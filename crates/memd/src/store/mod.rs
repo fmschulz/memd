@@ -1,0 +1,68 @@
+//! Storage module for memd
+//!
+//! Provides the Store trait and implementations for memory chunk storage.
+//! The in-memory store is used as a baseline before persistent storage.
+
+pub mod memory;
+pub mod tenant;
+
+use std::collections::HashMap;
+
+use async_trait::async_trait;
+
+use crate::error::Result;
+use crate::types::{ChunkId, MemoryChunk, TenantId};
+
+/// Statistics for a tenant's store
+#[derive(Debug, Clone, Default)]
+pub struct StoreStats {
+    /// Total number of chunks (including deleted)
+    pub total_chunks: usize,
+    /// Number of soft-deleted chunks
+    pub deleted_chunks: usize,
+    /// Count of chunks by type
+    pub chunk_types: HashMap<String, usize>,
+}
+
+/// Store trait for memory operations
+///
+/// Defines the interface for all storage backends (in-memory, persistent, etc.)
+#[async_trait]
+pub trait Store: Send + Sync {
+    /// Add a chunk to the store
+    ///
+    /// Returns the chunk_id of the stored chunk.
+    async fn add(&self, chunk: MemoryChunk) -> Result<ChunkId>;
+
+    /// Add multiple chunks in a batch
+    ///
+    /// Returns the chunk_ids of all stored chunks.
+    async fn add_batch(&self, chunks: Vec<MemoryChunk>) -> Result<Vec<ChunkId>>;
+
+    /// Get chunk by ID (respects tenant isolation)
+    ///
+    /// Returns None if the chunk doesn't exist or belongs to a different tenant.
+    async fn get(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<Option<MemoryChunk>>;
+
+    /// Search chunks (stub: returns all non-deleted chunks matching tenant)
+    ///
+    /// The search is currently a simple substring match - real vector search
+    /// comes in Phase 3.
+    async fn search(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        k: usize,
+    ) -> Result<Vec<MemoryChunk>>;
+
+    /// Soft delete a chunk
+    ///
+    /// Returns true if the chunk was found and deleted, false if not found.
+    async fn delete(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<bool>;
+
+    /// Get statistics for a tenant
+    async fn stats(&self, tenant_id: &TenantId) -> Result<StoreStats>;
+}
+
+pub use memory::MemoryStore;
+pub use tenant::TenantManager;
