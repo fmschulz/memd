@@ -12,7 +12,7 @@ This roadmap delivers a complete Architecture A baseline for memd — a local da
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Skeleton + MCP Server** - Basic MCP server with stub tools and in-memory store
+- [x] **Phase 1: Skeleton + MCP Server** - Basic MCP server with stub tools and in-memory store
 - [ ] **Phase 2: Persistent Cold Store** - Append-only segments, WAL, SQLite metadata, soft deletes
 - [ ] **Phase 3: Dense Warm Index** - Embeddings interface, HNSW warm tier, basic search
 - [ ] **Phase 4: Sparse Lexical + Fusion** - BM25 indexing, RRF fusion, feature-based reranker
@@ -35,10 +35,10 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 4 plans in 4 waves
 
 Plans:
-- [ ] 01-01-PLAN.md — Initialize Cargo workspace, core types, config loader
-- [ ] 01-02-PLAN.md — MCP server core with JSON-RPC protocol over stdio
-- [ ] 01-03-PLAN.md — In-memory store, tool handlers, tenant dirs, logging
-- [ ] 01-04-PLAN.md — CLI mode and eval harness with MCP conformance tests
+- [x] 01-01-PLAN.md — Initialize Cargo workspace, core types, config loader
+- [x] 01-02-PLAN.md — MCP server core with JSON-RPC protocol over stdio
+- [x] 01-03-PLAN.md — In-memory store, tool handlers, tenant dirs, logging
+- [x] 01-04-PLAN.md — CLI mode and eval harness with MCP conformance tests
 
 ### Phase 2: Persistent Cold Store
 **Goal**: Memory chunks persist across restarts with crash recovery and tenant isolation
@@ -144,7 +144,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Skeleton + MCP Server | 0/4 | Planned | - |
+| 1. Skeleton + MCP Server | 4/4 | Complete | 2026-01-29 |
 | 2. Persistent Cold Store | 0/TBD | Not started | - |
 | 3. Dense Warm Index | 0/TBD | Not started | - |
 | 4. Sparse Lexical + Fusion | 0/TBD | Not started | - |
