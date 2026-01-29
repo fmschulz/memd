@@ -1,0 +1,17 @@
+[package]
+name = "memd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local memory daemon for AI agents - MCP server with hybrid retrieval"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+tokio.workspace = true
