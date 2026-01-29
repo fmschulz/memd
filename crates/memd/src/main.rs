@@ -2,9 +2,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 use tracing::info;
-use tracing_subscriber::{fmt, EnvFilter};
 
-use memd::{load_config, run_server};
+use memd::{init_logging, load_config, run_server};
 
 /// Run mode for memd
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -44,28 +43,22 @@ async fn main() {
         std::process::exit(1);
     });
 
-    // Initialize tracing
+    // Initialize logging
     let log_level = if args.verbose { "debug" } else { &config.log_level };
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(log_level));
-
-    let subscriber = fmt().with_env_filter(filter);
-
-    // Use pretty format for CLI mode, JSON for MCP mode
-    match args.mode {
-        Mode::Cli => {
-            subscriber.pretty().init();
-        }
-        Mode::Mcp => {
-            // In MCP mode, logs go to stderr in JSON format
-            // so they don't interfere with stdout protocol messages
-            subscriber.json().with_writer(std::io::stderr).init();
-        }
-    }
+    let log_format = match args.mode {
+        Mode::Mcp => "json",
+        Mode::Cli => "pretty",
+    };
+    init_logging(log_format, log_level);
 
     match args.mode {
         Mode::Mcp => {
-            info!("starting memd in MCP server mode");
+            info!(
+                version = env!("CARGO_PKG_VERSION"),
+                config_path = ?args.config,
+                data_dir = %config.data_dir.display(),
+                "memd starting"
+            );
             if let Err(e) = run_server(config).await {
                 eprintln!("error: MCP server error: {}", e);
                 std::process::exit(1);
