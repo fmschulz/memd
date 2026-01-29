@@ -1,0 +1,28 @@
+# memd configuration
+#
+# This file shows all available configuration options with their defaults.
+# Copy this to ~/.config/memd/config.toml and customize as needed.
+
+# Directory for tenant data storage
+# Each tenant gets a subdirectory: {data_dir}/{tenant_id}/
+# Supports ~ for home directory expansion
+data_dir = "~/.memd/data"
+
+# Logging level: trace, debug, info, warn, error
+# - trace: Most verbose, includes internal details
+# - debug: Detailed information for debugging
+# - info: General operational information (default)
+# - warn: Warning conditions
+# - error: Error conditions only
+log_level = "info"
+
+# Log format: json or pretty
+# - json: Structured JSON logs (recommended for production)
+# - pretty: Human-readable format (useful for development)
+log_format = "json"
+
+[server]
+# Transport type for MCP server communication
+# Currently supported: stdio
+# Future options may include: tcp, unix
+transport = "stdio"
