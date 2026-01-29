@@ -1,5 +1,7 @@
-// Error types - placeholder for Task 2
-// This file will be fully implemented in Task 2
+//! Error types for memd
+//!
+//! Provides a unified error type using thiserror for ergonomic error handling
+//! throughout the codebase.
 
 use thiserror::Error;
 
@@ -27,9 +29,31 @@ pub enum MemdError {
     IoError(#[from] std::io::Error),
 
     /// JSON serialization/deserialization errors
-    #[error("serialization error: {0}")]
-    SerializationError(#[from] serde_json::Error),
+    #[error("json error: {0}")]
+    JsonError(#[from] serde_json::Error),
+
+    /// TOML deserialization errors (config parsing)
+    #[error("toml parse error: {0}")]
+    TomlError(#[from] toml::de::Error),
 }
 
 /// Result type alias for memd operations
 pub type Result<T> = std::result::Result<T, MemdError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_display() {
+        let err = MemdError::ValidationError("test error".to_string());
+        assert_eq!(err.to_string(), "validation error: test error");
+    }
+
+    #[test]
+    fn error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let err: MemdError = io_err.into();
+        assert!(matches!(err, MemdError::IoError(_)));
+    }
+}
