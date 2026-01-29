@@ -9,16 +9,16 @@ Requirements for Architecture A baseline (Milestones 1-7). Each maps to roadmap 
 
 ### MCP Server Foundation
 
-- [ ] **MCP-01**: MCP server implements stdio transport with JSON-RPC protocol
-- [ ] **MCP-02**: Server exposes memory.search tool with tenant_id, query, filters, k parameters
-- [ ] **MCP-03**: Server exposes memory.add tool with chunk fields (type, text, source, tenant, project)
-- [ ] **MCP-04**: Server exposes memory.add_batch tool for batch ingestion
-- [ ] **MCP-05**: Server exposes memory.get tool to fetch chunk by id
-- [ ] **MCP-06**: Server exposes memory.delete tool for soft deletes
-- [ ] **MCP-07**: Server exposes memory.stats tool for index sizes, tier counts, version
-- [ ] **MCP-08**: Config loader reads TOML configuration files
-- [ ] **MCP-09**: Tenant directory structure initialized per tenant_id
-- [ ] **MCP-10**: Simple in-memory store for initial development
+- [x] **MCP-01**: MCP server implements stdio transport with JSON-RPC protocol
+- [x] **MCP-02**: Server exposes memory.search tool with tenant_id, query, filters, k parameters
+- [x] **MCP-03**: Server exposes memory.add tool with chunk fields (type, text, source, tenant, project)
+- [x] **MCP-04**: Server exposes memory.add_batch tool for batch ingestion
+- [x] **MCP-05**: Server exposes memory.get tool to fetch chunk by id
+- [x] **MCP-06**: Server exposes memory.delete tool for soft deletes
+- [x] **MCP-07**: Server exposes memory.stats tool for index sizes, tier counts, version
+- [x] **MCP-08**: Config loader reads TOML configuration files
+- [x] **MCP-09**: Tenant directory structure initialized per tenant_id
+- [x] **MCP-10**: Simple in-memory store for initial development
 
 ### Storage & Persistence
 
@@ -103,9 +103,9 @@ Requirements for Architecture A baseline (Milestones 1-7). Each maps to roadmap 
 
 ### Evaluation & Quality
 
-- [ ] **EVAL-01**: Eval harness can start memd locally and run test suites
-- [ ] **EVAL-02**: Suite A (MCP conformance): tools/list, tools/call, error objects
-- [ ] **EVAL-03**: Suite A (schema validation): invalid args, missing tenant_id, large payloads
+- [x] **EVAL-01**: Eval harness can start memd locally and run test suites
+- [x] **EVAL-02**: Suite A (MCP conformance): tools/list, tools/call, error objects
+- [x] **EVAL-03**: Suite A (schema validation): invalid args, missing tenant_id, large payloads
 - [ ] **EVAL-04**: Suite A (isolation): ingest tenant A, query tenant B returns zero results
 - [ ] **EVAL-05**: Suite A (recovery): crash mid-ingest, restart, WAL replay, no corruption
 - [ ] **EVAL-06**: Suite A (soft delete): deleted chunks never returned in results
@@ -119,7 +119,7 @@ Requirements for Architecture A baseline (Milestones 1-7). Each maps to roadmap 
 
 ### Observability
 
-- [ ] **OBS-01**: Structured JSON logging for all operations
+- [x] **OBS-01**: Structured JSON logging for all operations
 - [ ] **OBS-02**: Metrics endpoint with Prometheus-style or JSON format
 - [ ] **OBS-03**: Per-query latency breakdown (embed, dense_hot, dense_warm, lexical, ast/trace, fusion, rerank, pack, total)
 - [ ] **OBS-04**: Debug flags return candidate source ranks and scores
