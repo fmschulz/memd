@@ -32,11 +32,13 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Agent can call memory.stats and see tenant directory structure
   4. Invalid tool calls return well-formed MCP error objects
   5. Structured JSON logging captures all operations
-**Plans**: TBD
+**Plans**: 4 plans in 4 waves
 
 Plans:
-- [ ] 01-01: TBD
-- [ ] 01-02: TBD
+- [ ] 01-01-PLAN.md — Initialize Cargo workspace, core types, config loader
+- [ ] 01-02-PLAN.md — MCP server core with JSON-RPC protocol over stdio
+- [ ] 01-03-PLAN.md — In-memory store, tool handlers, tenant dirs, logging
+- [ ] 01-04-PLAN.md — CLI mode and eval harness with MCP conformance tests
 
 ### Phase 2: Persistent Cold Store
 **Goal**: Memory chunks persist across restarts with crash recovery and tenant isolation
@@ -142,7 +144,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Skeleton + MCP Server | 0/TBD | Not started | - |
+| 1. Skeleton + MCP Server | 0/4 | Planned | - |
 | 2. Persistent Cold Store | 0/TBD | Not started | - |
 | 3. Dense Warm Index | 0/TBD | Not started | - |
 | 4. Sparse Lexical + Fusion | 0/TBD | Not started | - |
