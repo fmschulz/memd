@@ -79,8 +79,8 @@ Requirements for Architecture A baseline (Milestones 1-7). Each maps to roadmap 
 
 - [ ] **STRUCT-01**: Tree-sitter parser integration for multi-language AST extraction
 - [ ] **STRUCT-02**: Symbol table extraction (functions, classes, definitions)
-- [ ] **STRUCT-03**: Call graph extraction with caller → callee edges
-- [ ] **STRUCT-04**: Import graph extraction with file → module dependencies
+- [ ] **STRUCT-03**: Call graph extraction with caller -> callee edges
+- [ ] **STRUCT-04**: Import graph extraction with file -> module dependencies
 - [ ] **STRUCT-05**: find_symbol_definition(name) query support
 - [ ] **STRUCT-06**: find_references(name) query support
 - [ ] **STRUCT-07**: find_callers(name) query support
@@ -166,13 +166,100 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| TBD | TBD | Pending |
+| MCP-01 | Phase 1 | Pending |
+| MCP-02 | Phase 1 | Pending |
+| MCP-03 | Phase 1 | Pending |
+| MCP-04 | Phase 1 | Pending |
+| MCP-05 | Phase 1 | Pending |
+| MCP-06 | Phase 1 | Pending |
+| MCP-07 | Phase 1 | Pending |
+| MCP-08 | Phase 1 | Pending |
+| MCP-09 | Phase 1 | Pending |
+| MCP-10 | Phase 1 | Pending |
+| STOR-01 | Phase 2 | Pending |
+| STOR-02 | Phase 2 | Pending |
+| STOR-03 | Phase 2 | Pending |
+| STOR-04 | Phase 2 | Pending |
+| STOR-05 | Phase 2 | Pending |
+| STOR-06 | Phase 2 | Pending |
+| STOR-07 | Phase 2 | Pending |
+| STOR-08 | Phase 2 | Pending |
+| STOR-09 | Phase 2 | Pending |
+| DENSE-01 | Phase 3 | Pending |
+| DENSE-02 | Phase 3 | Pending |
+| DENSE-03 | Phase 3 | Pending |
+| DENSE-04 | Phase 3 | Pending |
+| DENSE-05 | Phase 3 | Pending |
+| DENSE-06 | Phase 3 | Pending |
+| DENSE-07 | Phase 3 | Pending |
+| DENSE-08 | Phase 3 | Pending |
+| SPARSE-01 | Phase 4 | Pending |
+| SPARSE-02 | Phase 4 | Pending |
+| SPARSE-03 | Phase 4 | Pending |
+| SPARSE-04 | Phase 4 | Pending |
+| SPARSE-05 | Phase 4 | Pending |
+| SPARSE-06 | Phase 4 | Pending |
+| FUSION-01 | Phase 4 | Pending |
+| FUSION-02 | Phase 4 | Pending |
+| FUSION-03 | Phase 4 | Pending |
+| FUSION-04 | Phase 4 | Pending |
+| FUSION-05 | Phase 4 | Pending |
+| FUSION-06 | Phase 4 | Pending |
+| FUSION-07 | Phase 4 | Pending |
+| FUSION-08 | Phase 4 | Pending |
+| HOT-01 | Phase 5 | Pending |
+| HOT-02 | Phase 5 | Pending |
+| HOT-03 | Phase 5 | Pending |
+| HOT-04 | Phase 5 | Pending |
+| HOT-05 | Phase 5 | Pending |
+| HOT-06 | Phase 5 | Pending |
+| HOT-07 | Phase 5 | Pending |
+| HOT-08 | Phase 5 | Pending |
+| HOT-09 | Phase 5 | Pending |
+| STRUCT-01 | Phase 6 | Pending |
+| STRUCT-02 | Phase 6 | Pending |
+| STRUCT-03 | Phase 6 | Pending |
+| STRUCT-04 | Phase 6 | Pending |
+| STRUCT-05 | Phase 6 | Pending |
+| STRUCT-06 | Phase 6 | Pending |
+| STRUCT-07 | Phase 6 | Pending |
+| STRUCT-08 | Phase 6 | Pending |
+| STRUCT-09 | Phase 6 | Pending |
+| STRUCT-10 | Phase 6 | Pending |
+| STRUCT-11 | Phase 6 | Pending |
+| STRUCT-12 | Phase 6 | Pending |
+| STRUCT-13 | Phase 6 | Pending |
+| STRUCT-14 | Phase 6 | Pending |
+| COMPACT-01 | Phase 7 | Pending |
+| COMPACT-02 | Phase 7 | Pending |
+| COMPACT-03 | Phase 7 | Pending |
+| COMPACT-04 | Phase 7 | Pending |
+| COMPACT-05 | Phase 7 | Pending |
+| COMPACT-06 | Phase 7 | Pending |
+| EVAL-01 | Phase 1 | Pending |
+| EVAL-02 | Phase 1 | Pending |
+| EVAL-03 | Phase 1 | Pending |
+| EVAL-04 | Phase 2 | Pending |
+| EVAL-05 | Phase 2 | Pending |
+| EVAL-06 | Phase 2 | Pending |
+| EVAL-07 | Phase 3 | Pending |
+| EVAL-08 | Phase 3 | Pending |
+| EVAL-09 | Phase 4 | Pending |
+| EVAL-10 | Phase 4 | Pending |
+| EVAL-11 | Phase 4 | Pending |
+| EVAL-12 | Phase 4 | Pending |
+| EVAL-13 | Phase 7 | Pending |
+| OBS-01 | Phase 1 | Pending |
+| OBS-02 | Phase 3 | Pending |
+| OBS-03 | Phase 3 | Pending |
+| OBS-04 | Phase 5 | Pending |
+| OBS-05 | Phase 5 | Pending |
 
 **Coverage:**
-- v1 requirements: TBD total
-- Mapped to phases: TBD
-- Unmapped: TBD
+- v1 requirements: 88 total
+- Mapped to phases: 88
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-01-29*
-*Last updated: 2026-01-29 after initial definition*
+*Last updated: 2026-01-29 after roadmap creation*
