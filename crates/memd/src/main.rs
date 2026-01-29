@@ -1,16 +1,18 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::{Parser, ValueEnum};
 use tracing::info;
 
-use memd::{init_logging, load_config, run_server};
+use memd::{init_logging, load_config, run_server, MemoryStore, TenantManager};
+use memd::cli::{run_cli, CliCommand};
 
 /// Run mode for memd
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum Mode {
     /// MCP server mode (JSON-RPC over stdio)
     Mcp,
-    /// CLI mode for direct commands (future)
+    /// CLI mode for direct commands
     Cli,
 }
 
@@ -31,6 +33,10 @@ struct Args {
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
+
+    /// CLI subcommand (only used in cli mode)
+    #[command(subcommand)]
+    command: Option<CliCommand>,
 }
 
 #[tokio::main]
@@ -65,9 +71,22 @@ async fn main() {
             }
         }
         Mode::Cli => {
-            info!("CLI mode not yet implemented");
-            eprintln!("error: CLI mode not yet implemented");
-            std::process::exit(1);
+            if let Some(cmd) = args.command {
+                // Create store and tenant manager
+                let store = Arc::new(MemoryStore::new());
+                let tenant_manager = config
+                    .data_dir_expanded()
+                    .ok()
+                    .map(TenantManager::new);
+
+                if let Err(e) = run_cli(&*store, tenant_manager.as_ref(), cmd).await {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+            } else {
+                eprintln!("error: CLI mode requires a subcommand. Use --help for usage.");
+                std::process::exit(1);
+            }
         }
     }
 }
