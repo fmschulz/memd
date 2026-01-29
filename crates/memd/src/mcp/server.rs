@@ -4,13 +4,20 @@
 //! This is the primary interface for agent integration.
 
 use std::io::{self, BufRead, Write};
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 use tracing::{debug, error, info, warn};
 
 use super::error::McpError;
+use super::handlers::{
+    handle_memory_add, handle_memory_add_batch, handle_memory_delete, handle_memory_get,
+    handle_memory_search, handle_memory_stats, AddBatchParams, AddParams, DeleteParams, GetParams,
+    SearchParams, StatsParams,
+};
 use super::protocol::{Request, Response};
 use super::tools::get_all_tools;
+use crate::store::{Store, TenantManager};
 use crate::Config;
 
 /// MCP protocol version supported by this server
@@ -23,16 +30,26 @@ const SERVER_NAME: &str = "memd";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// MCP server that handles JSON-RPC requests over stdio
-pub struct McpServer {
+pub struct McpServer<S: Store> {
     config: Config,
+    store: Arc<S>,
+    tenant_manager: Option<TenantManager>,
     initialized: bool,
 }
 
-impl McpServer {
-    /// Create a new MCP server with the given configuration
-    pub fn new(config: Config) -> Self {
+impl<S: Store> McpServer<S> {
+    /// Create a new MCP server with the given configuration and store
+    pub fn new(config: Config, store: Arc<S>) -> Self {
+        // Create tenant manager from config data_dir
+        let tenant_manager = config
+            .data_dir_expanded()
+            .ok()
+            .map(TenantManager::new);
+
         Self {
             config,
+            store,
+            tenant_manager,
             initialized: false,
         }
     }
@@ -195,9 +212,8 @@ impl McpServer {
 
     /// Handle the 'tools/call' request
     ///
-    /// Dispatches to the appropriate tool handler.
-    /// Currently returns stub responses - will be implemented with actual storage in later plans.
-    async fn handle_tools_call(&mut self, params: Option<Value>) -> Result<Value, McpError> {
+    /// Dispatches to the appropriate tool handler using the actual store.
+    async fn handle_tools_call(&self, params: Option<Value>) -> Result<Value, McpError> {
         let params = params.ok_or_else(|| McpError::InvalidParams("missing params".to_string()))?;
 
         let name = params
@@ -209,138 +225,40 @@ impl McpServer {
 
         info!(tool = %name, "tool call received");
 
-        // Dispatch to tool handlers (stub implementations for now)
+        // Dispatch to tool handlers
         match name {
-            "memory.search" => self.handle_tool_search(arguments).await,
-            "memory.add" => self.handle_tool_add(arguments).await,
-            "memory.add_batch" => self.handle_tool_add_batch(arguments).await,
-            "memory.get" => self.handle_tool_get(arguments).await,
-            "memory.delete" => self.handle_tool_delete(arguments).await,
-            "memory.stats" => self.handle_tool_stats(arguments).await,
+            "memory.search" => {
+                let params: SearchParams = serde_json::from_value(arguments)
+                    .map_err(|e| McpError::InvalidParams(format!("invalid search params: {}", e)))?;
+                handle_memory_search(&*self.store, params).await
+            }
+            "memory.add" => {
+                let params: AddParams = serde_json::from_value(arguments)
+                    .map_err(|e| McpError::InvalidParams(format!("invalid add params: {}", e)))?;
+                handle_memory_add(&*self.store, self.tenant_manager.as_ref(), params).await
+            }
+            "memory.add_batch" => {
+                let params: AddBatchParams = serde_json::from_value(arguments)
+                    .map_err(|e| McpError::InvalidParams(format!("invalid add_batch params: {}", e)))?;
+                handle_memory_add_batch(&*self.store, self.tenant_manager.as_ref(), params).await
+            }
+            "memory.get" => {
+                let params: GetParams = serde_json::from_value(arguments)
+                    .map_err(|e| McpError::InvalidParams(format!("invalid get params: {}", e)))?;
+                handle_memory_get(&*self.store, params).await
+            }
+            "memory.delete" => {
+                let params: DeleteParams = serde_json::from_value(arguments)
+                    .map_err(|e| McpError::InvalidParams(format!("invalid delete params: {}", e)))?;
+                handle_memory_delete(&*self.store, params).await
+            }
+            "memory.stats" => {
+                let params: StatsParams = serde_json::from_value(arguments)
+                    .map_err(|e| McpError::InvalidParams(format!("invalid stats params: {}", e)))?;
+                handle_memory_stats(&*self.store, self.tenant_manager.as_ref(), params).await
+            }
             _ => Err(McpError::InvalidParams(format!("unknown tool '{}'", name))),
         }
-    }
-
-    // Stub tool handlers - will be implemented with actual storage in later plans
-
-    async fn handle_tool_search(&self, args: Value) -> Result<Value, McpError> {
-        let _query = args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::InvalidParams("missing 'query' field".to_string()))?;
-
-        let _tenant_id = args
-            .get("tenant_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::InvalidParams("missing 'tenant_id' field".to_string()))?;
-
-        // Stub: return empty results
-        Ok(json!({
-            "content": [{
-                "type": "text",
-                "text": "[]"
-            }]
-        }))
-    }
-
-    async fn handle_tool_add(&self, args: Value) -> Result<Value, McpError> {
-        let _tenant_id = args
-            .get("tenant_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::InvalidParams("missing 'tenant_id' field".to_string()))?;
-
-        let _text = args
-            .get("text")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::InvalidParams("missing 'text' field".to_string()))?;
-
-        let _chunk_type = args
-            .get("type")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::InvalidParams("missing 'type' field".to_string()))?;
-
-        // Stub: return a fake chunk_id
-        Ok(json!({
-            "content": [{
-                "type": "text",
-                "text": "{\"chunk_id\": \"00000000-0000-0000-0000-000000000000\"}"
-            }]
-        }))
-    }
-
-    async fn handle_tool_add_batch(&self, args: Value) -> Result<Value, McpError> {
-        let _tenant_id = args
-            .get("tenant_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::InvalidParams("missing 'tenant_id' field".to_string()))?;
-
-        let _chunks = args
-            .get("chunks")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| McpError::InvalidParams("missing 'chunks' array".to_string()))?;
-
-        // Stub: return empty array of chunk_ids
-        Ok(json!({
-            "content": [{
-                "type": "text",
-                "text": "{\"chunk_ids\": []}"
-            }]
-        }))
-    }
-
-    async fn handle_tool_get(&self, args: Value) -> Result<Value, McpError> {
-        let _tenant_id = args
-            .get("tenant_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::InvalidParams("missing 'tenant_id' field".to_string()))?;
-
-        let _chunk_id = args
-            .get("chunk_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::InvalidParams("missing 'chunk_id' field".to_string()))?;
-
-        // Stub: return null (not found)
-        Ok(json!({
-            "content": [{
-                "type": "text",
-                "text": "null"
-            }]
-        }))
-    }
-
-    async fn handle_tool_delete(&self, args: Value) -> Result<Value, McpError> {
-        let _tenant_id = args
-            .get("tenant_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::InvalidParams("missing 'tenant_id' field".to_string()))?;
-
-        let _chunk_id = args
-            .get("chunk_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::InvalidParams("missing 'chunk_id' field".to_string()))?;
-
-        // Stub: return success
-        Ok(json!({
-            "content": [{
-                "type": "text",
-                "text": "{\"deleted\": true}"
-            }]
-        }))
-    }
-
-    async fn handle_tool_stats(&self, args: Value) -> Result<Value, McpError> {
-        let _tenant_id = args
-            .get("tenant_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::InvalidParams("missing 'tenant_id' field".to_string()))?;
-
-        // Stub: return empty stats
-        Ok(json!({
-            "content": [{
-                "type": "text",
-                "text": "{\"total_chunks\": 0, \"total_bytes\": 0}"
-            }]
-        }))
     }
 
     /// Get a reference to the config
@@ -353,8 +271,12 @@ impl McpServer {
 /// Run the MCP server with the given configuration
 ///
 /// This is the main entry point for the MCP server.
+/// Uses an in-memory store by default.
 pub async fn run_server(config: Config) -> crate::Result<()> {
-    let mut server = McpServer::new(config);
+    use crate::store::MemoryStore;
+
+    let store = Arc::new(MemoryStore::new());
+    let mut server = McpServer::new(config, store);
     server.run().await
 }
 
@@ -362,15 +284,39 @@ pub async fn run_server(config: Config) -> crate::Result<()> {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::store::MemoryStore;
     use super::super::protocol::RequestId;
 
     fn test_config() -> Config {
-        Config::default()
+        // Use a temp directory to avoid permission issues in tests
+        let temp_dir = std::env::temp_dir().join("memd_test");
+        Config {
+            data_dir: temp_dir,
+            log_level: "info".to_string(),
+            log_format: "json".to_string(),
+            server: crate::config::ServerConfig::default(),
+        }
+    }
+
+    fn test_server() -> McpServer<MemoryStore> {
+        let store = Arc::new(MemoryStore::new());
+        McpServer::new(test_config(), store)
+    }
+
+    fn test_server_no_tenant_manager() -> McpServer<MemoryStore> {
+        // Create server without tenant manager for simpler tests
+        let store = Arc::new(MemoryStore::new());
+        McpServer {
+            config: test_config(),
+            store,
+            tenant_manager: None,
+            initialized: false,
+        }
     }
 
     #[tokio::test]
     async fn handle_initialize() {
-        let mut server = McpServer::new(test_config());
+        let mut server = test_server();
         let result = server.handle_initialize(None).await.unwrap();
 
         assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
@@ -380,7 +326,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_tools_list() {
-        let server = McpServer::new(test_config());
+        let server = test_server();
         let result = server.handle_tools_list().await.unwrap();
 
         assert!(result["tools"].is_array());
@@ -388,7 +334,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_unknown_method() {
-        let mut server = McpServer::new(test_config());
+        let mut server = test_server();
         let request = Request {
             jsonrpc: "2.0".to_string(),
             id: Some(RequestId::Number(1)),
@@ -403,7 +349,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_tools_call_missing_params() {
-        let mut server = McpServer::new(test_config());
+        let server = test_server();
         let result = server.handle_tools_call(None).await;
 
         assert!(result.is_err());
@@ -412,7 +358,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_tools_call_missing_name() {
-        let mut server = McpServer::new(test_config());
+        let server = test_server();
         let result = server.handle_tools_call(Some(json!({}))).await;
 
         assert!(result.is_err());
@@ -420,13 +366,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_tool_search_stub() {
-        let server = McpServer::new(test_config());
+    async fn handle_tool_search() {
+        let server = test_server();
         let result = server
-            .handle_tool_search(json!({
-                "query": "test",
-                "tenant_id": "test_tenant"
-            }))
+            .handle_tools_call(Some(json!({
+                "name": "memory.search",
+                "arguments": {
+                    "query": "test",
+                    "tenant_id": "test_tenant"
+                }
+            })))
             .await
             .unwrap();
 
@@ -434,14 +383,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_tool_add_stub() {
-        let server = McpServer::new(test_config());
+    async fn handle_tool_add() {
+        let server = test_server_no_tenant_manager();
         let result = server
-            .handle_tool_add(json!({
-                "tenant_id": "test_tenant",
-                "text": "test content",
-                "type": "doc"
-            }))
+            .handle_tools_call(Some(json!({
+                "name": "memory.add",
+                "arguments": {
+                    "tenant_id": "test_tenant",
+                    "text": "test content",
+                    "type": "doc"
+                }
+            })))
+            .await
+            .unwrap();
+
+        assert!(result["content"].is_array());
+
+        // Verify the chunk_id is a valid UUID
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let response: serde_json::Value = serde_json::from_str(text).unwrap();
+        let chunk_id = response["chunk_id"].as_str().unwrap();
+        assert!(uuid::Uuid::parse_str(chunk_id).is_ok());
+    }
+
+    #[tokio::test]
+    async fn handle_tool_stats() {
+        let server = test_server();
+        let result = server
+            .handle_tools_call(Some(json!({
+                "name": "memory.stats",
+                "arguments": {
+                    "tenant_id": "test_tenant"
+                }
+            })))
             .await
             .unwrap();
 
@@ -449,15 +423,94 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_tool_stats_stub() {
-        let server = McpServer::new(test_config());
-        let result = server
-            .handle_tool_stats(json!({
-                "tenant_id": "test_tenant"
-            }))
+    async fn add_then_search() {
+        let server = test_server_no_tenant_manager();
+
+        // Add a chunk
+        let add_result = server
+            .handle_tools_call(Some(json!({
+                "name": "memory.add",
+                "arguments": {
+                    "tenant_id": "test_tenant",
+                    "text": "hello world from memd",
+                    "type": "doc"
+                }
+            })))
             .await
             .unwrap();
 
-        assert!(result["content"].is_array());
+        let text = add_result["content"][0]["text"].as_str().unwrap();
+        let add_response: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert!(add_response["chunk_id"].is_string());
+
+        // Search for it
+        let search_result = server
+            .handle_tools_call(Some(json!({
+                "name": "memory.search",
+                "arguments": {
+                    "tenant_id": "test_tenant",
+                    "query": "hello"
+                }
+            })))
+            .await
+            .unwrap();
+
+        let text = search_result["content"][0]["text"].as_str().unwrap();
+        let search_response: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(search_response["results"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_removes_from_search() {
+        let server = test_server_no_tenant_manager();
+
+        // Add a chunk
+        let add_result = server
+            .handle_tools_call(Some(json!({
+                "name": "memory.add",
+                "arguments": {
+                    "tenant_id": "test_tenant",
+                    "text": "delete me",
+                    "type": "doc"
+                }
+            })))
+            .await
+            .unwrap();
+
+        let text = add_result["content"][0]["text"].as_str().unwrap();
+        let add_response: serde_json::Value = serde_json::from_str(text).unwrap();
+        let chunk_id = add_response["chunk_id"].as_str().unwrap();
+
+        // Delete it
+        let delete_result = server
+            .handle_tools_call(Some(json!({
+                "name": "memory.delete",
+                "arguments": {
+                    "tenant_id": "test_tenant",
+                    "chunk_id": chunk_id
+                }
+            })))
+            .await
+            .unwrap();
+
+        let text = delete_result["content"][0]["text"].as_str().unwrap();
+        let delete_response: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert!(delete_response["deleted"].as_bool().unwrap());
+
+        // Search should return empty
+        let search_result = server
+            .handle_tools_call(Some(json!({
+                "name": "memory.search",
+                "arguments": {
+                    "tenant_id": "test_tenant",
+                    "query": "delete"
+                }
+            })))
+            .await
+            .unwrap();
+
+        let text = search_result["content"][0]["text"].as_str().unwrap();
+        let search_response: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert!(search_response["results"].as_array().unwrap().is_empty());
     }
 }

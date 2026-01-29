@@ -4,11 +4,13 @@
 //! This is the primary interface for tools like Claude Code and Codex CLI.
 
 pub mod error;
+pub mod handlers;
 pub mod protocol;
 pub mod server;
 pub mod tools;
 
 pub use error::McpError;
+pub use handlers::*;
 pub use protocol::{Request, RequestId, Response, RpcError};
 pub use server::{run_server, McpServer};
 pub use tools::{get_all_tools, get_tool, tool_names, ToolDefinition};
