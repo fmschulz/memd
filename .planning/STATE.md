@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-01-29)
 
 **Core value:** Agents can find and use relevant past context--across sessions, projects, and time--without hitting context window limits or losing continuity.
-**Current focus:** Phase 4 - Sparse Lexical + Fusion
+**Current focus:** Phase 4 COMPLETE - Ready for Phase 5 (Streaming)
 
 ## Current Position
 
-Phase: 4 of 7 (Sparse Lexical + Fusion)
-Plan: 5 of 6 in current phase
-Status: In progress
-Last activity: 2026-01-30 -- Completed 04-05-PLAN.md (Hybrid Search Integration)
+Phase: 4 of 7 (Sparse Lexical + Fusion) - COMPLETE
+Plan: 6 of 6 in current phase
+Status: Phase complete
+Last activity: 2026-01-30 -- Completed 04-06-PLAN.md (Hybrid Evaluation Suite)
 
-Progress: [===========================================--------] ~96% (22 of ~23 total plans estimated)
+Progress: [=============================================------] ~100% (23 of ~23 total plans estimated)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 22
+- Total plans completed: 23
 - Average duration: 6m
-- Total execution time: ~131 minutes
+- Total execution time: ~136 minutes
 
 **By Phase:**
 
@@ -30,11 +30,11 @@ Progress: [===========================================--------] ~96% (22 of ~23 
 | 01 | 4 | 39m | 10m |
 | 02 | 7 | 38m | 5m |
 | 03 | 6 | 37m | 6m |
-| 04 | 5 | 22m | 4m |
+| 04 | 6 | 27m | 4m |
 
 **Recent Trend:**
-- Last 5 plans: 04-01 (4m), 04-02 (5m), 04-03 (4m), 04-04 (4m), 04-05 (5m)
-- Trend: Phase 4 retrieval pipeline complete, hybrid search operational
+- Last 5 plans: 04-02 (5m), 04-03 (4m), 04-04 (4m), 04-05 (5m), 04-06 (5m)
+- Trend: Phase 4 complete with hybrid eval suite
 
 *Updated after each plan completion*
 
@@ -121,6 +121,9 @@ Recent decisions affecting current work:
 - 04-05: HybridSearcher accessed via PersistentStore.search_with_scores()
 - 04-05: Sparse index path at data_dir/sparse_index
 - 04-05: Fallback chain: hybrid -> dense -> text search
+- 04-06: Quality thresholds: keyword 0.9, semantic 0.7, mixed 0.75
+- 04-06: Performance targets: p50 < 100ms, p99 < 500ms
+- 04-06: 3 iterations for performance sampling (36 queries total)
 
 ### Pending Todos
 
@@ -135,6 +138,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-01-30 08:41 UTC
-Stopped at: Completed 04-05-PLAN.md (Hybrid Search Integration)
+Last session: 2026-01-30 08:47 UTC
+Stopped at: Completed 04-06-PLAN.md (Hybrid Evaluation Suite) - PHASE 4 COMPLETE
 Resume file: None
