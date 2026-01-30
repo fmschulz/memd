@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let config = EmbeddingConfig::default();
-        assert_eq!(config.dimension, 384);
+        assert_eq!(config.dimension, 1024);  // Qwen3-Embedding-0.6B dimension
         assert!(config.normalize);
         assert_eq!(config.batch_size, 32);
     }
