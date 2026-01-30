@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use serde_json::Value;
 use tempfile::TempDir;
 
 use crate::mcp_client::McpClient;
@@ -20,6 +21,23 @@ pub fn run_all(memd_binary: &PathBuf) -> Vec<TestResult> {
         a4_crash_recovery(memd_binary),
         a5_soft_delete(memd_binary),
     ]
+}
+
+/// Extract the text content from an MCP tool call response
+fn extract_content_text(response: &Value) -> Option<&str> {
+    response
+        .get("result")
+        .and_then(|r| r.get("content"))
+        .and_then(|c| c.get(0))
+        .and_then(|item| item.get("text"))
+        .and_then(|t| t.as_str())
+}
+
+/// Parse the JSON content text and extract chunk_id
+fn extract_chunk_id(response: &Value) -> Option<String> {
+    let text = extract_content_text(response)?;
+    let parsed: Value = serde_json::from_str(text).ok()?;
+    parsed.get("chunk_id").and_then(|id| id.as_str()).map(String::from)
 }
 
 /// A3: Tenant B cannot see Tenant A's data
@@ -48,21 +66,16 @@ fn a3_tenant_isolation(memd_binary: &PathBuf) -> TestResult {
     let add_result = client.call_tool("memory.add", serde_json::json!({
         "tenant_id": "tenant_a",
         "text": "secret data for tenant A",
-        "chunk_type": "doc"
+        "type": "doc"
     }));
 
     let chunk_id = match add_result {
-        Ok(r) => {
-            let content = r["content"][0]["text"].as_str().unwrap_or("");
-            let parsed: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
-            parsed["chunk_id"].as_str().unwrap_or("").to_string()
-        }
+        Ok(ref r) => match extract_chunk_id(r) {
+            Some(id) => id,
+            None => return TestResult::fail(test_name, &format!("no chunk_id in add response: {:?}", r)),
+        },
         Err(e) => return TestResult::fail(test_name, &format!("add: {}", e)),
     };
-
-    if chunk_id.is_empty() {
-        return TestResult::fail(test_name, "no chunk_id returned");
-    }
 
     // Try to get as tenant_b - should fail
     let get_result = client.call_tool("memory.get", serde_json::json!({
@@ -72,12 +85,12 @@ fn a3_tenant_isolation(memd_binary: &PathBuf) -> TestResult {
 
     match get_result {
         Ok(r) => {
-            let content = r["content"][0]["text"].as_str().unwrap_or("");
-            let parsed: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
-
-            // Should return null/not found
-            if parsed.get("chunk_id").is_some() {
-                return TestResult::fail(test_name, "tenant_b can see tenant_a's data");
+            if let Some(text) = extract_content_text(&r) {
+                let parsed: Value = serde_json::from_str(text).unwrap_or_default();
+                // Should return null/not found - chunk_id presence means tenant_b can see tenant_a's data
+                if parsed.get("chunk_id").is_some() {
+                    return TestResult::fail(test_name, "tenant_b can see tenant_a's data");
+                }
             }
         }
         Err(e) => return TestResult::fail(test_name, &format!("get: {}", e)),
@@ -92,13 +105,12 @@ fn a3_tenant_isolation(memd_binary: &PathBuf) -> TestResult {
 
     match search_result {
         Ok(r) => {
-            let content = r["content"][0]["text"].as_str().unwrap_or("");
-            let parsed: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
-            let results = parsed["results"].as_array();
-
-            if let Some(arr) = results {
-                if !arr.is_empty() {
-                    return TestResult::fail(test_name, "tenant_b search returned tenant_a's data");
+            if let Some(text) = extract_content_text(&r) {
+                let parsed: Value = serde_json::from_str(text).unwrap_or_default();
+                if let Some(arr) = parsed["results"].as_array() {
+                    if !arr.is_empty() {
+                        return TestResult::fail(test_name, "tenant_b search returned tenant_a's data");
+                    }
                 }
             }
         }
@@ -113,9 +125,12 @@ fn a3_tenant_isolation(memd_binary: &PathBuf) -> TestResult {
 
     match get_a {
         Ok(r) => {
-            let content = r["content"][0]["text"].as_str().unwrap_or("");
-            if !content.contains("secret data") {
-                return TestResult::fail(test_name, "tenant_a cannot access own data");
+            if let Some(text) = extract_content_text(&r) {
+                if !text.contains("secret data") {
+                    return TestResult::fail(test_name, "tenant_a cannot access own data");
+                }
+            } else {
+                return TestResult::fail(test_name, "no content in get tenant_a response");
             }
         }
         Err(e) => return TestResult::fail(test_name, &format!("get tenant_a: {}", e)),
@@ -153,21 +168,16 @@ fn a4_crash_recovery(memd_binary: &PathBuf) -> TestResult {
         let add_result = client.call_tool("memory.add", serde_json::json!({
             "tenant_id": "recovery_test",
             "text": "data that must survive restart",
-            "chunk_type": "doc"
+            "type": "doc"
         }));
 
         chunk_id = match add_result {
-            Ok(r) => {
-                let content = r["content"][0]["text"].as_str().unwrap_or("");
-                let parsed: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
-                parsed["chunk_id"].as_str().unwrap_or("").to_string()
-            }
+            Ok(ref r) => match extract_chunk_id(r) {
+                Some(id) => id,
+                None => return TestResult::fail(test_name, &format!("no chunk_id in add response: {:?}", r)),
+            },
             Err(e) => return TestResult::fail(test_name, &format!("add: {}", e)),
         };
-
-        if chunk_id.is_empty() {
-            return TestResult::fail(test_name, "no chunk_id from add");
-        }
 
         // Shutdown daemon (simulates crash/restart)
         drop(client);
@@ -197,12 +207,15 @@ fn a4_crash_recovery(memd_binary: &PathBuf) -> TestResult {
 
         match get_result {
             Ok(r) => {
-                let content = r["content"][0]["text"].as_str().unwrap_or("");
-                if !content.contains("survive restart") {
-                    return TestResult::fail(test_name, &format!(
-                        "data not recovered after restart. Got: {}",
-                        &content[..content.len().min(100)]
-                    ));
+                if let Some(text) = extract_content_text(&r) {
+                    if !text.contains("survive restart") {
+                        return TestResult::fail(test_name, &format!(
+                            "data not recovered after restart. Got: {}",
+                            &text[..text.len().min(200)]
+                        ));
+                    }
+                } else {
+                    return TestResult::fail(test_name, "no content in get response after restart");
                 }
             }
             Err(e) => return TestResult::fail(test_name, &format!("get after restart: {}", e)),
@@ -238,15 +251,14 @@ fn a5_soft_delete(memd_binary: &PathBuf) -> TestResult {
     let add_result = client.call_tool("memory.add", serde_json::json!({
         "tenant_id": "delete_test",
         "text": "this will be deleted",
-        "chunk_type": "doc"
+        "type": "doc"
     }));
 
     let chunk_id = match add_result {
-        Ok(r) => {
-            let content = r["content"][0]["text"].as_str().unwrap_or("");
-            let parsed: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
-            parsed["chunk_id"].as_str().unwrap_or("").to_string()
-        }
+        Ok(ref r) => match extract_chunk_id(r) {
+            Some(id) => id,
+            None => return TestResult::fail(test_name, &format!("no chunk_id in add response: {:?}", r)),
+        },
         Err(e) => return TestResult::fail(test_name, &format!("add: {}", e)),
     };
 
@@ -258,9 +270,12 @@ fn a5_soft_delete(memd_binary: &PathBuf) -> TestResult {
 
     match delete_result {
         Ok(r) => {
-            let content = r["content"][0]["text"].as_str().unwrap_or("");
-            if !content.contains("true") && !content.contains("deleted") {
-                return TestResult::fail(test_name, &format!("delete failed: {}", content));
+            if let Some(text) = extract_content_text(&r) {
+                if !text.contains("true") && !text.contains("deleted") {
+                    return TestResult::fail(test_name, &format!("delete failed: {}", text));
+                }
+            } else {
+                return TestResult::fail(test_name, "no content in delete response");
             }
         }
         Err(e) => return TestResult::fail(test_name, &format!("delete: {}", e)),
@@ -274,10 +289,11 @@ fn a5_soft_delete(memd_binary: &PathBuf) -> TestResult {
 
     match get_result {
         Ok(r) => {
-            let content = r["content"][0]["text"].as_str().unwrap_or("");
-            let parsed: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
-            if parsed.get("chunk_id").is_some() && parsed.get("text").is_some() {
-                return TestResult::fail(test_name, "deleted chunk still returned by get");
+            if let Some(text) = extract_content_text(&r) {
+                let parsed: Value = serde_json::from_str(text).unwrap_or_default();
+                if parsed.get("chunk_id").is_some() && parsed.get("text").is_some() {
+                    return TestResult::fail(test_name, "deleted chunk still returned by get");
+                }
             }
         }
         Err(e) => return TestResult::fail(test_name, &format!("get after delete: {}", e)),
@@ -292,11 +308,12 @@ fn a5_soft_delete(memd_binary: &PathBuf) -> TestResult {
 
     match search_result {
         Ok(r) => {
-            let content = r["content"][0]["text"].as_str().unwrap_or("");
-            let parsed: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
-            if let Some(results) = parsed["results"].as_array() {
-                if !results.is_empty() {
-                    return TestResult::fail(test_name, "deleted chunk appears in search results");
+            if let Some(text) = extract_content_text(&r) {
+                let parsed: Value = serde_json::from_str(text).unwrap_or_default();
+                if let Some(results) = parsed["results"].as_array() {
+                    if !results.is_empty() {
+                        return TestResult::fail(test_name, "deleted chunk appears in search results");
+                    }
                 }
             }
         }
@@ -310,11 +327,14 @@ fn a5_soft_delete(memd_binary: &PathBuf) -> TestResult {
 
     match stats_result {
         Ok(r) => {
-            let content = r["content"][0]["text"].as_str().unwrap_or("");
-            let parsed: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
-            let deleted = parsed["deleted_chunks"].as_u64().unwrap_or(0);
-            if deleted != 1 {
-                return TestResult::fail(test_name, &format!("expected 1 deleted, got {}", deleted));
+            if let Some(text) = extract_content_text(&r) {
+                let parsed: Value = serde_json::from_str(text).unwrap_or_default();
+                let deleted = parsed["deleted_chunks"].as_u64().unwrap_or(0);
+                if deleted != 1 {
+                    return TestResult::fail(test_name, &format!("expected 1 deleted, got {}", deleted));
+                }
+            } else {
+                return TestResult::fail(test_name, "no content in stats response");
             }
         }
         Err(e) => return TestResult::fail(test_name, &format!("stats: {}", e)),
