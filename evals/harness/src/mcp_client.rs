@@ -36,17 +36,22 @@ pub struct McpClient {
 }
 
 impl McpClient {
-    /// Start memd as a subprocess in MCP mode
+    /// Start memd as a subprocess in MCP mode with additional arguments
     ///
     /// # Arguments
     /// * `memd_path` - Path to the memd binary
+    /// * `extra_args` - Additional command-line arguments
     ///
     /// # Returns
     /// An McpClient connected to the memd process
-    pub fn start(memd_path: &str) -> Result<Self, McpClientError> {
-        let mut process = Command::new(memd_path)
-            .arg("--mode")
-            .arg("mcp")
+    pub fn start_with_args(memd_path: &std::path::PathBuf, extra_args: &[&str]) -> Result<Self, McpClientError> {
+        let mut cmd = Command::new(memd_path);
+        cmd.arg("--mode").arg("mcp");
+        for arg in extra_args {
+            cmd.arg(arg);
+        }
+
+        let mut process = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null()) // Suppress logs in tests
@@ -64,6 +69,18 @@ impl McpClient {
             stdout: BufReader::new(stdout),
             request_id: 0,
         })
+    }
+
+    /// Start memd as a subprocess in MCP mode
+    ///
+    /// # Arguments
+    /// * `memd_path` - Path to the memd binary
+    ///
+    /// # Returns
+    /// An McpClient connected to the memd process
+    pub fn start(memd_path: &str) -> Result<Self, McpClientError> {
+        let path = std::path::PathBuf::from(memd_path);
+        Self::start_with_args(&path, &[])
     }
 
     /// Send a JSON-RPC request and get the response

@@ -16,7 +16,7 @@ struct Args {
     #[arg(long, default_value = "target/debug/memd")]
     memd_path: String,
 
-    /// Suite to run (all, mcp)
+    /// Suite to run (all, mcp, persistence)
     #[arg(long, default_value = "all")]
     suite: String,
 
@@ -48,15 +48,18 @@ fn main() -> ExitCode {
     }
 
     // Run the specified suite
+    let memd_binary = std::path::PathBuf::from(&args.memd_path);
     let results: Vec<TestResult> = match args.suite.as_str() {
         "all" => {
             let mut all = vec![];
             all.extend(suites::mcp_conformance::run(&args.memd_path));
+            all.extend(suites::persistence::run_all(&memd_binary));
             all
         }
         "mcp" => suites::mcp_conformance::run(&args.memd_path),
+        "persistence" => suites::persistence::run_all(&memd_binary),
         _ => {
-            eprintln!("Unknown suite: {}", args.suite);
+            eprintln!("Unknown suite: {}. Available: all, mcp, persistence", args.suite);
             return ExitCode::FAILURE;
         }
     };
