@@ -1,0 +1,12 @@
+# Override global mold linker config to fix ort-sys glibc C23 symbol incompatibility
+# Use default system linker (ld) which is compatible with ort-sys glibc C23 symbols
+
+[target.x86_64-unknown-linux-gnu]
+# Use default cc linker instead of clang to avoid mold
+linker = "cc"
+# Empty rustflags to prevent global mold config from being used
+rustflags = []
+
+[build]
+# Incremental builds for faster development
+incremental = true
