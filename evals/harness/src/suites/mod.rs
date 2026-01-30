@@ -3,3 +3,4 @@
 //! Each suite tests a specific aspect of MCP conformance.
 
 pub mod mcp_conformance;
+pub mod persistence;
