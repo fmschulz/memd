@@ -5,6 +5,7 @@
 
 pub mod memory;
 pub mod metadata;
+pub mod persistent;
 pub mod segment;
 pub mod tenant;
 pub mod tombstone;
@@ -69,5 +70,6 @@ pub trait Store: Send + Sync {
 }
 
 pub use memory::MemoryStore;
+pub use persistent::{PersistentStore, PersistentStoreConfig};
 pub use tenant::TenantManager;
 pub use tombstone::TombstoneSet;
