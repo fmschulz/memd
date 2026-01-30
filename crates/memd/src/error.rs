@@ -35,6 +35,10 @@ pub enum MemdError {
     /// TOML deserialization errors (config parsing)
     #[error("toml parse error: {0}")]
     TomlError(#[from] toml::de::Error),
+
+    /// SQLite database errors
+    #[error("database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
 }
 
 /// Result type alias for memd operations
