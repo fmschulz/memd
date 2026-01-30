@@ -257,6 +257,25 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                 "required": ["tenant_id"]
             }),
         ),
+        // MCP-08: memory.metrics
+        ToolDefinition::new(
+            "memory.metrics",
+            "Get system metrics including index sizes and query latency breakdown. Returns: timestamp, per-tenant index stats (chunks, embeddings, memory), latency statistics (avg, p50, p90, p99), recent query breakdown.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Optional: filter to specific tenant"
+                    },
+                    "include_recent": {
+                        "type": "boolean",
+                        "description": "Include recent query latency breakdown (default: true)"
+                    }
+                },
+                "required": []
+            }),
+        ),
     ]
 });
 
@@ -283,6 +302,7 @@ pub fn tool_names() -> Vec<&'static str> {
         "memory.get",
         "memory.delete",
         "memory.stats",
+        "memory.metrics",
     ]
 }
 
@@ -291,9 +311,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn get_all_tools_returns_six() {
+    fn get_all_tools_returns_seven() {
         let tools = get_all_tools();
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 7);
     }
 
     #[test]
@@ -372,7 +392,8 @@ mod tests {
     #[test]
     fn tool_names_list() {
         let names = tool_names();
-        assert_eq!(names.len(), 6);
+        assert_eq!(names.len(), 7);
         assert!(names.contains(&"memory.search"));
+        assert!(names.contains(&"memory.metrics"));
     }
 }
