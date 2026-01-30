@@ -2,14 +2,16 @@ pub mod cli;
 pub mod config;
 pub mod embeddings;
 pub mod error;
+pub mod index;
 pub mod logging;
 pub mod mcp;
 pub mod store;
 pub mod types;
 
 pub use config::{load_config, Config, ServerConfig};
-pub use embeddings::{Embedder, EmbeddingConfig, EmbeddingResult, MockEmbedder};
+pub use embeddings::{Embedder, EmbeddingConfig, EmbeddingResult, MockEmbedder, OnnxEmbedder};
 pub use error::{MemdError, Result};
+pub use index::{HnswConfig, HnswIndex, SearchResult};
 pub use logging::init_logging;
 pub use mcp::{McpServer, run_server};
 pub use store::{MemoryStore, PersistentStore, PersistentStoreConfig, Store, StoreStats, TenantManager};
