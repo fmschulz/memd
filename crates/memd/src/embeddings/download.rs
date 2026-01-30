@@ -6,15 +6,17 @@ use std::path::PathBuf;
 
 use crate::error::{MemdError, Result};
 
-/// Model info for all-MiniLM-L6-v2 (quantized)
-/// Using Xenova's ONNX-optimized model: https://huggingface.co/Xenova/all-MiniLM-L6-v2
-const MODEL_URL: &str = "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model_quantized.onnx";
-const MODEL_FILENAME: &str = "all-MiniLM-L6-v2-quantized.onnx";
-const TOKENIZER_URL: &str = "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json";
-const TOKENIZER_FILENAME: &str = "tokenizer.json";
+/// Model info for Qwen3-Embedding-0.6B (quantized)
+/// Using ONNX Community's quantized model: https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX
+/// Upgraded from all-MiniLM-L6-v2 (56.3 MTEB) to Qwen3 (64.33 MTEB, +15% improvement)
+/// Dimensions: 1024 (vs 384), Context: 32K tokens, Languages: 100+, Code: Excellent
+const MODEL_URL: &str = "https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/resolve/main/onnx/model_quantized.onnx";
+const MODEL_FILENAME: &str = "Qwen3-Embedding-0.6B-quantized.onnx";
+const TOKENIZER_URL: &str = "https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/resolve/main/tokenizer.json";
+const TOKENIZER_FILENAME: &str = "qwen3-tokenizer.json";
 
-/// Minimum expected model file size (bytes) - ~23MB for quantized model
-const MIN_MODEL_SIZE: u64 = 20_000_000;
+/// Minimum expected model file size (bytes) - ~150MB for q8 quantized Qwen3
+const MIN_MODEL_SIZE: u64 = 100_000_000;
 /// Minimum expected tokenizer file size (bytes) - ~700KB
 const MIN_TOKENIZER_SIZE: u64 = 500_000;
 

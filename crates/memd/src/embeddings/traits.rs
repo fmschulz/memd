@@ -7,7 +7,7 @@ use crate::error::Result;
 /// Configuration for embedding generation
 #[derive(Debug, Clone)]
 pub struct EmbeddingConfig {
-    /// Embedding dimension (typically 384 for small models)
+    /// Embedding dimension (1024 for Qwen3-Embedding-0.6B, was 384 for all-MiniLM-L6-v2)
     pub dimension: usize,
     /// Normalize embeddings to unit length
     pub normalize: bool,
@@ -18,7 +18,7 @@ pub struct EmbeddingConfig {
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
-            dimension: 384,
+            dimension: 1024,  // Qwen3-Embedding-0.6B outputs 1024-dim embeddings
             normalize: true,
             batch_size: 32,
         }
