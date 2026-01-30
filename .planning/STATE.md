@@ -131,10 +131,17 @@ None.
 
 ### Blockers/Concerns
 
-- Pre-existing linker issue: mold linker incompatible with ort-sys glibc C23 symbols
-  - Affects: cargo test/build (linking phase)
-  - Does not affect: cargo check
-  - Resolution: Update system libc or change linker config
+- System glibc version prevents ort-sys linking
+  - Root cause: System glibc 2.35 < ort-sys requires glibc 2.38+ (C23 standard)
+  - Missing symbols: __isoc23_strtol, __isoc23_strtoll, __isoc23_strtoull
+  - Affects: cargo test/build (linking phase) - binaries cannot be created
+  - Does not affect: cargo check (code compiles correctly)
+  - Linker issue resolved: Created .cargo/config.toml to override global mold config (commit f016b1d)
+  - Resolution options:
+    1. Upgrade to Ubuntu 24.04+ (includes glibc 2.39)
+    2. Build ONNX Runtime from source with compatibility flags (time-intensive)
+    3. Accept architectural completion without binary execution
+  - Status: Phase 4 architecturally complete, runtime verification pending system upgrade
 
 ## Session Continuity
 
