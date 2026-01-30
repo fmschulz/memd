@@ -10,29 +10,29 @@ See: .planning/PROJECT.md (updated 2026-01-29)
 ## Current Position
 
 Phase: 2 of 7 (Persistent Cold Store)
-Plan: 5 of 7 in current phase
+Plan: 6 of 7 in current phase
 Status: In progress
-Last activity: 2026-01-30 — Completed 02-05-PLAN.md (Segment Reader + WAL Reader)
+Last activity: 2026-01-30 — Completed 02-06-PLAN.md (Persistent Store Integration)
 
-Progress: [==================------------------------------] ~45% (9 of ~20 total plans estimated)
+Progress: [====================----------------------------] ~50% (10 of ~20 total plans estimated)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 9
+- Total plans completed: 10
 - Average duration: 7m
-- Total execution time: ~64 minutes
+- Total execution time: ~71 minutes
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01 | 4 | 39m | 10m |
-| 02 | 5 | 25m | 5m |
+| 02 | 6 | 32m | 5m |
 
 **Recent Trend:**
-- Last 5 plans: 02-04 (2m), 02-02 (4m), 02-03 (4m), 02-05 (3m)
-- Trend: Fast execution, Phase 2 storage modules progressing well
+- Last 5 plans: 02-02 (4m), 02-03 (4m), 02-05 (3m), 02-04 (2m), 02-06 (7m)
+- Trend: Fast execution, Phase 2 storage modules nearly complete
 
 *Updated after each plan completion*
 
@@ -72,6 +72,9 @@ Recent decisions affecting current work:
 - 02-05: parse_all() on PayloadIndexRecord for batch index parsing
 - 02-05: Recovery replay skips existing chunk_ids (idempotent)
 - 02-05: WalReader tolerates partial records (stops at first error)
+- 02-06: INSERT OR REPLACE for crash recovery idempotency
+- 02-06: SegmentWriter::read_chunk flushes buffer before reading
+- 02-06: Recovery checks segment readability, not just metadata existence
 
 ### Pending Todos
 
@@ -83,6 +86,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-01-30 01:59 UTC
-Stopped at: Completed 02-05-PLAN.md (Segment Reader + WAL Reader)
+Last session: 2026-01-30 05:49 UTC
+Stopped at: Completed 02-06-PLAN.md (Persistent Store Integration)
 Resume file: None
