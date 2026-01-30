@@ -256,7 +256,7 @@ impl TenantStore {
         for record in &records {
             match record.record_type {
                 WalRecordType::Add => {
-                    // Idempotent: check if chunk already exists in metadata
+                    // Check if chunk already exists and is readable
                     let tenant_id = TenantId::new(&record.tenant_id).map_err(|e| {
                         MemdError::StorageError(format!("invalid tenant_id in WAL: {}", e))
                     })?;
@@ -264,9 +264,23 @@ impl TenantStore {
                         MemdError::StorageError(format!("invalid chunk_id in WAL: {}", e))
                     })?;
 
-                    if metadata.get(&tenant_id, &chunk_id)?.is_some() {
-                        skipped += 1;
-                        continue;
+                    // If metadata exists, check if segment data is readable
+                    if let Some(existing_meta) = metadata.get(&tenant_id, &chunk_id)? {
+                        // Try to read from segment to verify data is intact
+                        let segments = self.segments.read();
+                        if let Some(reader) = segments.get(&existing_meta.segment_id) {
+                            if reader.read_chunk(existing_meta.ordinal).ok().flatten().is_some() {
+                                // Data exists and is readable, skip
+                                skipped += 1;
+                                continue;
+                            }
+                        }
+                        // Metadata exists but segment data is missing or unreadable
+                        // This is a crash recovery case - re-write the chunk
+                        debug!(
+                            chunk_id = %chunk_id,
+                            "recovering orphan metadata - segment data missing"
+                        );
                     }
 
                     // Deserialize chunk from payload
@@ -419,8 +433,8 @@ impl TenantStore {
 
     /// Read chunk from active segment by ordinal
     fn read_from_active_segment(&self, segment_id: u64, ordinal: u32) -> Result<Option<Vec<u8>>> {
-        let active = self.active_segment.lock();
-        if let Some(seg) = active.as_ref() {
+        let mut active = self.active_segment.lock();
+        if let Some(seg) = active.as_mut() {
             if seg.writer.id() == segment_id {
                 return seg.writer.read_chunk(ordinal);
             }
