@@ -5,33 +5,34 @@
 See: .planning/PROJECT.md (updated 2026-01-29)
 
 **Core value:** Agents can find and use relevant past context—across sessions, projects, and time—without hitting context window limits or losing continuity.
-**Current focus:** Phase 1 - Skeleton + MCP Server (COMPLETE)
+**Current focus:** Phase 2 - Persistent Cold Store (IN PROGRESS)
 
 ## Current Position
 
-Phase: 1 of 7 (Skeleton + MCP Server)
-Plan: 4 of 4 in current phase
-Status: Phase complete
-Last activity: 2026-01-29 — Completed 01-04-PLAN.md (CLI Mode + Eval Harness)
+Phase: 2 of 7 (Persistent Cold Store)
+Plan: 1 of 3 in current phase
+Status: In progress
+Last activity: 2026-01-29 — Completed 02-01-PLAN.md (Segment Format + Writer)
 
-Progress: [========================================----] ~20% (4 of ~20 total plans estimated)
+Progress: [==========--------------------------------------] ~25% (5 of ~20 total plans estimated)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 4
+- Total plans completed: 5
 - Average duration: 10m
-- Total execution time: ~39 minutes
+- Total execution time: ~51 minutes
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01 | 4 | 39m | 10m |
+| 02 | 1 | 12m | 12m |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (4m), 01-02 (8m), 01-03 (12m), 01-04 (15m)
-- Trend: Good momentum, complexity increasing appropriately
+- Last 5 plans: 01-02 (8m), 01-03 (12m), 01-04 (15m), 02-01 (12m)
+- Trend: Good momentum, Phase 2 starting smoothly
 
 *Updated after each plan completion*
 
@@ -57,6 +58,10 @@ Recent decisions affecting current work:
 - 01-04: CLI mode uses pretty logging, MCP mode uses JSON logging
 - 01-04: Eval harness builds memd before running tests
 - 01-04: Each eval test starts a fresh memd subprocess
+- 02-01: PayloadIndexRecord is 16-byte repr(C) for consistent memory layout
+- 02-01: Little-endian encoding via byteorder for cross-platform compatibility
+- 02-01: bincode with serde feature for metadata serialization
+- 02-01: 6-digit zero-padded segment IDs (seg_000001) for sorting
 
 ### Pending Todos
 
@@ -68,6 +73,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-01-29 22:45 UTC
-Stopped at: Completed 01-04-PLAN.md (Phase 1 fully complete)
+Last session: 2026-01-29 23:12 UTC
+Stopped at: Completed 02-01-PLAN.md (Segment Format + Writer)
 Resume file: None
