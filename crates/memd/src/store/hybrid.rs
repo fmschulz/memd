@@ -356,7 +356,7 @@ mod tests {
     use crate::store::DenseSearchConfig;
 
     fn make_test_hybrid_searcher(enable_sparse: bool) -> HybridSearcher {
-        let embedder = Arc::new(MockEmbedder::new(384));
+        let embedder = Arc::new(MockEmbedder::new());  // Uses default config (1024 dims)
         let dense_config = DenseSearchConfig {
             persist: false,
             ..Default::default()
