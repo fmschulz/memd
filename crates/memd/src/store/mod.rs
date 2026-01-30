@@ -4,8 +4,11 @@
 //! The in-memory store is used as a baseline before persistent storage.
 
 pub mod memory;
+pub mod metadata;
 pub mod segment;
 pub mod tenant;
+pub mod tombstone;
+pub mod wal;
 
 use std::collections::HashMap;
 
@@ -67,3 +70,4 @@ pub trait Store: Send + Sync {
 
 pub use memory::MemoryStore;
 pub use tenant::TenantManager;
+pub use tombstone::TombstoneSet;
