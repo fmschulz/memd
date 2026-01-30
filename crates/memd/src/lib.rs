@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config;
+pub mod embeddings;
 pub mod error;
 pub mod logging;
 pub mod mcp;
@@ -7,6 +8,7 @@ pub mod store;
 pub mod types;
 
 pub use config::{load_config, Config, ServerConfig};
+pub use embeddings::{Embedder, EmbeddingConfig, EmbeddingResult, MockEmbedder};
 pub use error::{MemdError, Result};
 pub use logging::init_logging;
 pub use mcp::{McpServer, run_server};
