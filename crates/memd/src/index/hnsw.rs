@@ -38,7 +38,7 @@ impl Default for HnswConfig {
             ef_construction: 200,  // Higher = better quality, slower build
             ef_search: 50,         // Higher = better recall, slower search
             max_elements: 100_000, // 100K chunks per tenant
-            dimension: 1024,       // Qwen3-Embedding-0.6B (was 384 for all-MiniLM-L6-v2)
+            dimension: 384,        // all-MiniLM-L6-v2 (TODO: 1024 for Qwen3 upgrade)
         }
     }
 }
@@ -441,6 +441,6 @@ mod tests {
         assert_eq!(config.max_connections, 16);
         assert_eq!(config.ef_construction, 200);
         assert_eq!(config.ef_search, 50);
-        assert_eq!(config.dimension, 1024);  // Qwen3-Embedding-0.6B dimension
+        assert_eq!(config.dimension, 384);
     }
 }
