@@ -50,11 +50,16 @@ Plans:
   3. Tenant A's chunks are never returned when querying as Tenant B
   4. Deleted chunks (via memory.delete) never appear in any retrieval results
   5. Segment files use mmap for efficient reads
-**Plans**: TBD
+**Plans**: 7 plans in 5 waves
 
 Plans:
-- [ ] 02-01: TBD
-- [ ] 02-02: TBD
+- [ ] 02-01-PLAN.md — Add Phase 2 dependencies, segment format, segment writer
+- [ ] 02-02-PLAN.md — WAL format and writer with fsync durability
+- [ ] 02-03-PLAN.md — SQLite metadata store with tenant isolation indexes
+- [ ] 02-04-PLAN.md — Tombstone bitset with roaring bitmap
+- [ ] 02-05-PLAN.md — Segment reader (mmap), WAL reader and recovery
+- [ ] 02-06-PLAN.md — PersistentStore integrating all components
+- [ ] 02-07-PLAN.md — Eval Suite A: isolation, recovery, soft delete tests
 
 ### Phase 3: Dense Warm Index
 **Goal**: Agents can search by semantic similarity using dense vector retrieval
@@ -145,7 +150,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Skeleton + MCP Server | 4/4 | Complete | 2026-01-29 |
-| 2. Persistent Cold Store | 0/TBD | Not started | - |
+| 2. Persistent Cold Store | 0/7 | Planned | - |
 | 3. Dense Warm Index | 0/TBD | Not started | - |
 | 4. Sparse Lexical + Fusion | 0/TBD | Not started | - |
 | 5. Hot Tier + Cache | 0/TBD | Not started | - |
