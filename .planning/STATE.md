@@ -131,17 +131,14 @@ None.
 
 ### Blockers/Concerns
 
-- System glibc version prevents ort-sys linking
+- ~~System glibc version prevents ort-sys linking~~ **RESOLVED**
   - Root cause: System glibc 2.35 < ort-sys requires glibc 2.38+ (C23 standard)
-  - Missing symbols: __isoc23_strtol, __isoc23_strtoll, __isoc23_strtoull
-  - Affects: cargo test/build (linking phase) - binaries cannot be created
-  - Does not affect: cargo check (code compiles correctly)
-  - Linker issue resolved: Created .cargo/config.toml to override global mold config (commit f016b1d)
-  - Resolution options:
-    1. Upgrade to Ubuntu 24.04+ (includes glibc 2.39)
-    2. Build ONNX Runtime from source with compatibility flags (time-intensive)
-    3. Accept architectural completion without binary execution
-  - Status: Phase 4 architecturally complete, runtime verification pending system upgrade
+  - **Solution**: Docker development environment with Ubuntu 24.04 (glibc 2.39)
+  - Files: Dockerfile.dev, docker-compose.yml, docker-dev.sh (commit 2ed9e6c)
+  - Usage: `./docker-dev.sh test` or `./docker-dev.sh eval --suite hybrid`
+  - Performance metrics captured: p50=0.6ms, p90=0.6ms, p99=0.9ms ✓
+  - All build/test/eval operations now work via Docker
+  - See DOCKER.md for detailed usage instructions
 
 ## Session Continuity
 
