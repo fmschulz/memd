@@ -5,6 +5,7 @@ pub mod error;
 pub mod index;
 pub mod logging;
 pub mod mcp;
+pub mod metrics;
 pub mod store;
 pub mod types;
 
@@ -14,5 +15,6 @@ pub use error::{MemdError, Result};
 pub use index::{HnswConfig, HnswIndex, SearchResult};
 pub use logging::init_logging;
 pub use mcp::{McpServer, run_server};
+pub use metrics::{IndexStats, LatencyStats, MetricsCollector, MetricsSnapshot, QueryMetrics, Timer};
 pub use store::{MemoryStore, PersistentStore, PersistentStoreConfig, Store, StoreStats, TenantManager};
 pub use types::{ChunkId, ChunkStatus, ChunkType, MemoryChunk, ProjectId, Source, TenantId};
