@@ -272,17 +272,20 @@ pub async fn handle_memory_search<S: Store>(
         "memory.search"
     );
 
-    let chunks = store.search(&tenant_id, &params.query, params.k).await
+    // Use search_with_scores - works for both MemoryStore and PersistentStore
+    let scored_chunks = store
+        .search_with_scores(&tenant_id, &params.query, params.k)
+        .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
 
-    debug!(results_count = chunks.len(), "search completed");
+    debug!(results_count = scored_chunks.len(), "search completed");
 
-    let results: Vec<ChunkResult> = chunks
+    let results: Vec<ChunkResult> = scored_chunks
         .iter()
-        .map(|chunk| ChunkResult {
+        .map(|(chunk, score)| ChunkResult {
             chunk_id: chunk.chunk_id.to_string(),
             text: chunk.text.clone(),
-            score: 1.0, // Stub: all results have score 1.0
+            score: *score,
             chunk_type: chunk.chunk_type.to_string(),
             source: SourceResult::from(&chunk.source),
             timestamp_created: chunk.timestamp_created,
