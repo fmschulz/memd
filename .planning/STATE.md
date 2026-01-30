@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-01-29)
 
 **Core value:** Agents can find and use relevant past context--across sessions, projects, and time--without hitting context window limits or losing continuity.
-**Current focus:** Phase 3 - Dense Warm Index (In Progress)
+**Current focus:** Phase 3 - Dense Warm Index (Complete)
 
 ## Current Position
 
 Phase: 3 of 7 (Dense Warm Index)
-Plan: 5 of 6 in current phase
-Status: In progress
-Last activity: 2026-01-30 -- Completed 03-05-PLAN.md (Retrieval Quality Evaluation)
+Plan: 6 of 6 in current phase (COMPLETE)
+Status: Phase complete
+Last activity: 2026-01-30 -- Completed 03-06-PLAN.md (Metrics Observability)
 
-Progress: [================================----------------] ~80% (16 of ~20 total plans estimated)
+Progress: [===================================--------------] ~85% (17 of ~20 total plans estimated)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 16
+- Total plans completed: 17
 - Average duration: 7m
-- Total execution time: ~107 minutes
+- Total execution time: ~114 minutes
 
 **By Phase:**
 
@@ -29,11 +29,11 @@ Progress: [================================----------------] ~80% (16 of ~20 tot
 |-------|-------|-------|----------|
 | 01 | 4 | 39m | 10m |
 | 02 | 7 | 38m | 5m |
-| 03 | 5 | 30m | 6m |
+| 03 | 6 | 37m | 6m |
 
 **Recent Trend:**
-- Last 5 plans: 03-01 (3m), 03-02 (8m), 03-03 (9m), 03-04 (7m), 03-05 (3m)
-- Trend: Retrieval quality evaluation complete
+- Last 5 plans: 03-02 (8m), 03-03 (9m), 03-04 (7m), 03-05 (3m), 03-06 (7m)
+- Trend: Phase 3 complete with metrics observability
 
 *Updated after each plan completion*
 
@@ -96,6 +96,10 @@ Recent decisions affecting current work:
 - 03-05: Handcrafted code samples for Phase 3 (Phase 4 adds benchmark datasets)
 - 03-05: Document IDs tracked via tags field for retrieval evaluation
 - 03-05: Quality thresholds: Recall@10 > 0.8, MRR > 0.6
+- 03-06: Circular buffer for recent queries (default 1000)
+- 03-06: Atomic counters for cumulative totals (lock-free accumulation)
+- 03-06: search_with_timing returns (results, embed_time, search_time) tuple
+- 03-06: Memory estimate uses 2x multiplier on embedding bytes for HNSW overhead
 
 ### Pending Todos
 
@@ -110,6 +114,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-01-30 07:35 UTC
-Stopped at: Completed 03-05-PLAN.md (Retrieval Quality Evaluation)
+Last session: 2026-01-30 07:39 UTC
+Stopped at: Completed 03-06-PLAN.md (Metrics Observability) - Phase 3 complete
 Resume file: None
