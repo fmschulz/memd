@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-01-29)
 ## Current Position
 
 Phase: 4 of 7 (Sparse Lexical + Fusion)
-Plan: 2 of 6 in current phase
+Plan: 4 of 6 in current phase
 Status: In progress
-Last activity: 2026-01-30 -- Completed 04-02-PLAN.md (BM25 Sparse Index)
+Last activity: 2026-01-30 -- Completed 04-04-PLAN.md (Context Packer)
 
-Progress: [======================================-------------] ~91% (19 of ~21 total plans estimated)
+Progress: [=========================================----------] ~93% (21 of ~23 total plans estimated)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 18
-- Average duration: 7m
-- Total execution time: ~118 minutes
+- Total plans completed: 20
+- Average duration: 6m
+- Total execution time: ~126 minutes
 
 **By Phase:**
 
@@ -30,11 +30,11 @@ Progress: [======================================-------------] ~91% (19 of ~21 
 | 01 | 4 | 39m | 10m |
 | 02 | 7 | 38m | 5m |
 | 03 | 6 | 37m | 6m |
-| 04 | 2 | 9m | 5m |
+| 04 | 4 | 17m | 4m |
 
 **Recent Trend:**
-- Last 5 plans: 03-04 (7m), 03-05 (3m), 03-06 (7m), 04-01 (4m), 04-02 (5m)
-- Trend: Phase 4 progressing with sparse index implementation
+- Last 5 plans: 03-06 (7m), 04-01 (4m), 04-02 (5m), 04-03 (4m), 04-04 (4m)
+- Trend: Phase 4 retrieval pipeline coming together
 
 *Updated after each plan completion*
 
@@ -111,6 +111,13 @@ Recent decisions affecting current work:
 - 04-02: BooleanQuery for tenant isolation (must match tenant AND query)
 - 04-02: Sentence-level indexing with sentence_idx for fine-grained results
 - 04-02: IndexReader with OnCommitWithDelay reload policy
+- 04-03: RRF fusion with configurable k constant (default 60)
+- 04-03: Source weights for dense/sparse contribution balance
+- 04-03: FeatureReranker with recency/project/type bonuses
+- 04-04: Hash-based dedup before similarity-based (cheap operation first)
+- 04-04: MMR lambda default 0.7 (favor relevance slightly over diversity)
+- 04-04: Type diversity fallback when no embeddings available
+- 04-04: Chars per token = 4 for token estimation
 
 ### Pending Todos
 
@@ -125,6 +132,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-01-30 08:27 UTC
-Stopped at: Completed 04-02-PLAN.md (BM25 Sparse Index)
+Last session: 2026-01-30 08:34 UTC
+Stopped at: Completed 04-04-PLAN.md (Context Packer)
 Resume file: None
