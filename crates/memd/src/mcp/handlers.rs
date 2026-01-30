@@ -3,11 +3,14 @@
 //! Bridges MCP tool calls to store operations.
 //! Each handler validates parameters, calls the store, and formats the response.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tracing::{debug, info, warn};
 
 use super::error::McpError;
+use crate::metrics::{IndexStats, MetricsCollector};
 use crate::store::{Store, StoreStats, TenantManager};
 use crate::types::{ChunkId, ChunkType, MemoryChunk, ProjectId, Source, TenantId};
 
@@ -113,6 +116,19 @@ pub struct StatsParams {
     pub tenant_id: String,
 }
 
+/// Parameters for memory.metrics
+#[derive(Debug, Deserialize, Default)]
+pub struct MetricsParams {
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+    #[serde(default = "default_true")]
+    pub include_recent: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 // ---------- Response Types ----------
 
 /// Result of a search operation
@@ -185,7 +201,7 @@ pub struct DeleteResult {
 pub struct StatsResult {
     pub total_chunks: usize,
     pub deleted_chunks: usize,
-    pub chunk_types: std::collections::HashMap<String, usize>,
+    pub chunk_types: HashMap<String, usize>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub disk_stats: Option<DiskStatsResult>,
 }
@@ -481,6 +497,38 @@ pub async fn handle_memory_stats<S: Store>(
         chunk_types: store_stats.chunk_types,
         disk_stats,
     })
+}
+
+/// Handle memory.metrics tool call
+pub fn handle_memory_metrics(
+    metrics: &MetricsCollector,
+    index_stats: HashMap<String, IndexStats>,
+    params: MetricsParams,
+) -> Result<Value, McpError> {
+    info!(
+        tenant_id = ?params.tenant_id,
+        include_recent = params.include_recent,
+        "memory.metrics"
+    );
+
+    // Filter index stats by tenant if specified
+    let filtered_stats = if let Some(ref tenant_id_str) = params.tenant_id {
+        let tenant_id = validate_tenant_id(tenant_id_str)?;
+        index_stats
+            .into_iter()
+            .filter(|(k, _)| k == tenant_id.as_str())
+            .collect()
+    } else {
+        index_stats
+    };
+
+    let mut snapshot = metrics.snapshot(filtered_stats);
+
+    if !params.include_recent {
+        snapshot.recent_queries.clear();
+    }
+
+    format_mcp_response(&snapshot)
 }
 
 #[cfg(test)]

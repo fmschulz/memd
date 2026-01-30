@@ -9,14 +9,17 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tracing::{debug, error, info, warn};
 
+use std::collections::HashMap;
+
 use super::error::McpError;
 use super::handlers::{
     handle_memory_add, handle_memory_add_batch, handle_memory_delete, handle_memory_get,
-    handle_memory_search, handle_memory_stats, AddBatchParams, AddParams, DeleteParams, GetParams,
-    SearchParams, StatsParams,
+    handle_memory_metrics, handle_memory_search, handle_memory_stats, AddBatchParams, AddParams,
+    DeleteParams, GetParams, MetricsParams, SearchParams, StatsParams,
 };
 use super::protocol::{Request, Response};
 use super::tools::get_all_tools;
+use crate::metrics::MetricsCollector;
 use crate::store::{Store, TenantManager};
 use crate::Config;
 
@@ -34,6 +37,7 @@ pub struct McpServer<S: Store> {
     config: Config,
     store: Arc<S>,
     tenant_manager: Option<TenantManager>,
+    metrics: Arc<MetricsCollector>,
     initialized: bool,
 }
 
@@ -50,8 +54,30 @@ impl<S: Store> McpServer<S> {
             config,
             store,
             tenant_manager,
+            metrics: Arc::new(MetricsCollector::default()),
             initialized: false,
         }
+    }
+
+    /// Create a new MCP server with custom metrics collector
+    pub fn with_metrics(config: Config, store: Arc<S>, metrics: Arc<MetricsCollector>) -> Self {
+        let tenant_manager = config
+            .data_dir_expanded()
+            .ok()
+            .map(TenantManager::new);
+
+        Self {
+            config,
+            store,
+            tenant_manager,
+            metrics,
+            initialized: false,
+        }
+    }
+
+    /// Get reference to metrics collector
+    pub fn metrics(&self) -> &MetricsCollector {
+        &self.metrics
     }
 
     /// Run the server loop, reading from stdin and writing to stdout
@@ -257,6 +283,13 @@ impl<S: Store> McpServer<S> {
                     .map_err(|e| McpError::InvalidParams(format!("invalid stats params: {}", e)))?;
                 handle_memory_stats(&*self.store, self.tenant_manager.as_ref(), params).await
             }
+            "memory.metrics" => {
+                let params: MetricsParams = serde_json::from_value(arguments)
+                    .map_err(|e| McpError::InvalidParams(format!("invalid metrics params: {}", e)))?;
+                // For now return empty index stats - Task 3 integrates with PersistentStore
+                let index_stats = HashMap::new();
+                handle_memory_metrics(&self.metrics, index_stats, params)
+            }
             _ => Err(McpError::InvalidParams(format!("unknown tool '{}'", name))),
         }
     }
@@ -310,6 +343,7 @@ mod tests {
             config: test_config(),
             store,
             tenant_manager: None,
+            metrics: Arc::new(MetricsCollector::default()),
             initialized: false,
         }
     }
