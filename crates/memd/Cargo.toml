@@ -27,6 +27,7 @@ byteorder.workspace = true
 parking_lot.workspace = true
 ort.workspace = true
 hnsw_rs.workspace = true
+anndists.workspace = true
 half.workspace = true
 ndarray.workspace = true
 ureq.workspace = true
