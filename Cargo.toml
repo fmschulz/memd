@@ -24,6 +24,6 @@ memmap2 = "0.9"
 rusqlite = { version = "0.38", features = ["bundled"] }
 roaring = "0.11"
 crc32fast = "1.4"
-bincode = "2"
+bincode = { version = "2", features = ["serde"] }
 byteorder = "1.5"
 parking_lot = "0.12"
