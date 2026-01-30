@@ -35,3 +35,6 @@ ndarray = "0.17"
 ureq = "2.10"
 dirs = "5.0"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+tantivy = "0.24"
+rust-stemmers = "1.2"
+unicode-segmentation = "1.12"

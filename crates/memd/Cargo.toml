@@ -33,6 +33,9 @@ ndarray.workspace = true
 ureq.workspace = true
 dirs.workspace = true
 tokenizers.workspace = true
+tantivy.workspace = true
+rust-stemmers.workspace = true
+unicode-segmentation.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
