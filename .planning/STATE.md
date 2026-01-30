@@ -10,28 +10,28 @@ See: .planning/PROJECT.md (updated 2026-01-29)
 ## Current Position
 
 Phase: 2 of 7 (Persistent Cold Store)
-Plan: 4 of 7 in current phase
+Plan: 5 of 7 in current phase
 Status: In progress
-Last activity: 2026-01-30 — Completed 02-03-PLAN.md (SQLite Metadata Store)
+Last activity: 2026-01-30 — Completed 02-05-PLAN.md (Segment Reader + WAL Reader)
 
-Progress: [================--------------------------------] ~40% (8 of ~20 total plans estimated)
+Progress: [==================------------------------------] ~45% (9 of ~20 total plans estimated)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 8
-- Average duration: 8m
-- Total execution time: ~61 minutes
+- Total plans completed: 9
+- Average duration: 7m
+- Total execution time: ~64 minutes
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01 | 4 | 39m | 10m |
-| 02 | 4 | 22m | 5.5m |
+| 02 | 5 | 25m | 5m |
 
 **Recent Trend:**
-- Last 5 plans: 02-01 (12m), 02-04 (2m), 02-02 (4m), 02-03 (4m)
+- Last 5 plans: 02-04 (2m), 02-02 (4m), 02-03 (4m), 02-05 (3m)
 - Trend: Fast execution, Phase 2 storage modules progressing well
 
 *Updated after each plan completion*
@@ -69,6 +69,9 @@ Recent decisions affecting current work:
 - 02-03: WAL mode with synchronous=NORMAL for SQLite
 - 02-03: 5s busy_timeout to prevent SQLITE_BUSY
 - 02-03: All queries filter tenant_id first in WHERE clause
+- 02-05: parse_all() on PayloadIndexRecord for batch index parsing
+- 02-05: Recovery replay skips existing chunk_ids (idempotent)
+- 02-05: WalReader tolerates partial records (stops at first error)
 
 ### Pending Todos
 
@@ -80,6 +83,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-01-30 01:54 UTC
-Stopped at: Completed 02-03-PLAN.md (SQLite Metadata Store)
+Last session: 2026-01-30 01:59 UTC
+Stopped at: Completed 02-05-PLAN.md (Segment Reader + WAL Reader)
 Resume file: None
