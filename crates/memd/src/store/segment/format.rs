@@ -82,6 +82,28 @@ impl PayloadIndexRecord {
         reader.read_exact(&mut buf)?;
         Self::from_bytes(&buf)
     }
+
+    /// Parse all index records from bytes
+    ///
+    /// Assumes bytes start after any magic header.
+    pub fn parse_all(bytes: &[u8]) -> io::Result<Vec<Self>> {
+        if bytes.len() % Self::SIZE != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid index size: not a multiple of record size",
+            ));
+        }
+
+        let count = bytes.len() / Self::SIZE;
+        let mut records = Vec::with_capacity(count);
+
+        for i in 0..count {
+            let offset = i * Self::SIZE;
+            records.push(Self::from_bytes(&bytes[offset..offset + Self::SIZE])?);
+        }
+
+        Ok(records)
+    }
 }
 
 /// Metadata for a segment
@@ -113,6 +135,21 @@ impl SegmentMeta {
             created_ts: now_ms,
             finalized: false,
         }
+    }
+
+    /// Load segment metadata from a file
+    pub fn load(path: &std::path::Path) -> io::Result<Self> {
+        let bytes = std::fs::read(path)?;
+        let (meta, _): (SegmentMeta, _) =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).map_err(
+                |e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("failed to decode segment meta: {}", e),
+                    )
+                },
+            )?;
+        Ok(meta)
     }
 }
 
