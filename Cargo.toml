@@ -27,10 +27,10 @@ crc32fast = "1.4"
 bincode = { version = "2", features = ["serde"] }
 byteorder = "1.5"
 parking_lot = "0.12"
-ort = { version = "2.0.0-rc.11", default-features = false, features = ["download-binaries", "ndarray", "tls-native"] }
+ort = { version = "2.0.0-rc.11", default-features = false, features = ["std", "download-binaries", "ndarray", "tls-native"] }
 hnsw_rs = "0.3"
 half = { version = "2.4", features = ["serde"] }
-ndarray = "0.16"
+ndarray = "0.17"
 ureq = "2.10"
 dirs = "5.0"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
