@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use parking_lot::{Mutex, RwLock};
 use tracing::{debug, info, warn};
@@ -16,6 +17,7 @@ use super::segment::{SegmentReader, SegmentWriter};
 use super::wal::{WalReader, WalRecordType, WalWriter};
 use super::{Store, StoreStats};
 use crate::error::{MemdError, Result};
+use crate::metrics::{IndexStats, MetricsCollector, QueryMetrics};
 use crate::types::{ChunkId, ChunkStatus, MemoryChunk, TenantId};
 
 /// Configuration for persistent store
@@ -51,6 +53,8 @@ pub struct PersistentStore {
     metadata: Arc<SqliteMetadataStore>,
     /// Dense vector search (optional)
     dense_searcher: Option<Arc<DenseSearcher>>,
+    /// Metrics collector for query latency
+    metrics: Arc<MetricsCollector>,
 }
 
 /// Per-tenant storage state
@@ -108,12 +112,36 @@ impl PersistentStore {
             tenants: RwLock::new(HashMap::new()),
             metadata,
             dense_searcher,
+            metrics: Arc::new(MetricsCollector::default()),
         };
 
         // Recover existing tenants
         store.discover_and_recover_tenants()?;
 
         Ok(store)
+    }
+
+    /// Get reference to metrics collector
+    pub fn metrics(&self) -> &MetricsCollector {
+        &self.metrics
+    }
+
+    /// Get index statistics per tenant
+    pub fn get_index_stats(&self, tenant_id: Option<&TenantId>) -> HashMap<String, IndexStats> {
+        if let Some(ref searcher) = self.dense_searcher {
+            let all_stats = searcher.get_stats();
+            if let Some(tid) = tenant_id {
+                let tid_str = tid.to_string();
+                all_stats
+                    .into_iter()
+                    .filter(|(k, _)| k == &tid_str)
+                    .collect()
+            } else {
+                all_stats
+            }
+        } else {
+            HashMap::new()
+        }
     }
 
     fn discover_and_recover_tenants(&self) -> Result<()> {
@@ -693,16 +721,29 @@ impl Store for PersistentStore {
         query: &str,
         k: usize,
     ) -> Result<Vec<(MemoryChunk, f32)>> {
+        let total_start = Instant::now();
+
         // Use dense search if available
         if let Some(ref searcher) = self.dense_searcher {
-            let dense_results = searcher.search(tenant_id, query, k).await?;
+            let (dense_results, embed_time, search_time) =
+                searcher.search_with_timing(tenant_id, query, k).await?;
 
+            let fetch_start = Instant::now();
             let mut results = Vec::with_capacity(dense_results.len());
             for result in dense_results {
                 if let Some(chunk) = self.get(tenant_id, &result.chunk_id).await? {
                     results.push((chunk, result.score));
                 }
             }
+            let fetch_time = fetch_start.elapsed();
+
+            // Record metrics
+            self.metrics.record_query(QueryMetrics::from_timings(
+                embed_time,
+                search_time,
+                fetch_time,
+                total_start.elapsed(),
+            ));
 
             return Ok(results);
         }
