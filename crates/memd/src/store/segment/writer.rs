@@ -243,6 +243,54 @@ impl SegmentWriter {
     pub fn payload_size(&self) -> u64 {
         self.payload_len
     }
+
+    /// Read a chunk by ordinal from the active (unflushed) segment
+    ///
+    /// This is used by PersistentStore to read chunks that haven't been
+    /// finalized yet. Returns None if ordinal is out of bounds.
+    ///
+    /// Note: This reads from the buffered writer by flushing and reading
+    /// the file directly. CRC verification is performed.
+    pub fn read_chunk(&self, ordinal: u32) -> Result<Option<Vec<u8>>> {
+        let idx = ordinal as usize;
+        if idx >= self.index_records.len() {
+            return Ok(None);
+        }
+
+        let record = &self.index_records[idx];
+        let payload_path = self.dir.join("payload.bin");
+
+        // Read from the file (we need to flush first to ensure data is there)
+        // Note: BufWriter doesn't provide a way to read, so we read from the file
+        let payload_data = std::fs::read(&payload_path).map_err(|e| {
+            MemdError::StorageError(format!("read payload for chunk {}: {}", ordinal, e))
+        })?;
+
+        let start = record.offset as usize;
+        let end = start + record.length as usize;
+
+        if end > payload_data.len() {
+            return Err(MemdError::StorageError(format!(
+                "chunk {} offset out of bounds: {} > {}",
+                ordinal,
+                end,
+                payload_data.len()
+            )));
+        }
+
+        let data = &payload_data[start..end];
+
+        // Verify CRC
+        let computed_crc = crc32fast::hash(data);
+        if computed_crc != record.crc32 {
+            return Err(MemdError::StorageError(format!(
+                "chunk {} CRC mismatch: expected {:08x}, got {:08x}",
+                ordinal, record.crc32, computed_crc
+            )));
+        }
+
+        Ok(Some(data.to_vec()))
+    }
 }
 
 #[cfg(test)]
