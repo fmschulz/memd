@@ -1,0 +1,174 @@
+{
+  "description": "Hybrid retrieval test dataset with keyword and semantic queries",
+  "version": "1.0",
+  "note": "Tests keyword precision (sparse) and semantic similarity (dense). Query types: keyword (exact matches), semantic (conceptual), mixed (both help).",
+  "query_types": ["keyword", "semantic", "mixed"],
+  "queries": [
+    {
+      "id": "K1",
+      "query": "getUserById",
+      "type": "keyword",
+      "relevant": ["D1", "D2"],
+      "irrelevant": ["D9", "D10"]
+    },
+    {
+      "id": "K2",
+      "query": "src/auth/login.rs",
+      "type": "keyword",
+      "relevant": ["D3", "D4"],
+      "irrelevant": ["D5", "D6"]
+    },
+    {
+      "id": "K3",
+      "query": "SQLITE_BUSY timeout",
+      "type": "keyword",
+      "relevant": ["D5", "D6"],
+      "irrelevant": ["D1", "D2"]
+    },
+    {
+      "id": "K4",
+      "query": "XyzConfigManager",
+      "type": "keyword",
+      "relevant": ["D7", "D8"],
+      "irrelevant": ["D3", "D4"]
+    },
+    {
+      "id": "S1",
+      "query": "how to handle authentication",
+      "type": "semantic",
+      "relevant": ["D3", "D4"],
+      "irrelevant": ["D5", "D6"]
+    },
+    {
+      "id": "S2",
+      "query": "function that retrieves user data",
+      "type": "semantic",
+      "relevant": ["D1", "D2"],
+      "irrelevant": ["D7", "D8"]
+    },
+    {
+      "id": "S3",
+      "query": "error handling patterns for database",
+      "type": "semantic",
+      "relevant": ["D5", "D6"],
+      "irrelevant": ["D1", "D2"]
+    },
+    {
+      "id": "S4",
+      "query": "configuration management approach",
+      "type": "semantic",
+      "relevant": ["D7", "D8"],
+      "irrelevant": ["D9", "D10"]
+    },
+    {
+      "id": "M1",
+      "query": "parseJSON function documentation",
+      "type": "mixed",
+      "relevant": ["D9", "D10"],
+      "irrelevant": ["D3", "D4"]
+    },
+    {
+      "id": "M2",
+      "query": "implementation of the UserService class",
+      "type": "mixed",
+      "relevant": ["D11", "D12"],
+      "irrelevant": ["D5", "D6"]
+    },
+    {
+      "id": "M3",
+      "query": "CacheManager initialization code",
+      "type": "mixed",
+      "relevant": ["D13", "D14"],
+      "irrelevant": ["D1", "D2"]
+    },
+    {
+      "id": "M4",
+      "query": "validate request middleware function",
+      "type": "mixed",
+      "relevant": ["D15", "D16"],
+      "irrelevant": ["D7", "D8"]
+    }
+  ],
+  "documents": [
+    {
+      "id": "D1",
+      "text": "/// Fetches a user by their unique identifier\nasync fn getUserById(user_id: &str) -> Result<User, DbError> {\n    let query = \"SELECT * FROM users WHERE id = ?\";\n    db.query_one(query, &[user_id]).await\n}",
+      "type": "code"
+    },
+    {
+      "id": "D2",
+      "text": "// UserRepository implementation\nimpl UserRepository {\n    pub async fn getUserById(&self, id: UserId) -> Option<User> {\n        self.cache.get(&id).or_else(|| self.db.find_user(id))\n    }\n}",
+      "type": "code"
+    },
+    {
+      "id": "D3",
+      "text": "// File: src/auth/login.rs\n// Authentication module for handling user login\npub async fn login(credentials: &Credentials) -> Result<AuthToken, AuthError> {\n    let user = verify_password(credentials)?;\n    generate_jwt_token(&user)\n}",
+      "type": "code"
+    },
+    {
+      "id": "D4",
+      "text": "// src/auth/login.rs - Login handler\n// Handles POST /api/login requests\nasync fn handle_login(req: LoginRequest) -> Response {\n    match authenticate_user(&req.email, &req.password).await {\n        Ok(session) => Response::ok().with_cookie(session),\n        Err(e) => Response::unauthorized(e)\n    }\n}",
+      "type": "code"
+    },
+    {
+      "id": "D5",
+      "text": "// Database error handling for SQLite\n// When SQLITE_BUSY timeout occurs, retry with exponential backoff\nfn handle_sqlite_error(err: SqliteError) -> DbResult {\n    match err.code() {\n        SQLITE_BUSY => {\n            warn!(\"SQLITE_BUSY timeout - retrying\");\n            Err(DbError::Retry)\n        }\n        _ => Err(DbError::Fatal(err))\n    }\n}",
+      "type": "code"
+    },
+    {
+      "id": "D6",
+      "text": "Error Log [2024-01-15 14:32:01]\nLevel: WARN\nMessage: Database operation failed\nError: SQLITE_BUSY timeout after 5000ms\nContext: write_lock acquisition failed\nAction: Automatic retry scheduled (attempt 2/3)",
+      "type": "log"
+    },
+    {
+      "id": "D7",
+      "text": "/// XyzConfigManager handles application configuration\n/// Loads config from env vars, files, and defaults\npub struct XyzConfigManager {\n    env_prefix: String,\n    config_path: PathBuf,\n    cache: HashMap<String, ConfigValue>,\n}",
+      "type": "code"
+    },
+    {
+      "id": "D8",
+      "text": "impl XyzConfigManager {\n    pub fn new(prefix: &str) -> Self {\n        Self {\n            env_prefix: prefix.to_string(),\n            config_path: PathBuf::from(\"/etc/app/config.toml\"),\n            cache: HashMap::new(),\n        }\n    }\n    \n    pub fn get(&self, key: &str) -> Option<&ConfigValue> {\n        self.cache.get(key)\n    }\n}",
+      "type": "code"
+    },
+    {
+      "id": "D9",
+      "text": "/// parseJSON - Safely parse JSON string with error handling\n/// \n/// # Arguments\n/// * `input` - The JSON string to parse\n/// \n/// # Returns\n/// * `Ok(Value)` - Parsed JSON value\n/// * `Err(ParseError)` - If parsing fails\n/// \n/// # Example\n/// ```\n/// let data = parseJSON(\"{\\\"key\\\": \\\"value\\\"}\");\n/// ```\npub fn parseJSON(input: &str) -> Result<Value, ParseError> {\n    serde_json::from_str(input).map_err(ParseError::from)\n}",
+      "type": "documentation"
+    },
+    {
+      "id": "D10",
+      "text": "# parseJSON Function Documentation\n\nThe `parseJSON` function provides safe JSON parsing with comprehensive error handling.\n\n## Usage\n```rust\nlet result = parseJSON(raw_string)?;\n```\n\n## Error Cases\n- Invalid UTF-8 encoding\n- Malformed JSON syntax\n- Unexpected end of input\n\n## Performance\nAverage parsing time: O(n) where n is input length",
+      "type": "documentation"
+    },
+    {
+      "id": "D11",
+      "text": "/// UserService provides business logic for user operations\npub struct UserService {\n    user_repo: Arc<UserRepository>,\n    event_bus: EventBus,\n}\n\nimpl UserService {\n    pub async fn create_user(&self, dto: CreateUserDto) -> Result<User> {\n        let user = User::from_dto(dto)?;\n        self.user_repo.save(&user).await?;\n        self.event_bus.publish(UserCreated(user.id)).await;\n        Ok(user)\n    }\n}",
+      "type": "code"
+    },
+    {
+      "id": "D12",
+      "text": "// UserService class implementation\n// Handles user-related business operations\nclass UserService {\n    constructor(private repo: UserRepository, private cache: CacheService) {}\n    \n    async getUser(id: string): Promise<User | null> {\n        const cached = await this.cache.get(`user:${id}`);\n        if (cached) return cached;\n        return this.repo.findById(id);\n    }\n}",
+      "type": "code"
+    },
+    {
+      "id": "D13",
+      "text": "/// CacheManager - Distributed cache with local fallback\npub struct CacheManager {\n    redis: RedisClient,\n    local: LruCache<String, Vec<u8>>,\n    ttl: Duration,\n}\n\nimpl CacheManager {\n    pub fn init(redis_url: &str, capacity: usize) -> Self {\n        let redis = RedisClient::connect(redis_url);\n        let local = LruCache::new(capacity);\n        Self { redis, local, ttl: Duration::from_secs(300) }\n    }\n}",
+      "type": "code"
+    },
+    {
+      "id": "D14",
+      "text": "// Cache initialization and configuration\n// CacheManager setup with Redis backend\n\nconst cacheConfig = {\n    redis: { host: 'localhost', port: 6379 },\n    localCapacity: 1000,\n    defaultTTL: 300\n};\n\nconst cacheManager = new CacheManager(cacheConfig);\nawait cacheManager.initialize();\nconsole.log('CacheManager initialized successfully');",
+      "type": "code"
+    },
+    {
+      "id": "D15",
+      "text": "/// Request validation middleware\n/// Validates incoming HTTP requests against schema\npub async fn validate_request<T: DeserializeOwned + Validate>(\n    req: Request<Body>\n) -> Result<T, ValidationError> {\n    let body: T = parse_body(req).await?;\n    body.validate()?;\n    Ok(body)\n}",
+      "type": "code"
+    },
+    {
+      "id": "D16",
+      "text": "// Middleware function for request validation\n// Ensures all incoming requests meet API contract\n\nfunction validateRequestMiddleware(schema) {\n    return async (req, res, next) => {\n        const { error, value } = schema.validate(req.body);\n        if (error) {\n            return res.status(400).json({ error: error.details });\n        }\n        req.validatedBody = value;\n        next();\n    };\n}",
+      "type": "code"
+    }
+  ]
+}
