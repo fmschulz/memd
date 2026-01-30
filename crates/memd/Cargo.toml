@@ -29,6 +29,9 @@ ort.workspace = true
 hnsw_rs.workspace = true
 half.workspace = true
 ndarray.workspace = true
+ureq.workspace = true
+dirs.workspace = true
+tokenizers.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
