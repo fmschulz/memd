@@ -14,7 +14,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Skeleton + MCP Server** - Basic MCP server with stub tools and in-memory store
 - [x] **Phase 2: Persistent Cold Store** - Append-only segments, WAL, SQLite metadata, soft deletes
-- [ ] **Phase 3: Dense Warm Index** - Embeddings interface, HNSW warm tier, basic search
+- [x] **Phase 3: Dense Warm Index** - Embeddings interface, HNSW warm tier, basic search
 - [ ] **Phase 4: Sparse Lexical + Fusion** - BM25 indexing, RRF fusion, feature-based reranker
 - [ ] **Phase 5: Hot Tier + Cache** - Hot cache, semantic cache, promotion/demotion logic
 - [ ] **Phase 6: Structural Indexes** - AST parsing, symbol tables, trace indexing, query router
@@ -91,11 +91,15 @@ Plans:
   3. RRF fusion combines candidate lists with recency and project bonuses
   4. Context packer deduplicates and enforces diversity via MMR
   5. Performance baseline captured (p50/p90/p99 latency, QPS under load)
-**Plans**: TBD
+**Plans**: 6 plans in 5 waves
 
 Plans:
-- [ ] 04-01: TBD
-- [ ] 04-02: TBD
+- [ ] 04-01-PLAN.md — Add Phase 4 dependencies, text processing module
+- [ ] 04-02-PLAN.md — BM25 sparse index with Tantivy
+- [ ] 04-03-PLAN.md — RRF fusion and feature-based reranker
+- [ ] 04-04-PLAN.md — Context packer with MMR diversity
+- [ ] 04-05-PLAN.md — Hybrid search integration into PersistentStore
+- [ ] 04-06-PLAN.md — Hybrid retrieval eval suite with performance baseline
 
 ### Phase 5: Hot Tier + Cache
 **Goal**: Frequently accessed memories are served with low latency from hot tier and cache
@@ -156,7 +160,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | 1. Skeleton + MCP Server | 4/4 | Complete | 2026-01-29 |
 | 2. Persistent Cold Store | 7/7 | Complete | 2026-01-30 |
 | 3. Dense Warm Index | 6/6 | Complete | 2026-01-30 |
-| 4. Sparse Lexical + Fusion | 0/TBD | Not started | - |
+| 4. Sparse Lexical + Fusion | 0/6 | Planned | - |
 | 5. Hot Tier + Cache | 0/TBD | Not started | - |
 | 6. Structural Indexes | 0/TBD | Not started | - |
 | 7. Compaction + Cleanup | 0/TBD | Not started | - |
