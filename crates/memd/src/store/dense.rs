@@ -5,12 +5,14 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 
 use crate::embeddings::{Embedder, OnnxEmbedder};
 use crate::error::Result;
 use crate::index::{HnswConfig, HnswIndex};
+use crate::metrics::IndexStats;
 use crate::types::{ChunkId, TenantId};
 
 /// Result of a dense search with chunk content
@@ -181,10 +183,27 @@ impl DenseSearcher {
         query: &str,
         k: usize,
     ) -> Result<Vec<DenseSearchResult>> {
-        let query_embedding = self.embedder.embed_query(query).await?;
-        let index = self.get_or_create_index(tenant_id)?;
+        let (results, _, _) = self.search_with_timing(tenant_id, query, k).await?;
+        Ok(results)
+    }
 
+    /// Search for similar chunks with timing information
+    ///
+    /// Returns (results, embed_time, search_time)
+    pub async fn search_with_timing(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        k: usize,
+    ) -> Result<(Vec<DenseSearchResult>, Duration, Duration)> {
+        let embed_start = Instant::now();
+        let query_embedding = self.embedder.embed_query(query).await?;
+        let embed_time = embed_start.elapsed();
+
+        let search_start = Instant::now();
+        let index = self.get_or_create_index(tenant_id)?;
         let results = index.search(&query_embedding, k)?;
+        let search_time = search_start.elapsed();
 
         let dense_results: Vec<DenseSearchResult> = results
             .into_iter()
@@ -198,10 +217,58 @@ impl DenseSearcher {
             tenant_id = %tenant_id,
             query_len = query.len(),
             results = dense_results.len(),
+            embed_ms = embed_time.as_millis(),
+            search_ms = search_time.as_millis(),
             "dense search completed"
         );
 
-        Ok(dense_results)
+        Ok((dense_results, embed_time, search_time))
+    }
+
+    /// Get index statistics for all tenants
+    pub fn get_stats(&self) -> HashMap<String, IndexStats> {
+        let indices = self.indices.read();
+        let dimension = self.embedder.dimension();
+
+        indices
+            .iter()
+            .map(|(tenant_id, index)| {
+                let count = index.len() as u64;
+                // Estimate memory: each embedding is dim * 4 bytes, plus HNSW overhead (~2x)
+                let embedding_bytes = count * dimension as u64 * 4;
+                let estimated_memory = embedding_bytes * 2;
+
+                (
+                    tenant_id.clone(),
+                    IndexStats {
+                        chunks_indexed: count,
+                        embeddings_count: count,
+                        embedding_dimension: dimension,
+                        index_memory_bytes: estimated_memory,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Get index statistics for a specific tenant
+    pub fn get_tenant_stats(&self, tenant_id: &TenantId) -> Option<IndexStats> {
+        let indices = self.indices.read();
+        let tenant_str = tenant_id.to_string();
+        let dimension = self.embedder.dimension();
+
+        indices.get(&tenant_str).map(|index| {
+            let count = index.len() as u64;
+            let embedding_bytes = count * dimension as u64 * 4;
+            let estimated_memory = embedding_bytes * 2;
+
+            IndexStats {
+                chunks_indexed: count,
+                embeddings_count: count,
+                embedding_dimension: dimension,
+                index_memory_bytes: estimated_memory,
+            }
+        })
     }
 
     /// Save all indices
