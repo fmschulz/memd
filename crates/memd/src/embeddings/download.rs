@@ -7,9 +7,10 @@ use std::path::PathBuf;
 use crate::error::{MemdError, Result};
 
 /// Model info for all-MiniLM-L6-v2 (quantized)
-const MODEL_URL: &str = "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model_quantized.onnx";
+/// Using Xenova's ONNX-optimized model: https://huggingface.co/Xenova/all-MiniLM-L6-v2
+const MODEL_URL: &str = "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model_quantized.onnx";
 const MODEL_FILENAME: &str = "all-MiniLM-L6-v2-quantized.onnx";
-const TOKENIZER_URL: &str = "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json";
+const TOKENIZER_URL: &str = "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json";
 const TOKENIZER_FILENAME: &str = "tokenizer.json";
 
 /// Minimum expected model file size (bytes) - ~23MB for quantized model
