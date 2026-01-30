@@ -4,6 +4,7 @@
 //! The in-memory store is used as a baseline before persistent storage.
 
 pub mod memory;
+pub mod segment;
 pub mod tenant;
 
 use std::collections::HashMap;
