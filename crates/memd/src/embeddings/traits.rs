@@ -18,7 +18,7 @@ pub struct EmbeddingConfig {
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
-            dimension: 1024,  // Qwen3-Embedding-0.6B outputs 1024-dim embeddings
+            dimension: 384,  // all-MiniLM-L6-v2 (TODO: 1024 for Qwen3 when upgraded)
             normalize: true,
             batch_size: 32,
         }
