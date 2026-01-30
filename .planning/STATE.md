@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-01-29)
 ## Current Position
 
 Phase: 3 of 7 (Dense Warm Index)
-Plan: 2 of 6 in current phase
+Plan: 3 of 6 in current phase
 Status: In progress
-Last activity: 2026-01-30 -- Completed 03-02-PLAN.md (ONNX Embedder)
+Last activity: 2026-01-30 -- Completed 03-03-PLAN.md (HNSW Warm Index)
 
-Progress: [===========================---------------------] ~65% (13 of ~20 total plans estimated)
+Progress: [============================--------------------] ~70% (14 of ~20 total plans estimated)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 13
+- Total plans completed: 14
 - Average duration: 7m
-- Total execution time: ~88 minutes
+- Total execution time: ~97 minutes
 
 **By Phase:**
 
@@ -29,11 +29,11 @@ Progress: [===========================---------------------] ~65% (13 of ~20 tot
 |-------|-------|-------|----------|
 | 01 | 4 | 39m | 10m |
 | 02 | 7 | 38m | 5m |
-| 03 | 2 | 11m | 6m |
+| 03 | 3 | 20m | 7m |
 
 **Recent Trend:**
-- Last 5 plans: 02-04 (2m), 02-06 (7m), 02-07 (6m), 03-01 (3m), 03-02 (8m)
-- Trend: Phase 3 embeddings infrastructure complete
+- Last 5 plans: 02-06 (7m), 02-07 (6m), 03-01 (3m), 03-02 (8m), 03-03 (9m)
+- Trend: Phase 3 HNSW index complete
 
 *Updated after each plan completion*
 
@@ -86,6 +86,10 @@ Recent decisions affecting current work:
 - 03-02: ndarray 0.17 for ort 2.0.0-rc.11 compatibility
 - 03-02: Mutex<Session> for thread-safe inference
 - 03-02: Mean pooling with attention mask for sentence embeddings
+- 03-03: anndists 0.1 for DistCosine distance function (required by hnsw_rs)
+- 03-03: HnswConfig defaults M=16, efConstruction=200, efSearch=50
+- 03-03: IndexMapping for bidirectional chunk_id to internal ID mapping
+- 03-03: Partial persistence - save works, load returns empty graph due to hnsw_rs lifetime
 
 ### Pending Todos
 
@@ -97,6 +101,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-01-30 07:20 UTC
-Stopped at: Completed 03-02-PLAN.md (ONNX Embedder) - Embeddings complete
+Last session: 2026-01-30 07:21 UTC
+Stopped at: Completed 03-03-PLAN.md (HNSW Warm Index) - Vector index ready
 Resume file: None
