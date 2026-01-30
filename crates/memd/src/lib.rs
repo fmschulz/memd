@@ -6,6 +6,7 @@ pub mod index;
 pub mod logging;
 pub mod mcp;
 pub mod metrics;
+pub mod retrieval;
 pub mod store;
 pub mod text;
 pub mod types;
@@ -18,5 +19,9 @@ pub use logging::init_logging;
 pub use mcp::{McpServer, run_server};
 pub use metrics::{IndexStats, LatencyStats, MetricsCollector, MetricsSnapshot, QueryMetrics, Timer};
 pub use store::{MemoryStore, PersistentStore, PersistentStoreConfig, Store, StoreStats, TenantManager};
+pub use retrieval::{
+    ChunkWithMeta, FeatureReranker, FusedResult, FusionCandidate, FusionSource, RankedResult,
+    RerankerConfig, RerankerContext, RrfConfig, RrfFusion,
+};
 pub use text::{CodeTokenizer, ProcessedSentence, Sentence, SentenceSplitter, TextProcessor};
 pub use types::{ChunkId, ChunkStatus, ChunkType, MemoryChunk, ProjectId, Source, TenantId};
