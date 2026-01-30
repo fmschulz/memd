@@ -169,8 +169,10 @@ impl MetadataStore for SqliteMetadataStore {
     fn insert(&self, metadata: &ChunkMetadata) -> Result<()> {
         let conn = self.conn.lock().unwrap();
 
+        // Use INSERT OR REPLACE to handle crash recovery scenarios where
+        // metadata exists but segment data was lost
         conn.execute(
-            "INSERT INTO chunks (
+            "INSERT OR REPLACE INTO chunks (
                 chunk_id, tenant_id, project_id, segment_id, ordinal,
                 chunk_type, status, timestamp_created, hash, source_uri
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",

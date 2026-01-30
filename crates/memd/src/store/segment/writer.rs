@@ -244,24 +244,28 @@ impl SegmentWriter {
         self.payload_len
     }
 
-    /// Read a chunk by ordinal from the active (unflushed) segment
+    /// Read a chunk by ordinal from the active segment
     ///
     /// This is used by PersistentStore to read chunks that haven't been
     /// finalized yet. Returns None if ordinal is out of bounds.
     ///
-    /// Note: This reads from the buffered writer by flushing and reading
-    /// the file directly. CRC verification is performed.
-    pub fn read_chunk(&self, ordinal: u32) -> Result<Option<Vec<u8>>> {
+    /// Note: This flushes the buffer before reading to ensure data is on disk.
+    /// CRC verification is performed.
+    pub fn read_chunk(&mut self, ordinal: u32) -> Result<Option<Vec<u8>>> {
         let idx = ordinal as usize;
         if idx >= self.index_records.len() {
             return Ok(None);
         }
 
+        // Flush the buffer to ensure data is written to disk
+        self.payload_writer
+            .flush()
+            .map_err(|e| MemdError::StorageError(format!("flush for read: {}", e)))?;
+
         let record = &self.index_records[idx];
         let payload_path = self.dir.join("payload.bin");
 
-        // Read from the file (we need to flush first to ensure data is there)
-        // Note: BufWriter doesn't provide a way to read, so we read from the file
+        // Read from the file
         let payload_data = std::fs::read(&payload_path).map_err(|e| {
             MemdError::StorageError(format!("read payload for chunk {}: {}", ordinal, e))
         })?;
