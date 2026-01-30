@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-01-29)
 
 **Core value:** Agents can find and use relevant past context--across sessions, projects, and time--without hitting context window limits or losing continuity.
-**Current focus:** Phase 2 - Persistent Cold Store (COMPLETE)
+**Current focus:** Phase 3 - Dense Warm Index (In Progress)
 
 ## Current Position
 
-Phase: 2 of 7 (Persistent Cold Store)
-Plan: 7 of 7 in current phase (COMPLETE)
-Status: Phase complete
-Last activity: 2026-01-30 -- Completed 02-07-PLAN.md (Persistence Eval Tests)
+Phase: 3 of 7 (Dense Warm Index)
+Plan: 1 of 7 in current phase
+Status: In progress
+Last activity: 2026-01-30 -- Completed 03-01-PLAN.md (Embedder Trait)
 
-Progress: [========================------------------------] ~55% (11 of ~20 total plans estimated)
+Progress: [==========================----------------------] ~60% (12 of ~20 total plans estimated)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 11
+- Total plans completed: 12
 - Average duration: 7m
-- Total execution time: ~77 minutes
+- Total execution time: ~80 minutes
 
 **By Phase:**
 
@@ -29,10 +29,11 @@ Progress: [========================------------------------] ~55% (11 of ~20 tot
 |-------|-------|-------|----------|
 | 01 | 4 | 39m | 10m |
 | 02 | 7 | 38m | 5m |
+| 03 | 1 | 3m | 3m |
 
 **Recent Trend:**
-- Last 5 plans: 02-03 (4m), 02-05 (3m), 02-04 (2m), 02-06 (7m), 02-07 (6m)
-- Trend: Fast execution, Phase 2 complete
+- Last 5 plans: 02-05 (3m), 02-04 (2m), 02-06 (7m), 02-07 (6m), 03-01 (3m)
+- Trend: Fast execution, Phase 3 started
 
 *Updated after each plan completion*
 
@@ -77,6 +78,10 @@ Recent decisions affecting current work:
 - 02-06: Recovery checks segment readability, not just metadata existence
 - 02-07: extract_content_text helper for consistent MCP response parsing
 - 02-07: McpClient::start_with_args takes PathBuf reference for flexibility
+- 03-01: ort 2.0.0-rc.11 for ONNX Runtime (prerelease, stable not yet released)
+- 03-01: tls-native feature required for ort download-binaries
+- 03-01: DefaultHasher for deterministic mock embeddings (reproducible tests)
+- 03-01: Default dimension 384 matching all-MiniLM-L6-v2 model
 
 ### Pending Todos
 
@@ -88,6 +93,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-01-30 05:58 UTC
-Stopped at: Completed 02-07-PLAN.md (Persistence Eval Tests) - Phase 2 complete
+Last session: 2026-01-30 07:09 UTC
+Stopped at: Completed 03-01-PLAN.md (Embedder Trait) - Phase 3 started
 Resume file: None
