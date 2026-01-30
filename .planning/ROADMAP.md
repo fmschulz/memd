@@ -13,7 +13,7 @@ This roadmap delivers a complete Architecture A baseline for memd — a local da
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Skeleton + MCP Server** - Basic MCP server with stub tools and in-memory store
-- [ ] **Phase 2: Persistent Cold Store** - Append-only segments, WAL, SQLite metadata, soft deletes
+- [x] **Phase 2: Persistent Cold Store** - Append-only segments, WAL, SQLite metadata, soft deletes
 - [ ] **Phase 3: Dense Warm Index** - Embeddings interface, HNSW warm tier, basic search
 - [ ] **Phase 4: Sparse Lexical + Fusion** - BM25 indexing, RRF fusion, feature-based reranker
 - [ ] **Phase 5: Hot Tier + Cache** - Hot cache, semantic cache, promotion/demotion logic
@@ -53,13 +53,13 @@ Plans:
 **Plans**: 7 plans in 5 waves
 
 Plans:
-- [ ] 02-01-PLAN.md — Add Phase 2 dependencies, segment format, segment writer
-- [ ] 02-02-PLAN.md — WAL format and writer with fsync durability
-- [ ] 02-03-PLAN.md — SQLite metadata store with tenant isolation indexes
-- [ ] 02-04-PLAN.md — Tombstone bitset with roaring bitmap
-- [ ] 02-05-PLAN.md — Segment reader (mmap), WAL reader and recovery
-- [ ] 02-06-PLAN.md — PersistentStore integrating all components
-- [ ] 02-07-PLAN.md — Eval Suite A: isolation, recovery, soft delete tests
+- [x] 02-01-PLAN.md — Add Phase 2 dependencies, segment format, segment writer
+- [x] 02-02-PLAN.md — WAL format and writer with fsync durability
+- [x] 02-03-PLAN.md — SQLite metadata store with tenant isolation indexes
+- [x] 02-04-PLAN.md — Tombstone bitset with roaring bitmap
+- [x] 02-05-PLAN.md — Segment reader (mmap), WAL reader and recovery
+- [x] 02-06-PLAN.md — PersistentStore integrating all components
+- [x] 02-07-PLAN.md — Eval Suite A: isolation, recovery, soft delete tests
 
 ### Phase 3: Dense Warm Index
 **Goal**: Agents can search by semantic similarity using dense vector retrieval
