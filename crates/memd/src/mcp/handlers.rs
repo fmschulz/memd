@@ -146,6 +146,8 @@ pub struct ChunkResult {
     pub chunk_type: String,
     pub source: SourceResult,
     pub timestamp_created: i64,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub tags: Vec<String>,
 }
 
 /// Source information in results
@@ -305,6 +307,7 @@ pub async fn handle_memory_search<S: Store>(
             chunk_type: chunk.chunk_type.to_string(),
             source: SourceResult::from(&chunk.source),
             timestamp_created: chunk.timestamp_created,
+            tags: chunk.tags.clone(),
         })
         .collect();
 
