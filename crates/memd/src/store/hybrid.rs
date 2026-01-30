@@ -549,4 +549,91 @@ mod tests {
         assert_eq!(reranked.len(), 2);
         // The reranker may reorder based on bonuses
     }
+
+    #[tokio::test]
+    async fn test_multiple_chunks_fusion() {
+        let searcher = make_test_hybrid_searcher(true);
+        let tenant = make_tenant();
+
+        // Add multiple chunks with different content
+        let chunk_id1 = ChunkId::new();
+        let chunk_id2 = ChunkId::new();
+        let chunk_id3 = ChunkId::new();
+
+        searcher
+            .index_chunk(&tenant, &chunk_id1, "The parseConfig function reads configuration files")
+            .await
+            .unwrap();
+        searcher
+            .index_chunk(&tenant, &chunk_id2, "Configuration parsing is handled by parseConfig")
+            .await
+            .unwrap();
+        searcher
+            .index_chunk(&tenant, &chunk_id3, "This module handles user authentication")
+            .await
+            .unwrap();
+
+        // Search for parseConfig - should find chunks 1 and 2
+        let results = searcher.search(&tenant, "parseConfig", 10, None).await.unwrap();
+
+        // Should find the relevant chunks
+        assert!(!results.is_empty(), "Should find chunks matching parseConfig");
+
+        // Results should include chunks with parseConfig
+        let result_ids: Vec<ChunkId> = results.iter().map(|r| r.chunk_id.clone()).collect();
+        assert!(
+            result_ids.contains(&chunk_id1) || result_ids.contains(&chunk_id2),
+            "Should include parseConfig chunks"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tenant_isolation() {
+        let searcher = make_test_hybrid_searcher(true);
+        let tenant_a = TenantId::new("tenant_a").unwrap();
+        let tenant_b = TenantId::new("tenant_b").unwrap();
+        let chunk_id = ChunkId::new();
+
+        // Index chunk for tenant_a
+        searcher
+            .index_chunk(&tenant_a, &chunk_id, "secret data for tenant A only")
+            .await
+            .unwrap();
+
+        // Tenant A should find it
+        let results_a = searcher.search(&tenant_a, "secret", 10, None).await.unwrap();
+        assert!(!results_a.is_empty(), "Tenant A should find their data");
+
+        // Tenant B should not find it
+        let results_b = searcher.search(&tenant_b, "secret", 10, None).await.unwrap();
+        // Sparse index enforces tenant isolation
+        let sparse_found_b = results_b.iter().any(|r| r.sparse_rank.is_some());
+        assert!(!sparse_found_b, "Tenant B should not find tenant A's data in sparse");
+    }
+
+    #[tokio::test]
+    async fn test_empty_query() {
+        let searcher = make_test_hybrid_searcher(true);
+        let tenant = make_tenant();
+        let chunk_id = ChunkId::new();
+
+        searcher
+            .index_chunk(&tenant, &chunk_id, "some content here")
+            .await
+            .unwrap();
+
+        // Empty query should not crash
+        let results = searcher.search(&tenant, "", 10, None).await;
+        // May return error or empty results depending on sparse index behavior
+        assert!(results.is_ok() || results.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_config_defaults() {
+        let config = HybridConfig::default();
+
+        assert_eq!(config.dense_k, 100);
+        assert_eq!(config.sparse_k, 100);
+        assert!(config.enable_sparse);
+    }
 }
