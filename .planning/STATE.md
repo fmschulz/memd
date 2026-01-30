@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-01-29)
 ## Current Position
 
 Phase: 3 of 7 (Dense Warm Index)
-Plan: 3 of 6 in current phase
+Plan: 4 of 6 in current phase
 Status: In progress
-Last activity: 2026-01-30 -- Completed 03-03-PLAN.md (HNSW Warm Index)
+Last activity: 2026-01-30 -- Completed 03-04-PLAN.md (Dense Search Integration)
 
-Progress: [============================--------------------] ~70% (14 of ~20 total plans estimated)
+Progress: [==============================------------------] ~75% (15 of ~20 total plans estimated)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 14
+- Total plans completed: 15
 - Average duration: 7m
-- Total execution time: ~97 minutes
+- Total execution time: ~104 minutes
 
 **By Phase:**
 
@@ -29,11 +29,11 @@ Progress: [============================--------------------] ~70% (14 of ~20 tot
 |-------|-------|-------|----------|
 | 01 | 4 | 39m | 10m |
 | 02 | 7 | 38m | 5m |
-| 03 | 3 | 20m | 7m |
+| 03 | 4 | 27m | 7m |
 
 **Recent Trend:**
-- Last 5 plans: 02-06 (7m), 02-07 (6m), 03-01 (3m), 03-02 (8m), 03-03 (9m)
-- Trend: Phase 3 HNSW index complete
+- Last 5 plans: 02-07 (6m), 03-01 (3m), 03-02 (8m), 03-03 (9m), 03-04 (7m)
+- Trend: Dense search integration complete
 
 *Updated after each plan completion*
 
@@ -90,6 +90,9 @@ Recent decisions affecting current work:
 - 03-03: HnswConfig defaults M=16, efConstruction=200, efSearch=50
 - 03-03: IndexMapping for bidirectional chunk_id to internal ID mapping
 - 03-03: Partial persistence - save works, load returns empty graph due to hnsw_rs lifetime
+- 03-04: DenseSearcher coordinates embedder + HNSW per tenant
+- 03-04: search_with_scores as trait default returning score 1.0
+- 03-04: Index failure doesn't fail add() operation (best-effort)
 
 ### Pending Todos
 
@@ -97,10 +100,13 @@ None.
 
 ### Blockers/Concerns
 
-None.
+- Pre-existing linker issue: mold linker incompatible with ort-sys glibc C23 symbols
+  - Affects: cargo test/build (linking phase)
+  - Does not affect: cargo check
+  - Resolution: Update system libc or change linker config
 
 ## Session Continuity
 
-Last session: 2026-01-30 07:21 UTC
-Stopped at: Completed 03-03-PLAN.md (HNSW Warm Index) - Vector index ready
+Last session: 2026-01-30 07:30 UTC
+Stopped at: Completed 03-04-PLAN.md (Dense Search Integration)
 Resume file: None
