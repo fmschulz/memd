@@ -2,6 +2,7 @@
 //!
 //! Integrates segments, WAL, SQLite metadata, and tombstones.
 //! Implements crash recovery via WAL replay on startup.
+//! Uses hybrid search (dense + sparse) for retrieval.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -12,11 +13,13 @@ use parking_lot::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 use super::dense::{DenseSearchConfig, DenseSearcher};
+use super::hybrid::{HybridConfig, HybridSearcher};
 use super::metadata::{ChunkMetadata, MetadataStore, SqliteMetadataStore};
 use super::segment::{SegmentReader, SegmentWriter};
 use super::wal::{WalReader, WalRecordType, WalWriter};
 use super::{Store, StoreStats};
 use crate::error::{MemdError, Result};
+use crate::index::Bm25Index;
 use crate::metrics::{IndexStats, MetricsCollector, QueryMetrics};
 use crate::types::{ChunkId, ChunkStatus, MemoryChunk, TenantId};
 
@@ -31,6 +34,10 @@ pub struct PersistentStoreConfig {
     pub wal_checkpoint_interval: u32,
     /// Enable dense vector search
     pub enable_dense_search: bool,
+    /// Enable hybrid search (dense + sparse)
+    pub enable_hybrid_search: bool,
+    /// Hybrid search configuration
+    pub hybrid_config: Option<HybridConfig>,
 }
 
 impl Default for PersistentStoreConfig {
@@ -40,6 +47,8 @@ impl Default for PersistentStoreConfig {
             segment_max_chunks: 10_000,
             wal_checkpoint_interval: 100,
             enable_dense_search: true,
+            enable_hybrid_search: true,
+            hybrid_config: None,
         }
     }
 }
@@ -53,6 +62,10 @@ pub struct PersistentStore {
     metadata: Arc<SqliteMetadataStore>,
     /// Dense vector search (optional)
     dense_searcher: Option<Arc<DenseSearcher>>,
+    /// Sparse index (shared with hybrid_searcher)
+    sparse_index: Option<Arc<Bm25Index>>,
+    /// Hybrid searcher (replaces dense_searcher usage in search)
+    hybrid_searcher: Option<Arc<HybridSearcher>>,
     /// Metrics collector for query latency
     metrics: Arc<MetricsCollector>,
 }
@@ -107,11 +120,43 @@ impl PersistentStore {
             None
         };
 
+        // Initialize sparse index if hybrid search enabled
+        let sparse_index = if config.enable_hybrid_search {
+            let sparse_path = config.data_dir.join("sparse_index");
+            match Bm25Index::with_path(Some(sparse_path)) {
+                Ok(index) => Some(Arc::new(index)),
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "failed to initialize sparse index, hybrid search disabled"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Initialize hybrid searcher if both dense and sparse available (or just dense)
+        let hybrid_searcher = if config.enable_hybrid_search && dense_searcher.is_some() {
+            let hybrid_config = config.hybrid_config.clone().unwrap_or_default();
+            let hybrid = HybridSearcher::new(
+                Arc::clone(dense_searcher.as_ref().unwrap()),
+                sparse_index.clone(),
+                hybrid_config,
+            );
+            Some(Arc::new(hybrid))
+        } else {
+            None
+        };
+
         let store = Self {
             config,
             tenants: RwLock::new(HashMap::new()),
             metadata,
             dense_searcher,
+            sparse_index,
+            hybrid_searcher,
             metrics: Arc::new(MetricsCollector::default()),
         };
 
@@ -201,6 +246,13 @@ impl PersistentStore {
         if let Some(ref searcher) = self.dense_searcher {
             if let Err(e) = searcher.save_all() {
                 warn!(error = %e, "failed to save dense indices on shutdown");
+            }
+        }
+
+        // Commit sparse index
+        if let Some(ref sparse) = self.sparse_index {
+            if let Err(e) = sparse.commit() {
+                warn!(error = %e, "failed to commit sparse index on shutdown");
             }
         }
 
@@ -576,8 +628,21 @@ impl Store for PersistentStore {
         };
         self.metadata.insert(&metadata)?;
 
-        // Index in dense searcher (non-blocking, best-effort)
-        if let Some(ref searcher) = self.dense_searcher {
+        // Index in hybrid searcher (handles both dense and sparse)
+        if let Some(ref hybrid) = self.hybrid_searcher {
+            if let Err(e) = hybrid
+                .index_chunk(&chunk.tenant_id, &chunk_id, &chunk.text)
+                .await
+            {
+                warn!(
+                    chunk_id = %chunk_id,
+                    error = %e,
+                    "failed to index chunk in hybrid searcher"
+                );
+                // Don't fail the add - search will fall back to text matching
+            }
+        } else if let Some(ref searcher) = self.dense_searcher {
+            // Fallback to dense-only if hybrid not available
             if let Err(e) = searcher
                 .index_chunk(&chunk.tenant_id, &chunk_id, &chunk.text)
                 .await
@@ -587,7 +652,6 @@ impl Store for PersistentStore {
                     error = %e,
                     "failed to index chunk in dense searcher"
                 );
-                // Don't fail the add - search will fall back to text matching
             }
         }
 
@@ -723,7 +787,33 @@ impl Store for PersistentStore {
     ) -> Result<Vec<(MemoryChunk, f32)>> {
         let total_start = Instant::now();
 
-        // Use dense search if available
+        // Use hybrid search if available (combines dense + sparse)
+        if let Some(ref hybrid) = self.hybrid_searcher {
+            let (hybrid_results, timing) = hybrid
+                .search_with_timing(tenant_id, query, k, None)
+                .await?;
+
+            let fetch_start = Instant::now();
+            let mut results = Vec::with_capacity(hybrid_results.len());
+            for result in hybrid_results {
+                if let Some(chunk) = self.get(tenant_id, &result.chunk_id).await? {
+                    results.push((chunk, result.final_score));
+                }
+            }
+            let fetch_time = fetch_start.elapsed();
+
+            // Record metrics (use dense time as embed time, sparse time as search time)
+            self.metrics.record_query(QueryMetrics::from_timings(
+                timing.dense_time,
+                timing.sparse_time + timing.fusion_time,
+                fetch_time,
+                total_start.elapsed(),
+            ));
+
+            return Ok(results);
+        }
+
+        // Fallback to dense-only if hybrid not available
         if let Some(ref searcher) = self.dense_searcher {
             let (dense_results, embed_time, search_time) =
                 searcher.search_with_timing(tenant_id, query, k).await?;
@@ -783,6 +873,17 @@ impl Store for PersistentStore {
             let mut segments = tenant.segments.write();
             if let Some(reader) = segments.get_mut(&meta.segment_id) {
                 reader.mark_deleted(meta.ordinal)?;
+            }
+        }
+
+        // Remove from hybrid/sparse index
+        if let Some(ref hybrid) = self.hybrid_searcher {
+            if let Err(e) = hybrid.delete_chunk(tenant_id, chunk_id) {
+                warn!(
+                    chunk_id = %chunk_id,
+                    error = %e,
+                    "failed to delete chunk from hybrid searcher"
+                );
             }
         }
 
