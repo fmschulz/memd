@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-01-29)
 ## Current Position
 
 Phase: 4 of 7 (Sparse Lexical + Fusion)
-Plan: 4 of 6 in current phase
+Plan: 5 of 6 in current phase
 Status: In progress
-Last activity: 2026-01-30 -- Completed 04-04-PLAN.md (Context Packer)
+Last activity: 2026-01-30 -- Completed 04-05-PLAN.md (Hybrid Search Integration)
 
-Progress: [=========================================----------] ~93% (21 of ~23 total plans estimated)
+Progress: [===========================================--------] ~96% (22 of ~23 total plans estimated)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 20
+- Total plans completed: 22
 - Average duration: 6m
-- Total execution time: ~126 minutes
+- Total execution time: ~131 minutes
 
 **By Phase:**
 
@@ -30,11 +30,11 @@ Progress: [=========================================----------] ~93% (21 of ~23 
 | 01 | 4 | 39m | 10m |
 | 02 | 7 | 38m | 5m |
 | 03 | 6 | 37m | 6m |
-| 04 | 4 | 17m | 4m |
+| 04 | 5 | 22m | 4m |
 
 **Recent Trend:**
-- Last 5 plans: 03-06 (7m), 04-01 (4m), 04-02 (5m), 04-03 (4m), 04-04 (4m)
-- Trend: Phase 4 retrieval pipeline coming together
+- Last 5 plans: 04-01 (4m), 04-02 (5m), 04-03 (4m), 04-04 (4m), 04-05 (5m)
+- Trend: Phase 4 retrieval pipeline complete, hybrid search operational
 
 *Updated after each plan completion*
 
@@ -118,6 +118,9 @@ Recent decisions affecting current work:
 - 04-04: MMR lambda default 0.7 (favor relevance slightly over diversity)
 - 04-04: Type diversity fallback when no embeddings available
 - 04-04: Chars per token = 4 for token estimation
+- 04-05: HybridSearcher accessed via PersistentStore.search_with_scores()
+- 04-05: Sparse index path at data_dir/sparse_index
+- 04-05: Fallback chain: hybrid -> dense -> text search
 
 ### Pending Todos
 
@@ -132,8 +135,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-01-30 08:35 UTC
-Stopped at: Completed 04-03-PLAN.md (RRF Fusion and Reranker)
+Last session: 2026-01-30 08:41 UTC
+Stopped at: Completed 04-05-PLAN.md (Hybrid Search Integration)
 Resume file: None
-
-Note: 04-04-SUMMARY.md exists from prior automation run.
