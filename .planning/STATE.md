@@ -10,11 +10,11 @@ See: .planning/PROJECT.md (updated 2026-01-29)
 ## Current Position
 
 Phase: 4 of 7 (Sparse Lexical + Fusion)
-Plan: 1 of 6 in current phase
+Plan: 2 of 6 in current phase
 Status: In progress
-Last activity: 2026-01-30 -- Completed 04-01-PLAN.md (Text Processing Foundation)
+Last activity: 2026-01-30 -- Completed 04-02-PLAN.md (BM25 Sparse Index)
 
-Progress: [=====================================--------------] ~90% (18 of ~20 total plans estimated)
+Progress: [======================================-------------] ~91% (19 of ~21 total plans estimated)
 
 ## Performance Metrics
 
@@ -30,11 +30,11 @@ Progress: [=====================================--------------] ~90% (18 of ~20 
 | 01 | 4 | 39m | 10m |
 | 02 | 7 | 38m | 5m |
 | 03 | 6 | 37m | 6m |
-| 04 | 1 | 4m | 4m |
+| 04 | 2 | 9m | 5m |
 
 **Recent Trend:**
-- Last 5 plans: 03-03 (9m), 03-04 (7m), 03-05 (3m), 03-06 (7m), 04-01 (4m)
-- Trend: Phase 4 started with text processing foundation
+- Last 5 plans: 03-04 (7m), 03-05 (3m), 03-06 (7m), 04-01 (4m), 04-02 (5m)
+- Trend: Phase 4 progressing with sparse index implementation
 
 *Updated after each plan completion*
 
@@ -106,6 +106,11 @@ Recent decisions affecting current work:
 - 04-01: Acronyms (2+ uppercase) preserved during normalization
 - 04-01: Heuristic code detection via syntax patterns (braces, keywords, operators)
 - 04-01: Code blocks kept together as single 'sentences' for indexing
+- 04-02: 50MB default writer memory budget for Tantivy IndexWriter
+- 04-02: Commit after batch insert for immediate searchability
+- 04-02: BooleanQuery for tenant isolation (must match tenant AND query)
+- 04-02: Sentence-level indexing with sentence_idx for fine-grained results
+- 04-02: IndexReader with OnCommitWithDelay reload policy
 
 ### Pending Todos
 
@@ -120,6 +125,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-01-30 08:21 UTC
-Stopped at: Completed 04-01-PLAN.md (Text Processing Foundation)
+Last session: 2026-01-30 08:27 UTC
+Stopped at: Completed 04-02-PLAN.md (BM25 Sparse Index)
 Resume file: None
