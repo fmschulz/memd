@@ -87,3 +87,98 @@ impl Embedder for MockEmbedder {
         &self.config
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_mock_deterministic() {
+        let embedder = MockEmbedder::new();
+
+        let emb1 = embedder.embed_query("hello world").await.unwrap();
+        let emb2 = embedder.embed_query("hello world").await.unwrap();
+
+        // Same text should produce same embedding
+        assert_eq!(emb1, emb2);
+    }
+
+    #[tokio::test]
+    async fn test_mock_different_texts() {
+        let embedder = MockEmbedder::new();
+
+        let emb1 = embedder.embed_query("hello").await.unwrap();
+        let emb2 = embedder.embed_query("world").await.unwrap();
+
+        // Different texts should produce different embeddings
+        assert_ne!(emb1, emb2);
+    }
+
+    #[tokio::test]
+    async fn test_mock_dimension() {
+        let embedder = MockEmbedder::new();
+        let embedding = embedder.embed_query("test").await.unwrap();
+
+        assert_eq!(embedding.len(), 384);
+    }
+
+    #[tokio::test]
+    async fn test_mock_normalized() {
+        let embedder = MockEmbedder::new();
+        let embedding = embedder.embed_query("test").await.unwrap();
+
+        let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 0.001, "not normalized: {}", norm);
+    }
+
+    #[tokio::test]
+    async fn test_mock_batch() {
+        let embedder = MockEmbedder::new();
+        let texts = vec!["one", "two", "three"];
+
+        let embeddings = embedder.embed_texts(&texts).await.unwrap();
+
+        assert_eq!(embeddings.len(), 3);
+        for emb in &embeddings {
+            assert_eq!(emb.len(), 384);
+        }
+    }
+
+    #[test]
+    fn test_config_defaults() {
+        let config = EmbeddingConfig::default();
+        assert_eq!(config.dimension, 384);
+        assert!(config.normalize);
+        assert_eq!(config.batch_size, 32);
+    }
+
+    #[tokio::test]
+    async fn test_custom_dimension() {
+        let config = EmbeddingConfig {
+            dimension: 768,
+            normalize: true,
+            batch_size: 16,
+        };
+        let embedder = MockEmbedder::with_config(config);
+
+        let embedding = embedder.embed_query("test").await.unwrap();
+        assert_eq!(embedding.len(), 768);
+        assert_eq!(embedder.dimension(), 768);
+    }
+
+    #[tokio::test]
+    async fn test_unnormalized() {
+        let config = EmbeddingConfig {
+            dimension: 384,
+            normalize: false,
+            batch_size: 32,
+        };
+        let embedder = MockEmbedder::with_config(config);
+
+        let embedding = embedder.embed_query("test").await.unwrap();
+        let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+        // Without normalization, norm should NOT be 1.0
+        assert!((norm - 1.0).abs() > 0.1, "unexpectedly normalized: {}", norm);
+    }
+}
