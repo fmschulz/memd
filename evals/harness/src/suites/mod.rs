@@ -4,3 +4,4 @@
 
 pub mod mcp_conformance;
 pub mod persistence;
+pub mod retrieval;
