@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      # Mount project directory
+      - .:/workspace
+      # Cache cargo registry and build artifacts
+      - cargo-registry:/root/.cargo/registry
+      - cargo-git:/root/.cargo/git
+      - target:/workspace/target
+    working_dir: /workspace
+    # Keep container running
+    stdin_open: true
+    tty: true
+
+volumes:
+  cargo-registry:
+  cargo-git:
+  target:
