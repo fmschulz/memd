@@ -25,6 +25,10 @@ crc32fast.workspace = true
 bincode.workspace = true
 byteorder.workspace = true
 parking_lot.workspace = true
+ort.workspace = true
+hnsw_rs.workspace = true
+half.workspace = true
+ndarray.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
