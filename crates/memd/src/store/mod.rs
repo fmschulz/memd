@@ -61,6 +61,21 @@ pub trait Store: Send + Sync {
         k: usize,
     ) -> Result<Vec<MemoryChunk>>;
 
+    /// Search with scores (default: calls search with score 1.0)
+    ///
+    /// Returns chunks with their relevance scores.
+    /// Default implementation calls search() and assigns score 1.0 to all results.
+    /// PersistentStore overrides this with real dense search using HNSW.
+    async fn search_with_scores(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        k: usize,
+    ) -> Result<Vec<(MemoryChunk, f32)>> {
+        let chunks = self.search(tenant_id, query, k).await?;
+        Ok(chunks.into_iter().map(|c| (c, 1.0)).collect())
+    }
+
     /// Soft delete a chunk
     ///
     /// Returns true if the chunk was found and deleted, false if not found.

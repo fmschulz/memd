@@ -10,6 +10,7 @@ use std::sync::Arc;
 use parking_lot::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
+use super::dense::{DenseSearchConfig, DenseSearcher};
 use super::metadata::{ChunkMetadata, MetadataStore, SqliteMetadataStore};
 use super::segment::{SegmentReader, SegmentWriter};
 use super::wal::{WalReader, WalRecordType, WalWriter};
@@ -26,6 +27,8 @@ pub struct PersistentStoreConfig {
     pub segment_max_chunks: u32,
     /// WAL checkpoint interval (chunks)
     pub wal_checkpoint_interval: u32,
+    /// Enable dense vector search
+    pub enable_dense_search: bool,
 }
 
 impl Default for PersistentStoreConfig {
@@ -34,6 +37,7 @@ impl Default for PersistentStoreConfig {
             data_dir: PathBuf::from("data"),
             segment_max_chunks: 10_000,
             wal_checkpoint_interval: 100,
+            enable_dense_search: true,
         }
     }
 }
@@ -45,6 +49,8 @@ pub struct PersistentStore {
     tenants: RwLock<HashMap<String, Arc<TenantStore>>>,
     /// Global metadata store
     metadata: Arc<SqliteMetadataStore>,
+    /// Dense vector search (optional)
+    dense_searcher: Option<Arc<DenseSearcher>>,
 }
 
 /// Per-tenant storage state
@@ -77,10 +83,31 @@ impl PersistentStore {
         let metadata_path = config.data_dir.join("metadata.db");
         let metadata = Arc::new(SqliteMetadataStore::open(&metadata_path)?);
 
+        // Initialize dense searcher if enabled
+        let dense_searcher = if config.enable_dense_search {
+            let dense_config = DenseSearchConfig::default();
+            match DenseSearcher::new(dense_config) {
+                Ok(searcher) => {
+                    let searcher = searcher.with_base_path(config.data_dir.clone());
+                    Some(Arc::new(searcher))
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "failed to initialize dense searcher, falling back to text search"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let store = Self {
             config,
             tenants: RwLock::new(HashMap::new()),
             metadata,
+            dense_searcher,
         };
 
         // Recover existing tenants
@@ -141,6 +168,14 @@ impl PersistentStore {
     /// Graceful shutdown - finalizes all active segments
     pub fn shutdown(&self) -> Result<()> {
         info!("PersistentStore shutting down");
+
+        // Save dense indices
+        if let Some(ref searcher) = self.dense_searcher {
+            if let Err(e) = searcher.save_all() {
+                warn!(error = %e, "failed to save dense indices on shutdown");
+            }
+        }
+
         let tenants = self.tenants.read();
         for (tenant_id, tenant) in tenants.iter() {
             if let Err(e) = tenant.finalize_active_segment() {
@@ -513,6 +548,21 @@ impl Store for PersistentStore {
         };
         self.metadata.insert(&metadata)?;
 
+        // Index in dense searcher (non-blocking, best-effort)
+        if let Some(ref searcher) = self.dense_searcher {
+            if let Err(e) = searcher
+                .index_chunk(&chunk.tenant_id, &chunk_id, &chunk.text)
+                .await
+            {
+                warn!(
+                    chunk_id = %chunk_id,
+                    error = %e,
+                    "failed to index chunk in dense searcher"
+                );
+                // Don't fail the add - search will fall back to text matching
+            }
+        }
+
         // Check if we need checkpoint
         {
             let mut count = tenant.writes_since_checkpoint.lock();
@@ -637,6 +687,31 @@ impl Store for PersistentStore {
         Ok(results)
     }
 
+    async fn search_with_scores(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        k: usize,
+    ) -> Result<Vec<(MemoryChunk, f32)>> {
+        // Use dense search if available
+        if let Some(ref searcher) = self.dense_searcher {
+            let dense_results = searcher.search(tenant_id, query, k).await?;
+
+            let mut results = Vec::with_capacity(dense_results.len());
+            for result in dense_results {
+                if let Some(chunk) = self.get(tenant_id, &result.chunk_id).await? {
+                    results.push((chunk, result.score));
+                }
+            }
+
+            return Ok(results);
+        }
+
+        // Fall back to text search with score 1.0
+        let chunks = self.search(tenant_id, query, k).await?;
+        Ok(chunks.into_iter().map(|c| (c, 1.0)).collect())
+    }
+
     async fn delete(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<bool> {
         // Get metadata to find segment/ordinal
         let meta = self.metadata.get(tenant_id, chunk_id)?;
@@ -704,6 +779,7 @@ mod tests {
             data_dir: dir.path().to_path_buf(),
             segment_max_chunks: 100,
             wal_checkpoint_interval: 10,
+            enable_dense_search: false, // Disable for unit tests
         };
         let store = PersistentStore::open(config).unwrap();
         (store, dir)
@@ -779,6 +855,7 @@ mod tests {
                 data_dir: dir.path().to_path_buf(),
                 segment_max_chunks: 100,
                 wal_checkpoint_interval: 10,
+                enable_dense_search: false,
             };
             let store = PersistentStore::open(config).unwrap();
             let chunk = make_chunk(&tenant, "persistent data");
@@ -794,6 +871,7 @@ mod tests {
                 data_dir: dir.path().to_path_buf(),
                 segment_max_chunks: 100,
                 wal_checkpoint_interval: 10,
+                enable_dense_search: false,
             };
             let store = PersistentStore::open(config).unwrap();
             let retrieved = store.get(&tenant, &chunk_id).await.unwrap();
@@ -816,6 +894,7 @@ mod tests {
                 data_dir: dir.path().to_path_buf(),
                 segment_max_chunks: 100,
                 wal_checkpoint_interval: 10,
+                enable_dense_search: false,
             };
             let store = PersistentStore::open(config).unwrap();
             let chunk = make_chunk(&tenant, "crash test data");
@@ -831,6 +910,7 @@ mod tests {
                 data_dir: dir.path().to_path_buf(),
                 segment_max_chunks: 100,
                 wal_checkpoint_interval: 10,
+                enable_dense_search: false,
             };
             let store = PersistentStore::open(config).unwrap();
             let retrieved = store.get(&tenant, &chunk_id).await.unwrap();
