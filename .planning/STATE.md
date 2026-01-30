@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-01-29)
 
 **Core value:** Agents can find and use relevant past context--across sessions, projects, and time--without hitting context window limits or losing continuity.
-**Current focus:** Phase 3 - Dense Warm Index (Complete)
+**Current focus:** Phase 4 - Sparse Lexical + Fusion
 
 ## Current Position
 
-Phase: 3 of 7 (Dense Warm Index)
-Plan: 6 of 6 in current phase (COMPLETE)
-Status: Phase complete
-Last activity: 2026-01-30 -- Completed 03-06-PLAN.md (Metrics Observability)
+Phase: 4 of 7 (Sparse Lexical + Fusion)
+Plan: 1 of 6 in current phase
+Status: In progress
+Last activity: 2026-01-30 -- Completed 04-01-PLAN.md (Text Processing Foundation)
 
-Progress: [===================================--------------] ~85% (17 of ~20 total plans estimated)
+Progress: [=====================================--------------] ~90% (18 of ~20 total plans estimated)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 17
+- Total plans completed: 18
 - Average duration: 7m
-- Total execution time: ~114 minutes
+- Total execution time: ~118 minutes
 
 **By Phase:**
 
@@ -30,10 +30,11 @@ Progress: [===================================--------------] ~85% (17 of ~20 to
 | 01 | 4 | 39m | 10m |
 | 02 | 7 | 38m | 5m |
 | 03 | 6 | 37m | 6m |
+| 04 | 1 | 4m | 4m |
 
 **Recent Trend:**
-- Last 5 plans: 03-02 (8m), 03-03 (9m), 03-04 (7m), 03-05 (3m), 03-06 (7m)
-- Trend: Phase 3 complete with metrics observability
+- Last 5 plans: 03-03 (9m), 03-04 (7m), 03-05 (3m), 03-06 (7m), 04-01 (4m)
+- Trend: Phase 4 started with text processing foundation
 
 *Updated after each plan completion*
 
@@ -100,6 +101,11 @@ Recent decisions affecting current work:
 - 03-06: Atomic counters for cumulative totals (lock-free accumulation)
 - 03-06: search_with_timing returns (results, embed_time, search_time) tuple
 - 03-06: Memory estimate uses 2x multiplier on embedding bytes for HNSW overhead
+- 04-01: tantivy 0.24 for BM25 (mature, battle-tested inverted index)
+- 04-01: rust-stemmers for Porter algorithm (simple, effective for English prose)
+- 04-01: Acronyms (2+ uppercase) preserved during normalization
+- 04-01: Heuristic code detection via syntax patterns (braces, keywords, operators)
+- 04-01: Code blocks kept together as single 'sentences' for indexing
 
 ### Pending Todos
 
@@ -114,6 +120,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-01-30 07:39 UTC
-Stopped at: Completed 03-06-PLAN.md (Metrics Observability) - Phase 3 complete
+Last session: 2026-01-30 08:21 UTC
+Stopped at: Completed 04-01-PLAN.md (Text Processing Foundation)
 Resume file: None
