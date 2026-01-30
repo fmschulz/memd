@@ -16,7 +16,7 @@ struct Args {
     #[arg(long, default_value = "target/debug/memd")]
     memd_path: String,
 
-    /// Suite to run (all, mcp, persistence, retrieval)
+    /// Suite to run (all, mcp, persistence, retrieval, hybrid)
     #[arg(long, default_value = "all")]
     suite: String,
 
@@ -55,14 +55,16 @@ fn main() -> ExitCode {
             all.extend(suites::mcp_conformance::run(&args.memd_path));
             all.extend(suites::persistence::run_all(&memd_binary));
             all.extend(suites::retrieval::run_retrieval_tests(&memd_binary));
+            all.extend(suites::hybrid::run_hybrid_tests(&memd_binary));
             all
         }
         "mcp" => suites::mcp_conformance::run(&args.memd_path),
         "persistence" => suites::persistence::run_all(&memd_binary),
         "retrieval" => suites::retrieval::run_retrieval_tests(&memd_binary),
+        "hybrid" => suites::hybrid::run_hybrid_tests(&memd_binary),
         _ => {
             eprintln!(
-                "Unknown suite: {}. Available: all, mcp, persistence, retrieval",
+                "Unknown suite: {}. Available: all, mcp, persistence, retrieval, hybrid",
                 args.suite
             );
             return ExitCode::FAILURE;
