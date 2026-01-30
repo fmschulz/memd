@@ -10,29 +10,29 @@ See: .planning/PROJECT.md (updated 2026-01-29)
 ## Current Position
 
 Phase: 2 of 7 (Persistent Cold Store)
-Plan: 1 of 3 in current phase
+Plan: 2 of 5 in current phase
 Status: In progress
-Last activity: 2026-01-29 — Completed 02-01-PLAN.md (Segment Format + Writer)
+Last activity: 2026-01-30 — Completed 02-04-PLAN.md (Tombstone Bitset)
 
-Progress: [==========--------------------------------------] ~25% (5 of ~20 total plans estimated)
+Progress: [============------------------------------------] ~30% (6 of ~20 total plans estimated)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 5
-- Average duration: 10m
-- Total execution time: ~51 minutes
+- Total plans completed: 6
+- Average duration: 9m
+- Total execution time: ~53 minutes
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01 | 4 | 39m | 10m |
-| 02 | 1 | 12m | 12m |
+| 02 | 2 | 14m | 7m |
 
 **Recent Trend:**
-- Last 5 plans: 01-02 (8m), 01-03 (12m), 01-04 (15m), 02-01 (12m)
-- Trend: Good momentum, Phase 2 starting smoothly
+- Last 5 plans: 01-03 (12m), 01-04 (15m), 02-01 (12m), 02-04 (2m)
+- Trend: Fast execution, 02-04 was a focused module
 
 *Updated after each plan completion*
 
@@ -62,6 +62,8 @@ Recent decisions affecting current work:
 - 02-01: Little-endian encoding via byteorder for cross-platform compatibility
 - 02-01: bincode with serde feature for metadata serialization
 - 02-01: 6-digit zero-padded segment IDs (seg_000001) for sorting
+- 02-04: Roaring bitmap for space-efficient tombstone storage
+- 02-04: Atomic file persistence: temp file + rename + fsync
 
 ### Pending Todos
 
@@ -73,6 +75,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-01-29 23:12 UTC
-Stopped at: Completed 02-01-PLAN.md (Segment Format + Writer)
+Last session: 2026-01-30 01:52 UTC
+Stopped at: Completed 02-04-PLAN.md (Tombstone Bitset)
 Resume file: None
