@@ -74,12 +74,12 @@ Plans:
 **Plans**: 6 plans in 4 waves
 
 Plans:
-- [ ] 03-01-PLAN.md — Add Phase 3 dependencies, Embedder trait interface
-- [ ] 03-02-PLAN.md — ONNX embedder with automatic model download
-- [ ] 03-03-PLAN.md — HNSW warm index with insert, search, persistence
-- [ ] 03-04-PLAN.md — Integrate dense search into PersistentStore and MCP handlers
-- [ ] 03-05-PLAN.md — Retrieval quality eval suite with code similarity dataset
-- [ ] 03-06-PLAN.md — Metrics collection and memory.metrics endpoint
+- [x] 03-01-PLAN.md — Add Phase 3 dependencies, Embedder trait interface
+- [x] 03-02-PLAN.md — ONNX embedder with automatic model download
+- [x] 03-03-PLAN.md — HNSW warm index with insert, search, persistence
+- [x] 03-04-PLAN.md — Integrate dense search into PersistentStore and MCP handlers
+- [x] 03-05-PLAN.md — Retrieval quality eval suite with code similarity dataset
+- [x] 03-06-PLAN.md — Metrics collection and memory.metrics endpoint
 
 ### Phase 4: Sparse Lexical + Fusion
 **Goal**: Hybrid retrieval combining dense and lexical signals improves result quality
@@ -155,7 +155,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 |-------|----------------|--------|-----------|
 | 1. Skeleton + MCP Server | 4/4 | Complete | 2026-01-29 |
 | 2. Persistent Cold Store | 7/7 | Complete | 2026-01-30 |
-| 3. Dense Warm Index | 0/6 | Planned | - |
+| 3. Dense Warm Index | 6/6 | Complete | 2026-01-30 |
 | 4. Sparse Lexical + Fusion | 0/TBD | Not started | - |
 | 5. Hot Tier + Cache | 0/TBD | Not started | - |
 | 6. Structural Indexes | 0/TBD | Not started | - |
