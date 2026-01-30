@@ -3,6 +3,7 @@
 //! Provides the Store trait and implementations for memory chunk storage.
 //! The in-memory store is used as a baseline before persistent storage.
 
+pub mod dense;
 pub mod memory;
 pub mod metadata;
 pub mod persistent;
@@ -69,6 +70,7 @@ pub trait Store: Send + Sync {
     async fn stats(&self, tenant_id: &TenantId) -> Result<StoreStats>;
 }
 
+pub use dense::{DenseSearchConfig, DenseSearchResult, DenseSearcher};
 pub use memory::MemoryStore;
 pub use persistent::{PersistentStore, PersistentStoreConfig};
 pub use tenant::TenantManager;
