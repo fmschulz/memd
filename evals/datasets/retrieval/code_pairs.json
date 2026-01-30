@@ -1,0 +1,137 @@
+{
+  "description": "Code similarity pairs for retrieval quality evaluation. Handcrafted realistic code samples covering common patterns (JSON, APIs, validation, sorting, error handling, database, auth, file I/O).",
+  "version": "1.0",
+  "note": "Phase 3 baseline. Expand with benchmark datasets (RepoBench-R, LongMemEval) in Phase 4.",
+  "queries": [
+    {
+      "id": "Q1",
+      "query": "function to parse JSON string into object",
+      "relevant": ["D1", "D2"],
+      "irrelevant": ["D10", "D11"]
+    },
+    {
+      "id": "Q2",
+      "query": "async function that fetches data from API",
+      "relevant": ["D3", "D4"],
+      "irrelevant": ["D5", "D6"]
+    },
+    {
+      "id": "Q3",
+      "query": "validate email address format",
+      "relevant": ["D5", "D6"],
+      "irrelevant": ["D1", "D2"]
+    },
+    {
+      "id": "Q4",
+      "query": "sort array of numbers ascending",
+      "relevant": ["D7", "D8"],
+      "irrelevant": ["D3", "D4"]
+    },
+    {
+      "id": "Q5",
+      "query": "error handling with try catch",
+      "relevant": ["D9", "D10"],
+      "irrelevant": ["D7", "D8"]
+    },
+    {
+      "id": "Q6",
+      "query": "database connection pool setup",
+      "relevant": ["D11", "D12"],
+      "irrelevant": ["D5", "D6"]
+    },
+    {
+      "id": "Q7",
+      "query": "authentication middleware",
+      "relevant": ["D13", "D14"],
+      "irrelevant": ["D11", "D12"]
+    },
+    {
+      "id": "Q8",
+      "query": "file read and write operations",
+      "relevant": ["D15", "D16"],
+      "irrelevant": ["D13", "D14"]
+    }
+  ],
+  "documents": [
+    {
+      "id": "D1",
+      "text": "function parseJson(str) {\n  try {\n    return JSON.parse(str);\n  } catch (e) {\n    return null;\n  }\n}",
+      "type": "code"
+    },
+    {
+      "id": "D2",
+      "text": "const parseJsonSafe = (jsonString) => {\n  if (!jsonString) return {};\n  return JSON.parse(jsonString);\n};",
+      "type": "code"
+    },
+    {
+      "id": "D3",
+      "text": "async function fetchUserData(userId) {\n  const response = await fetch(`/api/users/${userId}`);\n  return response.json();\n}",
+      "type": "code"
+    },
+    {
+      "id": "D4",
+      "text": "const getData = async (endpoint) => {\n  const res = await axios.get(endpoint);\n  return res.data;\n};",
+      "type": "code"
+    },
+    {
+      "id": "D5",
+      "text": "function isValidEmail(email) {\n  const regex = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;\n  return regex.test(email);\n}",
+      "type": "code"
+    },
+    {
+      "id": "D6",
+      "text": "const validateEmailFormat = (str) => {\n  return /^\\w+([.-]?\\w+)*@\\w+([.-]?\\w+)*(\\.\\w{2,3})+$/.test(str);\n};",
+      "type": "code"
+    },
+    {
+      "id": "D7",
+      "text": "function sortNumbers(arr) {\n  return [...arr].sort((a, b) => a - b);\n}",
+      "type": "code"
+    },
+    {
+      "id": "D8",
+      "text": "const sortAscending = (numbers) => numbers.slice().sort((x, y) => x - y);",
+      "type": "code"
+    },
+    {
+      "id": "D9",
+      "text": "async function safeOperation() {\n  try {\n    const result = await riskyCall();\n    return { success: true, data: result };\n  } catch (error) {\n    console.error(error);\n    return { success: false, error: error.message };\n  }\n}",
+      "type": "code"
+    },
+    {
+      "id": "D10",
+      "text": "function handleError(fn) {\n  return async (...args) => {\n    try {\n      return await fn(...args);\n    } catch (e) {\n      throw new Error(`Operation failed: ${e.message}`);\n    }\n  };\n}",
+      "type": "code"
+    },
+    {
+      "id": "D11",
+      "text": "const pool = new Pool({\n  host: process.env.DB_HOST,\n  port: 5432,\n  max: 20,\n  idleTimeoutMillis: 30000\n});",
+      "type": "code"
+    },
+    {
+      "id": "D12",
+      "text": "async function createConnectionPool(config) {\n  const pool = mysql.createPool({\n    connectionLimit: 10,\n    host: config.host,\n    database: config.database\n  });\n  return pool;\n}",
+      "type": "code"
+    },
+    {
+      "id": "D13",
+      "text": "function authMiddleware(req, res, next) {\n  const token = req.headers.authorization;\n  if (!token) return res.status(401).json({ error: 'Unauthorized' });\n  try {\n    req.user = verifyToken(token);\n    next();\n  } catch (e) {\n    res.status(403).json({ error: 'Invalid token' });\n  }\n}",
+      "type": "code"
+    },
+    {
+      "id": "D14",
+      "text": "const authenticate = async (req, res, next) => {\n  const jwt = req.cookies.session;\n  if (!jwt) return res.redirect('/login');\n  const user = await validateSession(jwt);\n  req.user = user;\n  next();\n};",
+      "type": "code"
+    },
+    {
+      "id": "D15",
+      "text": "const fs = require('fs').promises;\n\nasync function readFile(path) {\n  return await fs.readFile(path, 'utf8');\n}\n\nasync function writeFile(path, data) {\n  await fs.writeFile(path, data);\n}",
+      "type": "code"
+    },
+    {
+      "id": "D16",
+      "text": "function readFileSync(filePath) {\n  const data = fs.readFileSync(filePath);\n  return data.toString();\n}\n\nfunction saveToFile(path, content) {\n  fs.writeFileSync(path, content);\n}",
+      "type": "code"
+    }
+  ]
+}
