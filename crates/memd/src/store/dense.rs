@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 
-use crate::embeddings::{Embedder, OnnxEmbedder};
+use crate::embeddings::{Embedder, EmbeddingModel, OnnxEmbedder};
 use crate::error::Result;
 use crate::index::{HnswConfig, HnswIndex};
 use crate::metrics::IndexStats;
@@ -31,6 +31,8 @@ pub struct DenseSearchConfig {
     pub hnsw: HnswConfig,
     /// Whether to persist index
     pub persist: bool,
+    /// Embedding model to use
+    pub model: EmbeddingModel,
 }
 
 impl Default for DenseSearchConfig {
@@ -38,6 +40,7 @@ impl Default for DenseSearchConfig {
         Self {
             hnsw: HnswConfig::default(),
             persist: true,
+            model: EmbeddingModel::default(),
         }
     }
 }
@@ -57,13 +60,17 @@ pub struct DenseSearcher {
 impl DenseSearcher {
     /// Create a new dense searcher with ONNX embedder
     pub fn new(config: DenseSearchConfig) -> Result<Self> {
-        let embedder = Arc::new(OnnxEmbedder::new()?);
+        let embedder = Arc::new(OnnxEmbedder::with_model(config.model)?);
+
+        // Update HNSW config dimension to match model
+        let mut updated_config = config.clone();
+        updated_config.hnsw.dimension = config.model.dimension();
 
         Ok(Self {
             embedder,
             indices: RwLock::new(HashMap::new()),
             base_path: None,
-            config,
+            config: updated_config,
         })
     }
 
