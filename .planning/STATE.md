@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-01-29)
 
 **Core value:** Agents can find and use relevant past context--across sessions, projects, and time--without hitting context window limits or losing continuity.
-**Current focus:** Phase 4 COMPLETE - Ready for Phase 5 (Streaming)
+**Current focus:** Phase 4.1 (Pooling Strategy Support) - URGENT insertion to unlock Qwen3 upgrade
 
 ## Current Position
 
-Phase: 4 of 7 (Sparse Lexical + Fusion) - COMPLETE
-Plan: 6 of 6 in current phase
-Status: Phase complete
-Last activity: 2026-01-30 -- Completed 04-06-PLAN.md (Hybrid Evaluation Suite)
+Phase: 4.1 (Pooling Strategy Support) - INSERTED
+Plan: 1 of TBD in current phase
+Status: In progress
+Last activity: 2026-01-31 -- Completed 04.1-01-PLAN.md (Pooling Strategy Abstraction)
 
-Progress: [=============================================------] ~100% (23 of ~23 total plans estimated)
+Progress: [==============================================-----] ~100% (24 of ~26 total plans estimated)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 23
+- Total plans completed: 24
 - Average duration: 6m
-- Total execution time: ~136 minutes
+- Total execution time: ~140 minutes
 
 **By Phase:**
 
@@ -31,14 +31,23 @@ Progress: [=============================================------] ~100% (23 of ~23
 | 02 | 7 | 38m | 5m |
 | 03 | 6 | 37m | 6m |
 | 04 | 6 | 27m | 4m |
+| 04.1 | 1 | 4m | 4m |
 
 **Recent Trend:**
-- Last 5 plans: 04-02 (5m), 04-03 (4m), 04-04 (4m), 04-05 (5m), 04-06 (5m)
-- Trend: Phase 4 complete with hybrid eval suite
+- Last 5 plans: 04-04 (4m), 04-05 (5m), 04-06 (5m), 04.1-01 (4m)
+- Trend: Phase 4.1 started with pooling strategy abstraction
 
 *Updated after each plan completion*
 
 ## Accumulated Context
+
+### Roadmap Evolution
+
+- Phase 4.1 inserted after Phase 4: Pooling Strategy Support (URGENT)
+  - Reason: Enable next-generation embedding models (Qwen3-Embedding-0.6B)
+  - Impact: +15% MTEB score improvement (56.3 → 64.33), projected 92-95% recall
+  - Blocker removed: Incompatible pooling strategies (last-token vs mean)
+  - Inserted: 2026-01-30
 
 ### Decisions
 
@@ -124,6 +133,10 @@ Recent decisions affecting current work:
 - 04-06: Quality thresholds: keyword 0.9, semantic 0.7, mixed 0.75
 - 04-06: Performance targets: p50 < 100ms, p99 < 500ms
 - 04-06: 3 iterations for performance sampling (36 queries total)
+- 04.1-01: PoolingStrategy derives Default with Mean as default (backward compatible)
+- 04.1-01: EmbeddingModel enum encapsulates dimension, pooling, URLs per model
+- 04.1-01: Legacy download functions preserved for backward compatibility
+- 04.1-01: Model enum pattern: all model-specific config in one place
 
 ### Pending Todos
 
@@ -142,6 +155,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-01-30 08:47 UTC
-Stopped at: Completed 04-06-PLAN.md (Hybrid Evaluation Suite) - PHASE 4 COMPLETE
+Last session: 2026-01-31 02:57 UTC
+Stopped at: Completed 04.1-01-PLAN.md (Pooling Strategy Abstraction)
 Resume file: None
