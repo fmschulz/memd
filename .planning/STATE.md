@@ -5,7 +5,7 @@
 See: .planning/PROJECT.md (updated 2026-01-29)
 
 **Core value:** Agents can find and use relevant past context--across sessions, projects, and time--without hitting context window limits or losing continuity.
-**Current focus:** Phase 4.1 (Pooling Strategy Support) - URGENT insertion to unlock Qwen3 upgrade
+**Current focus:** Phase 5 (Hot Tier + Cache) - Next phase after Pooling Strategy Support completion
 
 ## Current Position
 

@@ -116,9 +116,9 @@ Plans:
 **Plans**: 3 plans in 2 waves
 
 Plans:
-- [ ] 04.1-01-PLAN.md — PoolingStrategy enum and EmbeddingModel configuration
-- [ ] 04.1-02-PLAN.md — Last-token pooling implementation and Qwen3 download
-- [ ] 04.1-03-PLAN.md — CLI integration, dimension validation, quality verification
+- [x] 04.1-01-PLAN.md — PoolingStrategy enum and EmbeddingModel configuration
+- [x] 04.1-02-PLAN.md — Last-token pooling implementation and Qwen3 download
+- [x] 04.1-03-PLAN.md — CLI integration, dimension validation, quality verification
 
 **Details:**
 This phase implements the architectural enhancement documented in `docs/QWEN3_UPGRADE.md`. Current blocker: Available ONNX exports of Qwen3-Embedding-0.6B use last-token pooling, incompatible with our mean-pooling pipeline. Solution adds pooling strategy abstraction enabling both approaches.
@@ -186,11 +186,11 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 4.1 -> 5 -> 6 -> 7
 | 2. Persistent Cold Store | 7/7 | Complete | 2026-01-30 |
 | 3. Dense Warm Index | 6/6 | Complete | 2026-01-30 |
 | 4. Sparse Lexical + Fusion | 6/6 | Complete | 2026-01-30 |
-| 4.1. Pooling Strategy Support | 0/3 | Planned (INSERTED) | - |
+| 4.1. Pooling Strategy Support | 3/3 | Complete | 2026-01-31 |
 | 5. Hot Tier + Cache | 0/TBD | Not started | - |
 | 6. Structural Indexes | 0/TBD | Not started | - |
 | 7. Compaction + Cleanup | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-01-29*
-*Last updated: 2026-01-30*
+*Last updated: 2026-01-31*
