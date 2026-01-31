@@ -4,23 +4,40 @@
 
 use crate::error::Result;
 
+/// Pooling strategy for sentence embeddings
+///
+/// Different embedding models require different pooling approaches:
+/// - Mean: Average all token embeddings (BERT-style, all-MiniLM-L6-v2)
+/// - LastToken: Use final token embedding (decoder-style, Qwen3, E5-Mistral)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PoolingStrategy {
+    /// Mean pooling: average all token embeddings weighted by attention mask
+    #[default]
+    Mean,
+    /// Last-token pooling: extract embedding at final attended position
+    LastToken,
+}
+
 /// Configuration for embedding generation
 #[derive(Debug, Clone)]
 pub struct EmbeddingConfig {
-    /// Embedding dimension (1024 for Qwen3-Embedding-0.6B, was 384 for all-MiniLM-L6-v2)
+    /// Embedding dimension (384 for all-MiniLM-L6-v2, 1024 for Qwen3)
     pub dimension: usize,
     /// Normalize embeddings to unit length
     pub normalize: bool,
     /// Batch size for processing multiple texts
     pub batch_size: usize,
+    /// Pooling strategy (determined by model type)
+    pub pooling: PoolingStrategy,
 }
 
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
-            dimension: 384,  // all-MiniLM-L6-v2 (TODO: 1024 for Qwen3 when upgraded)
+            dimension: 384, // all-MiniLM-L6-v2
             normalize: true,
             batch_size: 32,
+            pooling: PoolingStrategy::Mean,
         }
     }
 }
@@ -49,4 +66,24 @@ pub trait Embedder: Send + Sync {
 
     /// Get the configuration
     fn config(&self) -> &EmbeddingConfig;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pooling_strategy_default() {
+        let strategy = PoolingStrategy::default();
+        assert_eq!(strategy, PoolingStrategy::Mean);
+    }
+
+    #[test]
+    fn test_embedding_config_default() {
+        let config = EmbeddingConfig::default();
+        assert_eq!(config.dimension, 384);
+        assert!(config.normalize);
+        assert_eq!(config.batch_size, 32);
+        assert_eq!(config.pooling, PoolingStrategy::Mean);
+    }
 }
