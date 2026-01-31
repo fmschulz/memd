@@ -18,6 +18,7 @@ use super::metadata::{ChunkMetadata, MetadataStore, SqliteMetadataStore};
 use super::segment::{SegmentReader, SegmentWriter};
 use super::wal::{WalReader, WalRecordType, WalWriter};
 use super::{Store, StoreStats};
+use crate::embeddings::EmbeddingModel;
 use crate::error::{MemdError, Result};
 use crate::index::Bm25Index;
 use crate::metrics::{IndexStats, MetricsCollector, QueryMetrics};
@@ -38,6 +39,8 @@ pub struct PersistentStoreConfig {
     pub enable_hybrid_search: bool,
     /// Hybrid search configuration
     pub hybrid_config: Option<HybridConfig>,
+    /// Embedding model to use for dense search
+    pub embedding_model: EmbeddingModel,
 }
 
 impl Default for PersistentStoreConfig {
@@ -49,6 +52,7 @@ impl Default for PersistentStoreConfig {
             enable_dense_search: true,
             enable_hybrid_search: true,
             hybrid_config: None,
+            embedding_model: EmbeddingModel::default(),
         }
     }
 }
@@ -102,7 +106,10 @@ impl PersistentStore {
 
         // Initialize dense searcher if enabled
         let dense_searcher = if config.enable_dense_search {
-            let dense_config = DenseSearchConfig::default();
+            let dense_config = DenseSearchConfig {
+                model: config.embedding_model,
+                ..Default::default()
+            };
             match DenseSearcher::new(dense_config) {
                 Ok(searcher) => {
                     let searcher = searcher.with_base_path(config.data_dir.clone());
