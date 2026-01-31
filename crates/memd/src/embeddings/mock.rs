@@ -6,7 +6,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use super::traits::{Embedder, EmbeddingConfig, EmbeddingResult};
+use super::traits::{Embedder, EmbeddingConfig, EmbeddingResult, PoolingStrategy};
 use crate::error::Result;
 
 /// Mock embedder for testing
@@ -158,6 +158,7 @@ mod tests {
             dimension: 768,
             normalize: true,
             batch_size: 16,
+            pooling: PoolingStrategy::Mean,
         };
         let embedder = MockEmbedder::with_config(config);
 
@@ -172,6 +173,7 @@ mod tests {
             dimension: 384,
             normalize: false,
             batch_size: 32,
+            pooling: PoolingStrategy::Mean,
         };
         let embedder = MockEmbedder::with_config(config);
 
