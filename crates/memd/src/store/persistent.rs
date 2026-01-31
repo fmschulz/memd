@@ -930,7 +930,7 @@ mod tests {
             wal_checkpoint_interval: 10,
             enable_dense_search: false, // Disable for unit tests
             enable_hybrid_search: false,
-            hybrid_config: None,
+            ..Default::default()
         };
         let store = PersistentStore::open(config).unwrap();
         (store, dir)
@@ -1008,7 +1008,7 @@ mod tests {
                 wal_checkpoint_interval: 10,
                 enable_dense_search: false,
                 enable_hybrid_search: false,
-                hybrid_config: None,
+                ..Default::default()
             };
             let store = PersistentStore::open(config).unwrap();
             let chunk = make_chunk(&tenant, "persistent data");
@@ -1026,7 +1026,7 @@ mod tests {
                 wal_checkpoint_interval: 10,
                 enable_dense_search: false,
                 enable_hybrid_search: false,
-                hybrid_config: None,
+                ..Default::default()
             };
             let store = PersistentStore::open(config).unwrap();
             let retrieved = store.get(&tenant, &chunk_id).await.unwrap();
@@ -1051,7 +1051,7 @@ mod tests {
                 wal_checkpoint_interval: 10,
                 enable_dense_search: false,
                 enable_hybrid_search: false,
-                hybrid_config: None,
+                ..Default::default()
             };
             let store = PersistentStore::open(config).unwrap();
             let chunk = make_chunk(&tenant, "crash test data");
@@ -1069,7 +1069,7 @@ mod tests {
                 wal_checkpoint_interval: 10,
                 enable_dense_search: false,
                 enable_hybrid_search: false,
-                hybrid_config: None,
+                ..Default::default()
             };
             let store = PersistentStore::open(config).unwrap();
             let retrieved = store.get(&tenant, &chunk_id).await.unwrap();

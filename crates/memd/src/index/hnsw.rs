@@ -144,7 +144,9 @@ impl HnswIndex {
     pub fn insert(&self, chunk_id: &ChunkId, embedding: &[f32]) -> Result<()> {
         if embedding.len() != self.config.dimension {
             return Err(MemdError::ValidationError(format!(
-                "embedding dimension mismatch: expected {}, got {}",
+                "Embedding dimension mismatch: expected {}, got {}. \
+                 This usually means the embedding model changed. \
+                 To fix: delete the data directory and restart, or use --rebuild-index flag.",
                 self.config.dimension,
                 embedding.len()
             )));
@@ -166,7 +168,9 @@ impl HnswIndex {
         for (chunk_id, embedding) in items {
             if embedding.len() != self.config.dimension {
                 return Err(MemdError::ValidationError(format!(
-                    "embedding dimension mismatch for {}: expected {}, got {}",
+                    "Embedding dimension mismatch for {}: expected {}, got {}. \
+                     This usually means the embedding model changed. \
+                     To fix: delete the data directory and restart, or use --rebuild-index flag.",
                     chunk_id,
                     self.config.dimension,
                     embedding.len()
@@ -184,7 +188,9 @@ impl HnswIndex {
     pub fn search(&self, query_embedding: &[f32], k: usize) -> Result<Vec<SearchResult>> {
         if query_embedding.len() != self.config.dimension {
             return Err(MemdError::ValidationError(format!(
-                "query embedding dimension mismatch: expected {}, got {}",
+                "Query embedding dimension mismatch: expected {}, got {}. \
+                 This usually means the embedding model changed. \
+                 To fix: delete the data directory and restart, or use --rebuild-index flag.",
                 self.config.dimension,
                 query_embedding.len()
             )));
@@ -395,6 +401,15 @@ mod tests {
 
         let result = index.insert(&chunk_id, &wrong_dim);
         assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("dimension mismatch"),
+            "error should mention dimension mismatch"
+        );
+        assert!(
+            err_msg.contains("rebuild-index") || err_msg.contains("delete the data"),
+            "error should include rebuild instructions"
+        );
     }
 
     #[test]
