@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-01-29)
 ## Current Position
 
 Phase: 4.1 (Pooling Strategy Support) - INSERTED
-Plan: 1 of TBD in current phase
-Status: In progress
-Last activity: 2026-01-31 -- Completed 04.1-01-PLAN.md (Pooling Strategy Abstraction)
+Plan: 2 of 2 in current phase
+Status: Phase complete
+Last activity: 2026-01-31 -- Completed 04.1-02-PLAN.md (Last-Token Pooling Implementation)
 
-Progress: [==============================================-----] ~100% (24 of ~26 total plans estimated)
+Progress: [==============================================-----] ~100% (25 of ~26 total plans estimated)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 24
+- Total plans completed: 25
 - Average duration: 6m
-- Total execution time: ~140 minutes
+- Total execution time: ~147 minutes
 
 **By Phase:**
 
@@ -31,11 +31,11 @@ Progress: [==============================================-----] ~100% (24 of ~26
 | 02 | 7 | 38m | 5m |
 | 03 | 6 | 37m | 6m |
 | 04 | 6 | 27m | 4m |
-| 04.1 | 1 | 4m | 4m |
+| 04.1 | 2 | 11m | 6m |
 
 **Recent Trend:**
-- Last 5 plans: 04-04 (4m), 04-05 (5m), 04-06 (5m), 04.1-01 (4m)
-- Trend: Phase 4.1 started with pooling strategy abstraction
+- Last 5 plans: 04-05 (5m), 04-06 (5m), 04.1-01 (4m), 04.1-02 (7m)
+- Trend: Phase 4.1 complete - pooling strategy support ready for Qwen3
 
 *Updated after each plan completion*
 
@@ -137,6 +137,10 @@ Recent decisions affecting current work:
 - 04.1-01: EmbeddingModel enum encapsulates dimension, pooling, URLs per model
 - 04.1-01: Legacy download functions preserved for backward compatibility
 - 04.1-01: Model enum pattern: all model-specific config in one place
+- 04.1-02: ArrayViewD for pooling methods (matches ONNX output type)
+- 04.1-02: Match-based retry for token_type_ids fallback (avoids borrow issues)
+- 04.1-02: Instruction prefix only for queries (documents don't need it)
+- 04.1-02: Left-padding detection via all() before per-batch processing
 
 ### Pending Todos
 
@@ -155,6 +159,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-01-31 02:57 UTC
-Stopped at: Completed 04.1-01-PLAN.md (Pooling Strategy Abstraction)
+Last session: 2026-01-31 02:58 UTC
+Stopped at: Completed 04.1-02-PLAN.md (Last-Token Pooling Implementation) - PHASE 4.1 COMPLETE
 Resume file: None
