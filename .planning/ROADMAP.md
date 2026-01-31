@@ -15,7 +15,8 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Skeleton + MCP Server** - Basic MCP server with stub tools and in-memory store
 - [x] **Phase 2: Persistent Cold Store** - Append-only segments, WAL, SQLite metadata, soft deletes
 - [x] **Phase 3: Dense Warm Index** - Embeddings interface, HNSW warm tier, basic search
-- [ ] **Phase 4: Sparse Lexical + Fusion** - BM25 indexing, RRF fusion, feature-based reranker
+- [x] **Phase 4: Sparse Lexical + Fusion** - BM25 indexing, RRF fusion, feature-based reranker
+- [ ] **Phase 4.1: Pooling Strategy Support (INSERTED)** - Enable mean/last-token pooling for Qwen3 upgrade
 - [ ] **Phase 5: Hot Tier + Cache** - Hot cache, semantic cache, promotion/demotion logic
 - [ ] **Phase 6: Structural Indexes** - AST parsing, symbol tables, trace indexing, query router
 - [ ] **Phase 7: Compaction + Cleanup** - Tombstone filtering, segment merges, HNSW rebuild
@@ -94,16 +95,40 @@ Plans:
 **Plans**: 6 plans in 5 waves
 
 Plans:
-- [ ] 04-01-PLAN.md — Add Phase 4 dependencies, text processing module
-- [ ] 04-02-PLAN.md — BM25 sparse index with Tantivy
-- [ ] 04-03-PLAN.md — RRF fusion and feature-based reranker
-- [ ] 04-04-PLAN.md — Context packer with MMR diversity
-- [ ] 04-05-PLAN.md — Hybrid search integration into PersistentStore
-- [ ] 04-06-PLAN.md — Hybrid retrieval eval suite with performance baseline
+- [x] 04-01-PLAN.md — Add Phase 4 dependencies, text processing module
+- [x] 04-02-PLAN.md — BM25 sparse index with Tantivy
+- [x] 04-03-PLAN.md — RRF fusion and feature-based reranker
+- [x] 04-04-PLAN.md — Context packer with MMR diversity
+- [x] 04-05-PLAN.md — Hybrid search integration into PersistentStore
+- [x] 04-06-PLAN.md — Hybrid retrieval eval suite with performance baseline
+
+### Phase 4.1: Pooling Strategy Support (INSERTED)
+**Goal**: Enable support for multiple pooling strategies (mean, last-token) to unlock next-generation embedding models like Qwen3-Embedding-0.6B
+**Depends on**: Phase 4
+**Requirements**: Enable model flexibility for 64.33 MTEB score models (+15% improvement over current all-MiniLM-L6-v2)
+**Success Criteria** (what must be TRUE):
+  1. PoolingStrategy enum supports Mean and LastToken variants
+  2. OnnxEmbedder implements last_token_pooling() method
+  3. EmbeddingConfig and HnswConfig support configurable dimensions (384 or 1024)
+  4. Qwen3-Embedding-0.6B model downloads and generates embeddings correctly
+  5. Eval suite shows 92-95% recall improvement (from 87.5% baseline)
+  6. All existing tests pass with mean pooling (backward compatibility)
+**Plans**: 3 plans in 2 waves
+
+Plans:
+- [ ] 04.1-01-PLAN.md — PoolingStrategy enum and EmbeddingModel configuration
+- [ ] 04.1-02-PLAN.md — Last-token pooling implementation and Qwen3 download
+- [ ] 04.1-03-PLAN.md — CLI integration, dimension validation, quality verification
+
+**Details:**
+This phase implements the architectural enhancement documented in `docs/QWEN3_UPGRADE.md`. Current blocker: Available ONNX exports of Qwen3-Embedding-0.6B use last-token pooling, incompatible with our mean-pooling pipeline. Solution adds pooling strategy abstraction enabling both approaches.
+
+Expected effort: 2-4 hours
+Expected improvement: 87.5% → 92-95% recall, 56.3 → 64.33 MTEB score
 
 ### Phase 5: Hot Tier + Cache
 **Goal**: Frequently accessed memories are served with low latency from hot tier and cache
-**Depends on**: Phase 4
+**Depends on**: Phase 4.1
 **Requirements**: HOT-01, HOT-02, HOT-03, HOT-04, HOT-05, HOT-06, HOT-07, HOT-08, HOT-09, OBS-04, OBS-05
 **Success Criteria** (what must be TRUE):
   1. Hot tier queries return results significantly faster than warm tier queries
@@ -153,14 +178,15 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
+Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 4.1 -> 5 -> 6 -> 7
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Skeleton + MCP Server | 4/4 | Complete | 2026-01-29 |
 | 2. Persistent Cold Store | 7/7 | Complete | 2026-01-30 |
 | 3. Dense Warm Index | 6/6 | Complete | 2026-01-30 |
-| 4. Sparse Lexical + Fusion | 0/6 | Planned | - |
+| 4. Sparse Lexical + Fusion | 6/6 | Complete | 2026-01-30 |
+| 4.1. Pooling Strategy Support | 0/3 | Planned (INSERTED) | - |
 | 5. Hot Tier + Cache | 0/TBD | Not started | - |
 | 6. Structural Indexes | 0/TBD | Not started | - |
 | 7. Compaction + Cleanup | 0/TBD | Not started | - |
