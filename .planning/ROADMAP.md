@@ -16,7 +16,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: Persistent Cold Store** - Append-only segments, WAL, SQLite metadata, soft deletes
 - [x] **Phase 3: Dense Warm Index** - Embeddings interface, HNSW warm tier, basic search
 - [x] **Phase 4: Sparse Lexical + Fusion** - BM25 indexing, RRF fusion, feature-based reranker
-- [ ] **Phase 4.1: Pooling Strategy Support (INSERTED)** - Enable mean/last-token pooling for Qwen3 upgrade
+- [x] **Phase 4.1: Pooling Strategy Support (INSERTED)** - Enable mean/last-token pooling for Qwen3 upgrade
 - [ ] **Phase 5: Hot Tier + Cache** - Hot cache, semantic cache, promotion/demotion logic
 - [ ] **Phase 6: Structural Indexes** - AST parsing, symbol tables, trace indexing, query router
 - [ ] **Phase 7: Compaction + Cleanup** - Tombstone filtering, segment merges, HNSW rebuild
@@ -124,7 +124,7 @@ Plans:
 This phase implements the architectural enhancement documented in `docs/QWEN3_UPGRADE.md`. Current blocker: Available ONNX exports of Qwen3-Embedding-0.6B use last-token pooling, incompatible with our mean-pooling pipeline. Solution adds pooling strategy abstraction enabling both approaches.
 
 Expected effort: 2-4 hours
-Expected improvement: 87.5% → 92-95% recall, 56.3 → 64.33 MTEB score
+Expected improvement: 87.5% -> 92-95% recall, 56.3 -> 64.33 MTEB score
 
 ### Phase 5: Hot Tier + Cache
 **Goal**: Frequently accessed memories are served with low latency from hot tier and cache
@@ -136,11 +136,14 @@ Expected improvement: 87.5% → 92-95% recall, 56.3 → 64.33 MTEB score
   3. Cache entries invalidate when underlying memories change (version-based)
   4. Chunks are promoted to hot on repeated retrieval or active project match
   5. Debug flags show cache hit status and promotion/demotion reasoning
-**Plans**: TBD
+**Plans**: 5 plans in 4 waves
 
 Plans:
-- [ ] 05-01: TBD
-- [ ] 05-02: TBD
+- [ ] 05-01-PLAN.md — Add moka dependency, AccessTracker with multi-signal scoring, HotTier with separate HNSW
+- [ ] 05-02-PLAN.md — SemanticCache with similarity lookup, TTL, version invalidation
+- [ ] 05-03-PLAN.md — TieredSearcher coordinating cache/hot/warm fallback, promotion/demotion logic
+- [ ] 05-04-PLAN.md — Integrate TieredSearcher into HybridSearcher, add tiered metrics
+- [ ] 05-05-PLAN.md — Extend MCP handlers with tiered stats, tiered eval suite
 
 ### Phase 6: Structural Indexes
 **Goal**: Code-aware queries find symbols, callers, and traces across the codebase
@@ -187,7 +190,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 4.1 -> 5 -> 6 -> 7
 | 3. Dense Warm Index | 6/6 | Complete | 2026-01-30 |
 | 4. Sparse Lexical + Fusion | 6/6 | Complete | 2026-01-30 |
 | 4.1. Pooling Strategy Support | 3/3 | Complete | 2026-01-31 |
-| 5. Hot Tier + Cache | 0/TBD | Not started | - |
+| 5. Hot Tier + Cache | 0/5 | Planned | - |
 | 6. Structural Indexes | 0/TBD | Not started | - |
 | 7. Compaction + Cleanup | 0/TBD | Not started | - |
 
