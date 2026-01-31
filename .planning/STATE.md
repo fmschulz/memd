@@ -9,19 +9,19 @@ See: .planning/PROJECT.md (updated 2026-01-29)
 
 ## Current Position
 
-Phase: 4.1 (Pooling Strategy Support) - INSERTED
-Plan: 2 of 2 in current phase
+Phase: 4.1 (Pooling Strategy Support) - COMPLETE
+Plan: 3 of 3 in current phase
 Status: Phase complete
-Last activity: 2026-01-31 -- Completed 04.1-02-PLAN.md (Last-Token Pooling Implementation)
+Last activity: 2026-01-31 -- Completed 04.1-03-PLAN.md (CLI Integration and Quality Verification)
 
-Progress: [==============================================-----] ~100% (25 of ~26 total plans estimated)
+Progress: [================================================--] ~100% (26 of ~27 total plans estimated)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 25
+- Total plans completed: 26
 - Average duration: 6m
-- Total execution time: ~147 minutes
+- Total execution time: ~160 minutes
 
 **By Phase:**
 
@@ -31,11 +31,11 @@ Progress: [==============================================-----] ~100% (25 of ~26
 | 02 | 7 | 38m | 5m |
 | 03 | 6 | 37m | 6m |
 | 04 | 6 | 27m | 4m |
-| 04.1 | 2 | 11m | 6m |
+| 04.1 | 3 | 24m | 8m |
 
 **Recent Trend:**
-- Last 5 plans: 04-05 (5m), 04-06 (5m), 04.1-01 (4m), 04.1-02 (7m)
-- Trend: Phase 4.1 complete - pooling strategy support ready for Qwen3
+- Last 5 plans: 04-06 (5m), 04.1-01 (4m), 04.1-02 (7m), 04.1-03 (13m)
+- Trend: Phase 4.1 COMPLETE - Qwen3 model now selectable via CLI
 
 *Updated after each plan completion*
 
@@ -141,6 +141,10 @@ Recent decisions affecting current work:
 - 04.1-02: Match-based retry for token_type_ids fallback (avoids borrow issues)
 - 04.1-02: Instruction prefix only for queries (documents don't need it)
 - 04.1-02: Left-padding detection via all() before per-batch processing
+- 04.1-03: ModelChoice CLI enum converts to EmbeddingModel via From trait
+- 04.1-03: Default embedding model remains all-MiniLM-L6-v2 for backward compatibility
+- 04.1-03: DenseSearcher updates HNSW dimension based on model selection
+- 04.1-03: Dimension mismatch errors suggest delete data dir or --rebuild-index
 
 ### Pending Todos
 
@@ -159,6 +163,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-01-31 02:58 UTC
-Stopped at: Completed 04.1-02-PLAN.md (Last-Token Pooling Implementation) - PHASE 4.1 COMPLETE
+Last session: 2026-01-31 03:15 UTC
+Stopped at: Completed 04.1-03-PLAN.md (CLI Integration and Quality Verification) - PHASE 4.1 COMPLETE
 Resume file: None
