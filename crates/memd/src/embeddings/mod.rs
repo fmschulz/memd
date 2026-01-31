@@ -7,6 +7,7 @@ pub mod mock;
 pub mod onnx;
 pub mod traits;
 
+pub use download::EmbeddingModel;
 pub use mock::MockEmbedder;
 pub use onnx::OnnxEmbedder;
-pub use traits::{Embedder, EmbeddingConfig, EmbeddingResult};
+pub use traits::{Embedder, EmbeddingConfig, EmbeddingResult, PoolingStrategy};
