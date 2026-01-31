@@ -5,6 +5,7 @@ use clap::{Parser, ValueEnum};
 use tracing::info;
 
 use memd::cli::{run_cli, CliCommand};
+use memd::embeddings::EmbeddingModel;
 use memd::{
     init_logging, load_config, MemoryStore, PersistentStore, PersistentStoreConfig, TenantManager,
 };
@@ -16,6 +17,24 @@ enum Mode {
     Mcp,
     /// CLI mode for direct commands
     Cli,
+}
+
+/// Embedding model choice
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ModelChoice {
+    /// all-MiniLM-L6-v2: 384-dim, fast, good quality (default)
+    AllMinilm,
+    /// Qwen3-Embedding-0.6B: 1024-dim, slower, best quality
+    Qwen3,
+}
+
+impl From<ModelChoice> for EmbeddingModel {
+    fn from(choice: ModelChoice) -> Self {
+        match choice {
+            ModelChoice::AllMinilm => EmbeddingModel::AllMiniLmL6V2,
+            ModelChoice::Qwen3 => EmbeddingModel::Qwen3Embedding0_6B,
+        }
+    }
 }
 
 /// memd - Local memory daemon for AI agents
@@ -43,6 +62,10 @@ struct Args {
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
+
+    /// Embedding model to use
+    #[arg(long, value_enum, default_value = "all-minilm")]
+    embedding_model: ModelChoice,
 
     /// CLI subcommand (only used in cli mode)
     #[command(subcommand)]
@@ -98,9 +121,10 @@ async fn main() {
                     std::process::exit(1);
                 }
             } else {
-                info!(data_dir = %data_dir.display(), "using persistent store");
+                info!(data_dir = %data_dir.display(), embedding_model = ?args.embedding_model, "using persistent store");
                 let store_config = PersistentStoreConfig {
                     data_dir: data_dir.clone(),
+                    embedding_model: args.embedding_model.into(),
                     ..Default::default()
                 };
                 match PersistentStore::open(store_config) {
@@ -133,9 +157,10 @@ async fn main() {
                         std::process::exit(1);
                     }
                 } else {
-                    info!(data_dir = %data_dir.display(), "using persistent store");
+                    info!(data_dir = %data_dir.display(), embedding_model = ?args.embedding_model, "using persistent store");
                     let store_config = PersistentStoreConfig {
                         data_dir: data_dir.clone(),
+                        embedding_model: args.embedding_model.into(),
                         ..Default::default()
                     };
                     match PersistentStore::open(store_config) {
