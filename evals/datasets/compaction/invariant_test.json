@@ -1,0 +1,84 @@
+{
+  "name": "compaction_invariant",
+  "description": "Dataset for verifying search results unchanged after compaction (same IDs as set)",
+  "chunks": [
+    {
+      "id": "inv-001",
+      "text": "The quick brown fox jumps over the lazy dog",
+      "type": "doc",
+      "tags": ["keep"]
+    },
+    {
+      "id": "inv-002",
+      "text": "A fast red wolf leaps across the sleeping hound",
+      "type": "doc",
+      "tags": ["keep"]
+    },
+    {
+      "id": "inv-003",
+      "text": "Python function to parse JSON data from API response",
+      "type": "code",
+      "tags": ["delete"]
+    },
+    {
+      "id": "inv-004",
+      "text": "Rust implementation of HNSW index for vector search",
+      "type": "code",
+      "tags": ["keep"]
+    },
+    {
+      "id": "inv-005",
+      "text": "JavaScript async await pattern for network requests",
+      "type": "code",
+      "tags": ["delete"]
+    },
+    {
+      "id": "inv-006",
+      "text": "The lazy dog sleeps while the fox runs by",
+      "type": "doc",
+      "tags": ["keep"]
+    },
+    {
+      "id": "inv-007",
+      "text": "Error handling best practices in production systems",
+      "type": "doc",
+      "tags": ["delete"]
+    },
+    {
+      "id": "inv-008",
+      "text": "Memory management and garbage collection strategies",
+      "type": "doc",
+      "tags": ["keep"]
+    },
+    {
+      "id": "inv-009",
+      "text": "Database indexing with B-trees and LSM trees",
+      "type": "doc",
+      "tags": ["delete"]
+    },
+    {
+      "id": "inv-010",
+      "text": "Vector similarity search using cosine distance",
+      "type": "doc",
+      "tags": ["keep"]
+    }
+  ],
+  "queries": [
+    {
+      "query": "fox dog lazy",
+      "expected_keep": ["inv-001", "inv-006"],
+      "expected_not": ["inv-003", "inv-005", "inv-007", "inv-009"],
+      "note": "Compare result IDs as SET, not ordered list"
+    },
+    {
+      "query": "vector search index",
+      "expected_keep": ["inv-004", "inv-010"],
+      "expected_not": ["inv-003", "inv-005", "inv-007", "inv-009"],
+      "note": "Compare result IDs as SET, not ordered list"
+    }
+  ],
+  "delete_tags": ["delete"],
+  "keep_count": 6,
+  "delete_count": 4,
+  "invariant_note": "F4 test compares chunk IDs as SETS (not ordered). HNSW rebuild may change score ordering."
+}
