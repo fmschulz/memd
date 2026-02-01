@@ -1075,31 +1075,40 @@ impl StructuralStore {
             SELECT trace_id, tenant_id, project_id, session_id, tool_name, timestamp_ms,
                    input_json, output_json, error_json, context_tags, duration_ms
             FROM tool_traces
-            WHERE tenant_id = ?1
+            WHERE tenant_id = ?
             "#,
         );
 
+        let mut param_idx = 2;
         if tool_name.is_some() {
-            sql.push_str(" AND tool_name = ?2");
+            sql.push_str(&format!(" AND tool_name = ?{}", param_idx));
+            param_idx += 1;
         }
         if time_range.from_ms.is_some() {
-            sql.push_str(" AND timestamp_ms >= ?3");
+            sql.push_str(&format!(" AND timestamp_ms >= ?{}", param_idx));
+            param_idx += 1;
         }
         if time_range.to_ms.is_some() {
-            sql.push_str(" AND timestamp_ms <= ?4");
+            sql.push_str(&format!(" AND timestamp_ms <= ?{}", param_idx));
         }
         sql.push_str(" ORDER BY timestamp_ms DESC");
 
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(
-            params![
-                tenant_id.as_str(),
-                tool_name.unwrap_or(""),
-                time_range.from_ms.unwrap_or(0),
-                time_range.to_ms.unwrap_or(i64::MAX),
-            ],
-            |row| self.row_to_tool_trace(row),
-        )?;
+
+        // Build parameter list dynamically
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(tenant_id.as_str().to_string())];
+        if let Some(name) = tool_name {
+            params_vec.push(Box::new(name.to_string()));
+        }
+        if let Some(from) = time_range.from_ms {
+            params_vec.push(Box::new(from));
+        }
+        if let Some(to) = time_range.to_ms {
+            params_vec.push(Box::new(to));
+        }
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(params_refs.as_slice(), |row| self.row_to_tool_trace(row))?;
 
         rows.collect()
     }
@@ -1249,31 +1258,40 @@ impl StructuralStore {
             SELECT trace_id, tenant_id, project_id, session_id, timestamp_ms,
                    error_signature, error_message, full_trace
             FROM stack_traces
-            WHERE tenant_id = ?1
+            WHERE tenant_id = ?
             "#,
         );
 
+        let mut param_idx = 2;
         if error_signature.is_some() {
-            sql.push_str(" AND error_signature = ?2");
+            sql.push_str(&format!(" AND error_signature = ?{}", param_idx));
+            param_idx += 1;
         }
         if time_range.from_ms.is_some() {
-            sql.push_str(" AND timestamp_ms >= ?3");
+            sql.push_str(&format!(" AND timestamp_ms >= ?{}", param_idx));
+            param_idx += 1;
         }
         if time_range.to_ms.is_some() {
-            sql.push_str(" AND timestamp_ms <= ?4");
+            sql.push_str(&format!(" AND timestamp_ms <= ?{}", param_idx));
         }
         sql.push_str(" ORDER BY timestamp_ms DESC");
 
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(
-            params![
-                tenant_id.as_str(),
-                error_signature.unwrap_or(""),
-                time_range.from_ms.unwrap_or(0),
-                time_range.to_ms.unwrap_or(i64::MAX),
-            ],
-            |row| self.row_to_stack_trace(row),
-        )?;
+
+        // Build parameter list dynamically
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(tenant_id.as_str().to_string())];
+        if let Some(sig) = error_signature {
+            params_vec.push(Box::new(sig.to_string()));
+        }
+        if let Some(from) = time_range.from_ms {
+            params_vec.push(Box::new(from));
+        }
+        if let Some(to) = time_range.to_ms {
+            params_vec.push(Box::new(to));
+        }
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(params_refs.as_slice(), |row| self.row_to_stack_trace(row))?;
 
         rows.collect()
     }
@@ -1863,5 +1881,302 @@ mod tests {
         assert_eq!(imports.len(), 1);
         assert!(imports[0].is_relative);
         assert_eq!(imports[0].alias.as_deref(), Some("h"));
+    }
+
+    // --- Tool trace tests ---
+
+    #[test]
+    fn test_insert_tool_trace() {
+        let store = StructuralStore::in_memory().unwrap();
+        let tenant = test_tenant();
+
+        let mut trace = ToolTraceRecord::new(tenant.clone(), "read_file", 1000);
+        trace.input_json = Some(r#"{"path": "/test.rs"}"#.to_string());
+        trace.output_json = Some(r#"{"content": "fn main() {}"}"#.to_string());
+        trace.session_id = Some("session_1".to_string());
+        trace.context_tags = vec!["rust".to_string(), "code".to_string()];
+        trace.duration_ms = Some(50);
+
+        let trace_id = store.insert_tool_trace(&trace).unwrap();
+        assert!(trace_id > 0);
+
+        // Retrieve and verify
+        let traces = store
+            .find_tool_traces(&tenant, Some("read_file"), None)
+            .unwrap();
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].tool_name, "read_file");
+        assert_eq!(traces[0].context_tags, vec!["rust", "code"]);
+    }
+
+    #[test]
+    fn test_find_tool_traces_by_name() {
+        let store = StructuralStore::in_memory().unwrap();
+        let tenant = test_tenant();
+
+        // Insert traces for different tools
+        store
+            .insert_tool_trace(&ToolTraceRecord::new(tenant.clone(), "read_file", 1000))
+            .unwrap();
+        store
+            .insert_tool_trace(&ToolTraceRecord::new(tenant.clone(), "read_file", 2000))
+            .unwrap();
+        store
+            .insert_tool_trace(&ToolTraceRecord::new(tenant.clone(), "write_file", 3000))
+            .unwrap();
+
+        let read_traces = store
+            .find_tool_traces(&tenant, Some("read_file"), None)
+            .unwrap();
+        assert_eq!(read_traces.len(), 2);
+
+        let write_traces = store
+            .find_tool_traces(&tenant, Some("write_file"), None)
+            .unwrap();
+        assert_eq!(write_traces.len(), 1);
+    }
+
+    #[test]
+    fn test_find_tool_traces_by_time_range() {
+        let store = StructuralStore::in_memory().unwrap();
+        let tenant = test_tenant();
+
+        store
+            .insert_tool_trace(&ToolTraceRecord::new(tenant.clone(), "tool", 1000))
+            .unwrap();
+        store
+            .insert_tool_trace(&ToolTraceRecord::new(tenant.clone(), "tool", 2000))
+            .unwrap();
+        store
+            .insert_tool_trace(&ToolTraceRecord::new(tenant.clone(), "tool", 3000))
+            .unwrap();
+
+        // Range from 1500 to 2500 should only include the 2000 trace
+        let traces = store
+            .find_tool_traces(&tenant, None, Some(TimeRange::between(1500, 2500)))
+            .unwrap();
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].timestamp_ms, 2000);
+
+        // From 1500 onwards should include 2000 and 3000
+        let traces = store
+            .find_tool_traces(&tenant, None, Some(TimeRange::from(1500)))
+            .unwrap();
+        assert_eq!(traces.len(), 2);
+    }
+
+    #[test]
+    fn test_find_tool_traces_by_session() {
+        let store = StructuralStore::in_memory().unwrap();
+        let tenant = test_tenant();
+
+        let mut trace1 = ToolTraceRecord::new(tenant.clone(), "tool", 1000);
+        trace1.session_id = Some("session_a".to_string());
+
+        let mut trace2 = ToolTraceRecord::new(tenant.clone(), "tool", 2000);
+        trace2.session_id = Some("session_b".to_string());
+
+        let mut trace3 = ToolTraceRecord::new(tenant.clone(), "tool", 3000);
+        trace3.session_id = Some("session_a".to_string());
+
+        store.insert_tool_trace(&trace1).unwrap();
+        store.insert_tool_trace(&trace2).unwrap();
+        store.insert_tool_trace(&trace3).unwrap();
+
+        let session_a_traces = store.find_tool_traces_by_session("session_a").unwrap();
+        assert_eq!(session_a_traces.len(), 2);
+
+        let session_b_traces = store.find_tool_traces_by_session("session_b").unwrap();
+        assert_eq!(session_b_traces.len(), 1);
+    }
+
+    #[test]
+    fn test_find_tool_traces_with_error() {
+        let store = StructuralStore::in_memory().unwrap();
+        let tenant = test_tenant();
+
+        let mut success = ToolTraceRecord::new(tenant.clone(), "tool", 1000);
+        success.output_json = Some("result".to_string());
+
+        let mut error = ToolTraceRecord::new(tenant.clone(), "tool", 2000);
+        error.error_json = Some(r#"{"type": "NotFound"}"#.to_string());
+
+        store.insert_tool_trace(&success).unwrap();
+        store.insert_tool_trace(&error).unwrap();
+
+        let error_traces = store.find_tool_traces_with_error(&tenant).unwrap();
+        assert_eq!(error_traces.len(), 1);
+        assert!(error_traces[0].has_error());
+    }
+
+    // --- Stack trace tests ---
+
+    #[test]
+    fn test_insert_stack_trace_with_frames() {
+        let store = StructuralStore::in_memory().unwrap();
+        let tenant = test_tenant();
+
+        let trace = StackTraceRecord::new(
+            tenant.clone(),
+            1000,
+            "NullPointerException",
+            "Cannot read property 'x' of null",
+            "Error at foo.js:10\n  at bar.js:20\n  at main.js:5",
+        );
+
+        let frames = vec![
+            StackFrameRecord {
+                frame_id: None,
+                trace_id: 0, // Will be set during insert
+                frame_idx: 0,
+                file_path: Some("foo.js".to_string()),
+                function_name: Some("processData".to_string()),
+                line_number: Some(10),
+                col_number: Some(5),
+                context: None,
+            },
+            StackFrameRecord {
+                frame_id: None,
+                trace_id: 0,
+                frame_idx: 1,
+                file_path: Some("bar.js".to_string()),
+                function_name: Some("handleRequest".to_string()),
+                line_number: Some(20),
+                col_number: None,
+                context: None,
+            },
+            StackFrameRecord {
+                frame_id: None,
+                trace_id: 0,
+                frame_idx: 2,
+                file_path: Some("main.js".to_string()),
+                function_name: Some("main".to_string()),
+                line_number: Some(5),
+                col_number: None,
+                context: None,
+            },
+        ];
+
+        let trace_id = store.insert_stack_trace(&trace, &frames).unwrap();
+        assert!(trace_id > 0);
+
+        // Verify trace was stored
+        let traces = store.find_stack_traces(&tenant, None, None).unwrap();
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].error_signature, "NullPointerException");
+
+        // Verify frames were stored
+        let stored_frames = store.get_stack_frames(trace_id).unwrap();
+        assert_eq!(stored_frames.len(), 3);
+        assert_eq!(stored_frames[0].function_name.as_deref(), Some("processData"));
+        assert_eq!(stored_frames[1].function_name.as_deref(), Some("handleRequest"));
+        assert_eq!(stored_frames[2].function_name.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn test_find_stack_traces_by_function() {
+        let store = StructuralStore::in_memory().unwrap();
+        let tenant = test_tenant();
+
+        // Insert a trace with specific functions
+        let trace = StackTraceRecord::new(
+            tenant.clone(),
+            1000,
+            "Error",
+            "Something went wrong",
+            "trace",
+        );
+
+        let frames = vec![
+            StackFrameRecord {
+                frame_id: None,
+                trace_id: 0,
+                frame_idx: 0,
+                file_path: None,
+                function_name: Some("target_function".to_string()),
+                line_number: None,
+                col_number: None,
+                context: None,
+            },
+        ];
+
+        store.insert_stack_trace(&trace, &frames).unwrap();
+
+        // Another trace without the target function
+        let trace2 = StackTraceRecord::new(tenant.clone(), 2000, "Error2", "Other error", "trace2");
+        let frames2 = vec![StackFrameRecord {
+            frame_id: None,
+            trace_id: 0,
+            frame_idx: 0,
+            file_path: None,
+            function_name: Some("other_function".to_string()),
+            line_number: None,
+            col_number: None,
+            context: None,
+        }];
+        store.insert_stack_trace(&trace2, &frames2).unwrap();
+
+        // Find by function name
+        let traces = store
+            .find_stack_traces_by_function(&tenant, "target_function")
+            .unwrap();
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].error_signature, "Error");
+
+        // Should not find the other trace
+        let traces = store
+            .find_stack_traces_by_function(&tenant, "other_function")
+            .unwrap();
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].error_signature, "Error2");
+    }
+
+    #[test]
+    fn test_find_stack_traces_by_error_signature() {
+        let store = StructuralStore::in_memory().unwrap();
+        let tenant = test_tenant();
+
+        let trace1 =
+            StackTraceRecord::new(tenant.clone(), 1000, "TypeError", "null is not a function", "t1");
+        let trace2 =
+            StackTraceRecord::new(tenant.clone(), 2000, "TypeError", "undefined is not a function", "t2");
+        let trace3 =
+            StackTraceRecord::new(tenant.clone(), 3000, "ReferenceError", "x is not defined", "t3");
+
+        store.insert_stack_trace(&trace1, &[]).unwrap();
+        store.insert_stack_trace(&trace2, &[]).unwrap();
+        store.insert_stack_trace(&trace3, &[]).unwrap();
+
+        let type_errors = store
+            .find_stack_traces(&tenant, Some("TypeError"), None)
+            .unwrap();
+        assert_eq!(type_errors.len(), 2);
+
+        let ref_errors = store
+            .find_stack_traces(&tenant, Some("ReferenceError"), None)
+            .unwrap();
+        assert_eq!(ref_errors.len(), 1);
+    }
+
+    #[test]
+    fn test_trace_tenant_isolation() {
+        let store = StructuralStore::in_memory().unwrap();
+        let tenant_a = TenantId::new("tenant_a").unwrap();
+        let tenant_b = TenantId::new("tenant_b").unwrap();
+
+        store
+            .insert_tool_trace(&ToolTraceRecord::new(tenant_a.clone(), "tool", 1000))
+            .unwrap();
+        store
+            .insert_tool_trace(&ToolTraceRecord::new(tenant_b.clone(), "tool", 2000))
+            .unwrap();
+
+        let a_traces = store.find_tool_traces(&tenant_a, None, None).unwrap();
+        let b_traces = store.find_tool_traces(&tenant_b, None, None).unwrap();
+
+        assert_eq!(a_traces.len(), 1);
+        assert_eq!(b_traces.len(), 1);
+        assert_eq!(a_traces[0].timestamp_ms, 1000);
+        assert_eq!(b_traces[0].timestamp_ms, 2000);
     }
 }
