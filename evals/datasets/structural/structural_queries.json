@@ -1,0 +1,162 @@
+{
+  "version": "1.0",
+  "description": "Structural query evaluation dataset for memd",
+  "test_project": {
+    "name": "eval-test-codebase",
+    "description": "Small synthetic codebase for testing structural queries",
+    "files": [
+      {
+        "path": "src/main.rs",
+        "content": "fn main() {\n    hello_world();\n    greet(\"test\");\n}\n\nfn hello_world() {\n    println!(\"Hello, world!\");\n}\n\nfn greet(name: &str) {\n    println!(\"Hello, {}!\", name);\n}",
+        "language": "rust"
+      },
+      {
+        "path": "src/lib.rs",
+        "content": "pub mod utils;\n\npub fn process() {\n    utils::helper();\n}\n\npub struct Config {\n    pub name: String,\n}",
+        "language": "rust"
+      },
+      {
+        "path": "src/utils.rs",
+        "content": "/// Helper function for processing\npub fn helper() {\n    println!(\"Helping!\");\n}\n\npub fn helper2() {\n    helper();\n}",
+        "language": "rust"
+      }
+    ]
+  },
+  "queries": [
+    {
+      "id": "def-1",
+      "type": "find_definition",
+      "query": "hello_world",
+      "expected": {
+        "file": "src/main.rs",
+        "line_start": 6,
+        "kind": "function"
+      }
+    },
+    {
+      "id": "def-2",
+      "type": "find_definition",
+      "query": "Config",
+      "expected": {
+        "file": "src/lib.rs",
+        "line_start": 6,
+        "kind": "class"
+      }
+    },
+    {
+      "id": "def-3",
+      "type": "find_definition",
+      "query": "helper",
+      "expected": {
+        "file": "src/utils.rs",
+        "line_start": 2,
+        "kind": "function"
+      }
+    },
+    {
+      "id": "def-4",
+      "type": "find_definition",
+      "query": "process",
+      "expected": {
+        "file": "src/lib.rs",
+        "line_start": 3,
+        "kind": "function"
+      }
+    },
+    {
+      "id": "callers-1",
+      "type": "find_callers",
+      "query": "hello_world",
+      "expected_callers": [
+        { "function": "main", "file": "src/main.rs", "line": 2 }
+      ]
+    },
+    {
+      "id": "callers-2",
+      "type": "find_callers",
+      "query": "helper",
+      "expected_callers": [
+        { "function": "process", "file": "src/lib.rs" },
+        { "function": "helper2", "file": "src/utils.rs" }
+      ]
+    },
+    {
+      "id": "callers-3",
+      "type": "find_callers",
+      "query": "greet",
+      "expected_callers": [
+        { "function": "main", "file": "src/main.rs", "line": 3 }
+      ]
+    },
+    {
+      "id": "refs-1",
+      "type": "find_references",
+      "query": "greet",
+      "expected_count": 2,
+      "expected_files": ["src/main.rs"]
+    },
+    {
+      "id": "refs-2",
+      "type": "find_references",
+      "query": "helper",
+      "expected_count": 3,
+      "expected_files": ["src/utils.rs", "src/lib.rs"]
+    },
+    {
+      "id": "imports-1",
+      "type": "find_imports",
+      "query": "utils",
+      "expected_importers": [
+        { "file": "src/lib.rs" }
+      ]
+    }
+  ],
+  "natural_language_queries": [
+    {
+      "id": "nl-def-1",
+      "query": "where is hello_world defined",
+      "expected_intent": "SymbolDefinition",
+      "expected_target": "hello_world"
+    },
+    {
+      "id": "nl-def-2",
+      "query": "find definition of Config",
+      "expected_intent": "SymbolDefinition",
+      "expected_target": "Config"
+    },
+    {
+      "id": "nl-callers-1",
+      "query": "who calls helper",
+      "expected_intent": "SymbolCallers",
+      "expected_target": "helper"
+    },
+    {
+      "id": "nl-callers-2",
+      "query": "show callers of greet",
+      "expected_intent": "SymbolCallers",
+      "expected_target": "greet"
+    },
+    {
+      "id": "nl-refs-1",
+      "query": "find all usages of Config",
+      "expected_intent": "SymbolReferences",
+      "expected_target": "Config"
+    },
+    {
+      "id": "nl-refs-2",
+      "query": "where is helper used",
+      "expected_intent": "SymbolReferences",
+      "expected_target": "helper"
+    },
+    {
+      "id": "nl-semantic-1",
+      "query": "how does the greeting work",
+      "expected_intent": "SemanticSearch"
+    },
+    {
+      "id": "nl-semantic-2",
+      "query": "explain the configuration system",
+      "expected_intent": "SemanticSearch"
+    }
+  ]
+}
