@@ -34,7 +34,8 @@ pub use tiered::{
     SemanticCacheConfig,
 };
 pub use structural::{
-    detect_language, parse_file, ExtractedSymbol, LanguageSupport, ParseResult,
-    StructuralStore, SupportedLanguage, SymbolExtractor, SymbolIndexer, SymbolKind, SymbolRecord,
+    detect_language, parse_file, ExtractedSymbol, LanguageSupport, ParseResult, QueryIntent,
+    QueryRouter, RouteResult, StructuralStore, SupportedLanguage, SymbolExtractor, SymbolIndexer,
+    SymbolKind, SymbolRecord,
 };
 pub use types::{ChunkId, ChunkStatus, ChunkType, MemoryChunk, ProjectId, Source, TenantId};
