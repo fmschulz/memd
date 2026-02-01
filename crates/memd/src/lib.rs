@@ -1,5 +1,6 @@
 pub mod chunking;
 pub mod cli;
+pub mod compaction;
 pub mod config;
 pub mod embeddings;
 pub mod error;
