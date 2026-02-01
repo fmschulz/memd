@@ -16,7 +16,7 @@ struct Args {
     #[arg(long, default_value = "target/debug/memd")]
     memd_path: String,
 
-    /// Suite to run (all, sanity, mcp, persistence, retrieval, hybrid, scifact, true-semantic, nfcorpus, codesearchnet, tiered, structural)
+    /// Suite to run (all, sanity, mcp, persistence, retrieval, hybrid, scifact, true-semantic, nfcorpus, codesearchnet, tiered, structural, compaction)
     #[arg(long, default_value = "all")]
     suite: String,
 
@@ -35,6 +35,10 @@ struct Args {
     /// Include structural tests in 'all' suite
     #[arg(long, default_value = "true")]
     include_structural: bool,
+
+    /// Include compaction tests in 'all' suite (slower, tests compaction correctness)
+    #[arg(long, default_value = "false")]
+    include_compaction: bool,
 }
 
 fn main() -> ExitCode {
@@ -83,6 +87,11 @@ fn main() -> ExitCode {
             if args.include_structural {
                 all.extend(suites::structural::run_structural_tests(&memd_binary, embedding_model));
             }
+
+            // Compaction tests (Suite F) - excluded by default (slower)
+            if args.include_compaction {
+                all.extend(suites::compaction::run_compaction_tests(&memd_binary, embedding_model));
+            }
             all
         }
         "sanity" => suites::sanity::run_sanity_tests(&memd_binary, embedding_model),
@@ -96,9 +105,10 @@ fn main() -> ExitCode {
         "codesearchnet" => suites::codesearchnet::run_codesearchnet_tests(&memd_binary, embedding_model),
         "tiered" => suites::tiered::run_tiered_tests(&memd_binary, embedding_model),
         "structural" => suites::structural::run_structural_tests(&memd_binary, embedding_model),
+        "compaction" | "f" => suites::compaction::run_compaction_tests(&memd_binary, embedding_model),
         _ => {
             eprintln!(
-                "Unknown suite: {}. Available: all, sanity, mcp, persistence, retrieval, hybrid, true-semantic, scifact, nfcorpus, codesearchnet, tiered, structural",
+                "Unknown suite: {}. Available: all, sanity, mcp, persistence, retrieval, hybrid, true-semantic, scifact, nfcorpus, codesearchnet, tiered, structural, compaction",
                 args.suite
             );
             return ExitCode::FAILURE;
