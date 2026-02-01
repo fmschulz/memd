@@ -6,11 +6,13 @@
 
 pub mod hnsw_rebuild;
 pub mod metrics;
+pub mod segment_merge;
 pub mod throttle;
 pub mod tombstone_audit;
 
 pub use hnsw_rebuild::{HnswRebuilder, RebuildResult};
 pub use metrics::CompactionMetrics;
+pub use segment_merge::{MergeResult, SegmentMerger};
 pub use throttle::{Throttle, ThrottleConfig};
 pub use tombstone_audit::{AuditResult, TombstoneAudit};
 
