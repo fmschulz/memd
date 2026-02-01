@@ -2,9 +2,22 @@
 //!
 //! Provides test infrastructure for MCP conformance testing.
 //! The harness starts memd as a subprocess and communicates via MCP protocol.
+//!
+//! ## Suites
+//!
+//! - **Suite A**: MCP conformance (mcp_conformance)
+//! - **Suite B**: Retrieval quality (retrieval)
+//! - **Suite C**: Hybrid retrieval (hybrid)
+//! - **Suite D**: Tiered search (tiered)
+//! - **Suite E**: Structural queries (structural)
 
 pub mod mcp_client;
+pub mod metrics;
+pub mod statistics;
 pub mod suites;
+
+// Re-export structural suite results for external use
+pub use suites::structural::{StructuralSuiteResults, StructuralTestResult};
 
 use std::time::Instant;
 
