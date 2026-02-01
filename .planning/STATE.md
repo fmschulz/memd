@@ -10,19 +10,19 @@ See: .planning/PROJECT.md (updated 2026-01-29)
 ## Current Position
 
 Phase: 6 of 6 (Structural Indexes)
-Plan: 05 of 08 (Trace Storage)
-Status: In progress
-Last activity: 2026-01-31 -- Completed 06-05-PLAN.md (Trace Storage)
+Plan: 04 of 08 (Structural Search)
+Status: Plan complete
+Last activity: 2026-02-01 -- Completed 06-04-PLAN.md (Structural Search)
 
-Progress: [=============================================-------] 90% (35 of 39 total plans)
-**Phase 6 PROGRESS**: Trace storage and parsing complete
+Progress: [=============================================-------] 92% (36 of 39 total plans)
+**Phase 6 PROGRESS**: Structural search MCP tools complete
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 34
+- Total plans completed: 36
 - Average duration: 6m
-- Total execution time: ~228 minutes
+- Total execution time: ~235 minutes
 
 **By Phase:**
 
@@ -34,11 +34,11 @@ Progress: [=============================================-------] 90% (35 of 39 t
 | 04 | 6 | 27m | 4m |
 | 04.1 | 3 | 24m | 8m |
 | 05 | 5 | 53m | 11m |
-| 06 | 5 | 30m | 6m |
+| 06 | 6 | 37m | 6m |
 
 **Recent Trend:**
-- Last 5 plans: 06-01 (3m), 06-02 (3m), 06-03 (6m), 06-04 (0m-skipped), 06-05 (18m)
-- Trend: Phase 6 progressing - trace storage complete
+- Last 5 plans: 06-02 (3m), 06-03 (6m), 06-04 (7m), 06-05 (18m), 06-06 (3m)
+- Trend: Phase 6 progressing - structural search complete
 
 *Updated after each plan completion*
 
@@ -186,6 +186,10 @@ Recent decisions affecting current work:
 - 06-03: Batch insert methods for efficient indexing
 - 06-03: Re-indexing deletes old edges before inserting new
 - 06-03: Aliased Python imports via aliased_import node pattern
+- 06-04: Kind priority sorting: function > method > class > interface > type > enum > variable > constant > module
+- 06-04: Multi-hop caller traversal limited to 1-3 hops with cycle detection
+- 06-04: SymbolQueryService uses Optional initialization in McpServer
+- 06-04: Depth parameter for find_callers clamped to valid range (1-3)
 - 06-05: TimeRange struct for filtering time-based trace queries
 - 06-05: Dynamic SQL with parameter counting for optional filters
 - 06-05: Auto-detect trace format based on content patterns
@@ -222,18 +226,18 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-01-31 18:53 UTC
-Stopped at: Completed 06-05-PLAN.md (Trace Storage)
+Last session: 2026-02-01 03:03 UTC
+Stopped at: Completed 06-04-PLAN.md (Structural Search)
 Resume file: None
 
 **Latest work:**
-- Completed 06-05: Trace storage and parsing for tool calls and stack traces
+- Completed 06-04: Structural search MCP tools for code navigation
 
 **Phase 6 Progress:**
 - Plan 01: Tree-sitter Parser - COMPLETE
 - Plan 02: Symbol Extractor + Storage - COMPLETE
 - Plan 03: Call Graph - COMPLETE
-- Plan 04: Structural Search - pending
+- Plan 04: Structural Search - COMPLETE
 - Plan 05: Trace Storage - COMPLETE
 - Plan 06: Persistence - pending
 - Plan 07: MCP Integration - pending
