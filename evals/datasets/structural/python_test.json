@@ -1,0 +1,59 @@
+{
+  "version": "1.0",
+  "description": "Python structural query test dataset",
+  "test_project": {
+    "name": "python-test-codebase",
+    "description": "Small Python codebase for testing structural queries",
+    "files": [
+      {
+        "path": "main.py",
+        "content": "from utils import process\n\ndef main():\n    process()\n\nif __name__ == '__main__':\n    main()",
+        "language": "python"
+      },
+      {
+        "path": "utils.py",
+        "content": "\"\"\"Utility functions.\"\"\"\n\ndef process():\n    \"\"\"Process data.\"\"\"\n    helper()\n\ndef helper():\n    pass\n\nclass DataProcessor:\n    def run(self):\n        helper()",
+        "language": "python"
+      }
+    ]
+  },
+  "queries": [
+    {
+      "id": "py-def-1",
+      "type": "find_definition",
+      "query": "process",
+      "expected": {
+        "file": "utils.py",
+        "line_start": 3,
+        "kind": "function"
+      }
+    },
+    {
+      "id": "py-def-2",
+      "type": "find_definition",
+      "query": "DataProcessor",
+      "expected": {
+        "file": "utils.py",
+        "line_start": 10,
+        "kind": "class"
+      }
+    },
+    {
+      "id": "py-callers-1",
+      "type": "find_callers",
+      "query": "helper",
+      "expected_callers": [
+        { "function": "process", "file": "utils.py" },
+        { "function": "run", "file": "utils.py" }
+      ]
+    },
+    {
+      "id": "py-imports-1",
+      "type": "find_imports",
+      "query": "utils",
+      "expected_importers": [
+        { "file": "main.py" }
+      ]
+    }
+  ]
+}
