@@ -177,6 +177,48 @@ pub struct FindImportsParams {
     pub project_id: Option<String>,
 }
 
+fn default_limit() -> usize {
+    50
+}
+
+/// Parameters for debug.find_tool_calls
+#[derive(Debug, Deserialize)]
+pub struct FindToolCallsParams {
+    pub tenant_id: String,
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub time_from: Option<String>,
+    #[serde(default)]
+    pub time_to: Option<String>,
+    #[serde(default)]
+    pub errors_only: bool,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+}
+
+/// Parameters for debug.find_errors
+#[derive(Debug, Deserialize)]
+pub struct FindErrorsParams {
+    pub tenant_id: String,
+    #[serde(default)]
+    pub error_signature: Option<String>,
+    #[serde(default)]
+    pub function_name: Option<String>,
+    #[serde(default)]
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub time_from: Option<String>,
+    #[serde(default)]
+    pub time_to: Option<String>,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    #[serde(default = "default_true")]
+    pub include_frames: bool,
+}
+
 // ---------- Response Types ----------
 
 /// Result of a search operation
@@ -960,6 +1002,159 @@ fn import_info_to_result(info: ImportInfo) -> ImportInfoResult {
         import_line: info.import_line,
         alias: info.alias,
     }
+}
+
+// ---------- Trace Query Handlers ----------
+
+use crate::structural::{
+    parse_iso_datetime, ErrorResult, FrameInfo, TimeRange as StructuralTimeRange,
+    ToolCallResult, TraceQueryService,
+};
+
+/// Result type for debug.find_tool_calls
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FindToolCallsResult {
+    pub tool_calls: Vec<ToolCallResult>,
+    pub total_count: usize,
+}
+
+/// Result type for debug.find_errors
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FindErrorsResult {
+    pub errors: Vec<ErrorResultResponse>,
+    pub total_count: usize,
+}
+
+/// Error result with optional frames
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ErrorResultResponse {
+    pub trace_id: i64,
+    pub error_signature: String,
+    pub error_message: String,
+    pub timestamp_ms: i64,
+    pub timestamp_formatted: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frames: Option<Vec<FrameInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+/// Convert ErrorResult to response, optionally including frames
+fn error_to_response(error: ErrorResult, include_frames: bool) -> ErrorResultResponse {
+    ErrorResultResponse {
+        trace_id: error.trace_id,
+        error_signature: error.error_signature,
+        error_message: error.error_message,
+        timestamp_ms: error.timestamp_ms,
+        timestamp_formatted: error.timestamp_formatted,
+        frames: if include_frames { Some(error.frames) } else { None },
+        session_id: error.session_id,
+    }
+}
+
+/// Parse time range from optional ISO 8601 strings
+fn parse_trace_time_range(time_from: Option<&str>, time_to: Option<&str>) -> Result<Option<StructuralTimeRange>, McpError> {
+    let from_ms = match time_from {
+        Some(s) => Some(parse_iso_datetime(s).map_err(|e| McpError::InvalidParams(e.to_string()))?),
+        None => None,
+    };
+    let to_ms = match time_to {
+        Some(s) => Some(parse_iso_datetime(s).map_err(|e| McpError::InvalidParams(e.to_string()))?),
+        None => None,
+    };
+
+    if from_ms.is_none() && to_ms.is_none() {
+        Ok(None)
+    } else {
+        Ok(Some(StructuralTimeRange {
+            from_ms,
+            to_ms,
+        }))
+    }
+}
+
+/// Handle debug.find_tool_calls tool call
+pub fn handle_find_tool_calls(
+    trace_service: &TraceQueryService,
+    params: FindToolCallsParams,
+) -> Result<Value, McpError> {
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let limit = params.limit.min(100);
+
+    // Parse time range
+    let time_range = parse_trace_time_range(params.time_from.as_deref(), params.time_to.as_deref())?;
+
+    info!(
+        tenant_id = %tenant_id,
+        tool_name = ?params.tool_name,
+        session_id = ?params.session_id,
+        errors_only = params.errors_only,
+        limit = limit,
+        "debug.find_tool_calls"
+    );
+
+    let tool_calls = if params.errors_only {
+        trace_service
+            .find_tool_calls_with_errors(&tenant_id, time_range)
+            .map_err(|e| McpError::ToolError(e.to_string()))?
+    } else {
+        trace_service
+            .find_tool_calls(
+                &tenant_id,
+                params.tool_name.as_deref(),
+                time_range,
+                params.session_id.as_deref(),
+                limit,
+            )
+            .map_err(|e| McpError::ToolError(e.to_string()))?
+    };
+
+    debug!(results_count = tool_calls.len(), "find_tool_calls completed");
+
+    let total_count = tool_calls.len();
+    format_mcp_response(&FindToolCallsResult { tool_calls, total_count })
+}
+
+/// Handle debug.find_errors tool call
+pub fn handle_find_errors(
+    trace_service: &TraceQueryService,
+    params: FindErrorsParams,
+) -> Result<Value, McpError> {
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let limit = params.limit.min(100);
+
+    // Parse time range
+    let time_range = parse_trace_time_range(params.time_from.as_deref(), params.time_to.as_deref())?;
+
+    info!(
+        tenant_id = %tenant_id,
+        error_signature = ?params.error_signature,
+        function_name = ?params.function_name,
+        file_path = ?params.file_path,
+        limit = limit,
+        "debug.find_errors"
+    );
+
+    let error_results = trace_service
+        .find_errors(
+            &tenant_id,
+            params.error_signature.as_deref(),
+            params.function_name.as_deref(),
+            params.file_path.as_deref(),
+            time_range,
+            limit,
+        )
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    debug!(results_count = error_results.len(), "find_errors completed");
+
+    let total_count = error_results.len();
+    let errors: Vec<ErrorResultResponse> = error_results
+        .into_iter()
+        .map(|e| error_to_response(e, params.include_frames))
+        .collect();
+
+    format_mcp_response(&FindErrorsResult { errors, total_count })
 }
 
 #[cfg(test)]
