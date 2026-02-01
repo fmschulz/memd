@@ -903,4 +903,4 @@ See [examples/](examples/) for:
 
 ---
 
-**Ready to build intelligent agent memory!** 🚀
+Ready to build intelligent agent memory!

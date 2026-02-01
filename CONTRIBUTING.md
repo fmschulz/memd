@@ -205,4 +205,4 @@ Target metrics (measured by evaluation suite):
 
 By contributing, you agree that your contributions will be licensed under the MIT License.
 
-Thank you for contributing to memd! 🚀
+Thank you for contributing to memd!
