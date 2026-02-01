@@ -6,6 +6,7 @@
 mod call_graph;
 mod parser;
 mod storage;
+mod symbols;
 
 pub use call_graph::{
     CallGraphExtractor, CallGraphIndexer, ExtractedCall, ExtractedImport,
@@ -18,3 +19,4 @@ pub use storage::{
     CallEdgeRecord, CallType, ImportRecord, StackFrameRecord, StackTraceRecord, StructuralStore,
     SymbolKind, SymbolRecord, TimeRange, ToolTraceRecord,
 };
+pub use symbols::{ExtractedSymbol, SymbolExtractor, SymbolIndexer};
