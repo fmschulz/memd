@@ -15,7 +15,10 @@ pub use call_graph::{
     CallGraphExtractor, CallGraphIndexer, ExtractedCall, ExtractedImport,
     SymbolRecord as CallGraphSymbolRecord,
 };
-pub use queries::{CallerInfo, ImportInfo, SymbolLocation, SymbolQueryService};
+pub use queries::{
+    format_timestamp, parse_iso_datetime, CallerInfo, ErrorResult, ErrorSummary, FrameInfo,
+    ImportInfo, SymbolLocation, SymbolQueryService, ToolCallResult, TraceQueryService,
+};
 pub use parser::{
     detect_language, parse_file, LanguageSupport, ParseError, ParseResult, SupportedLanguage,
 };
