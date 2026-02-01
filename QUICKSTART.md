@@ -29,7 +29,7 @@ source $HOME/.cargo/env
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/memd.git
+git clone https://github.com/fmschulz/memd.git
 cd memd
 
 # Build release binary (takes ~5-10 minutes first time)

@@ -1,12 +1,18 @@
-# Override global mold linker config to fix ort-sys glibc C23 symbol incompatibility
-# Use default system linker (ld) which is compatible with ort-sys glibc C23 symbols
+# Local cargo config - overrides global ~/.cargo/config.toml
+# Fixes ONNX Runtime + mold linker compatibility issue
+# Using default system linker (ld) instead of mold
 
 [target.x86_64-unknown-linux-gnu]
-# Use default cc linker instead of clang to avoid mold
+# Use default system linker (no special linker specified)
 linker = "cc"
-# Empty rustflags to prevent global mold config from being used
-rustflags = []
 
+# Keep other settings from global config
 [build]
-# Incremental builds for faster development
-incremental = true
+jobs = 64
+
+[registries.crates-io]
+protocol = "sparse"
+
+[net]
+git-fetch-with-cli = true
+retry = 3

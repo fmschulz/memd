@@ -16,33 +16,40 @@ use crate::TestResult;
 
 /// Dataset structure for hybrid tests
 #[derive(Debug, Deserialize)]
-struct HybridDataset {
-    description: String,
-    version: String,
+pub struct HybridDataset {
+    pub description: String,
+    pub version: String,
     #[serde(default)]
-    note: Option<String>,
-    query_types: Vec<String>,
-    queries: Vec<HybridQuery>,
-    documents: Vec<HybridDocument>,
+    pub note: Option<String>,
+    pub query_types: Vec<String>,
+    pub queries: Vec<HybridQuery>,
+    pub documents: Vec<HybridDocument>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-struct HybridQuery {
-    id: String,
-    query: String,
+pub struct HybridQuery {
+    pub id: String,
+    pub query: String,
     #[serde(rename = "type")]
-    query_type: String,
-    relevant: Vec<String>,
+    pub query_type: String,
+    pub relevant: Vec<String>,
     #[allow(dead_code)]
-    irrelevant: Vec<String>,
+    pub irrelevant: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct HybridDocument {
-    id: String,
-    text: String,
-    #[serde(rename = "type")]
-    doc_type: String,
+pub struct HybridDocument {
+    pub id: String,
+    #[serde(alias = "content")]
+    pub text: String,
+    #[serde(rename = "type", default = "default_doc_type")]
+    pub doc_type: String,
+    #[serde(default)]
+    pub tags: Option<serde_json::Value>,
+}
+
+fn default_doc_type() -> String {
+    "code".to_string()
 }
 
 /// Quality metrics per query type
@@ -95,7 +102,7 @@ fn extract_content_text(response: &Value) -> Option<&str> {
 }
 
 /// Run hybrid evaluation tests
-pub fn run_hybrid_tests(memd_path: &PathBuf) -> Vec<TestResult> {
+pub fn run_hybrid_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestResult> {
     let mut results = Vec::new();
 
     // Load dataset
@@ -124,7 +131,7 @@ pub fn run_hybrid_tests(memd_path: &PathBuf) -> Vec<TestResult> {
     );
 
     // C1: Index all documents and run quality tests in one session
-    let (c1_result, all_metrics) = run_c1_index_and_evaluate(memd_path, &dataset);
+    let (c1_result, all_metrics) = run_c1_index_and_evaluate(memd_path, &dataset, embedding_model);
     results.push(c1_result);
 
     let (keyword_metrics, semantic_metrics, mixed_metrics) = match all_metrics {
@@ -149,7 +156,7 @@ pub fn run_hybrid_tests(memd_path: &PathBuf) -> Vec<TestResult> {
     ));
 
     // C6: Performance baseline
-    results.push(run_c6_performance_baseline(memd_path, &dataset));
+    results.push(run_c6_performance_baseline(memd_path, &dataset, embedding_model));
 
     // C7: Quality thresholds check
     results.push(run_c7_quality_thresholds(
@@ -166,16 +173,27 @@ fn load_dataset(path: &std::path::Path) -> Result<HybridDataset, String> {
     serde_json::from_str(&content).map_err(|e| format!("parse json: {}", e))
 }
 
+/// Generic dataset loader (public for reuse in other test suites)
+pub fn load_dataset_generic(path: &std::path::Path) -> Result<HybridDataset, String> {
+    load_dataset(path)
+}
+
 /// Create a client, index documents, and optionally run queries
 fn create_indexed_client(
     memd_path: &PathBuf,
     dataset: &HybridDataset,
+    embedding_model: &str,
 ) -> Result<(McpClient, TempDir), String> {
     let data_dir = TempDir::new().map_err(|e| format!("tempdir: {}", e))?;
 
     let mut client = McpClient::start_with_args(
         memd_path,
-        &["--data-dir", data_dir.path().to_str().unwrap()],
+        &[
+            "--data-dir",
+            data_dir.path().to_str().unwrap(),
+            "--embedding-model",
+            embedding_model,
+        ],
     )
     .map_err(|e| format!("start memd: {}", e))?;
 
@@ -203,11 +221,12 @@ fn create_indexed_client(
 fn run_c1_index_and_evaluate(
     memd_path: &PathBuf,
     dataset: &HybridDataset,
+    embedding_model: &str,
 ) -> (TestResult, Option<(TypeMetrics, TypeMetrics, TypeMetrics)>) {
     let start = Instant::now();
     let name = "C1_index_documents";
 
-    let (mut client, _data_dir) = match create_indexed_client(memd_path, dataset) {
+    let (mut client, _data_dir) = match create_indexed_client(memd_path, dataset, embedding_model) {
         Ok(c) => c,
         Err(e) => {
             return (TestResult::fail_with_duration(name, &e, start), None);
@@ -345,12 +364,16 @@ fn run_c5_hybrid_comparison(
     TestResult::pass_with_duration(name, start)
 }
 
-fn run_c6_performance_baseline(memd_path: &PathBuf, dataset: &HybridDataset) -> TestResult {
+fn run_c6_performance_baseline(
+    memd_path: &PathBuf,
+    dataset: &HybridDataset,
+    embedding_model: &str,
+) -> TestResult {
     let start = Instant::now();
     let name = "C6_performance_baseline";
 
     // Create fresh client for performance testing
-    let (mut client, _data_dir) = match create_indexed_client(memd_path, dataset) {
+    let (mut client, _data_dir) = match create_indexed_client(memd_path, dataset, embedding_model) {
         Ok(c) => c,
         Err(e) => {
             return TestResult::fail_with_duration(name, &e, start);

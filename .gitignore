@@ -1,5 +1,6 @@
 # Build artifacts
 /target
+Cargo.lock
 
 # Environment and secrets
 .env
@@ -20,5 +21,42 @@
 .DS_Store
 Thumbs.db
 
-# Local development
+# Local development and data
 /.memd/
+test_chunk
+test_chunk.rs
+
+# Python environment (uv/pixi)
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.pixi/
+/python/
+pyproject.toml
+setup-python.sh
+
+# Planning and implementation documents (internal only)
+/.planning/
+/docs/codex-*.md
+/docs/debug-*.md
+/docs/session-*.md
+/docs/candle-*.md
+/docs/cli-args-*.md
+QUICK_START_PYTHON.md
+START_HERE.md
+DOCKER.md
+
+# Evaluation results (benchmarks change frequently)
+/evals/results/
+/evals/datasets/beir/
+/evals/datasets/codesearchnet/
+/evals/BENCHMARK_*.md
+/evals/CODEX_*.md
+/evals/COMPREHENSIVE_*.md
+/evals/EMBEDDING_*.md
+/evals/TESTING_*.md
+/evals/osgrep-comparison/
+/evals/scripts/
