@@ -10,19 +10,19 @@ See: .planning/PROJECT.md (updated 2026-01-29)
 ## Current Position
 
 Phase: 6 of 6 (Structural Indexes)
-Plan: 07 of 08 (Query Router)
-Status: Plan complete
-Last activity: 2026-02-01 -- Completed 06-07-PLAN.md (Query Router)
+Plan: 08 of 08 (Eval Suite)
+Status: PHASE 6 COMPLETE
+Last activity: 2026-02-01 -- Completed 06-08-PLAN.md (Eval Suite)
 
-Progress: [================================================----] 97% (38 of 39 total plans)
-**Phase 6 PROGRESS**: Query router complete (intent classification, routing, STRUCT-14 blending)
+Progress: [====================================================] 100% (39 of 39 total plans)
+**Phase 6 COMPLETE**: All structural indexes implemented with evaluation coverage
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 37
+- Total plans completed: 39
 - Average duration: 6m
-- Total execution time: ~241 minutes
+- Total execution time: ~246 minutes
 
 **By Phase:**
 
@@ -34,11 +34,11 @@ Progress: [================================================----] 97% (38 of 39 t
 | 04 | 6 | 27m | 4m |
 | 04.1 | 3 | 24m | 8m |
 | 05 | 5 | 53m | 11m |
-| 06 | 8 | 55m | 7m |
+| 06 | 8 | 60m | 8m |
 
 **Recent Trend:**
-- Last 5 plans: 06-04 (7m), 06-05 (18m), 06-06 (12m), 06-07 (6m)
-- Trend: Phase 6 progressing - query router complete
+- Last 5 plans: 06-05 (18m), 06-06 (12m), 06-07 (6m), 06-08 (5m)
+- Trend: Phase 6 complete - all structural indexes implemented
 
 *Updated after each plan completion*
 
@@ -201,6 +201,9 @@ Recent decisions affecting current work:
 - 06-07: Explicit prefixes (def:, callers:, refs:, etc.) override pattern detection
 - 06-07: BlendStrategy::StructuralPrimary as default (structural authoritative)
 - 06-07: QueryIntent::SemanticSearch as default variant (safe fallback)
+- 06-08: Suite E designation for structural tests (A=MCP, B=retrieval, C=hybrid, D=tiered, E=structural)
+- 06-08: Quality thresholds: 80% for definitions/imports/intent, 70% for callers/references
+- 06-08: Include structural tests in 'all' suite via --include-structural flag (default: true)
 
 ### Pending Todos
 
@@ -233,14 +236,14 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-01 03:17 UTC
-Stopped at: Completed 06-07-PLAN.md (Query Router)
+Last session: 2026-02-01 03:25 UTC
+Stopped at: Completed 06-08-PLAN.md (Eval Suite) - PHASE 6 COMPLETE
 Resume file: None
 
 **Latest work:**
-- Completed 06-07: Query router for intent classification and routing with STRUCT-14 blending
+- Completed 06-08: Structural query evaluation suite (Suite E) with test datasets
 
-**Phase 6 Progress:**
+**Phase 6 Progress:** ALL COMPLETE
 - Plan 01: Tree-sitter Parser - COMPLETE
 - Plan 02: Symbol Extractor + Storage - COMPLETE
 - Plan 03: Call Graph - COMPLETE
@@ -248,4 +251,6 @@ Resume file: None
 - Plan 05: Trace Storage - COMPLETE
 - Plan 06: Debug Trace Tools - COMPLETE
 - Plan 07: Query Router - COMPLETE
-- Plan 08: Eval Suite - pending
+- Plan 08: Eval Suite - COMPLETE
+
+**PROJECT STATUS: ALL PHASES COMPLETE (39/39 plans)**
