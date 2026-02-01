@@ -184,12 +184,12 @@ impl SparseIndex for Bm25Index {
         query: &str,
         k: usize,
     ) -> Result<Vec<SparseSearchResult>> {
-        let searcher = self.reader.searcher();
-
-        // Reload to see recent commits
+        // Reload to see recent commits (BEFORE getting searcher)
         self.reader
             .reload()
             .map_err(|e| MemdError::StorageError(format!("reload reader: {}", e)))?;
+
+        let searcher = self.reader.searcher();
 
         // Build tenant filter
         let tenant_term = Term::from_field_text(self.tenant_field, tenant_id.as_str());
