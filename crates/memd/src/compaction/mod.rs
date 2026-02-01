@@ -2,16 +2,18 @@
 //!
 //! Provides infrastructure for monitoring compaction health and managing
 //! the compaction lifecycle. Includes metrics gathering, tombstone auditing,
-//! HNSW rebuild, and segment merge operations.
+//! HNSW rebuild, segment merge, throttling, and compaction runner.
 
 pub mod hnsw_rebuild;
 pub mod metrics;
+pub mod runner;
 pub mod segment_merge;
 pub mod throttle;
 pub mod tombstone_audit;
 
 pub use hnsw_rebuild::{HnswRebuilder, RebuildResult};
 pub use metrics::CompactionMetrics;
+pub use runner::{CompactionResult, CompactionRunner};
 pub use segment_merge::{MergeResult, SegmentMerger};
 pub use throttle::{Throttle, ThrottleConfig};
 pub use tombstone_audit::{AuditResult, TombstoneAudit};
