@@ -1,8 +1,18 @@
 //! Test suites for memd evaluation
 //!
 //! Each suite tests a specific aspect of MCP conformance.
+//!
+//! ## Suites
+//!
+//! - **Suite A**: MCP conformance (mcp_conformance)
+//! - **Suite B**: Retrieval quality (retrieval)
+//! - **Suite C**: Hybrid retrieval (hybrid)
+//! - **Suite D**: Tiered search (tiered)
+//! - **Suite E**: Structural queries (structural)
+//! - **Suite F**: Compaction (compaction)
 
 pub mod codesearchnet;
+pub mod compaction;
 pub mod hybrid;
 pub mod mcp_conformance;
 pub mod nfcorpus;
