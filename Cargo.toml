@@ -45,3 +45,13 @@ tantivy = "0.24"
 rust-stemmers = "1.2"
 unicode-segmentation = "1.12"
 moka = { version = "0.12", features = ["sync"] }
+# Tree-sitter for structural parsing
+tree-sitter = "0.24"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.25"
+tree-sitter-javascript = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-cpp = "0.23"
+regex = "1.10"
