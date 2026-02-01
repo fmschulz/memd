@@ -327,6 +327,8 @@ pub struct StatsResult {
     pub chunk_types: HashMap<String, usize>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub disk_stats: Option<DiskStatsResult>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub compaction: Option<CompactionStatsResult>,
 }
 
 /// Disk statistics in stats result
@@ -334,6 +336,27 @@ pub struct StatsResult {
 pub struct DiskStatsResult {
     pub total_bytes: u64,
     pub segment_count: usize,
+}
+
+/// Compaction statistics in stats result
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CompactionStatsResult {
+    /// Ratio of deleted to total chunks (0.0 to 1.0)
+    pub tombstone_ratio: f32,
+    /// Number of active (non-deleted) chunks
+    pub active_chunks: usize,
+    /// Number of deleted chunks
+    pub deleted_chunks: usize,
+    /// Number of sparse index segments
+    pub segment_count: usize,
+    /// HNSW index staleness (0.0 to 1.0)
+    pub hnsw_staleness: f32,
+    /// Number of embeddings in HNSW cache
+    pub hnsw_cache_size: usize,
+    /// Number of embeddings in HNSW index
+    pub hnsw_index_size: usize,
+    /// Whether compaction is needed based on default thresholds
+    pub needs_compaction: bool,
 }
 
 /// Combined tiered search statistics result
@@ -812,11 +835,28 @@ pub async fn handle_memory_stats<S: Store>(
         })
         .flatten();
 
+    // Get compaction metrics if available
+    let compaction = store.get_compaction_metrics(&tenant_id).ok().map(|m| {
+        CompactionStatsResult {
+            tombstone_ratio: m.tombstone_ratio,
+            active_chunks: m.active_chunks,
+            deleted_chunks: m.deleted_chunks,
+            segment_count: m.segment_count,
+            hnsw_staleness: m.hnsw_staleness,
+            hnsw_cache_size: m.hnsw_cache_size,
+            hnsw_index_size: m.hnsw_index_size,
+            needs_compaction: m.tombstone_ratio > 0.20
+                || m.segment_count > 10
+                || m.hnsw_staleness > 0.15,
+        }
+    });
+
     format_mcp_response(&StatsResult {
         total_chunks: store_stats.total_chunks,
         deleted_chunks: store_stats.deleted_chunks,
         chunk_types: store_stats.chunk_types,
         disk_stats,
+        compaction,
     })
 }
 
