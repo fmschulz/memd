@@ -13,17 +13,18 @@ use std::collections::HashMap;
 
 use super::error::McpError;
 use super::handlers::{
-    handle_find_callers, handle_find_definition, handle_find_imports, handle_find_references,
-    handle_memory_add, handle_memory_add_batch, handle_memory_delete, handle_memory_get,
-    handle_memory_metrics, handle_memory_search, handle_memory_stats, AddBatchParams, AddParams,
-    DeleteParams, FindCallersParams, FindDefinitionParams, FindImportsParams, FindReferencesParams,
-    GetParams, MetricsParams, SearchParams, StatsParams,
+    handle_find_callers, handle_find_definition, handle_find_errors, handle_find_imports,
+    handle_find_references, handle_find_tool_calls, handle_memory_add, handle_memory_add_batch,
+    handle_memory_delete, handle_memory_get, handle_memory_metrics, handle_memory_search,
+    handle_memory_stats, AddBatchParams, AddParams, DeleteParams, FindCallersParams,
+    FindDefinitionParams, FindErrorsParams, FindImportsParams, FindReferencesParams,
+    FindToolCallsParams, GetParams, MetricsParams, SearchParams, StatsParams,
 };
 use super::protocol::{Request, Response};
 use super::tools::get_all_tools;
 use crate::metrics::MetricsCollector;
 use crate::store::{Store, TenantManager};
-use crate::structural::SymbolQueryService;
+use crate::structural::{SymbolQueryService, TraceQueryService};
 use crate::Config;
 
 /// MCP protocol version supported by this server
@@ -42,6 +43,7 @@ pub struct McpServer<S: Store> {
     tenant_manager: Option<TenantManager>,
     metrics: Arc<MetricsCollector>,
     symbol_query_service: Option<Arc<SymbolQueryService>>,
+    trace_query_service: Option<Arc<TraceQueryService>>,
     initialized: bool,
 }
 
@@ -60,6 +62,7 @@ impl<S: Store> McpServer<S> {
             tenant_manager,
             metrics: Arc::new(MetricsCollector::default()),
             symbol_query_service: None,
+            trace_query_service: None,
             initialized: false,
         }
     }
@@ -77,6 +80,7 @@ impl<S: Store> McpServer<S> {
             tenant_manager,
             metrics,
             symbol_query_service: None,
+            trace_query_service: None,
             initialized: false,
         }
     }
@@ -84,6 +88,12 @@ impl<S: Store> McpServer<S> {
     /// Set the symbol query service for code navigation tools
     pub fn with_symbol_query_service(mut self, service: Arc<SymbolQueryService>) -> Self {
         self.symbol_query_service = Some(service);
+        self
+    }
+
+    /// Set the trace query service for debugging tools
+    pub fn with_trace_query_service(mut self, service: Arc<TraceQueryService>) -> Self {
+        self.trace_query_service = Some(service);
         self
     }
 
@@ -330,6 +340,20 @@ impl<S: Store> McpServer<S> {
                     .ok_or_else(|| McpError::ToolError("Structural index not initialized".to_string()))?;
                 handle_find_imports(query_service, params)
             }
+            "debug.find_tool_calls" => {
+                let params: FindToolCallsParams = serde_json::from_value(arguments)
+                    .map_err(|e| McpError::InvalidParams(format!("invalid find_tool_calls params: {}", e)))?;
+                let trace_service = self.trace_query_service.as_ref()
+                    .ok_or_else(|| McpError::ToolError("Trace index not initialized".to_string()))?;
+                handle_find_tool_calls(trace_service, params)
+            }
+            "debug.find_errors" => {
+                let params: FindErrorsParams = serde_json::from_value(arguments)
+                    .map_err(|e| McpError::InvalidParams(format!("invalid find_errors params: {}", e)))?;
+                let trace_service = self.trace_query_service.as_ref()
+                    .ok_or_else(|| McpError::ToolError("Trace index not initialized".to_string()))?;
+                handle_find_errors(trace_service, params)
+            }
             _ => Err(McpError::InvalidParams(format!("unknown tool '{}'", name))),
         }
     }
@@ -385,6 +409,7 @@ mod tests {
             tenant_manager: None,
             metrics: Arc::new(MetricsCollector::default()),
             symbol_query_service: None,
+            trace_query_service: None,
             initialized: false,
         }
     }
