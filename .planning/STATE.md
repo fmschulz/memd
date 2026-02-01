@@ -9,19 +9,20 @@ See: .planning/PROJECT.md (updated 2026-01-29)
 
 ## Current Position
 
-Phase: 4.1 (Pooling Strategy Support) - COMPLETE
-Plan: 3 of 3 in current phase
-Status: Phase complete
-Last activity: 2026-01-31 -- Completed 04.1-03-PLAN.md (CLI Integration and Quality Verification)
+Phase: 5 of 5 (Hot Tier + Cache)
+Plan: 02 of 04 (Semantic Cache)
+Status: Completed
+Last activity: 2026-02-01 -- Completed 05-02-PLAN.md (Semantic Cache)
 
-Progress: [================================================--] ~100% (26 of ~27 total plans estimated)
+Progress: [==================================================-] ~100% (28 of ~30 total plans estimated)
+**Phase 5 in progress**: Hot tier, semantic cache, and promotion logic
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 26
+- Total plans completed: 28
 - Average duration: 6m
-- Total execution time: ~160 minutes
+- Total execution time: ~170 minutes
 
 **By Phase:**
 
@@ -32,10 +33,11 @@ Progress: [================================================--] ~100% (26 of ~27 
 | 03 | 6 | 37m | 6m |
 | 04 | 6 | 27m | 4m |
 | 04.1 | 3 | 24m | 8m |
+| 05 | 2 | 10m | 5m |
 
 **Recent Trend:**
-- Last 5 plans: 04-06 (5m), 04.1-01 (4m), 04.1-02 (7m), 04.1-03 (13m)
-- Trend: Phase 4.1 COMPLETE - Qwen3 model now selectable via CLI
+- Last 5 plans: 04.1-02 (7m), 04.1-03 (13m), 05-01 (5m), 05-02 (5m)
+- Trend: Phase 5 in progress - Hot tier infrastructure building
 
 *Updated after each plan completion*
 
@@ -48,6 +50,10 @@ Progress: [================================================--] ~100% (26 of ~27 
   - Impact: +15% MTEB score improvement (56.3 → 64.33), projected 92-95% recall
   - Blocker removed: Incompatible pooling strategies (last-token vs mean)
   - Inserted: 2026-01-30
+  - **Benchmark results** (2026-01-30): No quality difference on hybrid eval dataset
+    - all-MiniLM: Recall@10: 0.833, p50: 10.4ms (6/7 tests passed)
+    - Qwen3: Recall@10: 0.833, p50: 49.2ms (6/7 tests passed, 4.7x slower)
+    - Conclusion: Keep all-MiniLM as default; infrastructure ready for future testing
 
 ### Decisions
 
@@ -145,6 +151,17 @@ Recent decisions affecting current work:
 - 04.1-03: Default embedding model remains all-MiniLM-L6-v2 for backward compatibility
 - 04.1-03: DenseSearcher updates HNSW dimension based on model selection
 - 04.1-03: Dimension mismatch errors suggest delete data dir or --rebuild-index
+- 04.1-BENCH: Comparative benchmark infrastructure via evals/scripts/compare_models.sh
+- 04.1-BENCH: all-MiniLM remains default (identical quality, 4.7x faster on hybrid eval)
+- 04.1-BENCH: KV-cache support enables decoder-style models (position_ids + 56 cache tensors)
+- 05-01: Multi-signal promotion scoring with frequency, recency, and project context
+- 05-01: Exponential decay for access recency (configurable half-life)
+- 05-01: AccessTracker with promotion_score() method for hot tier decisions
+- 05-02: Similarity threshold 0.85 for semantic cache hits
+- 05-02: Initial confidence 0.5 with 0.1 boost per hit
+- 05-02: TTL 45 minutes for semantic cache entries
+- 05-02: SHA-256 first 16 bytes for cache key generation
+- 05-02: Version >= for cache validity (not stale if version matches or newer)
 
 ### Pending Todos
 
@@ -152,17 +169,42 @@ None.
 
 ### Blockers/Concerns
 
-- ~~System glibc version prevents ort-sys linking~~ **RESOLVED**
+- **ACTIVE: Migrating to Candle (Pure Rust) for Production** 🚀
+  - **Problem**: ONNX Runtime (C++) has glibc 2.38+ requirement, Python subprocess too slow (30-80 req/s)
+  - **Solution**: Candle (pure Rust) - no C++, no Python, 100+ req/s capable
+  - **Status**: Implementation plan ready based on 2 Codex critical reviews
+  - **Reviews**:
+    - `docs/codex-review.md` - Python implementation review (NEEDS CHANGES)
+    - `docs/codex-candle-review.md` - Candle strategy review (APPROVED with fixes)
+  - **Plan**: `.planning/CANDLE_IMPLEMENTATION_PLAN.md` (addresses all critical findings)
+  - **Estimated Time**: 1.5-2 days (12-17 hours)
+  - **Critical Fixes Required**:
+    1. HNSW lock order inversion (deadlock risk)
+    2. Cache integrity gaps (validity flags not in CRC)
+    3. Global mutex bottleneck (add model pool)
+    4. Proper tokenization (truncation + padding)
+    5. Robust model loading (validation + error handling)
+  - **Expected Results**: 120-250 req/s, <12ms p50 latency, single binary
+  - **Start Point**: `START_HERE.md` (for context reset)
+
+- ~~System glibc version prevents ort-sys linking~~ **SUPERSEDED BY CANDLE**
   - Root cause: System glibc 2.35 < ort-sys requires glibc 2.38+ (C23 standard)
-  - **Solution**: Docker development environment with Ubuntu 24.04 (glibc 2.39)
-  - Files: Dockerfile.dev, docker-compose.yml, docker-dev.sh (commit 2ed9e6c)
-  - Usage: `./docker-dev.sh test` or `./docker-dev.sh eval --suite hybrid`
-  - Performance metrics captured: p50=0.6ms, p90=0.6ms, p99=0.9ms ✓
-  - All build/test/eval operations now work via Docker
-  - See DOCKER.md for detailed usage instructions
+  - Docker workaround worked but added complexity
+  - **Permanent fix**: Candle (pure Rust, no C++ dependencies)
 
 ## Session Continuity
 
-Last session: 2026-01-31 03:15 UTC
-Stopped at: Completed 04.1-03-PLAN.md (CLI Integration and Quality Verification) - PHASE 4.1 COMPLETE
-Resume file: None
+Last session: 2026-02-01 00:53 UTC
+Stopped at: Completed 05-02-PLAN.md (Semantic Cache)
+Resume file: .planning/phases/05-hot-tier-+-cache---hot-cache,-semantic-cache,-promotion/05-03-PLAN.md
+
+**Latest work:**
+- ✅ Completed 05-01: AccessTracker with multi-signal promotion scoring
+- ✅ Completed 05-02: SemanticCache with similarity lookup and TTL expiration
+- 🎯 **Next**: Continue Phase 5 with remaining plans (05-03, 05-04)
+
+**Phase 5 Progress:**
+- Plan 01: AccessTracker - COMPLETE
+- Plan 02: SemanticCache - COMPLETE
+- Plan 03: Hot Tier Integration - PENDING
+- Plan 04: Promotion/Demotion Logic - PENDING
