@@ -310,6 +310,29 @@ impl MetadataStore for SqliteMetadataStore {
 
         Ok((active, deleted))
     }
+
+    fn get_deleted_chunk_ids(&self, tenant_id: &TenantId) -> Result<Vec<ChunkId>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn.prepare(
+            "SELECT chunk_id FROM chunks WHERE tenant_id = ?1 AND status = 'deleted'",
+        )?;
+
+        let rows = stmt.query_map(rusqlite::params![tenant_id.as_str()], |row| {
+            let chunk_id_str: String = row.get(0)?;
+            Ok(chunk_id_str)
+        })?;
+
+        let mut chunk_ids = Vec::new();
+        for row in rows {
+            let chunk_id_str = row?;
+            if let Ok(chunk_id) = ChunkId::parse(&chunk_id_str) {
+                chunk_ids.push(chunk_id);
+            }
+        }
+
+        Ok(chunk_ids)
+    }
 }
 
 #[cfg(test)]
