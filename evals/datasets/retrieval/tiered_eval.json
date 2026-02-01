@@ -1,0 +1,251 @@
+{
+  "name": "tiered_eval",
+  "description": "Evaluation dataset for hot tier and semantic cache testing",
+  "version": "1.0",
+  "note": "Tests cache hit rates on repeated queries, hot tier promotion for frequently accessed chunks, and warm tier baseline. Test types: cache_hit (repeated similar queries), hot_tier (promoted chunks), warm_tier (cold queries).",
+  "test_types": ["cache_hit", "hot_tier", "warm_tier"],
+  "documents": [
+    {
+      "id": "hot-001",
+      "text": "UserAuthenticator service handles user login and session management. This is a frequently accessed component that validates credentials and issues JWT tokens.\n\npub struct UserAuthenticator {\n    jwt_secret: String,\n    token_ttl: Duration,\n}\n\nimpl UserAuthenticator {\n    pub async fn authenticate(&self, username: &str, password: &str) -> Result<Token> {\n        let user = self.validate_credentials(username, password).await?;\n        self.issue_token(&user)\n    }\n}",
+      "type": "code",
+      "tags": ["frequently_accessed", "auth"]
+    },
+    {
+      "id": "hot-002",
+      "text": "CacheLayer provides fast in-memory caching with LRU eviction. This is a hot path component used by many services for performance optimization.\n\npub struct CacheLayer<K, V> {\n    store: LruCache<K, V>,\n    ttl: Duration,\n    hits: AtomicU64,\n    misses: AtomicU64,\n}\n\nimpl<K: Hash + Eq, V: Clone> CacheLayer<K, V> {\n    pub fn get(&self, key: &K) -> Option<V> {\n        self.store.get(key).cloned()\n    }\n}",
+      "type": "code",
+      "tags": ["frequently_accessed", "cache"]
+    },
+    {
+      "id": "hot-003",
+      "text": "DatabaseConnectionPool manages database connections efficiently. This component is accessed on every database query making it a hot path.\n\npub struct DatabaseConnectionPool {\n    connections: Vec<Connection>,\n    available: Semaphore,\n    max_size: usize,\n}\n\nimpl DatabaseConnectionPool {\n    pub async fn acquire(&self) -> PooledConnection {\n        self.available.acquire().await;\n        self.connections.pop().expect(\"connection available\")\n    }\n}",
+      "type": "code",
+      "tags": ["frequently_accessed", "database"]
+    },
+    {
+      "id": "hot-004",
+      "text": "RequestRouter dispatches incoming HTTP requests to handlers. This is the entry point for all API calls, making it extremely frequently accessed.\n\nstruct RequestRouter {\n    routes: HashMap<String, Handler>,\n    middleware: Vec<Middleware>,\n}\n\nimpl RequestRouter {\n    async fn route(&self, req: Request) -> Response {\n        let handler = self.routes.get(&req.path)?;\n        self.run_middleware(req, handler).await\n    }\n}",
+      "type": "code",
+      "tags": ["frequently_accessed", "routing"]
+    },
+    {
+      "id": "hot-005",
+      "text": "MetricsCollector aggregates application metrics for monitoring. Accessed on every request to track latency and error rates.\n\npub struct MetricsCollector {\n    counters: HashMap<String, AtomicU64>,\n    histograms: HashMap<String, Histogram>,\n}\n\nimpl MetricsCollector {\n    pub fn record_latency(&self, endpoint: &str, latency_ms: u64) {\n        if let Some(h) = self.histograms.get(endpoint) {\n            h.record(latency_ms);\n        }\n    }\n}",
+      "type": "code",
+      "tags": ["frequently_accessed", "metrics"]
+    },
+    {
+      "id": "hot-006",
+      "text": "SessionStore manages user sessions with Redis backend. Critical for maintaining user state across requests.\n\npub struct SessionStore {\n    redis: RedisClient,\n    prefix: String,\n    ttl: Duration,\n}\n\nimpl SessionStore {\n    pub async fn get_session(&self, session_id: &str) -> Option<Session> {\n        let key = format!(\"{}{}\", self.prefix, session_id);\n        self.redis.get(&key).await.ok()\n    }\n}",
+      "type": "code",
+      "tags": ["frequently_accessed", "session"]
+    },
+    {
+      "id": "hot-007",
+      "text": "ConfigLoader reads application configuration at startup and caches it. Accessed frequently for feature flags and settings.\n\nstruct ConfigLoader {\n    config: Arc<RwLock<Config>>,\n    path: PathBuf,\n}\n\nimpl ConfigLoader {\n    fn get(&self, key: &str) -> Option<String> {\n        self.config.read().get(key).cloned()\n    }\n}",
+      "type": "code",
+      "tags": ["frequently_accessed", "config"]
+    },
+    {
+      "id": "hot-008",
+      "text": "RateLimiter controls API request rates per client. Consulted on every incoming request to prevent abuse.\n\npub struct RateLimiter {\n    limits: HashMap<String, u64>,\n    window: Duration,\n    store: RedisClient,\n}\n\nimpl RateLimiter {\n    pub async fn check(&self, client_id: &str) -> Result<(), RateLimitError> {\n        let count = self.store.incr(&format!(\"rate:{}\", client_id)).await?;\n        if count > self.limits.get(client_id).unwrap_or(&100) {\n            Err(RateLimitError::Exceeded)\n        } else {\n            Ok(())\n        }\n    }\n}",
+      "type": "code",
+      "tags": ["frequently_accessed", "security"]
+    },
+    {
+      "id": "hot-009",
+      "text": "LogFormatter structures log messages for output. Used by every logging call in the application.\n\npub struct LogFormatter {\n    format: LogFormat,\n    include_timestamp: bool,\n}\n\nimpl LogFormatter {\n    pub fn format(&self, record: &LogRecord) -> String {\n        match self.format {\n            LogFormat::Json => serde_json::to_string(record).unwrap(),\n            LogFormat::Text => format!(\"{} [{}] {}\", record.timestamp, record.level, record.message)\n        }\n    }\n}",
+      "type": "code",
+      "tags": ["frequently_accessed", "logging"]
+    },
+    {
+      "id": "hot-010",
+      "text": "ErrorHandler provides centralized error handling and response formatting. Called for every error in the application.\n\npub struct ErrorHandler {\n    include_stack_trace: bool,\n    notify_on_error: bool,\n}\n\nimpl ErrorHandler {\n    pub fn handle(&self, err: AppError) -> Response {\n        let status = err.status_code();\n        let body = if self.include_stack_trace {\n            format!(\"{}: {}\", err.message(), err.backtrace())\n        } else {\n            err.message().to_string()\n        };\n        Response::new(status).body(body)\n    }\n}",
+      "type": "code",
+      "tags": ["frequently_accessed", "error_handling"]
+    },
+    {
+      "id": "warm-001",
+      "text": "LegacyDataMigrator handles one-time data migration from old schema. Rarely accessed after initial migration.\n\nstruct LegacyDataMigrator {\n    source_db: Connection,\n    target_db: Connection,\n    batch_size: usize,\n}\n\nimpl LegacyDataMigrator {\n    async fn migrate_users(&self) -> Result<usize> {\n        let users = self.source_db.query(\"SELECT * FROM old_users\").await?;\n        self.target_db.insert_batch(&users).await\n    }\n}",
+      "type": "code",
+      "tags": ["rarely_accessed", "migration"]
+    },
+    {
+      "id": "warm-002",
+      "text": "BackupScheduler runs nightly database backups. Only accessed by cron jobs.\n\nstruct BackupScheduler {\n    backup_path: PathBuf,\n    retention_days: u32,\n    compression: bool,\n}\n\nimpl BackupScheduler {\n    async fn run_backup(&self) -> Result<BackupResult> {\n        let timestamp = Utc::now().format(\"%Y%m%d\").to_string();\n        let path = self.backup_path.join(format!(\"backup_{}.sql.gz\", timestamp));\n        self.db.dump_to_file(&path).await\n    }\n}",
+      "type": "code",
+      "tags": ["rarely_accessed", "backup"]
+    },
+    {
+      "id": "warm-003",
+      "text": "AuditLogArchiver moves old audit logs to cold storage. Runs monthly with minimal access.\n\nstruct AuditLogArchiver {\n    archive_bucket: S3Bucket,\n    retention_months: u32,\n}\n\nimpl AuditLogArchiver {\n    async fn archive_old_logs(&self) -> Result<usize> {\n        let cutoff = Utc::now() - Duration::days(self.retention_months * 30);\n        let logs = self.db.query(\"SELECT * FROM audit_logs WHERE created_at < ?\", &[cutoff]).await?;\n        self.archive_bucket.upload_batch(&logs).await\n    }\n}",
+      "type": "code",
+      "tags": ["rarely_accessed", "archival"]
+    },
+    {
+      "id": "warm-004",
+      "text": "SchemaVersionChecker validates database schema version on startup. Only accessed once per deployment.\n\nstruct SchemaVersionChecker {\n    expected_version: String,\n    migrations_path: PathBuf,\n}\n\nimpl SchemaVersionChecker {\n    async fn check(&self) -> Result<bool> {\n        let current = self.db.query_one(\"SELECT version FROM schema_info\").await?;\n        Ok(current == self.expected_version)\n    }\n}",
+      "type": "code",
+      "tags": ["rarely_accessed", "schema"]
+    },
+    {
+      "id": "warm-005",
+      "text": "ReportGenerator creates monthly business reports. Only accessed by scheduled jobs.\n\nstruct ReportGenerator {\n    templates: HashMap<String, Template>,\n    output_format: OutputFormat,\n}\n\nimpl ReportGenerator {\n    async fn generate_monthly_report(&self, month: u32, year: u32) -> Result<Report> {\n        let data = self.fetch_monthly_data(month, year).await?;\n        let template = self.templates.get(\"monthly\").unwrap();\n        template.render(&data)\n    }\n}",
+      "type": "code",
+      "tags": ["rarely_accessed", "reporting"]
+    },
+    {
+      "id": "warm-006",
+      "text": "FeatureFlagMigrator updates feature flag configurations. Only used during deployment.\n\nstruct FeatureFlagMigrator {\n    flags_config: PathBuf,\n    environment: String,\n}\n\nimpl FeatureFlagMigrator {\n    async fn apply_flags(&self) -> Result<()> {\n        let config = load_config(&self.flags_config)?;\n        for (flag, value) in config.flags {\n            self.db.upsert(\"feature_flags\", &flag, &value).await?;\n        }\n        Ok(())\n    }\n}",
+      "type": "code",
+      "tags": ["rarely_accessed", "deployment"]
+    },
+    {
+      "id": "warm-007",
+      "text": "DatabaseIndexOptimizer analyzes and optimizes indexes. Runs weekly during maintenance window.\n\nstruct DatabaseIndexOptimizer {\n    analyze_threshold: f64,\n    reindex_threshold: f64,\n}\n\nimpl DatabaseIndexOptimizer {\n    async fn optimize(&self) -> Result<OptimizationReport> {\n        let stats = self.db.query(\"SELECT * FROM pg_stat_user_indexes\").await?;\n        let mut reindexed = 0;\n        for stat in stats {\n            if stat.bloat_ratio > self.reindex_threshold {\n                self.db.execute(&format!(\"REINDEX INDEX {}\", stat.index_name)).await?;\n                reindexed += 1;\n            }\n        }\n        Ok(OptimizationReport { reindexed })\n    }\n}",
+      "type": "code",
+      "tags": ["rarely_accessed", "maintenance"]
+    },
+    {
+      "id": "warm-008",
+      "text": "EmailTemplateLoader loads email templates from disk. Only accessed when sending specific email types.\n\nstruct EmailTemplateLoader {\n    templates_dir: PathBuf,\n    cache: HashMap<String, Template>,\n}\n\nimpl EmailTemplateLoader {\n    fn load(&self, name: &str) -> Result<Template> {\n        if let Some(t) = self.cache.get(name) {\n            return Ok(t.clone());\n        }\n        let path = self.templates_dir.join(format!(\"{}.html\", name));\n        let content = fs::read_to_string(&path)?;\n        Ok(Template::parse(&content)?)\n    }\n}",
+      "type": "code",
+      "tags": ["rarely_accessed", "email"]
+    },
+    {
+      "id": "warm-009",
+      "text": "Architectural Decision Record for database selection. Chose PostgreSQL for ACID compliance and JSON support.\n\n# ADR-003: Database Selection\n\n## Status: Accepted\n\n## Context\nNeed reliable storage for user data with complex queries.\n\n## Decision\nUse PostgreSQL 14 with JSON column support.\n\n## Consequences\n- Good: ACID compliance, mature ecosystem\n- Bad: More operational complexity than SQLite",
+      "type": "decision",
+      "tags": ["rarely_accessed", "architecture"]
+    },
+    {
+      "id": "warm-010",
+      "text": "User onboarding documentation with step-by-step setup guide.\n\n# Getting Started Guide\n\n1. Create an account at dashboard.example.com\n2. Generate an API key in Settings > API\n3. Install the SDK: npm install @example/sdk\n4. Initialize with your key: const client = new ExampleClient(API_KEY)\n5. Make your first request: await client.ping()",
+      "type": "doc",
+      "tags": ["rarely_accessed", "documentation"]
+    }
+  ],
+  "queries": [
+    {
+      "id": "q-cache-01",
+      "query": "user authentication login credentials",
+      "relevant_docs": ["hot-001"],
+      "test_type": "cache_hit",
+      "repeat_count": 3,
+      "description": "Repeated similar query should hit semantic cache"
+    },
+    {
+      "id": "q-cache-02",
+      "query": "caching layer LRU eviction memory",
+      "relevant_docs": ["hot-002"],
+      "test_type": "cache_hit",
+      "repeat_count": 3,
+      "description": "Repeated query for cache component"
+    },
+    {
+      "id": "q-cache-03",
+      "query": "database connection pool management",
+      "relevant_docs": ["hot-003"],
+      "test_type": "cache_hit",
+      "repeat_count": 3,
+      "description": "Repeated query for connection pool"
+    },
+    {
+      "id": "q-cache-04",
+      "query": "HTTP request routing handler dispatch",
+      "relevant_docs": ["hot-004"],
+      "test_type": "cache_hit",
+      "repeat_count": 3,
+      "description": "Repeated query for router"
+    },
+    {
+      "id": "q-cache-05",
+      "query": "metrics collection latency monitoring",
+      "relevant_docs": ["hot-005"],
+      "test_type": "cache_hit",
+      "repeat_count": 3,
+      "description": "Repeated query for metrics"
+    },
+    {
+      "id": "q-hot-01",
+      "query": "session management user state Redis",
+      "relevant_docs": ["hot-006"],
+      "test_type": "hot_tier",
+      "expected_tier": "hot",
+      "description": "Frequently accessed session store"
+    },
+    {
+      "id": "q-hot-02",
+      "query": "configuration settings feature flags",
+      "relevant_docs": ["hot-007"],
+      "test_type": "hot_tier",
+      "expected_tier": "hot",
+      "description": "Config loader hot path"
+    },
+    {
+      "id": "q-hot-03",
+      "query": "rate limiting API request throttle",
+      "relevant_docs": ["hot-008"],
+      "test_type": "hot_tier",
+      "expected_tier": "hot",
+      "description": "Rate limiter checked every request"
+    },
+    {
+      "id": "q-hot-04",
+      "query": "log formatting structured logging",
+      "relevant_docs": ["hot-009"],
+      "test_type": "hot_tier",
+      "expected_tier": "hot",
+      "description": "Logger used everywhere"
+    },
+    {
+      "id": "q-hot-05",
+      "query": "error handling response formatting",
+      "relevant_docs": ["hot-010"],
+      "test_type": "hot_tier",
+      "expected_tier": "hot",
+      "description": "Error handler on every exception"
+    },
+    {
+      "id": "q-warm-01",
+      "query": "legacy data migration schema",
+      "relevant_docs": ["warm-001"],
+      "test_type": "warm_tier",
+      "expected_tier": "warm",
+      "description": "One-time migration tool"
+    },
+    {
+      "id": "q-warm-02",
+      "query": "backup scheduler nightly cron",
+      "relevant_docs": ["warm-002"],
+      "test_type": "warm_tier",
+      "expected_tier": "warm",
+      "description": "Backup job rarely accessed"
+    },
+    {
+      "id": "q-warm-03",
+      "query": "audit log archival cold storage",
+      "relevant_docs": ["warm-003"],
+      "test_type": "warm_tier",
+      "expected_tier": "warm",
+      "description": "Monthly archival process"
+    },
+    {
+      "id": "q-warm-04",
+      "query": "schema version validation deployment",
+      "relevant_docs": ["warm-004"],
+      "test_type": "warm_tier",
+      "expected_tier": "warm",
+      "description": "Startup-only check"
+    },
+    {
+      "id": "q-warm-05",
+      "query": "monthly business report generation",
+      "relevant_docs": ["warm-005"],
+      "test_type": "warm_tier",
+      "expected_tier": "warm",
+      "description": "Scheduled report job"
+    }
+  ]
+}
