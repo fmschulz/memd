@@ -207,6 +207,226 @@ impl<W: WarmTierSearch> TieredSearcher<W> {
     pub fn query_count(&self) -> u64 {
         self.query_counter.load(Ordering::Relaxed)
     }
+
+    /// Search across tiers with cache -> hot -> warm fallback
+    ///
+    /// Returns results from the fastest tier that has them:
+    /// 1. Semantic cache (if enabled and similar query found)
+    /// 2. Hot tier (if enabled and has results)
+    /// 3. Warm tier (always searched as fallback)
+    pub fn search(
+        &self,
+        query_embedding: &[f32],
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        k: usize,
+    ) -> Result<TieredSearchResult> {
+        self.search_internal(query_embedding, tenant_id, project_id, k, false)
+    }
+
+    /// Search with debug tier decisions enabled
+    pub fn search_with_debug(
+        &self,
+        query_embedding: &[f32],
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        k: usize,
+    ) -> Result<TieredSearchResult> {
+        self.search_internal(query_embedding, tenant_id, project_id, k, true)
+    }
+
+    /// Internal search implementation
+    fn search_internal(
+        &self,
+        query_embedding: &[f32],
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        k: usize,
+        debug: bool,
+    ) -> Result<TieredSearchResult> {
+        let total_start = Instant::now();
+        let mut timing = TieredTiming::default();
+        let mut tier_decisions = Vec::new();
+
+        // Increment query counter
+        self.query_counter.fetch_add(1, Ordering::Relaxed);
+
+        // Step 1: Cache lookup (if enabled)
+        let cache_start = Instant::now();
+        let cache_result = if self.config.enable_cache {
+            let version = self.warm_tier.get_version();
+            self.cache.lookup(query_embedding, tenant_id, project_id, version)
+        } else {
+            None
+        };
+        timing.cache_lookup_ms = cache_start.elapsed().as_millis() as u64;
+
+        // If cache hit, return immediately
+        if let Some(hit) = cache_result {
+            let results: Vec<ScoredChunk> = hit
+                .results
+                .into_iter()
+                .map(|r| ScoredChunk {
+                    chunk_id: r.chunk_id,
+                    score: r.score,
+                    source_tier: SourceTier::Cache,
+                })
+                .collect();
+
+            timing.total_ms = total_start.elapsed().as_millis() as u64;
+
+            return Ok(TieredSearchResult {
+                results,
+                source_tier: SourceTier::Cache,
+                cache_hit: true,
+                hot_tier_hit: false,
+                timing,
+                tier_decisions,
+            });
+        }
+
+        // Step 2: Hot tier search (if enabled)
+        let hot_start = Instant::now();
+        let hot_results = if self.config.enable_hot_tier {
+            let hot_tier = self.hot_tier.read();
+            hot_tier.search(query_embedding, k)?
+        } else {
+            Vec::new()
+        };
+        timing.hot_tier_ms = hot_start.elapsed().as_millis() as u64;
+
+        let hot_tier_hit = !hot_results.is_empty();
+
+        // Step 3: Warm tier search (always as fallback)
+        let warm_start = Instant::now();
+        let warm_results = self.warm_tier.search(query_embedding, k)?;
+        timing.warm_tier_ms = warm_start.elapsed().as_millis() as u64;
+
+        // Step 4: Merge and deduplicate results
+        let merged = self.merge_results(&hot_results, &warm_results, k, debug, &mut tier_decisions);
+
+        // Step 5: Record access for all returned chunks
+        {
+            let tracker = self.access_tracker.write();
+            for chunk in &merged {
+                let event = if let Some(proj) = project_id {
+                    AccessEvent::with_project(chunk.chunk_id.clone(), proj.to_string())
+                } else {
+                    AccessEvent::new(chunk.chunk_id.clone())
+                };
+                tracker.record_access(event);
+            }
+        }
+
+        // Step 6: Cache results (if cache enabled)
+        if self.config.enable_cache && !merged.is_empty() {
+            let cached_results: Vec<CachedResult> = merged
+                .iter()
+                .map(|r| CachedResult {
+                    chunk_id: r.chunk_id.clone(),
+                    score: r.score,
+                    text_preview: String::new(), // No text preview in this path
+                })
+                .collect();
+
+            let version = self.warm_tier.get_version();
+            self.cache.insert(
+                query_embedding.to_vec(),
+                tenant_id.clone(),
+                project_id.map(|s| s.to_string()),
+                cached_results,
+                version,
+            );
+        }
+
+        // Determine primary source tier
+        let source_tier = if hot_tier_hit {
+            SourceTier::Hot
+        } else {
+            SourceTier::Warm
+        };
+
+        timing.total_ms = total_start.elapsed().as_millis() as u64;
+
+        Ok(TieredSearchResult {
+            results: merged,
+            source_tier,
+            cache_hit: false,
+            hot_tier_hit,
+            timing,
+            tier_decisions: if debug || self.config.debug_tier_decisions {
+                tier_decisions
+            } else {
+                Vec::new()
+            },
+        })
+    }
+
+    /// Merge hot and warm tier results, deduplicating by chunk_id
+    ///
+    /// Prefers hot tier scores when a chunk appears in both.
+    fn merge_results(
+        &self,
+        hot_results: &[SearchResult],
+        warm_results: &[SearchResult],
+        k: usize,
+        debug: bool,
+        tier_decisions: &mut Vec<TierDecision>,
+    ) -> Vec<ScoredChunk> {
+        use std::collections::HashMap;
+
+        let mut seen: HashMap<ChunkId, ScoredChunk> = HashMap::new();
+
+        // Hot tier results first (preferred)
+        for result in hot_results {
+            if debug {
+                tier_decisions.push(TierDecision {
+                    chunk_id: result.chunk_id.clone(),
+                    action: TierAction::None,
+                    reason: format!("Found in hot tier with score {:.3}", result.score),
+                    score: Some(result.score),
+                    source_tier: SourceTier::Hot,
+                });
+            }
+            seen.insert(
+                result.chunk_id.clone(),
+                ScoredChunk {
+                    chunk_id: result.chunk_id.clone(),
+                    score: result.score,
+                    source_tier: SourceTier::Hot,
+                },
+            );
+        }
+
+        // Warm tier results (only if not already in hot)
+        for result in warm_results {
+            if !seen.contains_key(&result.chunk_id) {
+                if debug {
+                    tier_decisions.push(TierDecision {
+                        chunk_id: result.chunk_id.clone(),
+                        action: TierAction::None,
+                        reason: format!("Found in warm tier with score {:.3}", result.score),
+                        score: Some(result.score),
+                        source_tier: SourceTier::Warm,
+                    });
+                }
+                seen.insert(
+                    result.chunk_id.clone(),
+                    ScoredChunk {
+                        chunk_id: result.chunk_id.clone(),
+                        score: result.score,
+                        source_tier: SourceTier::Warm,
+                    },
+                );
+            }
+        }
+
+        // Sort by score descending and take top k
+        let mut results: Vec<ScoredChunk> = seen.into_values().collect();
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(k);
+        results
+    }
 }
 
 /// Get current time in milliseconds
