@@ -10,19 +10,19 @@ See: .planning/PROJECT.md (updated 2026-01-29)
 ## Current Position
 
 Phase: 5 of 5 (Hot Tier + Cache)
-Plan: 02 of 04 (Semantic Cache)
+Plan: 03 of 04 (TieredSearcher)
 Status: Completed
-Last activity: 2026-02-01 -- Completed 05-02-PLAN.md (Semantic Cache)
+Last activity: 2026-02-01 -- Completed 05-03-PLAN.md (TieredSearcher Coordination)
 
-Progress: [==================================================-] ~100% (28 of ~30 total plans estimated)
+Progress: [==================================================-] ~97% (29 of ~30 total plans estimated)
 **Phase 5 in progress**: Hot tier, semantic cache, and promotion logic
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 28
+- Total plans completed: 29
 - Average duration: 6m
-- Total execution time: ~170 minutes
+- Total execution time: ~175 minutes
 
 **By Phase:**
 
@@ -33,11 +33,11 @@ Progress: [==================================================-] ~100% (28 of ~30
 | 03 | 6 | 37m | 6m |
 | 04 | 6 | 27m | 4m |
 | 04.1 | 3 | 24m | 8m |
-| 05 | 2 | 10m | 5m |
+| 05 | 3 | 15m | 5m |
 
 **Recent Trend:**
-- Last 5 plans: 04.1-02 (7m), 04.1-03 (13m), 05-01 (5m), 05-02 (5m)
-- Trend: Phase 5 in progress - Hot tier infrastructure building
+- Last 5 plans: 04.1-03 (13m), 05-01 (5m), 05-02 (5m), 05-03 (5m)
+- Trend: Phase 5 proceeding smoothly - TieredSearcher complete
 
 *Updated after each plan completion*
 
@@ -162,6 +162,10 @@ Recent decisions affecting current work:
 - 05-02: TTL 45 minutes for semantic cache entries
 - 05-02: SHA-256 first 16 bytes for cache key generation
 - 05-02: Version >= for cache validity (not stale if version matches or newer)
+- 05-03: WarmTierSearch trait abstracts warm tier for testability
+- 05-03: Demotion threshold at 50% of promotion threshold (hysteresis)
+- 05-03: Query counter resets after demotion check (periodic checks)
+- 05-03: Auto-promotion requires non-zero project component
 
 ### Pending Todos
 
@@ -194,17 +198,18 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-01 00:53 UTC
-Stopped at: Completed 05-02-PLAN.md (Semantic Cache)
-Resume file: .planning/phases/05-hot-tier-+-cache---hot-cache,-semantic-cache,-promotion/05-03-PLAN.md
+Last session: 2026-02-01 01:01 UTC
+Stopped at: Completed 05-03-PLAN.md (TieredSearcher Coordination)
+Resume file: .planning/phases/05-hot-tier-+-cache---hot-cache,-semantic-cache,-promotion/05-04-PLAN.md
 
 **Latest work:**
-- ✅ Completed 05-01: AccessTracker with multi-signal promotion scoring
-- ✅ Completed 05-02: SemanticCache with similarity lookup and TTL expiration
-- 🎯 **Next**: Continue Phase 5 with remaining plans (05-03, 05-04)
+- Completed 05-01: AccessTracker with multi-signal promotion scoring
+- Completed 05-02: SemanticCache with similarity lookup and TTL expiration
+- Completed 05-03: TieredSearcher with cache->hot->warm fallback chain
+- **Next**: Continue Phase 5 with 05-04 (MCP Integration)
 
 **Phase 5 Progress:**
 - Plan 01: AccessTracker - COMPLETE
 - Plan 02: SemanticCache - COMPLETE
-- Plan 03: Hot Tier Integration - PENDING
-- Plan 04: Promotion/Demotion Logic - PENDING
+- Plan 03: TieredSearcher - COMPLETE
+- Plan 04: MCP Integration - PENDING
