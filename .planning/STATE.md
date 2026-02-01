@@ -5,24 +5,24 @@
 See: .planning/PROJECT.md (updated 2026-01-29)
 
 **Core value:** Agents can find and use relevant past context--across sessions, projects, and time--without hitting context window limits or losing continuity.
-**Current focus:** Phase 5 (Hot Tier + Cache) - Next phase after Pooling Strategy Support completion
+**Current focus:** Phase 5 (Hot Tier + Cache) - Completing tiered integration
 
 ## Current Position
 
 Phase: 5 of 5 (Hot Tier + Cache)
-Plan: 03 of 04 (TieredSearcher)
+Plan: 04 of 05 (Tiered Integration)
 Status: Completed
-Last activity: 2026-02-01 -- Completed 05-03-PLAN.md (TieredSearcher Coordination)
+Last activity: 2026-01-31 -- Completed 05-04-PLAN.md (Tiered Integration into HybridSearcher)
 
-Progress: [==================================================-] ~97% (29 of ~30 total plans estimated)
+Progress: [===================================================] ~100% (30 of ~31 total plans estimated)
 **Phase 5 in progress**: Hot tier, semantic cache, and promotion logic
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 29
+- Total plans completed: 30
 - Average duration: 6m
-- Total execution time: ~175 minutes
+- Total execution time: ~205 minutes
 
 **By Phase:**
 
@@ -33,11 +33,11 @@ Progress: [==================================================-] ~97% (29 of ~30 
 | 03 | 6 | 37m | 6m |
 | 04 | 6 | 27m | 4m |
 | 04.1 | 3 | 24m | 8m |
-| 05 | 3 | 15m | 5m |
+| 05 | 4 | 45m | 11m |
 
 **Recent Trend:**
-- Last 5 plans: 04.1-03 (13m), 05-01 (5m), 05-02 (5m), 05-03 (5m)
-- Trend: Phase 5 proceeding smoothly - TieredSearcher complete
+- Last 5 plans: 05-01 (5m), 05-02 (5m), 05-03 (5m), 05-04 (30m)
+- Trend: Phase 5 tiered integration complete - 05-04 was larger (3 tasks)
 
 *Updated after each plan completion*
 
@@ -47,7 +47,7 @@ Progress: [==================================================-] ~97% (29 of ~30 
 
 - Phase 4.1 inserted after Phase 4: Pooling Strategy Support (URGENT)
   - Reason: Enable next-generation embedding models (Qwen3-Embedding-0.6B)
-  - Impact: +15% MTEB score improvement (56.3 → 64.33), projected 92-95% recall
+  - Impact: +15% MTEB score improvement (56.3 -> 64.33), projected 92-95% recall
   - Blocker removed: Incompatible pooling strategies (last-token vs mean)
   - Inserted: 2026-01-30
   - **Benchmark results** (2026-01-30): No quality difference on hybrid eval dataset
@@ -166,6 +166,10 @@ Recent decisions affecting current work:
 - 05-03: Demotion threshold at 50% of promotion threshold (hysteresis)
 - 05-03: Query counter resets after demotion check (periodic checks)
 - 05-03: Auto-promotion requires non-zero project component
+- 05-04: Per-tenant TieredSearchers with shared SemanticCache
+- 05-04: WarmTierAdapter bridges DenseSearcher to WarmTierSearch
+- 05-04: TieredMetrics added to MetricsCollector for tier tracking
+- 05-04: Delete propagates to cache/hot tier invalidation
 
 ### Pending Todos
 
@@ -173,7 +177,7 @@ None.
 
 ### Blockers/Concerns
 
-- **ACTIVE: Migrating to Candle (Pure Rust) for Production** 🚀
+- **ACTIVE: Migrating to Candle (Pure Rust) for Production**
   - **Problem**: ONNX Runtime (C++) has glibc 2.38+ requirement, Python subprocess too slow (30-80 req/s)
   - **Solution**: Candle (pure Rust) - no C++, no Python, 100+ req/s capable
   - **Status**: Implementation plan ready based on 2 Codex critical reviews
@@ -198,18 +202,20 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-01 01:01 UTC
-Stopped at: Completed 05-03-PLAN.md (TieredSearcher Coordination)
-Resume file: .planning/phases/05-hot-tier-+-cache---hot-cache,-semantic-cache,-promotion/05-04-PLAN.md
+Last session: 2026-01-31 12:00 UTC
+Stopped at: Completed 05-04-PLAN.md (Tiered Integration into HybridSearcher)
+Resume file: .planning/phases/05-hot-tier-+-cache---hot-cache,-semantic-cache,-promotion/05-05-PLAN.md
 
 **Latest work:**
 - Completed 05-01: AccessTracker with multi-signal promotion scoring
 - Completed 05-02: SemanticCache with similarity lookup and TTL expiration
 - Completed 05-03: TieredSearcher with cache->hot->warm fallback chain
-- **Next**: Continue Phase 5 with 05-04 (MCP Integration)
+- Completed 05-04: TieredSearcher integrated into HybridSearcher and PersistentStore
+- **Next**: Continue Phase 5 with 05-05 (MCP Handler Updates)
 
 **Phase 5 Progress:**
 - Plan 01: AccessTracker - COMPLETE
 - Plan 02: SemanticCache - COMPLETE
 - Plan 03: TieredSearcher - COMPLETE
-- Plan 04: MCP Integration - PENDING
+- Plan 04: Tiered Integration - COMPLETE
+- Plan 05: MCP Handlers - PENDING
