@@ -178,6 +178,9 @@ Recent decisions affecting current work:
 - 06-01: tree-sitter 0.25 for grammar ABI version 15 compatibility
 - 06-01: Fresh LanguageSupport per parse (Parser not Send/Sync, cheap creation)
 - 06-01: Map .c/.h to C++ grammar (avoids separate tree-sitter-c)
+- 06-02: streaming_iterator for tree-sitter query matches (matches call_graph.rs pattern)
+- 06-02: TypeScript queries use type_identifier for class/interface names
+- 06-02: SymbolIndexer deletes before insert for re-indexing (clean slate)
 - 06-03: streaming-iterator for tree-sitter 0.25 QueryMatches API
 - 06-03: CallType enum: Direct, Method, Qualified for call classification
 - 06-03: Batch insert methods for efficient indexing
@@ -215,19 +218,19 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-01 02:49 UTC
-Stopped at: Completed 06-03-PLAN.md (Call Graph)
+Last session: 2026-02-01 02:54 UTC
+Stopped at: Completed 06-02-PLAN.md (Symbol Extractor + Storage)
 Resume file: None
 
 **Latest work:**
-- Completed 06-03: Call graph extraction with 7-language support
+- Completed 06-02: Multi-language symbol extraction and SQLite storage
 
 **Phase 6 Progress:**
 - Plan 01: Tree-sitter Parser - COMPLETE
-- Plan 02: Symbol Extractor - COMPLETE (parallel)
-- Plan 03: Call Graph - COMPLETE
+- Plan 02: Symbol Extractor + Storage - COMPLETE
+- Plan 03: Call Graph - COMPLETE (parallel)
 - Plan 04: Structural Search - pending
-- Plan 05: Symbol Index - pending
+- Plan 05: Traces + Indexing - pending
 - Plan 06: Persistence - pending
 - Plan 07: MCP Integration - pending
 - Plan 08: Eval Suite - pending
