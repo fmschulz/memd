@@ -10,19 +10,19 @@ See: .planning/PROJECT.md (updated 2026-01-29)
 ## Current Position
 
 Phase: 6 of 6 (Structural Indexes)
-Plan: 06 of 08 (Debug Trace Tools)
+Plan: 07 of 08 (Query Router)
 Status: Plan complete
-Last activity: 2026-02-01 -- Completed 06-06-PLAN.md (Debug Trace Tools)
+Last activity: 2026-02-01 -- Completed 06-07-PLAN.md (Query Router)
 
-Progress: [==============================================------] 95% (37 of 39 total plans)
-**Phase 6 PROGRESS**: Debug trace tools complete (debug.find_tool_calls, debug.find_errors)
+Progress: [================================================----] 97% (38 of 39 total plans)
+**Phase 6 PROGRESS**: Query router complete (intent classification, routing, STRUCT-14 blending)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 36
+- Total plans completed: 37
 - Average duration: 6m
-- Total execution time: ~235 minutes
+- Total execution time: ~241 minutes
 
 **By Phase:**
 
@@ -34,11 +34,11 @@ Progress: [==============================================------] 95% (37 of 39 t
 | 04 | 6 | 27m | 4m |
 | 04.1 | 3 | 24m | 8m |
 | 05 | 5 | 53m | 11m |
-| 06 | 7 | 49m | 7m |
+| 06 | 8 | 55m | 7m |
 
 **Recent Trend:**
-- Last 5 plans: 06-03 (6m), 06-04 (7m), 06-05 (18m), 06-06 (12m)
-- Trend: Phase 6 progressing - debug trace tools complete
+- Last 5 plans: 06-04 (7m), 06-05 (18m), 06-06 (12m), 06-07 (6m)
+- Trend: Phase 6 progressing - query router complete
 
 *Updated after each plan completion*
 
@@ -197,6 +197,10 @@ Recent decisions affecting current work:
 - 06-06: Use alias StructuralTimeRange to avoid collision with handlers.TimeRange
 - 06-06: Parse ISO 8601 timestamps manually without chrono dependency
 - 06-06: TraceQueryService pattern wraps StructuralStore for high-level trace queries
+- 06-07: Regex patterns for natural language intent detection
+- 06-07: Explicit prefixes (def:, callers:, refs:, etc.) override pattern detection
+- 06-07: BlendStrategy::StructuralPrimary as default (structural authoritative)
+- 06-07: QueryIntent::SemanticSearch as default variant (safe fallback)
 
 ### Pending Todos
 
@@ -229,12 +233,12 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-01 03:09 UTC
-Stopped at: Completed 06-06-PLAN.md (Debug Trace Tools)
+Last session: 2026-02-01 03:17 UTC
+Stopped at: Completed 06-07-PLAN.md (Query Router)
 Resume file: None
 
 **Latest work:**
-- Completed 06-06: Debug trace tools for querying tool invocations and stack traces
+- Completed 06-07: Query router for intent classification and routing with STRUCT-14 blending
 
 **Phase 6 Progress:**
 - Plan 01: Tree-sitter Parser - COMPLETE
@@ -243,5 +247,5 @@ Resume file: None
 - Plan 04: Structural Search - COMPLETE
 - Plan 05: Trace Storage - COMPLETE
 - Plan 06: Debug Trace Tools - COMPLETE
-- Plan 07: (reserved)
+- Plan 07: Query Router - COMPLETE
 - Plan 08: Eval Suite - pending
