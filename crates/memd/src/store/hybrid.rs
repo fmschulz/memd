@@ -1188,6 +1188,13 @@ impl HybridSearcher {
     pub fn get_cache_stats(&self) -> Option<crate::tiered::CacheStats> {
         self.semantic_cache.as_ref().map(|c| c.get_stats())
     }
+
+    /// Get reference to semantic cache for compaction
+    ///
+    /// Returns None if tiered search is not enabled.
+    pub fn get_semantic_cache(&self) -> Option<&SemanticCache> {
+        self.semantic_cache.as_ref().map(|c| c.as_ref())
+    }
 }
 
 #[cfg(test)]
