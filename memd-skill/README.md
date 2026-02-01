@@ -13,7 +13,7 @@ Complete guide for:
 
 ## Files
 
-- `skill.md` - Complete skill documentation
+- `SKILL.md` - Complete skill documentation
 - `examples/` - Example configurations and usage patterns
 - `mcp_config_claude.json` - Claude Code MCP configuration template
 - `mcp_config_codex.json` - Codex CLI MCP configuration template
@@ -66,7 +66,7 @@ memd works seamlessly with:
 
 ## Documentation
 
-See `skill.md` for comprehensive documentation including:
+See `SKILL.md` for comprehensive documentation including:
 - Detailed setup instructions
 - All 13 tool usage examples
 - Performance characteristics and tuning
