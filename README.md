@@ -2,6 +2,7 @@
 
 > A local daemon that provides persistent, searchable memory for AI coding agents through hybrid retrieval with hot/warm/cold tiering.
 
+[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/fmschulz/memd/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust Version](https://img.shields.io/badge/rust-1.75%2B-blue.svg)](https://www.rust-lang.org)
 
@@ -306,13 +307,13 @@ All architectural decisions are documented in code comments and design docs.
 **v0.1.0 - Milestone 1 Complete**
 
 Core features implemented:
-- ✅ MCP Server with 13 tools
-- ✅ Persistent storage with crash recovery
-- ✅ Hybrid retrieval (dense HNSW + sparse BM25)
-- ✅ Three-tier caching (hot/warm/cold)
-- ✅ Structural code indexes (6 languages)
-- ✅ Compaction and cleanup
-- ✅ Comprehensive evaluation suite (6 test suites)
+- MCP Server with 13 tools
+- Persistent storage with crash recovery
+- Hybrid retrieval (dense HNSW + sparse BM25)
+- Three-tier caching (hot/warm/cold)
+- Structural code indexes (6 languages)
+- Compaction and cleanup
+- Comprehensive evaluation suite (6 test suites)
 
 ## Known Limitations
 
