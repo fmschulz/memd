@@ -6,6 +6,7 @@
 
 mod call_graph;
 mod parser;
+mod queries;
 mod storage;
 mod symbols;
 mod traces;
@@ -14,6 +15,7 @@ pub use call_graph::{
     CallGraphExtractor, CallGraphIndexer, ExtractedCall, ExtractedImport,
     SymbolRecord as CallGraphSymbolRecord,
 };
+pub use queries::{CallerInfo, ImportInfo, SymbolLocation, SymbolQueryService};
 pub use parser::{
     detect_language, parse_file, LanguageSupport, ParseError, ParseResult, SupportedLanguage,
 };
