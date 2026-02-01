@@ -1,16 +1,47 @@
 //! SQLite storage for structural index data.
 //!
-//! Provides persistent storage for call graph edges and import relationships
-//! extracted from source code AST.
+//! Provides persistent storage for symbols, call graph edges, import
+//! relationships, tool call traces, and stack traces.
 
 use rusqlite::{params, Connection, Result as SqliteResult};
 use std::path::Path;
 use std::sync::Mutex;
 
+use crate::error::Result;
 use crate::types::TenantId;
 
 /// Schema for structural index tables.
 const STRUCTURAL_SCHEMA: &str = r#"
+-- Symbols table: functions, classes, methods, variables
+CREATE TABLE IF NOT EXISTS symbols (
+    symbol_id INTEGER PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    project_id TEXT,
+    file_path TEXT NOT NULL,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    line_start INTEGER NOT NULL,
+    line_end INTEGER NOT NULL,
+    col_start INTEGER NOT NULL,
+    col_end INTEGER NOT NULL,
+    parent_symbol_id INTEGER,
+    signature TEXT,
+    docstring TEXT,
+    visibility TEXT,
+    language TEXT NOT NULL,
+    FOREIGN KEY (parent_symbol_id) REFERENCES symbols(symbol_id)
+);
+
+-- Indexes for efficient symbol lookup
+CREATE INDEX IF NOT EXISTS idx_symbols_tenant_name
+    ON symbols(tenant_id, name);
+CREATE INDEX IF NOT EXISTS idx_symbols_tenant_file
+    ON symbols(tenant_id, file_path);
+CREATE INDEX IF NOT EXISTS idx_symbols_kind
+    ON symbols(tenant_id, kind);
+CREATE INDEX IF NOT EXISTS idx_symbols_parent
+    ON symbols(parent_symbol_id);
+
 -- Call graph edges: caller -> callee
 CREATE TABLE IF NOT EXISTS call_edges (
     edge_id INTEGER PRIMARY KEY,
@@ -51,7 +82,155 @@ CREATE INDEX IF NOT EXISTS idx_imports_source
     ON imports(tenant_id, source_file);
 CREATE INDEX IF NOT EXISTS idx_imports_module
     ON imports(tenant_id, imported_module);
+
+-- Tool call traces: captures agent tool invocations
+CREATE TABLE IF NOT EXISTS tool_traces (
+    trace_id INTEGER PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    project_id TEXT,
+    session_id TEXT,
+    tool_name TEXT NOT NULL,
+    timestamp_ms INTEGER NOT NULL,
+    input_json TEXT,      -- Full input parameters
+    output_json TEXT,     -- Full output (not truncated)
+    error_json TEXT,      -- Error if any
+    context_tags TEXT,    -- JSON array of tags
+    duration_ms INTEGER   -- How long the call took
+);
+
+-- Stack traces from errors
+CREATE TABLE IF NOT EXISTS stack_traces (
+    trace_id INTEGER PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    project_id TEXT,
+    session_id TEXT,
+    timestamp_ms INTEGER NOT NULL,
+    error_signature TEXT,  -- Normalized error type/message
+    error_message TEXT,    -- Full error message
+    full_trace TEXT        -- Raw trace string
+);
+
+-- Individual stack frames for precise queries
+CREATE TABLE IF NOT EXISTS stack_frames (
+    frame_id INTEGER PRIMARY KEY,
+    trace_id INTEGER NOT NULL,
+    frame_idx INTEGER NOT NULL,  -- 0 = top of stack
+    file_path TEXT,
+    function_name TEXT,
+    line_number INTEGER,
+    col_number INTEGER,
+    context TEXT,  -- Code snippet if available
+    FOREIGN KEY (trace_id) REFERENCES stack_traces(trace_id) ON DELETE CASCADE
+);
+
+-- Indexes for trace queries
+CREATE INDEX IF NOT EXISTS idx_tool_traces_tenant_tool
+    ON tool_traces(tenant_id, tool_name, timestamp_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_tool_traces_session
+    ON tool_traces(session_id, timestamp_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_tool_traces_time
+    ON tool_traces(tenant_id, timestamp_ms DESC);
+
+CREATE INDEX IF NOT EXISTS idx_stack_traces_tenant
+    ON stack_traces(tenant_id, timestamp_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_stack_traces_error_sig
+    ON stack_traces(tenant_id, error_signature);
+
+CREATE INDEX IF NOT EXISTS idx_stack_frames_function
+    ON stack_frames(function_name);
+CREATE INDEX IF NOT EXISTS idx_stack_frames_file
+    ON stack_frames(file_path);
+CREATE INDEX IF NOT EXISTS idx_stack_frames_trace
+    ON stack_frames(trace_id);
 "#;
+
+/// Symbol kinds extracted from source code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SymbolKind {
+    Function,
+    Class,
+    Method,
+    Variable,
+    Type,
+    Module,
+    Interface,
+    Enum,
+    Constant,
+}
+
+impl SymbolKind {
+    /// Convert to string for storage.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SymbolKind::Function => "function",
+            SymbolKind::Class => "class",
+            SymbolKind::Method => "method",
+            SymbolKind::Variable => "variable",
+            SymbolKind::Type => "type",
+            SymbolKind::Module => "module",
+            SymbolKind::Interface => "interface",
+            SymbolKind::Enum => "enum",
+            SymbolKind::Constant => "constant",
+        }
+    }
+
+    /// Parse from string.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "function" => Some(SymbolKind::Function),
+            "class" => Some(SymbolKind::Class),
+            "method" => Some(SymbolKind::Method),
+            "variable" => Some(SymbolKind::Variable),
+            "type" => Some(SymbolKind::Type),
+            "module" => Some(SymbolKind::Module),
+            "interface" => Some(SymbolKind::Interface),
+            "enum" => Some(SymbolKind::Enum),
+            "constant" => Some(SymbolKind::Constant),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for SymbolKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// A symbol record for storage.
+#[derive(Debug, Clone)]
+pub struct SymbolRecord {
+    /// Database ID (None before insert).
+    pub symbol_id: Option<i64>,
+    /// Tenant isolation.
+    pub tenant_id: TenantId,
+    /// Optional project scope.
+    pub project_id: Option<String>,
+    /// File containing the symbol.
+    pub file_path: String,
+    /// Symbol name.
+    pub name: String,
+    /// Symbol kind.
+    pub kind: SymbolKind,
+    /// Start line (0-indexed).
+    pub line_start: u32,
+    /// End line (0-indexed).
+    pub line_end: u32,
+    /// Start column (0-indexed).
+    pub col_start: u32,
+    /// End column (0-indexed).
+    pub col_end: u32,
+    /// Parent symbol ID for nested scopes.
+    pub parent_symbol_id: Option<i64>,
+    /// Function signature or type annotation.
+    pub signature: Option<String>,
+    /// Extracted documentation.
+    pub docstring: Option<String>,
+    /// Visibility (public, private, etc.).
+    pub visibility: Option<String>,
+    /// Source language.
+    pub language: String,
+}
 
 /// Type of function/method call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +291,169 @@ pub struct ImportRecord {
     pub is_relative: bool,
 }
 
+/// Time range for filtering trace queries.
+#[derive(Debug, Clone, Default)]
+pub struct TimeRange {
+    /// Start of range (inclusive), Unix milliseconds.
+    pub from_ms: Option<i64>,
+    /// End of range (inclusive), Unix milliseconds.
+    pub to_ms: Option<i64>,
+}
+
+impl TimeRange {
+    /// Create an unbounded time range.
+    pub fn unbounded() -> Self {
+        Self::default()
+    }
+
+    /// Create a time range with a start bound.
+    pub fn from(from_ms: i64) -> Self {
+        Self {
+            from_ms: Some(from_ms),
+            to_ms: None,
+        }
+    }
+
+    /// Create a time range with both bounds.
+    pub fn between(from_ms: i64, to_ms: i64) -> Self {
+        Self {
+            from_ms: Some(from_ms),
+            to_ms: Some(to_ms),
+        }
+    }
+}
+
+/// Record for a tool call trace.
+#[derive(Debug, Clone)]
+pub struct ToolTraceRecord {
+    /// Database ID (None for new records).
+    pub trace_id: Option<i64>,
+    /// Tenant this trace belongs to.
+    pub tenant_id: TenantId,
+    /// Project context (optional).
+    pub project_id: Option<String>,
+    /// Session context (optional).
+    pub session_id: Option<String>,
+    /// Name of the tool called.
+    pub tool_name: String,
+    /// When the call was made, Unix milliseconds.
+    pub timestamp_ms: i64,
+    /// Serialized input parameters.
+    pub input_json: Option<String>,
+    /// Serialized output (not truncated).
+    pub output_json: Option<String>,
+    /// Serialized error if any.
+    pub error_json: Option<String>,
+    /// Context tags for filtering.
+    pub context_tags: Vec<String>,
+    /// How long the call took in milliseconds.
+    pub duration_ms: Option<i64>,
+}
+
+impl ToolTraceRecord {
+    /// Create a new tool trace record.
+    pub fn new(tenant_id: TenantId, tool_name: impl Into<String>, timestamp_ms: i64) -> Self {
+        Self {
+            trace_id: None,
+            tenant_id,
+            project_id: None,
+            session_id: None,
+            tool_name: tool_name.into(),
+            timestamp_ms,
+            input_json: None,
+            output_json: None,
+            error_json: None,
+            context_tags: Vec::new(),
+            duration_ms: None,
+        }
+    }
+
+    /// Check if this trace has an error.
+    pub fn has_error(&self) -> bool {
+        self.error_json.is_some()
+    }
+}
+
+/// Record for a stack trace.
+#[derive(Debug, Clone)]
+pub struct StackTraceRecord {
+    /// Database ID (None for new records).
+    pub trace_id: Option<i64>,
+    /// Tenant this trace belongs to.
+    pub tenant_id: TenantId,
+    /// Project context (optional).
+    pub project_id: Option<String>,
+    /// Session context (optional).
+    pub session_id: Option<String>,
+    /// When the error occurred, Unix milliseconds.
+    pub timestamp_ms: i64,
+    /// Normalized error signature for grouping.
+    pub error_signature: String,
+    /// Full error message.
+    pub error_message: String,
+    /// Raw stack trace string.
+    pub full_trace: String,
+}
+
+impl StackTraceRecord {
+    /// Create a new stack trace record.
+    pub fn new(
+        tenant_id: TenantId,
+        timestamp_ms: i64,
+        error_signature: impl Into<String>,
+        error_message: impl Into<String>,
+        full_trace: impl Into<String>,
+    ) -> Self {
+        Self {
+            trace_id: None,
+            tenant_id,
+            project_id: None,
+            session_id: None,
+            timestamp_ms,
+            error_signature: error_signature.into(),
+            error_message: error_message.into(),
+            full_trace: full_trace.into(),
+        }
+    }
+}
+
+/// Record for a single stack frame.
+#[derive(Debug, Clone)]
+pub struct StackFrameRecord {
+    /// Database ID (None for new records).
+    pub frame_id: Option<i64>,
+    /// Parent trace ID.
+    pub trace_id: i64,
+    /// Frame index (0 = top of stack).
+    pub frame_idx: u32,
+    /// File path where the frame occurred.
+    pub file_path: Option<String>,
+    /// Function name.
+    pub function_name: Option<String>,
+    /// Line number.
+    pub line_number: Option<u32>,
+    /// Column number.
+    pub col_number: Option<u32>,
+    /// Code context snippet.
+    pub context: Option<String>,
+}
+
+impl StackFrameRecord {
+    /// Create a new stack frame record.
+    pub fn new(trace_id: i64, frame_idx: u32) -> Self {
+        Self {
+            frame_id: None,
+            trace_id,
+            frame_idx,
+            file_path: None,
+            function_name: None,
+            line_number: None,
+            col_number: None,
+            context: None,
+        }
+    }
+}
+
 /// SQLite-backed structural index store.
 pub struct StructuralStore {
     conn: Mutex<Connection>,
@@ -122,6 +464,8 @@ impl StructuralStore {
     pub fn open(path: &Path) -> SqliteResult<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch(STRUCTURAL_SCHEMA)?;
+        // Enable foreign key support for stack_frames -> stack_traces
+        conn.execute("PRAGMA foreign_keys = ON", [])?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -131,8 +475,259 @@ impl StructuralStore {
     pub fn in_memory() -> SqliteResult<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(STRUCTURAL_SCHEMA)?;
+        conn.execute("PRAGMA foreign_keys = ON", [])?;
         Ok(Self {
             conn: Mutex::new(conn),
+        })
+    }
+
+    // --- Symbol operations ---
+
+    /// Insert a single symbol and return its ID.
+    pub fn insert_symbol(&self, symbol: &SymbolRecord) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO symbols (
+                tenant_id, project_id, file_path, name, kind,
+                line_start, line_end, col_start, col_end,
+                parent_symbol_id, signature, docstring, visibility, language
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                symbol.tenant_id.as_str(),
+                symbol.project_id.as_deref(),
+                &symbol.file_path,
+                &symbol.name,
+                symbol.kind.as_str(),
+                symbol.line_start as i64,
+                symbol.line_end as i64,
+                symbol.col_start as i64,
+                symbol.col_end as i64,
+                symbol.parent_symbol_id,
+                symbol.signature.as_deref(),
+                symbol.docstring.as_deref(),
+                symbol.visibility.as_deref(),
+                &symbol.language,
+            ],
+        )?;
+
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Insert multiple symbols in a transaction for performance.
+    pub fn insert_symbols_batch(&self, symbols: &[SymbolRecord]) -> Result<Vec<i64>> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        let mut ids = Vec::with_capacity(symbols.len());
+
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO symbols (
+                    tenant_id, project_id, file_path, name, kind,
+                    line_start, line_end, col_start, col_end,
+                    parent_symbol_id, signature, docstring, visibility, language
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"
+            )?;
+
+            for symbol in symbols {
+                stmt.execute(params![
+                    symbol.tenant_id.as_str(),
+                    symbol.project_id.as_deref(),
+                    &symbol.file_path,
+                    &symbol.name,
+                    symbol.kind.as_str(),
+                    symbol.line_start as i64,
+                    symbol.line_end as i64,
+                    symbol.col_start as i64,
+                    symbol.col_end as i64,
+                    symbol.parent_symbol_id,
+                    symbol.signature.as_deref(),
+                    symbol.docstring.as_deref(),
+                    symbol.visibility.as_deref(),
+                    &symbol.language,
+                ])?;
+                ids.push(tx.last_insert_rowid());
+            }
+        }
+
+        tx.commit()?;
+        Ok(ids)
+    }
+
+    /// Find symbols by exact name match.
+    pub fn find_symbols_by_name(&self, tenant_id: &TenantId, name: &str) -> Result<Vec<SymbolRecord>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn.prepare(
+            "SELECT symbol_id, tenant_id, project_id, file_path, name, kind,
+                    line_start, line_end, col_start, col_end,
+                    parent_symbol_id, signature, docstring, visibility, language
+             FROM symbols
+             WHERE tenant_id = ?1 AND name = ?2"
+        )?;
+
+        let rows = stmt.query_map(params![tenant_id.as_str(), name], |row| {
+            Self::row_to_symbol(row)
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+
+        Ok(results)
+    }
+
+    /// Find symbols by name prefix (for autocomplete).
+    pub fn find_symbols_by_name_prefix(
+        &self,
+        tenant_id: &TenantId,
+        prefix: &str,
+    ) -> Result<Vec<SymbolRecord>> {
+        let conn = self.conn.lock().unwrap();
+
+        // Use LIKE with ESCAPE for safe prefix matching
+        let pattern = format!("{}%", prefix.replace('%', "\\%").replace('_', "\\_"));
+
+        let mut stmt = conn.prepare(
+            "SELECT symbol_id, tenant_id, project_id, file_path, name, kind,
+                    line_start, line_end, col_start, col_end,
+                    parent_symbol_id, signature, docstring, visibility, language
+             FROM symbols
+             WHERE tenant_id = ?1 AND name LIKE ?2 ESCAPE '\\'
+             ORDER BY name
+             LIMIT 100"
+        )?;
+
+        let rows = stmt.query_map(params![tenant_id.as_str(), &pattern], |row| {
+            Self::row_to_symbol(row)
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+
+        Ok(results)
+    }
+
+    /// Find all symbols in a file.
+    pub fn find_symbols_by_file(
+        &self,
+        tenant_id: &TenantId,
+        file_path: &str,
+    ) -> Result<Vec<SymbolRecord>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn.prepare(
+            "SELECT symbol_id, tenant_id, project_id, file_path, name, kind,
+                    line_start, line_end, col_start, col_end,
+                    parent_symbol_id, signature, docstring, visibility, language
+             FROM symbols
+             WHERE tenant_id = ?1 AND file_path = ?2
+             ORDER BY line_start"
+        )?;
+
+        let rows = stmt.query_map(params![tenant_id.as_str(), file_path], |row| {
+            Self::row_to_symbol(row)
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+
+        Ok(results)
+    }
+
+    /// Delete all symbols for a file (for re-indexing).
+    pub fn delete_file_symbols(
+        &self,
+        tenant_id: &TenantId,
+        file_path: &str,
+    ) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+
+        let rows_deleted = conn.execute(
+            "DELETE FROM symbols WHERE tenant_id = ?1 AND file_path = ?2",
+            params![tenant_id.as_str(), file_path],
+        )?;
+
+        Ok(rows_deleted)
+    }
+
+    /// Get child symbols of a parent (e.g., methods of a class).
+    pub fn get_symbol_children(&self, symbol_id: i64) -> Result<Vec<SymbolRecord>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn.prepare(
+            "SELECT symbol_id, tenant_id, project_id, file_path, name, kind,
+                    line_start, line_end, col_start, col_end,
+                    parent_symbol_id, signature, docstring, visibility, language
+             FROM symbols
+             WHERE parent_symbol_id = ?1
+             ORDER BY line_start"
+        )?;
+
+        let rows = stmt.query_map(params![symbol_id], |row| {
+            Self::row_to_symbol(row)
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+
+        Ok(results)
+    }
+
+    /// Convert a database row to SymbolRecord.
+    fn row_to_symbol(row: &rusqlite::Row) -> rusqlite::Result<SymbolRecord> {
+        let symbol_id: i64 = row.get(0)?;
+        let tenant_id_str: String = row.get(1)?;
+        let project_id: Option<String> = row.get(2)?;
+        let file_path: String = row.get(3)?;
+        let name: String = row.get(4)?;
+        let kind_str: String = row.get(5)?;
+        let line_start: i64 = row.get(6)?;
+        let line_end: i64 = row.get(7)?;
+        let col_start: i64 = row.get(8)?;
+        let col_end: i64 = row.get(9)?;
+        let parent_symbol_id: Option<i64> = row.get(10)?;
+        let signature: Option<String> = row.get(11)?;
+        let docstring: Option<String> = row.get(12)?;
+        let visibility: Option<String> = row.get(13)?;
+        let language: String = row.get(14)?;
+
+        // Parse tenant_id - this should not fail for valid stored data
+        let tenant_id = TenantId::new(&tenant_id_str).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Text,
+                Box::new(e),
+            )
+        })?;
+
+        // Parse kind - default to Function if unknown
+        let kind = SymbolKind::from_str(&kind_str).unwrap_or(SymbolKind::Function);
+
+        Ok(SymbolRecord {
+            symbol_id: Some(symbol_id),
+            tenant_id,
+            project_id,
+            file_path,
+            name,
+            kind,
+            line_start: line_start as u32,
+            line_end: line_end as u32,
+            col_start: col_start as u32,
+            col_end: col_end as u32,
+            parent_symbol_id,
+            signature,
+            docstring,
+            visibility,
+            language,
         })
     }
 
@@ -403,6 +998,230 @@ mod tests {
 
     fn test_tenant() -> TenantId {
         TenantId::new("test_tenant").unwrap()
+    }
+
+    fn create_test_symbol(tenant: &str, name: &str, kind: SymbolKind) -> SymbolRecord {
+        SymbolRecord {
+            symbol_id: None,
+            tenant_id: TenantId::new(tenant).unwrap(),
+            project_id: None,
+            file_path: "src/main.rs".to_string(),
+            name: name.to_string(),
+            kind,
+            line_start: 10,
+            line_end: 20,
+            col_start: 0,
+            col_end: 1,
+            parent_symbol_id: None,
+            signature: Some("fn main() -> ()".to_string()),
+            docstring: Some("Entry point".to_string()),
+            visibility: Some("public".to_string()),
+            language: "rust".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_insert_and_find_symbol() {
+        let store = StructuralStore::in_memory().unwrap();
+
+        let symbol = create_test_symbol("tenant_a", "main", SymbolKind::Function);
+        let id = store.insert_symbol(&symbol).unwrap();
+        assert!(id > 0);
+
+        let tenant_id = TenantId::new("tenant_a").unwrap();
+        let found = store.find_symbols_by_name(&tenant_id, "main").unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "main");
+        assert_eq!(found[0].kind, SymbolKind::Function);
+        assert_eq!(found[0].signature, Some("fn main() -> ()".to_string()));
+    }
+
+    #[test]
+    fn test_find_symbols_by_name_prefix() {
+        let store = StructuralStore::in_memory().unwrap();
+
+        // Insert symbols with similar names
+        store.insert_symbol(&create_test_symbol("tenant_a", "process_data", SymbolKind::Function)).unwrap();
+        store.insert_symbol(&create_test_symbol("tenant_a", "process_file", SymbolKind::Function)).unwrap();
+        store.insert_symbol(&create_test_symbol("tenant_a", "parse_input", SymbolKind::Function)).unwrap();
+
+        let tenant_id = TenantId::new("tenant_a").unwrap();
+
+        // Find by prefix "process"
+        let found = store.find_symbols_by_name_prefix(&tenant_id, "process").unwrap();
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().all(|s| s.name.starts_with("process")));
+
+        // Find by prefix "p"
+        let found = store.find_symbols_by_name_prefix(&tenant_id, "p").unwrap();
+        assert_eq!(found.len(), 3);
+    }
+
+    #[test]
+    fn test_symbol_tenant_isolation() {
+        let store = StructuralStore::in_memory().unwrap();
+
+        // Insert symbol for tenant_a
+        store.insert_symbol(&create_test_symbol("tenant_a", "secret_fn", SymbolKind::Function)).unwrap();
+
+        let tenant_a = TenantId::new("tenant_a").unwrap();
+        let tenant_b = TenantId::new("tenant_b").unwrap();
+
+        // Tenant A can find their symbol
+        let found_a = store.find_symbols_by_name(&tenant_a, "secret_fn").unwrap();
+        assert_eq!(found_a.len(), 1);
+
+        // Tenant B cannot find tenant A's symbol
+        let found_b = store.find_symbols_by_name(&tenant_b, "secret_fn").unwrap();
+        assert_eq!(found_b.len(), 0);
+    }
+
+    #[test]
+    fn test_delete_file_symbols() {
+        let store = StructuralStore::in_memory().unwrap();
+
+        // Insert symbols for different files
+        let mut symbol1 = create_test_symbol("tenant_a", "fn1", SymbolKind::Function);
+        symbol1.file_path = "src/lib.rs".to_string();
+        store.insert_symbol(&symbol1).unwrap();
+
+        let mut symbol2 = create_test_symbol("tenant_a", "fn2", SymbolKind::Function);
+        symbol2.file_path = "src/lib.rs".to_string();
+        store.insert_symbol(&symbol2).unwrap();
+
+        let mut symbol3 = create_test_symbol("tenant_a", "fn3", SymbolKind::Function);
+        symbol3.file_path = "src/other.rs".to_string();
+        store.insert_symbol(&symbol3).unwrap();
+
+        let tenant_id = TenantId::new("tenant_a").unwrap();
+
+        // Verify all symbols exist
+        let lib_symbols = store.find_symbols_by_file(&tenant_id, "src/lib.rs").unwrap();
+        assert_eq!(lib_symbols.len(), 2);
+
+        // Delete symbols for src/lib.rs
+        let deleted = store.delete_file_symbols(&tenant_id, "src/lib.rs").unwrap();
+        assert_eq!(deleted, 2);
+
+        // Verify lib.rs symbols are gone
+        let lib_symbols = store.find_symbols_by_file(&tenant_id, "src/lib.rs").unwrap();
+        assert_eq!(lib_symbols.len(), 0);
+
+        // Verify other.rs symbols still exist
+        let other_symbols = store.find_symbols_by_file(&tenant_id, "src/other.rs").unwrap();
+        assert_eq!(other_symbols.len(), 1);
+    }
+
+    #[test]
+    fn test_nested_symbols() {
+        let store = StructuralStore::in_memory().unwrap();
+
+        // Insert a class
+        let class_symbol = SymbolRecord {
+            symbol_id: None,
+            tenant_id: TenantId::new("tenant_a").unwrap(),
+            project_id: None,
+            file_path: "src/user.rs".to_string(),
+            name: "User".to_string(),
+            kind: SymbolKind::Class,
+            line_start: 1,
+            line_end: 50,
+            col_start: 0,
+            col_end: 1,
+            parent_symbol_id: None,
+            signature: None,
+            docstring: Some("User struct".to_string()),
+            visibility: Some("public".to_string()),
+            language: "rust".to_string(),
+        };
+        let class_id = store.insert_symbol(&class_symbol).unwrap();
+
+        // Insert methods with class as parent
+        let method1 = SymbolRecord {
+            symbol_id: None,
+            tenant_id: TenantId::new("tenant_a").unwrap(),
+            project_id: None,
+            file_path: "src/user.rs".to_string(),
+            name: "new".to_string(),
+            kind: SymbolKind::Method,
+            line_start: 5,
+            line_end: 10,
+            col_start: 4,
+            col_end: 5,
+            parent_symbol_id: Some(class_id),
+            signature: Some("fn new() -> Self".to_string()),
+            docstring: None,
+            visibility: Some("public".to_string()),
+            language: "rust".to_string(),
+        };
+        store.insert_symbol(&method1).unwrap();
+
+        let method2 = SymbolRecord {
+            symbol_id: None,
+            tenant_id: TenantId::new("tenant_a").unwrap(),
+            project_id: None,
+            file_path: "src/user.rs".to_string(),
+            name: "get_name".to_string(),
+            kind: SymbolKind::Method,
+            line_start: 15,
+            line_end: 20,
+            col_start: 4,
+            col_end: 5,
+            parent_symbol_id: Some(class_id),
+            signature: Some("fn get_name(&self) -> &str".to_string()),
+            docstring: None,
+            visibility: Some("public".to_string()),
+            language: "rust".to_string(),
+        };
+        store.insert_symbol(&method2).unwrap();
+
+        // Get children of the class
+        let children = store.get_symbol_children(class_id).unwrap();
+        assert_eq!(children.len(), 2);
+        assert!(children.iter().all(|s| s.kind == SymbolKind::Method));
+        assert!(children.iter().all(|s| s.parent_symbol_id == Some(class_id)));
+
+        // Verify ordering by line
+        assert_eq!(children[0].name, "new");
+        assert_eq!(children[1].name, "get_name");
+    }
+
+    #[test]
+    fn test_batch_insert_symbols() {
+        let store = StructuralStore::in_memory().unwrap();
+
+        let symbols: Vec<SymbolRecord> = (0..100)
+            .map(|i| SymbolRecord {
+                symbol_id: None,
+                tenant_id: TenantId::new("tenant_a").unwrap(),
+                project_id: None,
+                file_path: "src/big.rs".to_string(),
+                name: format!("func_{}", i),
+                kind: SymbolKind::Function,
+                line_start: i * 10,
+                line_end: i * 10 + 5,
+                col_start: 0,
+                col_end: 1,
+                parent_symbol_id: None,
+                signature: None,
+                docstring: None,
+                visibility: None,
+                language: "rust".to_string(),
+            })
+            .collect();
+
+        let ids = store.insert_symbols_batch(&symbols).unwrap();
+        assert_eq!(ids.len(), 100);
+
+        // Verify all are unique and positive
+        let unique_ids: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(unique_ids.len(), 100);
+        assert!(ids.iter().all(|&id| id > 0));
+
+        // Verify we can find them
+        let tenant_id = TenantId::new("tenant_a").unwrap();
+        let found = store.find_symbols_by_file(&tenant_id, "src/big.rs").unwrap();
+        assert_eq!(found.len(), 100);
     }
 
     #[test]
