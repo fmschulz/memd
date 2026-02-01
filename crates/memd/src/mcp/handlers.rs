@@ -135,6 +135,48 @@ fn default_true() -> bool {
     true
 }
 
+fn default_depth() -> u32 {
+    1
+}
+
+/// Parameters for code.find_definition
+#[derive(Debug, Deserialize)]
+pub struct FindDefinitionParams {
+    pub tenant_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+/// Parameters for code.find_references
+#[derive(Debug, Deserialize)]
+pub struct FindReferencesParams {
+    pub tenant_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+/// Parameters for code.find_callers
+#[derive(Debug, Deserialize)]
+pub struct FindCallersParams {
+    pub tenant_id: String,
+    pub name: String,
+    #[serde(default = "default_depth")]
+    pub depth: u32,
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+/// Parameters for code.find_imports
+#[derive(Debug, Deserialize)]
+pub struct FindImportsParams {
+    pub tenant_id: String,
+    pub module: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
 // ---------- Response Types ----------
 
 /// Result of a search operation
@@ -298,6 +340,69 @@ pub struct TieredMetricsResult {
     pub avg_hot_tier_ms: f64,
     /// Average warm tier search latency (ms)
     pub avg_warm_tier_ms: f64,
+}
+
+/// Result of code.find_definition
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FindDefinitionResult {
+    pub definitions: Vec<SymbolLocationResult>,
+}
+
+/// A symbol location in the codebase
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SymbolLocationResult {
+    pub file_path: String,
+    pub name: String,
+    pub kind: String,
+    pub line_start: u32,
+    pub line_end: u32,
+    pub col_start: u32,
+    pub col_end: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub docstring: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
+    pub language: String,
+}
+
+/// Result of code.find_references
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FindReferencesResult {
+    pub references: Vec<SymbolLocationResult>,
+}
+
+/// Result of code.find_callers
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FindCallersResult {
+    pub callers: Vec<CallerInfoResult>,
+}
+
+/// Information about a caller
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CallerInfoResult {
+    pub caller_name: String,
+    pub caller_file: String,
+    pub call_line: u32,
+    pub call_col: u32,
+    pub caller_kind: String,
+    pub depth: u32,
+}
+
+/// Result of code.find_imports
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FindImportsResult {
+    pub imports: Vec<ImportInfoResult>,
+}
+
+/// Information about an import
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ImportInfoResult {
+    pub importing_file: String,
+    pub import_line: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
 }
 
 // ---------- Helper Functions ----------
@@ -701,6 +806,160 @@ pub fn handle_memory_metrics(
     }
 
     format_mcp_response(&snapshot)
+}
+
+// ---------- Structural Query Handlers ----------
+
+use crate::structural::{CallerInfo, ImportInfo, SymbolLocation, SymbolQueryService};
+
+/// Handle code.find_definition tool call
+pub fn handle_find_definition(
+    query_service: &SymbolQueryService,
+    params: FindDefinitionParams,
+) -> Result<Value, McpError> {
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+
+    info!(
+        tenant_id = %tenant_id,
+        name = %params.name,
+        "code.find_definition"
+    );
+
+    let locations = query_service
+        .find_symbol_definition(&tenant_id, &params.name, params.project_id.as_deref())
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    debug!(results_count = locations.len(), "find_definition completed");
+
+    let definitions: Vec<SymbolLocationResult> = locations
+        .into_iter()
+        .map(symbol_location_to_result)
+        .collect();
+
+    format_mcp_response(&FindDefinitionResult { definitions })
+}
+
+/// Handle code.find_references tool call
+pub fn handle_find_references(
+    query_service: &SymbolQueryService,
+    params: FindReferencesParams,
+) -> Result<Value, McpError> {
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+
+    info!(
+        tenant_id = %tenant_id,
+        name = %params.name,
+        "code.find_references"
+    );
+
+    let locations = query_service
+        .find_references(&tenant_id, &params.name, params.project_id.as_deref())
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    debug!(results_count = locations.len(), "find_references completed");
+
+    let references: Vec<SymbolLocationResult> = locations
+        .into_iter()
+        .map(symbol_location_to_result)
+        .collect();
+
+    format_mcp_response(&FindReferencesResult { references })
+}
+
+/// Handle code.find_callers tool call
+pub fn handle_find_callers(
+    query_service: &SymbolQueryService,
+    params: FindCallersParams,
+) -> Result<Value, McpError> {
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+
+    // Clamp depth to 1-3
+    let depth = params.depth.clamp(1, 3);
+
+    info!(
+        tenant_id = %tenant_id,
+        name = %params.name,
+        depth = depth,
+        "code.find_callers"
+    );
+
+    let caller_infos = query_service
+        .find_callers(&tenant_id, &params.name, depth, params.project_id.as_deref())
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    debug!(results_count = caller_infos.len(), "find_callers completed");
+
+    let callers: Vec<CallerInfoResult> = caller_infos
+        .into_iter()
+        .map(caller_info_to_result)
+        .collect();
+
+    format_mcp_response(&FindCallersResult { callers })
+}
+
+/// Handle code.find_imports tool call
+pub fn handle_find_imports(
+    query_service: &SymbolQueryService,
+    params: FindImportsParams,
+) -> Result<Value, McpError> {
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+
+    info!(
+        tenant_id = %tenant_id,
+        module = %params.module,
+        "code.find_imports"
+    );
+
+    let import_infos = query_service
+        .find_imports(&tenant_id, &params.module, params.project_id.as_deref())
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    debug!(results_count = import_infos.len(), "find_imports completed");
+
+    let imports: Vec<ImportInfoResult> = import_infos
+        .into_iter()
+        .map(import_info_to_result)
+        .collect();
+
+    format_mcp_response(&FindImportsResult { imports })
+}
+
+/// Convert SymbolLocation to result type
+fn symbol_location_to_result(loc: SymbolLocation) -> SymbolLocationResult {
+    SymbolLocationResult {
+        file_path: loc.file_path,
+        name: loc.name,
+        kind: loc.kind.as_str().to_string(),
+        line_start: loc.line_start,
+        line_end: loc.line_end,
+        col_start: loc.col_start,
+        col_end: loc.col_end,
+        signature: loc.signature,
+        docstring: loc.docstring,
+        visibility: loc.visibility,
+        language: loc.language,
+    }
+}
+
+/// Convert CallerInfo to result type
+fn caller_info_to_result(info: CallerInfo) -> CallerInfoResult {
+    CallerInfoResult {
+        caller_name: info.caller_name,
+        caller_file: info.caller_file,
+        call_line: info.call_line,
+        call_col: info.call_col,
+        caller_kind: info.caller_kind.as_str().to_string(),
+        depth: info.depth,
+    }
+}
+
+/// Convert ImportInfo to result type
+fn import_info_to_result(info: ImportInfo) -> ImportInfoResult {
+    ImportInfoResult {
+        importing_file: info.importing_file,
+        import_line: info.import_line,
+        alias: info.alias,
+    }
 }
 
 #[cfg(test)]
