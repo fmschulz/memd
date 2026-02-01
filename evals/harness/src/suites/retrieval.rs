@@ -73,7 +73,7 @@ fn extract_content_text(response: &Value) -> Option<&str> {
 }
 
 /// Run retrieval quality tests
-pub fn run_retrieval_tests(memd_path: &PathBuf) -> Vec<TestResult> {
+pub fn run_retrieval_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestResult> {
     let mut results = Vec::new();
 
     // Load dataset
@@ -101,10 +101,10 @@ pub fn run_retrieval_tests(memd_path: &PathBuf) -> Vec<TestResult> {
     );
 
     // B1: Index all documents
-    results.push(run_b1_index_documents(memd_path, &dataset));
+    results.push(run_b1_index_documents(memd_path, &dataset, embedding_model));
 
     // B2: Evaluate retrieval quality
-    let (b2_result, metrics) = run_b2_retrieval_quality(memd_path, &dataset);
+    let (b2_result, metrics) = run_b2_retrieval_quality(memd_path, &dataset, embedding_model);
     results.push(b2_result);
 
     // B3: Check quality thresholds
@@ -118,7 +118,11 @@ fn load_dataset(path: &std::path::Path) -> Result<Dataset, String> {
     serde_json::from_str(&content).map_err(|e| format!("parse json: {}", e))
 }
 
-fn run_b1_index_documents(memd_path: &PathBuf, dataset: &Dataset) -> TestResult {
+fn run_b1_index_documents(
+    memd_path: &PathBuf,
+    dataset: &Dataset,
+    embedding_model: &str,
+) -> TestResult {
     let start = Instant::now();
     let name = "B1_index_documents";
 
@@ -129,7 +133,12 @@ fn run_b1_index_documents(memd_path: &PathBuf, dataset: &Dataset) -> TestResult 
 
     let mut client = match McpClient::start_with_args(
         memd_path,
-        &["--data-dir", data_dir.path().to_str().unwrap()],
+        &[
+            "--data-dir",
+            data_dir.path().to_str().unwrap(),
+            "--embedding-model",
+            embedding_model,
+        ],
     ) {
         Ok(c) => c,
         Err(e) => return TestResult::fail_with_duration(name, &format!("start memd: {}", e), start),
@@ -165,6 +174,7 @@ fn run_b1_index_documents(memd_path: &PathBuf, dataset: &Dataset) -> TestResult 
 fn run_b2_retrieval_quality(
     memd_path: &PathBuf,
     dataset: &Dataset,
+    embedding_model: &str,
 ) -> (TestResult, RetrievalMetrics) {
     let start = Instant::now();
     let name = "B2_retrieval_quality";
@@ -181,7 +191,12 @@ fn run_b2_retrieval_quality(
 
     let mut client = match McpClient::start_with_args(
         memd_path,
-        &["--data-dir", data_dir.path().to_str().unwrap()],
+        &[
+            "--data-dir",
+            data_dir.path().to_str().unwrap(),
+            "--embedding-model",
+            embedding_model,
+        ],
     ) {
         Ok(c) => c,
         Err(e) => {

@@ -1,0 +1,70 @@
+{
+  "description": "Sanity check dataset - exact match queries",
+  "version": "1.0",
+  "note": "All queries are exact document text. Should achieve 1.000 Recall@10. If not, evaluation harness has bugs.",
+  "query_types": ["exact_match"],
+  "documents": [
+    {
+      "id": "D1",
+      "text": "The quick brown fox jumps over the lazy dog.",
+      "type": "general"
+    },
+    {
+      "id": "D2",
+      "text": "Machine learning models require training data for parameter optimization.",
+      "type": "general"
+    },
+    {
+      "id": "D3",
+      "text": "Rust is a systems programming language focused on safety and performance.",
+      "type": "general"
+    },
+    {
+      "id": "D4",
+      "text": "Database indexing improves query performance by creating fast lookup structures.",
+      "type": "general"
+    },
+    {
+      "id": "D5",
+      "text": "Neural networks consist of interconnected layers of artificial neurons.",
+      "type": "general"
+    }
+  ],
+  "queries": [
+    {
+      "id": "Q1",
+      "query": "The quick brown fox jumps over the lazy dog.",
+      "type": "exact_match",
+      "relevant": ["D1"],
+      "irrelevant": ["D2", "D3", "D4", "D5"]
+    },
+    {
+      "id": "Q2",
+      "query": "Machine learning models require training data for parameter optimization.",
+      "type": "exact_match",
+      "relevant": ["D2"],
+      "irrelevant": ["D1", "D3", "D4", "D5"]
+    },
+    {
+      "id": "Q3",
+      "query": "Rust is a systems programming language focused on safety and performance.",
+      "type": "exact_match",
+      "relevant": ["D3"],
+      "irrelevant": ["D1", "D2", "D4", "D5"]
+    },
+    {
+      "id": "Q4",
+      "query": "Database indexing improves query performance by creating fast lookup structures.",
+      "type": "exact_match",
+      "relevant": ["D4"],
+      "irrelevant": ["D1", "D2", "D3", "D5"]
+    },
+    {
+      "id": "Q5",
+      "query": "Neural networks consist of interconnected layers of artificial neurons.",
+      "type": "exact_match",
+      "relevant": ["D5"],
+      "irrelevant": ["D1", "D2", "D3", "D4"]
+    }
+  ]
+}

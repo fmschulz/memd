@@ -24,7 +24,7 @@ enum Mode {
 enum ModelChoice {
     /// all-MiniLM-L6-v2: 384-dim, fast, good quality (default)
     AllMinilm,
-    /// Qwen3-Embedding-0.6B: 1024-dim, slower, best quality
+    /// Qwen3-Embedding-0.6B: 1024-dim, slower, best quality (not yet supported in Candle)
     Qwen3,
 }
 
@@ -110,6 +110,10 @@ async fn main() {
                 in_memory = args.in_memory,
                 "memd starting"
             );
+
+            // Update config with computed data_dir for TenantManager
+            let mut config = config;
+            config.data_dir = data_dir.clone();
 
             // Run server with appropriate store type
             if args.in_memory {
