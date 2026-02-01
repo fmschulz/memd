@@ -165,7 +165,7 @@ After reviewing examples:
 2. Follow the relevant example guide
 3. Adapt queries to your project
 4. Integrate with your AI agent workflow
-5. See `../skill.md` for complete tool reference
+5. See `../SKILL.md` for complete tool reference
 
 ## Combining Examples
 
