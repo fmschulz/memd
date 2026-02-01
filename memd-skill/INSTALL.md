@@ -39,7 +39,7 @@ ls -la ~/.codex/skills/memd
 The skill directory should contain:
 ```
 ~/.claude/skills/memd/
-├── skill.md                    # Main skill documentation
+├── SKILL.md                    # Main skill documentation
 ├── README.md                   # Quick reference
 ├── INSTALL.md                  # This file
 ├── mcp_config_claude.json      # Claude Code MCP config template
@@ -220,7 +220,7 @@ rm -rf ~/.claude/skills/memd
 ## Next Steps
 
 After installation:
-1. Read `skill.md` for complete documentation
+1. Read `SKILL.md` for complete documentation
 2. Review examples in `examples/` directory
 3. Start with `examples/session_tracking.md`
 4. Configure memd: `~/.config/memd/config.toml`

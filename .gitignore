@@ -56,3 +56,4 @@ DOCKER.md
 /evals/TESTING_*.md
 /evals/osgrep-comparison/
 /evals/scripts/
+test-install.sh
