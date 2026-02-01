@@ -27,9 +27,9 @@ fn test_hnsw_persistence_round_trip() {
     // Create index and insert embeddings
     let index = HnswIndex::with_persistence(config.clone(), &index_path).unwrap();
 
-    let chunk1 = ChunkId::new("doc1", 0);
-    let chunk2 = ChunkId::new("doc1", 1);
-    let chunk3 = ChunkId::new("doc2", 0);
+    let chunk1 = ChunkId::new();
+    let chunk2 = ChunkId::new();
+    let chunk3 = ChunkId::new();
 
     let mut emb1 = vec![1.0, 0.0, 0.0, 0.0];
     let mut emb2 = vec![0.0, 1.0, 0.0, 0.0];
@@ -89,7 +89,7 @@ fn test_hnsw_persistence_batch_insert() {
     // Insert batch
     let mut items = Vec::new();
     for i in 0..10 {
-        let chunk_id = ChunkId::new("doc", i);
+        let chunk_id = ChunkId::new();
         let mut embedding = vec![i as f32, (i + 1) as f32, (i + 2) as f32, (i + 3) as f32];
         normalize(&mut embedding);
         items.push((chunk_id, embedding));
@@ -152,7 +152,7 @@ fn test_hnsw_corrupted_cache_recovery() {
 
     // Create valid index
     let index = HnswIndex::with_persistence(config.clone(), &index_path).unwrap();
-    let chunk = ChunkId::new("doc", 0);
+    let chunk = ChunkId::new();
     let mut emb = vec![1.0, 0.0, 0.0, 0.0];
     normalize(&mut emb);
     index.insert(&chunk, &emb).unwrap();
@@ -185,7 +185,7 @@ fn test_hnsw_dimension_mismatch() {
     };
 
     let index = HnswIndex::with_persistence(config.clone(), &index_path).unwrap();
-    let chunk = ChunkId::new("doc", 0);
+    let chunk = ChunkId::new();
     let mut emb = vec![1.0, 0.0, 0.0, 0.0];
     normalize(&mut emb);
     index.insert(&chunk, &emb).unwrap();
@@ -219,7 +219,7 @@ fn test_hnsw_large_index_persistence() {
 
     // Insert 100 embeddings
     for i in 0..100 {
-        let chunk = ChunkId::new("doc", i);
+        let chunk = ChunkId::new();
         let mut embedding: Vec<f32> = (0..384).map(|j| (i * 384 + j) as f32).collect();
         normalize(&mut embedding);
         index.insert(&chunk, &embedding).unwrap();
