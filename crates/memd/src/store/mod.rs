@@ -17,7 +17,8 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 
-use crate::error::Result;
+use crate::compaction::{CompactionMetrics, CompactionResult};
+use crate::error::{MemdError, Result};
 use crate::tiered::TieredTiming;
 use crate::types::{ChunkId, MemoryChunk, TenantId};
 
@@ -107,6 +108,34 @@ pub trait Store: Send + Sync {
     /// PersistentStore overrides this with real tiered stats.
     fn get_tiered_stats(&self) -> Option<persistent::TieredStats> {
         None
+    }
+
+    /// Run compaction for a tenant regardless of thresholds
+    ///
+    /// Forces compaction to run even if no thresholds are exceeded.
+    /// Default implementation returns error (compaction not supported).
+    /// PersistentStore overrides with real implementation.
+    fn run_compaction(&self, _tenant_id: &TenantId) -> Result<CompactionResult> {
+        Err(MemdError::StorageError("compaction not supported".into()))
+    }
+
+    /// Run compaction for a tenant if thresholds are exceeded
+    ///
+    /// Returns None if no compaction needed (all thresholds below limits).
+    /// Returns Some(CompactionResult) if compaction was performed.
+    /// Default implementation returns Ok(None).
+    /// PersistentStore overrides with real implementation.
+    fn run_compaction_if_needed(&self, _tenant_id: &TenantId) -> Result<Option<CompactionResult>> {
+        Ok(None)
+    }
+
+    /// Get compaction metrics for a tenant
+    ///
+    /// Returns metrics about tombstone ratio, segment count, HNSW staleness.
+    /// Default implementation returns error (not available).
+    /// PersistentStore overrides with real implementation.
+    fn get_compaction_metrics(&self, _tenant_id: &TenantId) -> Result<CompactionMetrics> {
+        Err(MemdError::StorageError("compaction metrics not available".into()))
     }
 }
 
