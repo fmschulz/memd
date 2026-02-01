@@ -990,6 +990,367 @@ impl StructuralStore {
             is_relative: is_relative_int != 0,
         })
     }
+
+    // --- Tool trace operations ---
+
+    /// Insert a tool trace record.
+    ///
+    /// Returns the assigned trace_id.
+    pub fn insert_tool_trace(&self, trace: &ToolTraceRecord) -> SqliteResult<i64> {
+        let conn = self.conn.lock().unwrap();
+        let tags_json = serde_json::to_string(&trace.context_tags).unwrap_or_else(|_| "[]".into());
+
+        conn.execute(
+            r#"
+            INSERT INTO tool_traces
+                (tenant_id, project_id, session_id, tool_name, timestamp_ms,
+                 input_json, output_json, error_json, context_tags, duration_ms)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+            params![
+                trace.tenant_id.as_str(),
+                trace.project_id.as_deref(),
+                trace.session_id.as_deref(),
+                trace.tool_name,
+                trace.timestamp_ms,
+                trace.input_json.as_deref(),
+                trace.output_json.as_deref(),
+                trace.error_json.as_deref(),
+                tags_json,
+                trace.duration_ms,
+            ],
+        )?;
+
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Insert multiple tool traces in a batch.
+    pub fn insert_tool_traces_batch(&self, traces: &[ToolTraceRecord]) -> SqliteResult<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        {
+            let mut stmt = tx.prepare(
+                r#"
+                INSERT INTO tool_traces
+                    (tenant_id, project_id, session_id, tool_name, timestamp_ms,
+                     input_json, output_json, error_json, context_tags, duration_ms)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                "#,
+            )?;
+
+            for trace in traces {
+                let tags_json =
+                    serde_json::to_string(&trace.context_tags).unwrap_or_else(|_| "[]".into());
+                stmt.execute(params![
+                    trace.tenant_id.as_str(),
+                    trace.project_id.as_deref(),
+                    trace.session_id.as_deref(),
+                    trace.tool_name,
+                    trace.timestamp_ms,
+                    trace.input_json.as_deref(),
+                    trace.output_json.as_deref(),
+                    trace.error_json.as_deref(),
+                    tags_json,
+                    trace.duration_ms,
+                ])?;
+            }
+        }
+
+        tx.commit()
+    }
+
+    /// Find tool traces by tenant, optionally filtered by tool name and time range.
+    pub fn find_tool_traces(
+        &self,
+        tenant_id: &TenantId,
+        tool_name: Option<&str>,
+        time_range: Option<TimeRange>,
+    ) -> SqliteResult<Vec<ToolTraceRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let time_range = time_range.unwrap_or_default();
+
+        let mut sql = String::from(
+            r#"
+            SELECT trace_id, tenant_id, project_id, session_id, tool_name, timestamp_ms,
+                   input_json, output_json, error_json, context_tags, duration_ms
+            FROM tool_traces
+            WHERE tenant_id = ?1
+            "#,
+        );
+
+        if tool_name.is_some() {
+            sql.push_str(" AND tool_name = ?2");
+        }
+        if time_range.from_ms.is_some() {
+            sql.push_str(" AND timestamp_ms >= ?3");
+        }
+        if time_range.to_ms.is_some() {
+            sql.push_str(" AND timestamp_ms <= ?4");
+        }
+        sql.push_str(" ORDER BY timestamp_ms DESC");
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![
+                tenant_id.as_str(),
+                tool_name.unwrap_or(""),
+                time_range.from_ms.unwrap_or(0),
+                time_range.to_ms.unwrap_or(i64::MAX),
+            ],
+            |row| self.row_to_tool_trace(row),
+        )?;
+
+        rows.collect()
+    }
+
+    /// Find tool traces by session ID.
+    pub fn find_tool_traces_by_session(
+        &self,
+        session_id: &str,
+    ) -> SqliteResult<Vec<ToolTraceRecord>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT trace_id, tenant_id, project_id, session_id, tool_name, timestamp_ms,
+                   input_json, output_json, error_json, context_tags, duration_ms
+            FROM tool_traces
+            WHERE session_id = ?1
+            ORDER BY timestamp_ms DESC
+            "#,
+        )?;
+
+        let rows = stmt.query_map([session_id], |row| self.row_to_tool_trace(row))?;
+        rows.collect()
+    }
+
+    /// Find tool traces that have errors.
+    pub fn find_tool_traces_with_error(
+        &self,
+        tenant_id: &TenantId,
+    ) -> SqliteResult<Vec<ToolTraceRecord>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT trace_id, tenant_id, project_id, session_id, tool_name, timestamp_ms,
+                   input_json, output_json, error_json, context_tags, duration_ms
+            FROM tool_traces
+            WHERE tenant_id = ?1 AND error_json IS NOT NULL
+            ORDER BY timestamp_ms DESC
+            "#,
+        )?;
+
+        let rows = stmt.query_map([tenant_id.as_str()], |row| self.row_to_tool_trace(row))?;
+        rows.collect()
+    }
+
+    fn row_to_tool_trace(&self, row: &rusqlite::Row) -> SqliteResult<ToolTraceRecord> {
+        let tenant_str: String = row.get(1)?;
+        let tags_json: Option<String> = row.get(9)?;
+
+        let context_tags: Vec<String> = tags_json
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+
+        Ok(ToolTraceRecord {
+            trace_id: Some(row.get(0)?),
+            tenant_id: TenantId::new(&tenant_str).unwrap_or_else(|_| {
+                // Fallback for corrupted data
+                TenantId::new("unknown").unwrap()
+            }),
+            project_id: row.get(2)?,
+            session_id: row.get(3)?,
+            tool_name: row.get(4)?,
+            timestamp_ms: row.get(5)?,
+            input_json: row.get(6)?,
+            output_json: row.get(7)?,
+            error_json: row.get(8)?,
+            context_tags,
+            duration_ms: row.get(10)?,
+        })
+    }
+
+    // --- Stack trace operations ---
+
+    /// Insert a stack trace with its frames.
+    ///
+    /// Inserts both the trace and all frames in a single transaction.
+    /// Returns the assigned trace_id.
+    pub fn insert_stack_trace(
+        &self,
+        trace: &StackTraceRecord,
+        frames: &[StackFrameRecord],
+    ) -> SqliteResult<i64> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        tx.execute(
+            r#"
+            INSERT INTO stack_traces
+                (tenant_id, project_id, session_id, timestamp_ms,
+                 error_signature, error_message, full_trace)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                trace.tenant_id.as_str(),
+                trace.project_id.as_deref(),
+                trace.session_id.as_deref(),
+                trace.timestamp_ms,
+                trace.error_signature,
+                trace.error_message,
+                trace.full_trace,
+            ],
+        )?;
+
+        let trace_id = tx.last_insert_rowid();
+
+        // Insert frames
+        {
+            let mut stmt = tx.prepare(
+                r#"
+                INSERT INTO stack_frames
+                    (trace_id, frame_idx, file_path, function_name,
+                     line_number, col_number, context)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "#,
+            )?;
+
+            for frame in frames {
+                stmt.execute(params![
+                    trace_id,
+                    frame.frame_idx,
+                    frame.file_path.as_deref(),
+                    frame.function_name.as_deref(),
+                    frame.line_number,
+                    frame.col_number,
+                    frame.context.as_deref(),
+                ])?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(trace_id)
+    }
+
+    /// Find stack traces by tenant, optionally filtered by error signature and time range.
+    pub fn find_stack_traces(
+        &self,
+        tenant_id: &TenantId,
+        error_signature: Option<&str>,
+        time_range: Option<TimeRange>,
+    ) -> SqliteResult<Vec<StackTraceRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let time_range = time_range.unwrap_or_default();
+
+        let mut sql = String::from(
+            r#"
+            SELECT trace_id, tenant_id, project_id, session_id, timestamp_ms,
+                   error_signature, error_message, full_trace
+            FROM stack_traces
+            WHERE tenant_id = ?1
+            "#,
+        );
+
+        if error_signature.is_some() {
+            sql.push_str(" AND error_signature = ?2");
+        }
+        if time_range.from_ms.is_some() {
+            sql.push_str(" AND timestamp_ms >= ?3");
+        }
+        if time_range.to_ms.is_some() {
+            sql.push_str(" AND timestamp_ms <= ?4");
+        }
+        sql.push_str(" ORDER BY timestamp_ms DESC");
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![
+                tenant_id.as_str(),
+                error_signature.unwrap_or(""),
+                time_range.from_ms.unwrap_or(0),
+                time_range.to_ms.unwrap_or(i64::MAX),
+            ],
+            |row| self.row_to_stack_trace(row),
+        )?;
+
+        rows.collect()
+    }
+
+    /// Find stack traces where a specific function appears in the stack.
+    pub fn find_stack_traces_by_function(
+        &self,
+        tenant_id: &TenantId,
+        function_name: &str,
+    ) -> SqliteResult<Vec<StackTraceRecord>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT DISTINCT st.trace_id, st.tenant_id, st.project_id, st.session_id,
+                   st.timestamp_ms, st.error_signature, st.error_message, st.full_trace
+            FROM stack_traces st
+            INNER JOIN stack_frames sf ON st.trace_id = sf.trace_id
+            WHERE st.tenant_id = ?1 AND sf.function_name = ?2
+            ORDER BY st.timestamp_ms DESC
+            "#,
+        )?;
+
+        let rows = stmt
+            .query_map(params![tenant_id.as_str(), function_name], |row| {
+                self.row_to_stack_trace(row)
+            })?;
+
+        rows.collect()
+    }
+
+    /// Get all frames for a stack trace.
+    pub fn get_stack_frames(&self, trace_id: i64) -> SqliteResult<Vec<StackFrameRecord>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT frame_id, trace_id, frame_idx, file_path, function_name,
+                   line_number, col_number, context
+            FROM stack_frames
+            WHERE trace_id = ?1
+            ORDER BY frame_idx ASC
+            "#,
+        )?;
+
+        let rows = stmt.query_map([trace_id], |row| {
+            Ok(StackFrameRecord {
+                frame_id: Some(row.get(0)?),
+                trace_id: row.get(1)?,
+                frame_idx: row.get(2)?,
+                file_path: row.get(3)?,
+                function_name: row.get(4)?,
+                line_number: row.get::<_, Option<i32>>(5)?.map(|n| n as u32),
+                col_number: row.get::<_, Option<i32>>(6)?.map(|n| n as u32),
+                context: row.get(7)?,
+            })
+        })?;
+
+        rows.collect()
+    }
+
+    fn row_to_stack_trace(&self, row: &rusqlite::Row) -> SqliteResult<StackTraceRecord> {
+        let tenant_str: String = row.get(1)?;
+
+        Ok(StackTraceRecord {
+            trace_id: Some(row.get(0)?),
+            tenant_id: TenantId::new(&tenant_str).unwrap_or_else(|_| {
+                TenantId::new("unknown").unwrap()
+            }),
+            project_id: row.get(2)?,
+            session_id: row.get(3)?,
+            timestamp_ms: row.get(4)?,
+            error_signature: row.get(5)?,
+            error_message: row.get(6)?,
+            full_trace: row.get(7)?,
+        })
+    }
 }
 
 #[cfg(test)]
