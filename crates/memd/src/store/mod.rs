@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 
 use crate::error::Result;
+use crate::tiered::TieredTiming;
 use crate::types::{ChunkId, MemoryChunk, TenantId};
 
 /// Statistics for a tenant's store
@@ -84,11 +85,34 @@ pub trait Store: Send + Sync {
 
     /// Get statistics for a tenant
     async fn stats(&self, tenant_id: &TenantId) -> Result<StoreStats>;
+
+    /// Search with tier info for debugging
+    ///
+    /// Returns results with tiered timing and optional tier decisions.
+    /// Default implementation calls search_with_scores and returns None for timing.
+    /// PersistentStore overrides this with real tiered search info.
+    async fn search_with_tier_info(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        k: usize,
+    ) -> Result<(Vec<(MemoryChunk, f32)>, Option<TieredTiming>)> {
+        let results = self.search_with_scores(tenant_id, query, k).await?;
+        Ok((results, None))
+    }
+
+    /// Get tiered search statistics
+    ///
+    /// Returns None if tiered search is not enabled.
+    /// PersistentStore overrides this with real tiered stats.
+    fn get_tiered_stats(&self) -> Option<persistent::TieredStats> {
+        None
+    }
 }
 
 pub use dense::{DenseSearchConfig, DenseSearchResult, DenseSearcher};
 pub use hybrid::{HybridConfig, HybridSearcher, HybridSearchResult, HybridTiming, SearchContext};
 pub use memory::MemoryStore;
-pub use persistent::{PersistentStore, PersistentStoreConfig};
+pub use persistent::{PersistentStore, PersistentStoreConfig, TieredStats};
 pub use tenant::TenantManager;
 pub use tombstone::TombstoneSet;

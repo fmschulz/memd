@@ -27,6 +27,9 @@ pub struct SearchParams {
     pub k: usize,
     #[serde(default)]
     pub filters: Option<SearchFilters>,
+    /// Enable debug output showing tier source for each result
+    #[serde(default)]
+    pub debug_tiers: Option<bool>,
 }
 
 fn default_k() -> usize {
@@ -123,6 +126,9 @@ pub struct MetricsParams {
     pub tenant_id: Option<String>,
     #[serde(default = "default_true")]
     pub include_recent: bool,
+    /// Include tiered stats (cache, hot tier, promotions) - default true
+    #[serde(default = "default_true")]
+    pub include_tiered: bool,
 }
 
 fn default_true() -> bool {
@@ -135,6 +141,26 @@ fn default_true() -> bool {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SearchResult {
     pub results: Vec<ChunkResult>,
+    /// Tier debug info (only present when debug_tiers=true)
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tier_info: Option<TierDebugInfo>,
+}
+
+/// Debug information about tier performance
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TierDebugInfo {
+    /// Primary source tier ("cache" | "hot" | "warm" | "hybrid")
+    pub source_tier: String,
+    /// Whether cache was hit
+    pub cache_hit: bool,
+    /// Whether hot tier returned results
+    pub hot_tier_hit: bool,
+    /// Cache lookup latency (ms)
+    pub cache_lookup_ms: u64,
+    /// Hot tier search latency (ms)
+    pub hot_tier_ms: u64,
+    /// Warm tier search latency (ms)
+    pub warm_tier_ms: u64,
 }
 
 /// Single chunk in search results
@@ -148,6 +174,9 @@ pub struct ChunkResult {
     pub timestamp_created: i64,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub tags: Vec<String>,
+    /// Which tier this result came from (only present when debug_tiers=true)
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source_tier: Option<String>,
 }
 
 /// Source information in results
@@ -215,22 +244,78 @@ pub struct DiskStatsResult {
     pub segment_count: usize,
 }
 
+/// Combined tiered search statistics result
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TieredStatsResult {
+    /// Semantic cache statistics
+    pub cache_stats: CacheStatsResult,
+    /// Hot tier statistics
+    pub hot_tier_stats: HotTierStatsResult,
+    /// Tiered performance metrics
+    pub metrics: TieredMetricsResult,
+}
+
+/// Cache statistics
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CacheStatsResult {
+    /// Total cache lookups
+    pub total_lookups: u64,
+    /// Cache hits
+    pub hits: u64,
+    /// Cache misses
+    pub misses: u64,
+    /// Hit rate (0.0-1.0)
+    pub hit_rate: f32,
+    /// Number of entries in cache
+    pub entry_count: usize,
+    /// Average confidence of cached entries
+    pub avg_confidence: f32,
+}
+
+/// Hot tier statistics
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HotTierStatsResult {
+    /// Number of chunks in hot tier
+    pub chunk_count: usize,
+    /// Capacity used (0.0-1.0)
+    pub capacity_used: f32,
+    /// Hot tier version
+    pub version: u64,
+    /// Average promotion score of chunks in hot tier
+    pub avg_promotion_score: f32,
+}
+
+/// Tiered performance metrics
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TieredMetricsResult {
+    /// Total promotions
+    pub promotions: u64,
+    /// Total demotions
+    pub demotions: u64,
+    /// Average cache lookup latency (ms)
+    pub avg_cache_ms: f64,
+    /// Average hot tier search latency (ms)
+    pub avg_hot_tier_ms: f64,
+    /// Average warm tier search latency (ms)
+    pub avg_warm_tier_ms: f64,
+}
+
 // ---------- Helper Functions ----------
 
 /// Parse a chunk type string into ChunkType enum
 fn parse_chunk_type(s: &str) -> Result<ChunkType, McpError> {
     match s.to_lowercase().as_str() {
         "code" => Ok(ChunkType::Code),
-        "doc" => Ok(ChunkType::Doc),
+        "doc" | "scientific" => Ok(ChunkType::Doc),  // Map scientific documents to Doc type
         "trace" => Ok(ChunkType::Trace),
         "decision" => Ok(ChunkType::Decision),
         "plan" => Ok(ChunkType::Plan),
         "research" => Ok(ChunkType::Research),
         "message" => Ok(ChunkType::Message),
         "summary" => Ok(ChunkType::Summary),
-        "other" => Ok(ChunkType::Other),
+        "general" | "other" => Ok(ChunkType::Other),
         _ => Err(McpError::InvalidParams(format!(
-            "invalid chunk type '{}', must be one of: code, doc, trace, decision, plan, research, message, summary, other",
+            "invalid chunk type '{}', must be one of: code, doc, scientific, trace, decision, plan, research, message, summary, general, other",
             s
         ))),
     }
@@ -282,15 +367,72 @@ pub async fn handle_memory_search<S: Store>(
     params: SearchParams,
 ) -> Result<Value, McpError> {
     let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let debug_tiers = params.debug_tiers.unwrap_or(false);
 
     info!(
         tenant_id = %tenant_id,
         query = %params.query,
         k = params.k,
+        debug_tiers = debug_tiers,
         "memory.search"
     );
 
-    // Use search_with_scores - works for both MemoryStore and PersistentStore
+    // Use search_with_tier_info if debug_tiers is requested
+    if debug_tiers {
+        let (scored_chunks, timing) = store
+            .search_with_tier_info(&tenant_id, &params.query, params.k)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+        debug!(results_count = scored_chunks.len(), "search completed with tier info");
+
+        // Build tier debug info if timing is available
+        let tier_info = timing.map(|t| {
+            let source_tier = if t.cache_lookup_ms > 0 && t.hot_tier_ms == 0 && t.warm_tier_ms == 0 {
+                "cache".to_string()
+            } else if t.hot_tier_ms > 0 && t.warm_tier_ms == 0 {
+                "hot".to_string()
+            } else if t.warm_tier_ms > 0 {
+                "warm".to_string()
+            } else {
+                "hybrid".to_string()
+            };
+
+            let cache_hit = t.cache_lookup_ms > 0 && t.hot_tier_ms == 0 && t.warm_tier_ms == 0;
+            let hot_tier_hit = t.hot_tier_ms > 0 && t.warm_tier_ms == 0;
+
+            TierDebugInfo {
+                source_tier,
+                cache_hit,
+                hot_tier_hit,
+                cache_lookup_ms: t.cache_lookup_ms,
+                hot_tier_ms: t.hot_tier_ms,
+                warm_tier_ms: t.warm_tier_ms,
+            }
+        });
+
+        // Determine source tier per result based on scoring heuristics
+        // If we have tier_info, derive per-result tier from overall timing
+        let default_tier = tier_info.as_ref().map(|t| t.source_tier.clone());
+
+        let results: Vec<ChunkResult> = scored_chunks
+            .iter()
+            .map(|(chunk, score)| ChunkResult {
+                chunk_id: chunk.chunk_id.to_string(),
+                text: chunk.text.clone(),
+                score: *score,
+                chunk_type: chunk.chunk_type.to_string(),
+                source: SourceResult::from(&chunk.source),
+                timestamp_created: chunk.timestamp_created,
+                tags: chunk.tags.clone(),
+                source_tier: default_tier.clone(),
+            })
+            .collect();
+
+        return format_mcp_response(&SearchResult { results, tier_info });
+    }
+
+    // Standard path without tier info
     let scored_chunks = store
         .search_with_scores(&tenant_id, &params.query, params.k)
         .await
@@ -308,10 +450,11 @@ pub async fn handle_memory_search<S: Store>(
             source: SourceResult::from(&chunk.source),
             timestamp_created: chunk.timestamp_created,
             tags: chunk.tags.clone(),
+            source_tier: None,
         })
         .collect();
 
-    format_mcp_response(&SearchResult { results })
+    format_mcp_response(&SearchResult { results, tier_info: None })
 }
 
 /// Handle memory.add tool call
@@ -320,8 +463,28 @@ pub async fn handle_memory_add<S: Store>(
     tenant_manager: Option<&TenantManager>,
     params: AddParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
-    let chunk_type = parse_chunk_type(&params.chunk_type)?;
+    warn!("🔍 [DEBUG] handle_memory_add CALLED - tenant_id={}, text_len={}",
+          params.tenant_id, params.text.len());
+    let tenant_id = match validate_tenant_id(&params.tenant_id) {
+        Ok(tid) => {
+            warn!("🔍 [DEBUG] tenant_id validation succeeded: {}", tid);
+            tid
+        }
+        Err(e) => {
+            warn!("❌ [DEBUG] tenant_id validation FAILED: {}", e);
+            return Err(e);
+        }
+    };
+    let chunk_type = match parse_chunk_type(&params.chunk_type) {
+        Ok(ct) => {
+            warn!("🔍 [DEBUG] chunk_type validation succeeded: {:?}", ct);
+            ct
+        }
+        Err(e) => {
+            warn!("❌ [DEBUG] chunk_type validation FAILED: {}", e);
+            return Err(e);
+        }
+    };
 
     info!(
         tenant_id = %tenant_id,
@@ -511,6 +674,7 @@ pub fn handle_memory_metrics(
     info!(
         tenant_id = ?params.tenant_id,
         include_recent = params.include_recent,
+        include_tiered = params.include_tiered,
         "memory.metrics"
     );
 
@@ -529,6 +693,11 @@ pub fn handle_memory_metrics(
 
     if !params.include_recent {
         snapshot.recent_queries.clear();
+    }
+
+    // Clear tiered stats if not requested
+    if !params.include_tiered {
+        snapshot.tiered = Default::default();
     }
 
     format_mcp_response(&snapshot)
@@ -552,6 +721,7 @@ mod tests {
             project_id: None,
             k: 10,
             filters: None,
+            debug_tiers: None,
         };
 
         let result = handle_memory_search(&store, params).await.unwrap();
@@ -588,6 +758,7 @@ mod tests {
             project_id: None,
             k: 10,
             filters: None,
+            debug_tiers: None,
         };
 
         let search_result = handle_memory_search(&store, search_params).await.unwrap();
@@ -744,6 +915,7 @@ mod tests {
             project_id: None,
             k: 10,
             filters: None,
+            debug_tiers: None,
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -806,11 +978,48 @@ mod tests {
             project_id: None,
             k: 10,
             filters: None,
+            debug_tiers: None,
         };
 
         let result = handle_memory_search(&store, search_params).await.unwrap();
         let text = result["content"][0]["text"].as_str().unwrap();
         let search_response: SearchResult = serde_json::from_str(text).unwrap();
         assert!(search_response.results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_with_debug_tiers() {
+        let store = make_store();
+
+        // Add a chunk
+        let add_params = AddParams {
+            tenant_id: "test".to_string(),
+            text: "debug tier test".to_string(),
+            chunk_type: "doc".to_string(),
+            project_id: None,
+            source: None,
+            tags: vec![],
+        };
+
+        handle_memory_add(&store, None, add_params).await.unwrap();
+
+        // Search with debug_tiers enabled
+        let search_params = SearchParams {
+            tenant_id: "test".to_string(),
+            query: "debug".to_string(),
+            project_id: None,
+            k: 10,
+            filters: None,
+            debug_tiers: Some(true),
+        };
+
+        let result = handle_memory_search(&store, search_params).await.unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let search_response: SearchResult = serde_json::from_str(text).unwrap();
+
+        // MemoryStore doesn't have tiered support, so tier_info should be None
+        // and source_tier on results should be None (since timing is None)
+        assert_eq!(search_response.results.len(), 1);
+        assert!(search_response.tier_info.is_none());
     }
 }
