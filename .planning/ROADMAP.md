@@ -19,7 +19,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 4.1: Pooling Strategy Support (INSERTED)** - Enable mean/last-token pooling for Qwen3 upgrade
 - [x] **Phase 5: Hot Tier + Cache** - Hot cache, semantic cache, promotion/demotion logic
 - [x] **Phase 6: Structural Indexes** - AST parsing, symbol tables, trace indexing, query router
-- [ ] **Phase 7: Compaction + Cleanup** - Tombstone filtering, segment merges, HNSW rebuild
+- [x] **Phase 7: Compaction + Cleanup** - Tombstone filtering, segment merges, HNSW rebuild
 
 ## Phase Details
 
@@ -180,12 +180,12 @@ Plans:
 **Plans**: 6 plans in 5 waves
 
 Plans:
-- [ ] 07-01-PLAN.md — Compaction module foundation: metrics gathering and tombstone audit
-- [ ] 07-02-PLAN.md — HNSW rebuild and sparse segment merge operations
-- [ ] 07-03-PLAN.md — Throttle module for rate-limiting compaction
-- [ ] 07-04-PLAN.md — CompactionRunner workflow coordinator
-- [ ] 07-05-PLAN.md — PersistentStore and MCP integration (memory.compact tool)
-- [ ] 07-06-PLAN.md — Compaction eval suite (Suite F)
+- [x] 07-01-PLAN.md — Compaction module foundation: metrics gathering and tombstone audit
+- [x] 07-02-PLAN.md — HNSW rebuild and sparse segment merge operations
+- [x] 07-03-PLAN.md — Throttle module for rate-limiting compaction
+- [x] 07-04-PLAN.md — CompactionRunner workflow coordinator
+- [x] 07-05-PLAN.md — PersistentStore and MCP integration (memory.compact tool)
+- [x] 07-06-PLAN.md — Compaction eval suite (Suite F)
 
 ## Progress
 
@@ -201,8 +201,8 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 4.1 -> 5 -> 6 -> 7
 | 4.1. Pooling Strategy Support | 3/3 | Complete | 2026-01-31 |
 | 5. Hot Tier + Cache | 5/5 | Complete | 2026-01-31 |
 | 6. Structural Indexes | 8/8 | Complete | 2026-02-01 |
-| 7. Compaction + Cleanup | 0/6 | Not started | - |
+| 7. Compaction + Cleanup | 6/6 | Complete | 2026-02-01 |
 
 ---
 *Roadmap created: 2026-01-29*
-*Last updated: 2026-01-31 (Phase 7 planned)*
+*Last updated: 2026-02-01 (Phase 7 completed)*
