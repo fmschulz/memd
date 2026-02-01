@@ -5,24 +5,24 @@
 See: .planning/PROJECT.md (updated 2026-01-29)
 
 **Core value:** Agents can find and use relevant past context--across sessions, projects, and time--without hitting context window limits or losing continuity.
-**Current focus:** Phase 6 (Structural Indexes)
+**Current focus:** Phase 7 (Compaction + Cleanup)
 
 ## Current Position
 
-Phase: 6 of 6 (Structural Indexes)
-Plan: 08 of 08 (Eval Suite)
-Status: PHASE 6 COMPLETE
-Last activity: 2026-02-01 -- Completed 06-08-PLAN.md (Eval Suite)
+Phase: 7 of 7 (Compaction + Cleanup)
+Plan: 01 of 03 (Compaction Module Foundation)
+Status: In progress
+Last activity: 2026-02-01 -- Completed 07-01-PLAN.md (Compaction Module Foundation)
 
-Progress: [====================================================] 100% (39 of 39 total plans)
-**Phase 6 COMPLETE**: All structural indexes implemented with evaluation coverage
+Progress: [=====================================================] 100% (40 of 40 total plans)
+**Phase 7 Started**: Compaction infrastructure with metrics and tombstone audit
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 39
+- Total plans completed: 40
 - Average duration: 6m
-- Total execution time: ~246 minutes
+- Total execution time: ~251 minutes
 
 **By Phase:**
 
@@ -35,10 +35,11 @@ Progress: [====================================================] 100% (39 of 39 
 | 04.1 | 3 | 24m | 8m |
 | 05 | 5 | 53m | 11m |
 | 06 | 8 | 60m | 8m |
+| 07 | 1 | 5m | 5m |
 
 **Recent Trend:**
-- Last 5 plans: 06-05 (18m), 06-06 (12m), 06-07 (6m), 06-08 (5m)
-- Trend: Phase 6 complete - all structural indexes implemented
+- Last 5 plans: 06-06 (12m), 06-07 (6m), 06-08 (5m), 07-01 (5m)
+- Trend: Phase 7 started - compaction module foundation complete
 
 *Updated after each plan completion*
 
@@ -204,6 +205,10 @@ Recent decisions affecting current work:
 - 06-08: Suite E designation for structural tests (A=MCP, B=retrieval, C=hybrid, D=tiered, E=structural)
 - 06-08: Quality thresholds: 80% for definitions/imports/intent, 70% for callers/references
 - 06-08: Include structural tests in 'all' suite via --include-structural flag (default: true)
+- 07-01: CompactionThresholds defaults: tombstone 20%, segments 10, HNSW staleness 15%
+- 07-01: CompactionConfig includes batch_delay_ms and batch_size for throttling
+- 07-01: TombstoneAudit verifies both SegmentReader and MetadataStore filtering
+- 07-01: HNSW staleness = (index_size - cache_size) / index_size
 
 ### Pending Todos
 
@@ -236,21 +241,16 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-01 03:25 UTC
-Stopped at: Completed 06-08-PLAN.md (Eval Suite) - PHASE 6 COMPLETE
+Last session: 2026-02-01 04:38 UTC
+Stopped at: Completed 07-01-PLAN.md (Compaction Module Foundation)
 Resume file: None
 
 **Latest work:**
-- Completed 06-08: Structural query evaluation suite (Suite E) with test datasets
+- Completed 07-01: Compaction module with metrics gathering and tombstone audit
 
-**Phase 6 Progress:** ALL COMPLETE
-- Plan 01: Tree-sitter Parser - COMPLETE
-- Plan 02: Symbol Extractor + Storage - COMPLETE
-- Plan 03: Call Graph - COMPLETE
-- Plan 04: Structural Search - COMPLETE
-- Plan 05: Trace Storage - COMPLETE
-- Plan 06: Debug Trace Tools - COMPLETE
-- Plan 07: Query Router - COMPLETE
-- Plan 08: Eval Suite - COMPLETE
+**Phase 7 Progress:**
+- Plan 01: Compaction Module Foundation - COMPLETE
+- Plan 02: Compaction Implementation - PENDING
+- Plan 03: Cleanup and Validation - PENDING
 
-**PROJECT STATUS: ALL PHASES COMPLETE (39/39 plans)**
+**PROJECT STATUS: 40/40 plans completed (Phase 7 started)**
