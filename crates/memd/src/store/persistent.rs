@@ -15,6 +15,7 @@ use tracing::{debug, info, warn};
 use super::dense::DenseSearcher;
 use super::hybrid::{HybridConfig, HybridSearcher};
 use super::metadata::{ChunkMetadata, MetadataStore, SqliteMetadataStore};
+use crate::compaction::{CompactionConfig, CompactionMetrics, CompactionResult, CompactionRunner};
 use crate::metrics::TieredMetrics;
 use crate::tiered::{CacheStats, HotTierStats, TieredTiming, TierDecision};
 
@@ -90,6 +91,8 @@ pub struct PersistentStore {
     hybrid_searcher: Option<Arc<HybridSearcher>>,
     /// Metrics collector for query latency
     metrics: Arc<MetricsCollector>,
+    /// Compaction runner (None if compaction disabled)
+    compaction_runner: Option<CompactionRunner>,
 }
 
 /// Per-tenant storage state
@@ -180,6 +183,9 @@ impl PersistentStore {
             None
         };
 
+        // Initialize compaction runner
+        let compaction_runner = Some(CompactionRunner::new(CompactionConfig::default()));
+
         let store = Self {
             config,
             tenants: RwLock::new(HashMap::new()),
@@ -188,6 +194,7 @@ impl PersistentStore {
             sparse_index,
             hybrid_searcher,
             metrics: Arc::new(MetricsCollector::default()),
+            compaction_runner,
         };
 
         // Recover existing tenants
@@ -269,6 +276,82 @@ impl PersistentStore {
         if let Some(ref hybrid) = self.hybrid_searcher {
             hybrid.invalidate_chunk_in_cache(chunk_id);
         }
+    }
+
+    /// Run compaction for a tenant regardless of thresholds
+    ///
+    /// Forces compaction to run even if no thresholds are exceeded.
+    pub fn run_compaction(&self, tenant_id: &TenantId) -> Result<CompactionResult> {
+        let runner = self
+            .compaction_runner
+            .as_ref()
+            .ok_or_else(|| MemdError::StorageError("compaction disabled".into()))?;
+
+        let semantic_cache = self
+            .hybrid_searcher
+            .as_ref()
+            .and_then(|h| h.get_semantic_cache());
+
+        runner.run_compaction(
+            tenant_id,
+            &self.metadata,
+            self.dense_searcher.as_ref().ok_or_else(|| {
+                MemdError::StorageError("dense searcher not available".into())
+            })?,
+            self.sparse_index.as_deref(),
+            semantic_cache,
+        )
+    }
+
+    /// Run compaction for a tenant if thresholds are exceeded
+    ///
+    /// Returns None if no compaction needed (all thresholds below limits).
+    /// Returns Some(CompactionResult) if compaction was performed.
+    pub fn run_compaction_if_needed(&self, tenant_id: &TenantId) -> Result<Option<CompactionResult>> {
+        let runner = match &self.compaction_runner {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        // Gather metrics
+        let hnsw_stats = self
+            .dense_searcher
+            .as_ref()
+            .map(|s| s.get_rebuild_stats(tenant_id))
+            .unwrap_or((0, 0));
+
+        let segment_count = self
+            .sparse_index
+            .as_ref()
+            .map(|s| s.segment_count().unwrap_or(0))
+            .unwrap_or(0);
+
+        let metrics = CompactionMetrics::gather(&self.metadata, hnsw_stats, segment_count, tenant_id)?;
+
+        if !runner.should_run(&metrics) {
+            return Ok(None);
+        }
+
+        self.run_compaction(tenant_id).map(Some)
+    }
+
+    /// Get compaction metrics for a tenant
+    ///
+    /// Returns metrics about tombstone ratio, segment count, HNSW staleness.
+    pub fn get_compaction_metrics(&self, tenant_id: &TenantId) -> Result<CompactionMetrics> {
+        let hnsw_stats = self
+            .dense_searcher
+            .as_ref()
+            .map(|s| s.get_rebuild_stats(tenant_id))
+            .unwrap_or((0, 0));
+
+        let segment_count = self
+            .sparse_index
+            .as_ref()
+            .map(|s| s.segment_count().unwrap_or(0))
+            .unwrap_or(0);
+
+        CompactionMetrics::gather(&self.metadata, hnsw_stats, segment_count, tenant_id)
     }
 
     /// Search with tier information for debugging
