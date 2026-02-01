@@ -5,24 +5,24 @@
 See: .planning/PROJECT.md (updated 2026-01-29)
 
 **Core value:** Agents can find and use relevant past context--across sessions, projects, and time--without hitting context window limits or losing continuity.
-**Current focus:** Phase 5 (Hot Tier + Cache) - COMPLETE
+**Current focus:** Phase 6 (Structural Indexes)
 
 ## Current Position
 
-Phase: 5 of 5 (Hot Tier + Cache)
-Plan: 05 of 05 (MCP Tiered Exposure and Eval Suite)
-Status: PHASE COMPLETE
-Last activity: 2026-01-31 -- Completed 05-05-PLAN.md (MCP Tiered Exposure and Eval Suite)
+Phase: 6 of 6 (Structural Indexes)
+Plan: 01 of 08 (Tree-sitter Multi-language Parser)
+Status: In progress
+Last activity: 2026-02-01 -- Completed 06-01-PLAN.md (Tree-sitter Multi-language Parser)
 
-Progress: [===================================================] 100% (31 of 31 total plans)
-**Phase 5 COMPLETE**: Hot tier, semantic cache, promotion logic, and MCP exposure done
+Progress: [========================================-----------] 82% (32 of 39 total plans)
+**Phase 6 STARTED**: Tree-sitter parser foundation complete
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 31
+- Total plans completed: 32
 - Average duration: 6m
-- Total execution time: ~213 minutes
+- Total execution time: ~216 minutes
 
 **By Phase:**
 
@@ -34,10 +34,11 @@ Progress: [===================================================] 100% (31 of 31 t
 | 04 | 6 | 27m | 4m |
 | 04.1 | 3 | 24m | 8m |
 | 05 | 5 | 53m | 11m |
+| 06 | 1 | 3m | 3m |
 
 **Recent Trend:**
-- Last 5 plans: 05-02 (5m), 05-03 (5m), 05-04 (30m), 05-05 (8m)
-- Trend: Phase 5 complete - tiered architecture fully implemented and exposed
+- Last 5 plans: 05-03 (5m), 05-04 (30m), 05-05 (8m), 06-01 (3m)
+- Trend: Phase 6 started - structural indexing foundation
 
 *Updated after each plan completion*
 
@@ -174,6 +175,9 @@ Recent decisions affecting current work:
 - 05-05: get_tiered_stats trait method returns Option<TieredStats>
 - 05-05: Tiered eval suite D1-D7 following existing A/B/C suite patterns
 - 05-05: Quality thresholds: cache hit rate >= 80%, hot p50 <= warm p50
+- 06-01: tree-sitter 0.25 for grammar ABI version 15 compatibility
+- 06-01: Fresh LanguageSupport per parse (Parser not Send/Sync, cheap creation)
+- 06-01: Map .c/.h to C++ grammar (avoids separate tree-sitter-c)
 
 ### Pending Todos
 
@@ -206,22 +210,19 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-01 01:26 UTC
-Stopped at: Completed 05-05-PLAN.md (MCP Tiered Exposure and Eval Suite)
-Resume file: None (Phase 5 complete)
+Last session: 2026-02-01 02:40 UTC
+Stopped at: Completed 06-01-PLAN.md (Tree-sitter Multi-language Parser)
+Resume file: None
 
 **Latest work:**
-- Completed 05-01: AccessTracker with multi-signal promotion scoring
-- Completed 05-02: SemanticCache with similarity lookup and TTL expiration
-- Completed 05-03: TieredSearcher with cache->hot->warm fallback chain
-- Completed 05-04: TieredSearcher integrated into HybridSearcher and PersistentStore
-- Completed 05-05: MCP handlers extended with tiered debug output, tiered eval suite
+- Completed 06-01: Tree-sitter parser with 7-language support
 
-**Phase 5 Progress:**
-- Plan 01: AccessTracker - COMPLETE
-- Plan 02: SemanticCache - COMPLETE
-- Plan 03: TieredSearcher - COMPLETE
-- Plan 04: Tiered Integration - COMPLETE
-- Plan 05: MCP Handlers - COMPLETE
-
-**PHASE 5 COMPLETE**
+**Phase 6 Progress:**
+- Plan 01: Tree-sitter Parser - COMPLETE
+- Plan 02: Symbol Extractor - pending
+- Plan 03: Call Graph - pending
+- Plan 04: Structural Search - pending
+- Plan 05: Symbol Index - pending
+- Plan 06: Persistence - pending
+- Plan 07: MCP Integration - pending
+- Plan 08: Eval Suite - pending
