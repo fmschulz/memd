@@ -17,7 +17,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 3: Dense Warm Index** - Embeddings interface, HNSW warm tier, basic search
 - [x] **Phase 4: Sparse Lexical + Fusion** - BM25 indexing, RRF fusion, feature-based reranker
 - [x] **Phase 4.1: Pooling Strategy Support (INSERTED)** - Enable mean/last-token pooling for Qwen3 upgrade
-- [ ] **Phase 5: Hot Tier + Cache** - Hot cache, semantic cache, promotion/demotion logic
+- [x] **Phase 5: Hot Tier + Cache** - Hot cache, semantic cache, promotion/demotion logic
 - [ ] **Phase 6: Structural Indexes** - AST parsing, symbol tables, trace indexing, query router
 - [ ] **Phase 7: Compaction + Cleanup** - Tombstone filtering, segment merges, HNSW rebuild
 
@@ -139,11 +139,11 @@ Expected improvement: 87.5% -> 92-95% recall, 56.3 -> 64.33 MTEB score
 **Plans**: 5 plans in 4 waves
 
 Plans:
-- [ ] 05-01-PLAN.md — Add moka dependency, AccessTracker with multi-signal scoring, HotTier with separate HNSW
-- [ ] 05-02-PLAN.md — SemanticCache with similarity lookup, TTL, version invalidation
-- [ ] 05-03-PLAN.md — TieredSearcher coordinating cache/hot/warm fallback, promotion/demotion logic
-- [ ] 05-04-PLAN.md — Integrate TieredSearcher into HybridSearcher, add tiered metrics
-- [ ] 05-05-PLAN.md — Extend MCP handlers with tiered stats, tiered eval suite
+- [x] 05-01-PLAN.md — Add moka dependency, AccessTracker with multi-signal scoring, HotTier with separate HNSW
+- [x] 05-02-PLAN.md — SemanticCache with similarity lookup, TTL, version invalidation
+- [x] 05-03-PLAN.md — TieredSearcher coordinating cache/hot/warm fallback, promotion/demotion logic
+- [x] 05-04-PLAN.md — Integrate TieredSearcher into HybridSearcher, add tiered metrics
+- [x] 05-05-PLAN.md — Extend MCP handlers with tiered stats, tiered eval suite
 
 ### Phase 6: Structural Indexes
 **Goal**: Code-aware queries find symbols, callers, and traces across the codebase
@@ -190,10 +190,10 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 4.1 -> 5 -> 6 -> 7
 | 3. Dense Warm Index | 6/6 | Complete | 2026-01-30 |
 | 4. Sparse Lexical + Fusion | 6/6 | Complete | 2026-01-30 |
 | 4.1. Pooling Strategy Support | 3/3 | Complete | 2026-01-31 |
-| 5. Hot Tier + Cache | 0/5 | Planned | - |
+| 5. Hot Tier + Cache | 5/5 | Complete | 2026-01-31 |
 | 6. Structural Indexes | 0/TBD | Not started | - |
 | 7. Compaction + Cleanup | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-01-29*
-*Last updated: 2026-01-31*
+*Last updated: 2026-01-31 (Phase 5 complete)*
