@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 
-use crate::embeddings::{Embedder, EmbeddingModel, OnnxEmbedder};
+use crate::embeddings::{CandleEmbedder, Embedder};
 use crate::error::Result;
 use crate::index::{HnswConfig, HnswIndex};
 use crate::metrics::IndexStats;
@@ -31,8 +31,9 @@ pub struct DenseSearchConfig {
     pub hnsw: HnswConfig,
     /// Whether to persist index
     pub persist: bool,
-    /// Embedding model to use
-    pub model: EmbeddingModel,
+    // Temporarily removed during Candle migration
+    // /// Embedding model to use
+    // pub model: EmbeddingModel,
 }
 
 impl Default for DenseSearchConfig {
@@ -40,7 +41,7 @@ impl Default for DenseSearchConfig {
         Self {
             hnsw: HnswConfig::default(),
             persist: true,
-            model: EmbeddingModel::default(),
+            // model: EmbeddingModel::default(),
         }
     }
 }
@@ -58,13 +59,13 @@ pub struct DenseSearcher {
 }
 
 impl DenseSearcher {
-    /// Create a new dense searcher with ONNX embedder
+    /// Create a new dense searcher with Candle embedder
     pub fn new(config: DenseSearchConfig) -> Result<Self> {
-        let embedder = Arc::new(OnnxEmbedder::with_model(config.model)?);
+        let embedder = Arc::new(CandleEmbedder::new()?);
 
         // Update HNSW config dimension to match model
         let mut updated_config = config.clone();
-        updated_config.hnsw.dimension = config.model.dimension();
+        updated_config.hnsw.dimension = embedder.dimension();
 
         Ok(Self {
             embedder,
@@ -292,6 +293,39 @@ impl DenseSearcher {
     /// Get embedding dimension
     pub fn dimension(&self) -> usize {
         self.embedder.dimension()
+    }
+
+    /// Search using a pre-computed query embedding (for tiered search)
+    ///
+    /// This avoids re-embedding when the caller already has the embedding.
+    pub fn search_with_embedding(
+        &self,
+        tenant_id: &TenantId,
+        query_embedding: &[f32],
+        k: usize,
+    ) -> Result<Vec<DenseSearchResult>> {
+        let index = self.get_or_create_index(tenant_id)?;
+        let results = index.search(query_embedding, k)?;
+
+        Ok(results
+            .into_iter()
+            .map(|r| DenseSearchResult {
+                chunk_id: r.chunk_id,
+                score: r.score,
+            })
+            .collect())
+    }
+
+    /// Get the number of indexed chunks for a tenant
+    pub fn index_len(&self, tenant_id: &TenantId) -> usize {
+        let indices = self.indices.read();
+        let tenant_str = tenant_id.to_string();
+        indices.get(&tenant_str).map(|i| i.len()).unwrap_or(0)
+    }
+
+    /// Embed a query text (exposes embedder for tiered search)
+    pub async fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        self.embedder.embed_query(text).await
     }
 }
 
