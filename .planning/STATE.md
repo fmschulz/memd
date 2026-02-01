@@ -10,19 +10,19 @@ See: .planning/PROJECT.md (updated 2026-01-29)
 ## Current Position
 
 Phase: 6 of 6 (Structural Indexes)
-Plan: 01 of 08 (Tree-sitter Multi-language Parser)
+Plan: 03 of 08 (Call Graph)
 Status: In progress
-Last activity: 2026-02-01 -- Completed 06-01-PLAN.md (Tree-sitter Multi-language Parser)
+Last activity: 2026-02-01 -- Completed 06-03-PLAN.md (Call Graph)
 
-Progress: [========================================-----------] 82% (32 of 39 total plans)
-**Phase 6 STARTED**: Tree-sitter parser foundation complete
+Progress: [===========================================---------] 87% (34 of 39 total plans)
+**Phase 6 PROGRESS**: Call graph extraction complete
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 32
+- Total plans completed: 34
 - Average duration: 6m
-- Total execution time: ~216 minutes
+- Total execution time: ~228 minutes
 
 **By Phase:**
 
@@ -34,11 +34,11 @@ Progress: [========================================-----------] 82% (32 of 39 to
 | 04 | 6 | 27m | 4m |
 | 04.1 | 3 | 24m | 8m |
 | 05 | 5 | 53m | 11m |
-| 06 | 1 | 3m | 3m |
+| 06 | 3 | 12m | 4m |
 
 **Recent Trend:**
-- Last 5 plans: 05-03 (5m), 05-04 (30m), 05-05 (8m), 06-01 (3m)
-- Trend: Phase 6 started - structural indexing foundation
+- Last 5 plans: 05-04 (30m), 05-05 (8m), 06-01 (3m), 06-02 (3m), 06-03 (6m)
+- Trend: Phase 6 progressing - call graph extraction complete
 
 *Updated after each plan completion*
 
@@ -178,6 +178,11 @@ Recent decisions affecting current work:
 - 06-01: tree-sitter 0.25 for grammar ABI version 15 compatibility
 - 06-01: Fresh LanguageSupport per parse (Parser not Send/Sync, cheap creation)
 - 06-01: Map .c/.h to C++ grammar (avoids separate tree-sitter-c)
+- 06-03: streaming-iterator for tree-sitter 0.25 QueryMatches API
+- 06-03: CallType enum: Direct, Method, Qualified for call classification
+- 06-03: Batch insert methods for efficient indexing
+- 06-03: Re-indexing deletes old edges before inserting new
+- 06-03: Aliased Python imports via aliased_import node pattern
 
 ### Pending Todos
 
@@ -210,17 +215,17 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-01 02:40 UTC
-Stopped at: Completed 06-01-PLAN.md (Tree-sitter Multi-language Parser)
+Last session: 2026-02-01 02:49 UTC
+Stopped at: Completed 06-03-PLAN.md (Call Graph)
 Resume file: None
 
 **Latest work:**
-- Completed 06-01: Tree-sitter parser with 7-language support
+- Completed 06-03: Call graph extraction with 7-language support
 
 **Phase 6 Progress:**
 - Plan 01: Tree-sitter Parser - COMPLETE
-- Plan 02: Symbol Extractor - pending
-- Plan 03: Call Graph - pending
+- Plan 02: Symbol Extractor - COMPLETE (parallel)
+- Plan 03: Call Graph - COMPLETE
 - Plan 04: Structural Search - pending
 - Plan 05: Symbol Index - pending
 - Plan 06: Persistence - pending
