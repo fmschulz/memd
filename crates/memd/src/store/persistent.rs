@@ -798,6 +798,21 @@ impl Store for PersistentStore {
     async fn stats(&self, tenant_id: &TenantId) -> Result<StoreStats> {
         self.get_stats(tenant_id).await
     }
+
+    async fn search_with_tier_info(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        k: usize,
+    ) -> Result<(Vec<(MemoryChunk, f32)>, Option<TieredTiming>)> {
+        // Delegate to the specific method that returns timing info
+        let (results, timing, _) = PersistentStore::search_with_tier_info(self, tenant_id, query, k).await?;
+        Ok((results, timing))
+    }
+
+    fn get_tiered_stats(&self) -> Option<TieredStats> {
+        PersistentStore::get_tiered_stats(self)
+    }
 }
 
 impl PersistentStore {
