@@ -375,6 +375,98 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                 "required": ["tenant_id", "module"]
             }),
         ),
+        // STRUCT-11: debug.find_tool_calls
+        ToolDefinition::new(
+            "debug.find_tool_calls",
+            "Find past tool invocations, optionally filtered by name and time range. Returns tool name, input/output, errors, and duration.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier"
+                    },
+                    "tool_name": {
+                        "type": "string",
+                        "description": "Filter by tool name (e.g., 'memory.search')"
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Filter by session ID"
+                    },
+                    "time_from": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "Start of time range (ISO 8601)"
+                    },
+                    "time_to": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "End of time range (ISO 8601)"
+                    },
+                    "errors_only": {
+                        "type": "boolean",
+                        "description": "Only return calls that resulted in errors",
+                        "default": false
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results",
+                        "default": 50,
+                        "maximum": 100
+                    }
+                },
+                "required": ["tenant_id"]
+            }),
+        ),
+        // STRUCT-12: debug.find_errors
+        ToolDefinition::new(
+            "debug.find_errors",
+            "Find stack traces and errors, optionally filtered by error signature or function. Returns error type, message, and stack frames.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier"
+                    },
+                    "error_signature": {
+                        "type": "string",
+                        "description": "Filter by error type/signature (e.g., 'TypeError')"
+                    },
+                    "function_name": {
+                        "type": "string",
+                        "description": "Find errors where function is in stack"
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": "Find errors in this file"
+                    },
+                    "time_from": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "Start of time range"
+                    },
+                    "time_to": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "End of time range"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results",
+                        "default": 50,
+                        "maximum": 100
+                    },
+                    "include_frames": {
+                        "type": "boolean",
+                        "description": "Include stack frames in response",
+                        "default": true
+                    }
+                },
+                "required": ["tenant_id"]
+            }),
+        ),
     ]
 });
 
@@ -406,6 +498,8 @@ pub fn tool_names() -> Vec<&'static str> {
         "code.find_references",
         "code.find_callers",
         "code.find_imports",
+        "debug.find_tool_calls",
+        "debug.find_errors",
     ]
 }
 
@@ -414,9 +508,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn get_all_tools_returns_eleven() {
+    fn get_all_tools_returns_thirteen() {
         let tools = get_all_tools();
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 13);
     }
 
     #[test]
@@ -495,13 +589,15 @@ mod tests {
     #[test]
     fn tool_names_list() {
         let names = tool_names();
-        assert_eq!(names.len(), 11);
+        assert_eq!(names.len(), 13);
         assert!(names.contains(&"memory.search"));
         assert!(names.contains(&"memory.metrics"));
         assert!(names.contains(&"code.find_definition"));
         assert!(names.contains(&"code.find_references"));
         assert!(names.contains(&"code.find_callers"));
         assert!(names.contains(&"code.find_imports"));
+        assert!(names.contains(&"debug.find_tool_calls"));
+        assert!(names.contains(&"debug.find_errors"));
     }
 
     #[test]
@@ -529,5 +625,46 @@ mod tests {
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(required_strs.contains(&"tenant_id"));
         assert!(required_strs.contains(&"module"));
+    }
+
+    #[test]
+    fn debug_find_tool_calls_schema_has_required_fields() {
+        let tool = get_tool("debug.find_tool_calls").unwrap();
+        let required = tool.input_schema.get("required").unwrap().as_array().unwrap();
+        let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required_strs.contains(&"tenant_id"));
+    }
+
+    #[test]
+    fn debug_find_tool_calls_has_optional_filters() {
+        let tool = get_tool("debug.find_tool_calls").unwrap();
+        let props = tool.input_schema.get("properties").unwrap();
+        assert!(props.get("tool_name").is_some());
+        assert!(props.get("session_id").is_some());
+        assert!(props.get("time_from").is_some());
+        assert!(props.get("time_to").is_some());
+        assert!(props.get("errors_only").is_some());
+        assert!(props.get("limit").is_some());
+    }
+
+    #[test]
+    fn debug_find_errors_schema_has_required_fields() {
+        let tool = get_tool("debug.find_errors").unwrap();
+        let required = tool.input_schema.get("required").unwrap().as_array().unwrap();
+        let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required_strs.contains(&"tenant_id"));
+    }
+
+    #[test]
+    fn debug_find_errors_has_optional_filters() {
+        let tool = get_tool("debug.find_errors").unwrap();
+        let props = tool.input_schema.get("properties").unwrap();
+        assert!(props.get("error_signature").is_some());
+        assert!(props.get("function_name").is_some());
+        assert!(props.get("file_path").is_some());
+        assert!(props.get("time_from").is_some());
+        assert!(props.get("time_to").is_some());
+        assert!(props.get("limit").is_some());
+        assert!(props.get("include_frames").is_some());
     }
 }
