@@ -209,6 +209,10 @@ Recent decisions affecting current work:
 - 07-01: CompactionConfig includes batch_delay_ms and batch_size for throttling
 - 07-01: TombstoneAudit verifies both SegmentReader and MetadataStore filtering
 - 07-01: HNSW staleness = (index_size - cache_size) / index_size
+- 07-02: HnswRebuilder returns raw Hnsw, not HnswIndex (enables background rebuild + atomic swap)
+- 07-02: get_embedding_cache() returns &RwLock<EmbeddingCache> (preserves lock semantics)
+- 07-02: SegmentMerger triggers merge via commit(), relies on Tantivy LogMergePolicy
+- 07-02: Default min_segments_for_merge threshold is 4
 - 07-03: ThrottleConfig defaults: batch_delay_ms=10, batch_size=100, enabled=true
 - 07-03: First batch processed without delay, delay only between batches
 
@@ -243,16 +247,16 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-01 04:40 UTC
-Stopped at: Completed 07-03-PLAN.md (Throttle Module)
+Last session: 2026-02-01 05:00 UTC
+Stopped at: Completed 07-02-PLAN.md (Compaction Implementation)
 Resume file: None
 
 **Latest work:**
-- Completed 07-03: Throttle module for rate-limiting compaction operations
+- Completed 07-02: HNSW rebuild and sparse segment merge operations
 
 **Phase 7 Progress:**
 - Plan 01: Compaction Module Foundation - COMPLETE
-- Plan 02: Compaction Implementation - COMPLETE (via prior session)
+- Plan 02: Compaction Implementation - COMPLETE
 - Plan 03: Throttle Module - COMPLETE
 
 **PROJECT STATUS: 42/42 plans completed (ALL PHASES COMPLETE)**
