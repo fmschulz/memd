@@ -276,6 +276,105 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                 "required": []
             }),
         ),
+        // STRUCT-05: code.find_definition
+        ToolDefinition::new(
+            "code.find_definition",
+            "Find where a symbol (function, class, variable) is defined. Returns file path, line number, signature, and documentation.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Symbol name to find"
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional project scope"
+                    }
+                },
+                "required": ["tenant_id", "name"]
+            }),
+        ),
+        // STRUCT-06: code.find_references
+        ToolDefinition::new(
+            "code.find_references",
+            "Find all usages of a symbol across the codebase. Returns both definitions and call sites.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Symbol name to find usages of"
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional project scope"
+                    }
+                },
+                "required": ["tenant_id", "name"]
+            }),
+        ),
+        // STRUCT-07: code.find_callers
+        ToolDefinition::new(
+            "code.find_callers",
+            "Find all functions that call a given function. Supports multi-hop traversal to find indirect callers.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Function name"
+                    },
+                    "depth": {
+                        "type": "integer",
+                        "description": "How many hops to traverse (1-3, default 1)",
+                        "minimum": 1,
+                        "maximum": 3,
+                        "default": 1
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional project scope"
+                    }
+                },
+                "required": ["tenant_id", "name"]
+            }),
+        ),
+        // STRUCT-08: code.find_imports
+        ToolDefinition::new(
+            "code.find_imports",
+            "Find files that import a given module. Returns file paths and import details.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier"
+                    },
+                    "module": {
+                        "type": "string",
+                        "description": "Module name to search for"
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional project scope"
+                    }
+                },
+                "required": ["tenant_id", "module"]
+            }),
+        ),
     ]
 });
 
@@ -303,6 +402,10 @@ pub fn tool_names() -> Vec<&'static str> {
         "memory.delete",
         "memory.stats",
         "memory.metrics",
+        "code.find_definition",
+        "code.find_references",
+        "code.find_callers",
+        "code.find_imports",
     ]
 }
 
@@ -311,9 +414,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn get_all_tools_returns_seven() {
+    fn get_all_tools_returns_eleven() {
         let tools = get_all_tools();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 11);
     }
 
     #[test]
@@ -392,8 +495,39 @@ mod tests {
     #[test]
     fn tool_names_list() {
         let names = tool_names();
-        assert_eq!(names.len(), 7);
+        assert_eq!(names.len(), 11);
         assert!(names.contains(&"memory.search"));
         assert!(names.contains(&"memory.metrics"));
+        assert!(names.contains(&"code.find_definition"));
+        assert!(names.contains(&"code.find_references"));
+        assert!(names.contains(&"code.find_callers"));
+        assert!(names.contains(&"code.find_imports"));
+    }
+
+    #[test]
+    fn code_find_definition_schema_has_required_fields() {
+        let tool = get_tool("code.find_definition").unwrap();
+        let required = tool.input_schema.get("required").unwrap().as_array().unwrap();
+        let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required_strs.contains(&"tenant_id"));
+        assert!(required_strs.contains(&"name"));
+    }
+
+    #[test]
+    fn code_find_callers_has_depth_property() {
+        let tool = get_tool("code.find_callers").unwrap();
+        let props = tool.input_schema.get("properties").unwrap();
+        let depth = props.get("depth").unwrap();
+        assert_eq!(depth.get("minimum").unwrap(), 1);
+        assert_eq!(depth.get("maximum").unwrap(), 3);
+    }
+
+    #[test]
+    fn code_find_imports_schema_has_required_fields() {
+        let tool = get_tool("code.find_imports").unwrap();
+        let required = tool.input_schema.get("required").unwrap().as_array().unwrap();
+        let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required_strs.contains(&"tenant_id"));
+        assert!(required_strs.contains(&"module"));
     }
 }
