@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "memd": {
+      "command": "memd",
+      "args": [],
+      "env": {},
+      "disabled": false
+    }
+  }
+}

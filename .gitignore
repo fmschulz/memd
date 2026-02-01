@@ -40,11 +40,7 @@ setup-python.sh
 
 # Planning and implementation documents (internal only)
 /.planning/
-/docs/codex-*.md
-/docs/debug-*.md
-/docs/session-*.md
-/docs/candle-*.md
-/docs/cli-args-*.md
+/docs/
 QUICK_START_PYTHON.md
 START_HERE.md
 DOCKER.md
