@@ -9,6 +9,7 @@ pub mod mcp;
 pub mod metrics;
 pub mod retrieval;
 pub mod store;
+pub mod structural;
 pub mod text;
 pub mod tiered;
 pub mod types;
@@ -32,4 +33,5 @@ pub use tiered::{
     CachedResult, HotTier, HotTierConfig, HotTierStats, PromotionScore, SemanticCache,
     SemanticCacheConfig,
 };
+pub use structural::{detect_language, parse_file, LanguageSupport, ParseResult, SupportedLanguage};
 pub use types::{ChunkId, ChunkStatus, ChunkType, MemoryChunk, ProjectId, Source, TenantId};
