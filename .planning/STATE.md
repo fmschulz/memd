@@ -10,12 +10,12 @@ See: .planning/PROJECT.md (updated 2026-01-29)
 ## Current Position
 
 Phase: 7 of 7 (Compaction + Cleanup)
-Plan: 05 of 06 (Store Integration)
-Status: In progress
-Last activity: 2026-02-01 -- Completed 07-05-PLAN.md (Store Integration)
+Plan: 06 of 06 (Eval Suite)
+Status: Phase complete
+Last activity: 2026-02-01 -- Completed 07-06-PLAN.md (Eval Suite)
 
-Progress: [============================================........] 93% (44 of 45 total plans)
-**Phase 7 Progress**: Compaction fully integrated into Store trait and MCP
+Progress: [==================================================] 100% (45 of 45 total plans)
+**Phase 7 Progress**: Complete - Compaction eval suite with F1-F6 tests
 
 ## Performance Metrics
 
@@ -35,11 +35,11 @@ Progress: [============================================........] 93% (44 of 45 t
 | 04.1 | 3 | 24m | 8m |
 | 05 | 5 | 53m | 11m |
 | 06 | 8 | 60m | 8m |
-| 07 | 5 | 20m | 4m |
+| 07 | 6 | 30m | 5m |
 
 **Recent Trend:**
-- Last 5 plans: 07-01 (5m), 07-02 (7m), 07-03 (2m), 07-04 (8m), 07-05 (5m)
-- Trend: Compaction integration complete, eval suite pending
+- Last 5 plans: 07-02 (7m), 07-03 (2m), 07-04 (8m), 07-05 (5m), 07-06 (3m)
+- Trend: Phase 7 complete, all 45 plans finished
 
 *Updated after each plan completion*
 
@@ -222,6 +222,9 @@ Recent decisions affecting current work:
 - 07-05: CompactionRunner initialized with default config in PersistentStore::open()
 - 07-05: memory.compact force flag bypasses threshold checks
 - 07-05: memory.stats includes needs_compaction computed flag
+- 07-06: Suite F designation for compaction tests (F1-F6)
+- 07-06: F4 ResultsInvariant uses SET comparison (HNSW rebuild may reorder)
+- 07-06: --include-compaction defaults to false (slower suite)
 
 ### Pending Todos
 
@@ -254,12 +257,12 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-01 04:54 UTC
-Stopped at: Completed 07-05-PLAN.md (Store Integration)
+Last session: 2026-02-01 04:59 UTC
+Stopped at: Completed 07-06-PLAN.md (Eval Suite)
 Resume file: None
 
 **Latest work:**
-- Completed 07-05: Compaction integrated into Store trait and MCP
+- Completed 07-06: Compaction eval suite (Suite F) with F1-F6 tests
 
 **Phase 7 Progress:**
 - Plan 01: Compaction Module Foundation - COMPLETE
@@ -267,6 +270,6 @@ Resume file: None
 - Plan 03: Throttle Module - COMPLETE
 - Plan 04: Compaction Runner - COMPLETE
 - Plan 05: Store Integration - COMPLETE
-- Plan 06: Eval Suite - Pending
+- Plan 06: Eval Suite - COMPLETE
 
-**PROJECT STATUS: 44/45 plans completed (Phase 7 in progress)**
+**PROJECT STATUS: 45/45 plans completed (ALL PHASES COMPLETE)**
