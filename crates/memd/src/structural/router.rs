@@ -8,8 +8,9 @@ use regex::Regex;
 /// Query intent classification.
 ///
 /// Determines which search backend should handle the query.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum QueryIntent {
+    #[default]
     /// Semantic search (default fallback).
     SemanticSearch,
 
