@@ -44,4 +44,7 @@ pub trait MetadataStore: Send + Sync {
 
     /// Count chunks by status for a tenant
     fn count_by_status(&self, tenant_id: &TenantId) -> Result<(usize, usize)>;
+
+    /// Get all deleted chunk IDs for a tenant (for compaction)
+    fn get_deleted_chunk_ids(&self, tenant_id: &TenantId) -> Result<Vec<ChunkId>>;
 }
