@@ -24,6 +24,10 @@ pub enum MemdError {
     #[error("protocol error: {0}")]
     ProtocolError(String),
 
+    /// Embedding generation errors
+    #[error("embedding error: {0}")]
+    EmbeddingError(String),
+
     /// IO errors
     #[error("io error: {0}")]
     IoError(#[from] std::io::Error),
@@ -39,6 +43,17 @@ pub enum MemdError {
     /// SQLite database errors
     #[error("database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
+
+    /// Candle framework errors (for embeddings)
+    #[error("candle error: {0}")]
+    CandleError(String),
+}
+
+// Manual From implementation for candle_core::Error
+impl From<candle_core::Error> for MemdError {
+    fn from(err: candle_core::Error) -> Self {
+        MemdError::CandleError(err.to_string())
+    }
 }
 
 /// Result type alias for memd operations

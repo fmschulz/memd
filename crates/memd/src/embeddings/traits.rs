@@ -9,6 +9,7 @@ use crate::error::Result;
 /// Different embedding models require different pooling approaches:
 /// - Mean: Average all token embeddings (BERT-style, all-MiniLM-L6-v2)
 /// - LastToken: Use final token embedding (decoder-style, Qwen3, E5-Mistral)
+/// - Cls: Use CLS token embedding (first token)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PoolingStrategy {
     /// Mean pooling: average all token embeddings weighted by attention mask
@@ -16,6 +17,8 @@ pub enum PoolingStrategy {
     Mean,
     /// Last-token pooling: extract embedding at final attended position
     LastToken,
+    /// CLS token pooling: use first token embedding
+    Cls,
 }
 
 /// Configuration for embedding generation

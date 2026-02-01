@@ -1,0 +1,250 @@
+{
+  "description": "True semantic retrieval test dataset with minimal keyword overlap",
+  "version": "1.0",
+  "note": "Tests PURE semantic understanding where BM25 cannot help. All queries have <20% keyword overlap with relevant documents but high semantic/conceptual overlap. Designed to isolate embedding model quality.",
+  "query_types": ["semantic"],
+  "queries": [
+    {
+      "id": "TS1",
+      "query": "How do I verify a user's identity?",
+      "type": "semantic",
+      "relevant": ["D1"],
+      "irrelevant": ["D5", "D10"]
+    },
+    {
+      "id": "TS2",
+      "query": "I need to save information to permanent storage",
+      "type": "semantic",
+      "relevant": ["D2"],
+      "irrelevant": ["D6", "D11"]
+    },
+    {
+      "id": "TS3",
+      "query": "Something went wrong and I need to try again",
+      "type": "semantic",
+      "relevant": ["D3"],
+      "irrelevant": ["D7", "D12"]
+    },
+    {
+      "id": "TS4",
+      "query": "How do I get the settings for my application?",
+      "type": "semantic",
+      "relevant": ["D4"],
+      "irrelevant": ["D8", "D13"]
+    },
+    {
+      "id": "TS5",
+      "query": "I want to remember this for later use",
+      "type": "semantic",
+      "relevant": ["D5"],
+      "irrelevant": ["D1", "D9"]
+    },
+    {
+      "id": "TS6",
+      "query": "Show me what changed between versions",
+      "type": "semantic",
+      "relevant": ["D6"],
+      "irrelevant": ["D2", "D10"]
+    },
+    {
+      "id": "TS7",
+      "query": "I need to protect sensitive data",
+      "type": "semantic",
+      "relevant": ["D7"],
+      "irrelevant": ["D3", "D11"]
+    },
+    {
+      "id": "TS8",
+      "query": "How do I handle multiple operations at once?",
+      "type": "semantic",
+      "relevant": ["D8"],
+      "irrelevant": ["D4", "D12"]
+    },
+    {
+      "id": "TS9",
+      "query": "I want to track what happened in the past",
+      "type": "semantic",
+      "relevant": ["D9"],
+      "irrelevant": ["D5", "D13"]
+    },
+    {
+      "id": "TS10",
+      "query": "Make sure the input is correct before processing",
+      "type": "semantic",
+      "relevant": ["D10"],
+      "irrelevant": ["D1", "D6"]
+    },
+    {
+      "id": "TS11",
+      "query": "I need to transform the structure of this object",
+      "type": "semantic",
+      "relevant": ["D11"],
+      "irrelevant": ["D2", "D7"]
+    },
+    {
+      "id": "TS12",
+      "query": "How do I wait for something to finish?",
+      "type": "semantic",
+      "relevant": ["D12"],
+      "irrelevant": ["D3", "D8"]
+    },
+    {
+      "id": "TS13",
+      "query": "I need to stop unauthorized access",
+      "type": "semantic",
+      "relevant": ["D13"],
+      "irrelevant": ["D4", "D9"]
+    },
+    {
+      "id": "TS14",
+      "query": "Convert between different formats",
+      "type": "semantic",
+      "relevant": ["D14"],
+      "irrelevant": ["D5", "D10"]
+    },
+    {
+      "id": "TS15",
+      "query": "I need to clean up resources when done",
+      "type": "semantic",
+      "relevant": ["D15"],
+      "irrelevant": ["D6", "D11"]
+    }
+  ],
+  "documents": [
+    {
+      "id": "D1",
+      "content": "// Authentication module\npub fn authenticate_credentials(username: &str, password: &str) -> Result<Session> {\n    let stored_hash = database.lookup_password_hash(username)?;\n    let matches = bcrypt::verify(password, &stored_hash)?;\n    \n    if matches {\n        Ok(Session::create(username))\n    } else {\n        Err(AuthError::InvalidCredentials)\n    }\n}",
+      "tags": {
+        "doc_id": "D1",
+        "topic": "authentication",
+        "language": "rust"
+      }
+    },
+    {
+      "id": "D2",
+      "content": "// Database persistence layer\nclass Repository {\n    async persist(entity: Entity): Promise<void> {\n        const record = this.toRecord(entity);\n        await this.db.transaction(async (tx) => {\n            await tx.write(this.table, record);\n            await tx.commit();\n        });\n    }\n    \n    async flush(): Promise<void> {\n        await this.db.fsync();\n    }\n}",
+      "tags": {
+        "doc_id": "D2",
+        "topic": "database",
+        "language": "typescript"
+      }
+    },
+    {
+      "id": "D3",
+      "content": "# Error recovery handler\ndef execute_with_retry(operation, max_attempts=3):\n    attempt = 0\n    while attempt < max_attempts:\n        try:\n            return operation()\n        except TransientError as e:\n            attempt += 1\n            if attempt >= max_attempts:\n                raise\n            backoff = 2 ** attempt\n            time.sleep(backoff)",
+      "tags": {
+        "doc_id": "D3",
+        "topic": "error_handling",
+        "language": "python"
+      }
+    },
+    {
+      "id": "D4",
+      "content": "// Configuration loader\npublic class ConfigManager {\n    private Properties loadConfiguration() {\n        Properties props = new Properties();\n        props.load(new FileInputStream(\"app.properties\"));\n        \n        // Override with environment variables\n        for (String key : System.getenv().keySet()) {\n            if (key.startsWith(\"APP_\")) {\n                String propKey = key.toLowerCase().replace(\"_\", \".\");\n                props.setProperty(propKey, System.getenv(key));\n            }\n        }\n        return props;\n    }\n}",
+      "tags": {
+        "doc_id": "D4",
+        "topic": "configuration",
+        "language": "java"
+      }
+    },
+    {
+      "id": "D5",
+      "content": "// Memoization cache\nconst memoize = (fn) => {\n    const cache = new Map();\n    return (...args) => {\n        const key = JSON.stringify(args);\n        if (cache.has(key)) {\n            return cache.get(key);\n        }\n        const result = fn(...args);\n        cache.set(key, result);\n        return result;\n    };\n};",
+      "tags": {
+        "doc_id": "D5",
+        "topic": "caching",
+        "language": "javascript"
+      }
+    },
+    {
+      "id": "D6",
+      "content": "# Version diff utility\ndef compute_delta(old_version, new_version):\n    \"\"\"Calculate differences between two versions.\"\"\"\n    additions = []\n    removals = []\n    modifications = []\n    \n    for key in new_version.keys():\n        if key not in old_version:\n            additions.append(key)\n        elif new_version[key] != old_version[key]:\n            modifications.append((key, old_version[key], new_version[key]))\n    \n    for key in old_version.keys():\n        if key not in new_version:\n            removals.append(key)\n    \n    return Delta(additions, removals, modifications)",
+      "tags": {
+        "doc_id": "D6",
+        "topic": "versioning",
+        "language": "python"
+      }
+    },
+    {
+      "id": "D7",
+      "content": "// Encryption utility\npub struct Encryptor {\n    cipher: ChaCha20Poly1305,\n}\n\nimpl Encryptor {\n    pub fn encrypt_bytes(&self, plaintext: &[u8]) -> Result<Vec<u8>> {\n        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);\n        let ciphertext = self.cipher.encrypt(&nonce, plaintext)\n            .map_err(|e| EncryptionError::Failed)?;\n        \n        let mut output = nonce.to_vec();\n        output.extend_from_slice(&ciphertext);\n        Ok(output)\n    }\n}",
+      "tags": {
+        "doc_id": "D7",
+        "topic": "encryption",
+        "language": "rust"
+      }
+    },
+    {
+      "id": "D8",
+      "content": "// Concurrent task executor\nclass ParallelExecutor {\n    constructor(maxConcurrency) {\n        this.maxConcurrency = maxConcurrency;\n        this.running = 0;\n        this.queue = [];\n    }\n    \n    async execute(tasks) {\n        const results = [];\n        for (const task of tasks) {\n            while (this.running >= this.maxConcurrency) {\n                await this.waitForSlot();\n            }\n            this.running++;\n            const promise = task().finally(() => this.running--);\n            results.push(promise);\n        }\n        return Promise.all(results);\n    }\n}",
+      "tags": {
+        "doc_id": "D8",
+        "topic": "concurrency",
+        "language": "javascript"
+      }
+    },
+    {
+      "id": "D9",
+      "content": "// Audit logging\npublic class AuditLogger {\n    private final EventStore eventStore;\n    \n    public void recordEvent(String action, String userId, Map<String, Object> details) {\n        Event event = Event.builder()\n            .timestamp(Instant.now())\n            .action(action)\n            .actor(userId)\n            .metadata(details)\n            .build();\n        \n        eventStore.append(event);\n    }\n    \n    public List<Event> queryHistory(String userId, Instant from, Instant to) {\n        return eventStore.find(new TimeRangeQuery(userId, from, to));\n    }\n}",
+      "tags": {
+        "doc_id": "D9",
+        "topic": "logging",
+        "language": "java"
+      }
+    },
+    {
+      "id": "D10",
+      "content": "# Input validation\nimport re\nfrom typing import Optional\n\ndef sanitize_user_input(raw_input: str) -> Optional[str]:\n    \"\"\"Clean and validate user-provided text.\"\"\"\n    # Remove dangerous characters\n    cleaned = re.sub(r'[<>\"\\']', '', raw_input)\n    \n    # Enforce length limits\n    if len(cleaned) > 1000:\n        return None\n    \n    # Check against allowed pattern\n    if not re.match(r'^[a-zA-Z0-9\\s.,!?-]+$', cleaned):\n        return None\n    \n    return cleaned.strip()",
+      "tags": {
+        "doc_id": "D10",
+        "topic": "validation",
+        "language": "python"
+      }
+    },
+    {
+      "id": "D11",
+      "content": "// Data mapper\nfn map_entity(dto: UserDto) -> User {\n    User {\n        id: Uuid::parse_str(&dto.id).expect(\"Invalid UUID\"),\n        name: dto.full_name,\n        email: dto.email_address.to_lowercase(),\n        created_at: DateTime::parse_from_rfc3339(&dto.created)\n            .expect(\"Invalid timestamp\")\n            .into(),\n        preferences: dto.settings\n            .into_iter()\n            .map(|(k, v)| (k, serde_json::from_str(&v).unwrap()))\n            .collect(),\n    }\n}",
+      "tags": {
+        "doc_id": "D11",
+        "topic": "mapping",
+        "language": "rust"
+      }
+    },
+    {
+      "id": "D12",
+      "content": "// Async awaiter\nasync function synchronize(promises) {\n    const pending = new Set(promises);\n    const results = [];\n    \n    for (const promise of pending) {\n        try {\n            const result = await promise;\n            results.push({ status: 'fulfilled', value: result });\n        } catch (error) {\n            results.push({ status: 'rejected', reason: error });\n        }\n    }\n    \n    return results;\n}",
+      "tags": {
+        "doc_id": "D12",
+        "topic": "async",
+        "language": "javascript"
+      }
+    },
+    {
+      "id": "D13",
+      "content": "// Authorization guard\npublic class AccessControl {\n    private final PermissionRepository permissions;\n    \n    public boolean checkPermission(String userId, String resource, Action action) {\n        Set<Permission> userPerms = permissions.findByUser(userId);\n        \n        for (Permission perm : userPerms) {\n            if (perm.matches(resource, action)) {\n                return true;\n            }\n        }\n        \n        // Deny by default\n        return false;\n    }\n    \n    public void enforce(String userId, String resource, Action action) throws AccessDeniedException {\n        if (!checkPermission(userId, resource, action)) {\n            throw new AccessDeniedException(\"Insufficient permissions\");\n        }\n    }\n}",
+      "tags": {
+        "doc_id": "D13",
+        "topic": "authorization",
+        "language": "java"
+      }
+    },
+    {
+      "id": "D14",
+      "content": "# Serialization converter\nimport json\nimport yaml\nimport xml.etree.ElementTree as ET\n\nclass FormatConverter:\n    @staticmethod\n    def json_to_yaml(json_str):\n        data = json.loads(json_str)\n        return yaml.dump(data, default_flow_style=False)\n    \n    @staticmethod\n    def yaml_to_json(yaml_str):\n        data = yaml.safe_load(yaml_str)\n        return json.dumps(data, indent=2)\n    \n    @staticmethod\n    def dict_to_xml(data, root_name='root'):\n        root = ET.Element(root_name)\n        for key, value in data.items():\n            child = ET.SubElement(root, key)\n            child.text = str(value)\n        return ET.tostring(root, encoding='unicode')",
+      "tags": {
+        "doc_id": "D14",
+        "topic": "serialization",
+        "language": "python"
+      }
+    },
+    {
+      "id": "D15",
+      "content": "// Resource disposal\nimpl Drop for Connection {\n    fn drop(&mut self) {\n        // Release file handles\n        if let Some(file) = self.file.take() {\n            let _ = file.sync_all();\n        }\n        \n        // Close network sockets\n        if let Some(socket) = self.socket.take() {\n            let _ = socket.shutdown(Shutdown::Both);\n        }\n        \n        // Free memory buffers\n        self.buffer.clear();\n        self.buffer.shrink_to_fit();\n        \n        // Decrement reference count\n        self.pool.release(self.id);\n    }\n}",
+      "tags": {
+        "doc_id": "D15",
+        "topic": "cleanup",
+        "language": "rust"
+      }
+    }
+  ]
+}

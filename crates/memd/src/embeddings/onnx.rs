@@ -6,10 +6,10 @@
 
 use std::sync::Arc;
 
-use ndarray::{Array2, ArrayViewD, Axis};
+use ndarray::{Array2, Array4, ArrayViewD, Axis};
 use ort::session::builder::GraphOptimizationLevel;
-use ort::session::Session;
-use ort::value::TensorRef;
+use ort::session::{Session, SessionInputValue};
+use ort::value::{Tensor, TensorRef};
 use parking_lot::Mutex;
 use tokenizers::Tokenizer;
 
@@ -218,44 +218,73 @@ impl OnnxEmbedder {
         }
     }
 
-    /// Run inference on tokenized inputs
-    fn run_inference(&self, texts: &[&str]) -> Result<Vec<EmbeddingResult>> {
-        let (input_ids, attention_mask, token_type_ids) = self.tokenize(texts)?;
+    /// Generate position IDs for decoder models
+    ///
+    /// Position IDs are simply [0, 1, 2, ..., seq_len-1] for each sequence in the batch.
+    fn generate_position_ids(&self, batch_size: usize, seq_len: usize) -> Array2<i64> {
+        let mut position_ids = Array2::<i64>::zeros((batch_size, seq_len));
+        for b in 0..batch_size {
+            for s in 0..seq_len {
+                position_ids[[b, s]] = s as i64;
+            }
+        }
+        position_ids
+    }
 
-        // Create TensorRef from ndarray views
-        let input_ids_tensor = TensorRef::from_array_view(input_ids.view())
+    /// Run inference with KV-cache for decoder models (Qwen3)
+    ///
+    /// Decoder models require empty past_key_values tensors for the first forward pass.
+    /// This helper properly handles the complex input structure and returns the hidden states.
+    fn run_with_kv_cache(
+        &self,
+        session: &mut Session,
+        input_ids: &Array2<i64>,
+        attention_mask: &Array2<i64>,
+        position_ids: &Array2<i64>,
+        kv_arrays: Vec<Array4<f32>>,
+        num_layers: usize,
+    ) -> Result<ndarray::ArrayD<f32>> {
+        // Create owned tensors for the core inputs
+        let input_ids_tensor = Tensor::from_array(input_ids.clone())
             .map_err(|e| MemdError::StorageError(format!("failed to create input_ids tensor: {}", e)))?;
-        let attention_mask_tensor = TensorRef::from_array_view(attention_mask.view())
+        let attention_mask_tensor = Tensor::from_array(attention_mask.clone())
             .map_err(|e| MemdError::StorageError(format!("failed to create attention_mask tensor: {}", e)))?;
-        let token_type_ids_tensor = TensorRef::from_array_view(token_type_ids.view())
-            .map_err(|e| MemdError::StorageError(format!("failed to create token_type_ids tensor: {}", e)))?;
+        let position_ids_tensor = Tensor::from_array(position_ids.clone())
+            .map_err(|e| MemdError::StorageError(format!("failed to create position_ids tensor: {}", e)))?;
 
-        let mut session = self.session.lock();
+        // Create owned KV tensors - consuming the arrays
+        let mut kv_tensors: Vec<Tensor<f32>> = Vec::with_capacity(num_layers * 2);
+        for kv_array in kv_arrays.into_iter() {
+            let tensor = Tensor::from_array(kv_array)
+                .map_err(|e| MemdError::StorageError(format!("failed to create KV tensor: {}", e)))?;
+            kv_tensors.push(tensor);
+        }
 
-        // Try with token_type_ids first (BERT-style models need it)
-        let first_result = session.run(ort::inputs![
-            "input_ids" => input_ids_tensor.clone(),
-            "attention_mask" => attention_mask_tensor.clone(),
-            "token_type_ids" => token_type_ids_tensor,
-        ]);
+        // Build inputs vector using owned tensors
+        let mut inputs: Vec<(std::borrow::Cow<'_, str>, SessionInputValue<'_>)> = Vec::new();
+        inputs.push(("input_ids".into(), SessionInputValue::from(&input_ids_tensor)));
+        inputs.push(("attention_mask".into(), SessionInputValue::from(&attention_mask_tensor)));
+        inputs.push(("position_ids".into(), SessionInputValue::from(&position_ids_tensor)));
 
-        // Check if we need to retry without token_type_ids (Qwen3 doesn't use it)
-        let needs_retry = first_result.is_err();
+        // Add KV cache tensors with proper naming
+        for layer in 0..num_layers {
+            let key_idx = layer * 2;
+            let value_idx = layer * 2 + 1;
+            inputs.push((
+                format!("past_key_values.{}.key", layer).into(),
+                SessionInputValue::from(&kv_tensors[key_idx]),
+            ));
+            inputs.push((
+                format!("past_key_values.{}.value", layer).into(),
+                SessionInputValue::from(&kv_tensors[value_idx]),
+            ));
+        }
 
-        let outputs = if needs_retry {
-            drop(first_result);
-            session
-                .run(ort::inputs![
-                    "input_ids" => input_ids_tensor,
-                    "attention_mask" => attention_mask_tensor,
-                ])
-                .map_err(|e| MemdError::StorageError(format!("inference failed: {}", e)))?
-        } else {
-            first_result.map_err(|e| MemdError::StorageError(format!("inference failed: {}", e)))?
-        };
+        let outputs = session
+            .run(inputs)
+            .map_err(|e| MemdError::StorageError(format!("inference failed: {}", e)))?;
 
-        // Get the first output (last_hidden_state) - shape: [batch, seq_len, hidden_size]
-        // Try by name first, then fall back to index 0
+        // Extract last_hidden_state from outputs
         let output_array = if let Some(output) = outputs.get("last_hidden_state") {
             output
                 .try_extract_array::<f32>()
@@ -264,6 +293,72 @@ impl OnnxEmbedder {
             outputs[0]
                 .try_extract_array::<f32>()
                 .map_err(|e| MemdError::StorageError(format!("failed to extract tensor: {}", e)))?
+        };
+
+        Ok(output_array.into_owned())
+    }
+
+    /// Run inference on tokenized inputs
+    fn run_inference(&self, texts: &[&str]) -> Result<Vec<EmbeddingResult>> {
+        let (input_ids, attention_mask, token_type_ids) = self.tokenize(texts)?;
+
+        let mut session = self.session.lock();
+
+        // For BERT-style models (all-MiniLM), use token_type_ids
+        // For decoder models (Qwen3), use position_ids and empty KV-cache
+        let output_array = if let Some(kv_config) = self.model.kv_cache_config() {
+            // Qwen3-style: requires position_ids and empty past_key_values
+            let batch_size = input_ids.shape()[0];
+            let seq_len = input_ids.shape()[1];
+            let position_ids = self.generate_position_ids(batch_size, seq_len);
+
+            // Create empty KV-cache tensors: shape (batch, num_kv_heads, 0, head_dim)
+            // Using seq_len=0 means no cached keys/values (fresh forward pass)
+            // We create one array per layer pair (key+value share the same shape)
+            let empty_kv_shape = (batch_size, kv_config.num_kv_heads, 0, kv_config.head_dim);
+            let mut kv_arrays: Vec<Array4<f32>> = Vec::with_capacity(kv_config.num_layers * 2);
+            for _ in 0..kv_config.num_layers * 2 {
+                kv_arrays.push(Array4::<f32>::zeros(empty_kv_shape));
+            }
+
+            // Run with KV cache - returns hidden states directly
+            self.run_with_kv_cache(
+                &mut session,
+                &input_ids,
+                &attention_mask,
+                &position_ids,
+                kv_arrays,
+                kv_config.num_layers,
+            )?
+        } else {
+            // BERT-style: requires token_type_ids, no position_ids
+            let input_ids_tensor = TensorRef::from_array_view(input_ids.view())
+                .map_err(|e| MemdError::StorageError(format!("failed to create input_ids tensor: {}", e)))?;
+            let attention_mask_tensor = TensorRef::from_array_view(attention_mask.view())
+                .map_err(|e| MemdError::StorageError(format!("failed to create attention_mask tensor: {}", e)))?;
+            let token_type_ids_tensor = TensorRef::from_array_view(token_type_ids.view())
+                .map_err(|e| MemdError::StorageError(format!("failed to create token_type_ids tensor: {}", e)))?;
+
+            let outputs = session
+                .run(ort::inputs![
+                    "input_ids" => input_ids_tensor,
+                    "attention_mask" => attention_mask_tensor,
+                    "token_type_ids" => token_type_ids_tensor,
+                ])
+                .map_err(|e| MemdError::StorageError(format!("inference failed: {}", e)))?;
+
+            // Get the first output (last_hidden_state) - shape: [batch, seq_len, hidden_size]
+            // Try by name first, then fall back to index 0
+            let arr = if let Some(output) = outputs.get("last_hidden_state") {
+                output
+                    .try_extract_array::<f32>()
+                    .map_err(|e| MemdError::StorageError(format!("failed to extract tensor: {}", e)))?
+            } else {
+                outputs[0]
+                    .try_extract_array::<f32>()
+                    .map_err(|e| MemdError::StorageError(format!("failed to extract tensor: {}", e)))?
+            };
+            arr.into_owned()
         };
 
         // Apply pooling based on strategy
@@ -290,7 +385,7 @@ impl OnnxEmbedder {
 #[async_trait::async_trait]
 impl Embedder for OnnxEmbedder {
     async fn embed_texts(&self, texts: &[&str]) -> Result<Vec<EmbeddingResult>> {
-        // Process in batches
+        // Process in batches using the original run_inference method
         let mut all_results = Vec::with_capacity(texts.len());
 
         for chunk in texts.chunks(self.config.batch_size) {
@@ -431,5 +526,42 @@ mod tests {
         // For Qwen3, queries should use instruction format
         let model = EmbeddingModel::Qwen3Embedding0_6B;
         assert!(model.uses_instruction_format());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires model download (~600MB)"]
+    async fn test_qwen3_embed_single_text() {
+        let embedder = OnnxEmbedder::with_model(EmbeddingModel::Qwen3Embedding0_6B)
+            .expect("failed to create embedder");
+
+        let embedding = embedder
+            .embed_query("Hello, world!")
+            .await
+            .expect("embed failed");
+
+        // Qwen3 produces 1024-dim embeddings
+        assert_eq!(embedding.len(), 1024);
+
+        // Check normalized (unit length)
+        let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 0.01, "embedding not normalized: {}", norm);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires model download (~600MB)"]
+    async fn test_qwen3_embed_batch() {
+        let embedder = OnnxEmbedder::with_model(EmbeddingModel::Qwen3Embedding0_6B)
+            .expect("failed to create embedder");
+
+        let texts = vec!["Hello", "World", "Test"];
+        let embeddings = embedder
+            .embed_texts(&texts.iter().map(|s| *s).collect::<Vec<_>>())
+            .await
+            .expect("batch embed failed");
+
+        assert_eq!(embeddings.len(), 3);
+        for emb in &embeddings {
+            assert_eq!(emb.len(), 1024);
+        }
     }
 }

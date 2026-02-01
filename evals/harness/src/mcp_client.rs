@@ -54,7 +54,7 @@ impl McpClient {
         let mut process = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null()) // Suppress logs in tests
+            .stderr(Stdio::inherit()) // Show logs for debugging (model downloads, etc)
             .spawn()?;
 
         let stdin = process.stdin.take().ok_or(McpClientError::StdinNotAvailable)?;
