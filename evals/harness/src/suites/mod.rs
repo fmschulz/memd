@@ -10,5 +10,6 @@ pub mod persistence;
 pub mod retrieval;
 pub mod sanity;
 pub mod scifact;
+pub mod structural;
 pub mod tiered;
 pub mod true_semantic;
