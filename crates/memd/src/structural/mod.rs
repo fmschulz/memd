@@ -2,11 +2,13 @@
 //!
 //! This module provides tree-sitter integration for parsing source code
 //! files and extracting structural information like symbols and call graphs.
+//! Also includes trace capture and parsing for tool calls and stack traces.
 
 mod call_graph;
 mod parser;
 mod storage;
 mod symbols;
+mod traces;
 
 pub use call_graph::{
     CallGraphExtractor, CallGraphIndexer, ExtractedCall, ExtractedImport,
@@ -20,3 +22,7 @@ pub use storage::{
     SymbolKind, SymbolRecord, TimeRange, ToolTraceRecord,
 };
 pub use symbols::{ExtractedSymbol, SymbolExtractor, SymbolIndexer};
+pub use traces::{
+    normalize_error_signature, DefaultTraceIndexer, ParsedFrame, StackTraceParser, TraceCapture,
+    TraceIndexer,
+};
