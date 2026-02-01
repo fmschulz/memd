@@ -10,19 +10,19 @@ See: .planning/PROJECT.md (updated 2026-01-29)
 ## Current Position
 
 Phase: 7 of 7 (Compaction + Cleanup)
-Plan: 03 of 03 (Throttle Module)
-Status: Complete
-Last activity: 2026-02-01 -- Completed 07-03-PLAN.md (Throttle Module)
+Plan: 04 of 06 (Compaction Runner)
+Status: In progress
+Last activity: 2026-01-31 -- Completed 07-04-PLAN.md (Compaction Runner)
 
-Progress: [=====================================================] 100% (42 of 42 total plans)
-**Phase 7 Complete**: Compaction infrastructure with throttle for rate-limiting
+Progress: [===========================================.........] 90% (43 of 45 total plans)
+**Phase 7 Progress**: Compaction runner with HNSW rebuild, segment merge, cache invalidation
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 40
+- Total plans completed: 43
 - Average duration: 6m
-- Total execution time: ~251 minutes
+- Total execution time: ~259 minutes
 
 **By Phase:**
 
@@ -35,11 +35,11 @@ Progress: [=====================================================] 100% (42 of 42
 | 04.1 | 3 | 24m | 8m |
 | 05 | 5 | 53m | 11m |
 | 06 | 8 | 60m | 8m |
-| 07 | 3 | 7m | 2m |
+| 07 | 4 | 15m | 4m |
 
 **Recent Trend:**
-- Last 5 plans: 06-07 (6m), 06-08 (5m), 07-01 (5m), 07-03 (2m)
-- Trend: Phase 7 complete - throttle module for rate-limiting
+- Last 5 plans: 06-08 (5m), 07-01 (5m), 07-02 (7m), 07-03 (2m), 07-04 (8m)
+- Trend: Compaction workflow orchestration complete
 
 *Updated after each plan completion*
 
@@ -215,6 +215,9 @@ Recent decisions affecting current work:
 - 07-02: Default min_segments_for_merge threshold is 4
 - 07-03: ThrottleConfig defaults: batch_delay_ms=10, batch_size=100, enabled=true
 - 07-03: First batch processed without delay, delay only between batches
+- 07-04: CompactionRunner uses should_run() with unified trigger (any threshold exceeded)
+- 07-04: Throttle delays between gather->rebuild->merge->invalidate operations
+- 07-04: HNSW rebuild returns RebuildResult only, actual swap deferred (needs HnswIndex::from_rebuilt)
 
 ### Pending Todos
 
@@ -247,16 +250,19 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-01 05:00 UTC
-Stopped at: Completed 07-02-PLAN.md (Compaction Implementation)
+Last session: 2026-01-31 09:23 UTC
+Stopped at: Completed 07-04-PLAN.md (Compaction Runner)
 Resume file: None
 
 **Latest work:**
-- Completed 07-02: HNSW rebuild and sparse segment merge operations
+- Completed 07-04: CompactionRunner with HNSW rebuild, segment merge, cache invalidation
 
 **Phase 7 Progress:**
 - Plan 01: Compaction Module Foundation - COMPLETE
 - Plan 02: Compaction Implementation - COMPLETE
 - Plan 03: Throttle Module - COMPLETE
+- Plan 04: Compaction Runner - COMPLETE
+- Plan 05: Pending
+- Plan 06: Pending
 
-**PROJECT STATUS: 42/42 plans completed (ALL PHASES COMPLETE)**
+**PROJECT STATUS: 43/45 plans completed (Phase 7 in progress)**
