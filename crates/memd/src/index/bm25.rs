@@ -138,6 +138,19 @@ impl Bm25Index {
         let searcher = self.reader.searcher();
         Ok(searcher.num_docs())
     }
+
+    /// Get the number of segments in the index
+    ///
+    /// Used by compaction to check if segment merge is needed.
+    pub fn segment_count(&self) -> Result<usize> {
+        // Reload to see recent changes
+        self.reader
+            .reload()
+            .map_err(|e| MemdError::StorageError(format!("reload reader: {}", e)))?;
+
+        let searcher = self.reader.searcher();
+        Ok(searcher.segment_readers().len())
+    }
 }
 
 impl Default for Bm25Index {
