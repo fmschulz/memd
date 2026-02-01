@@ -5,24 +5,24 @@
 See: .planning/PROJECT.md (updated 2026-01-29)
 
 **Core value:** Agents can find and use relevant past context--across sessions, projects, and time--without hitting context window limits or losing continuity.
-**Current focus:** Phase 7 (Compaction + Cleanup)
+**Current focus:** Milestone 1 complete
 
 ## Current Position
 
 Phase: 7 of 7 (Compaction + Cleanup)
 Plan: 06 of 06 (Eval Suite)
-Status: Phase complete
-Last activity: 2026-02-01 -- Completed 07-06-PLAN.md (Eval Suite)
+Status: MILESTONE 1 COMPLETE
+Last activity: 2026-02-01 -- Completed Phase 7 (Compaction + Cleanup)
 
-Progress: [==================================================] 100% (45 of 45 total plans)
-**Phase 7 Progress**: Complete - Compaction eval suite with F1-F6 tests
+Progress: [====================================================] 100% (45 of 45 total plans)
+**MILESTONE 1 COMPLETE**: All 7 phases executed - memd baseline with hybrid retrieval ready
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 44
+- Total plans completed: 45
 - Average duration: 6m
-- Total execution time: ~264 minutes
+- Total execution time: ~294 minutes
 
 **By Phase:**
 
@@ -217,6 +217,13 @@ Recent decisions affecting current work:
 - 07-03: First batch processed without delay, delay only between batches
 - 07-04: CompactionRunner uses should_run() with unified trigger (any threshold exceeded)
 - 07-04: Throttle delays between gather->rebuild->merge->invalidate operations
+- 07-05: Store trait compaction methods have default implementations (allows non-persistent stores)
+- 07-05: CompactionRunner initialized with default config in PersistentStore::open()
+- 07-05: memory.compact force flag bypasses threshold checks (manual override)
+- 07-05: memory.stats includes needs_compaction computed flag
+- 07-06: Suite F designation for compaction tests (F1-F6 covering tombstone, merge, rebuild, invariant, latency, force)
+- 07-06: F4 ResultsInvariant uses SET comparison for chunk IDs (not strict ordering) after HNSW rebuild
+- 07-06: Compaction suite optionally included in 'all' via --include-compaction flag
 - 07-04: HNSW rebuild returns RebuildResult only, actual swap deferred (needs HnswIndex::from_rebuilt)
 - 07-05: Store trait compaction methods have default implementations returning errors/None
 - 07-05: CompactionRunner initialized with default config in PersistentStore::open()
@@ -257,19 +264,24 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-01 04:59 UTC
-Stopped at: Completed 07-06-PLAN.md (Eval Suite)
+Last session: 2026-02-01 05:05 UTC
+Stopped at: Completed Phase 7 (Compaction + Cleanup) - MILESTONE 1 COMPLETE
 Resume file: None
 
 **Latest work:**
-- Completed 07-06: Compaction eval suite (Suite F) with F1-F6 tests
+- Completed Phase 7: Compaction + Cleanup (6 plans, 30m total)
+  - 07-01: Compaction module foundation with metrics and tombstone audit (5m)
+  - 07-02: HNSW rebuild and segment merge operations (7m)
+  - 07-03: Throttle module for rate-limiting (2m)
+  - 07-04: CompactionRunner workflow coordinator (8m)
+  - 07-05: PersistentStore and MCP integration (5m)
+  - 07-06: Compaction eval suite F1-F6 (3m)
 
-**Phase 7 Progress:**
-- Plan 01: Compaction Module Foundation - COMPLETE
-- Plan 02: Compaction Implementation - COMPLETE
-- Plan 03: Throttle Module - COMPLETE
-- Plan 04: Compaction Runner - COMPLETE
-- Plan 05: Store Integration - COMPLETE
-- Plan 06: Eval Suite - COMPLETE
+**Phase 7 Goal Verification:** PASSED (5/5 criteria)
+- Tombstone filtering ensures deleted chunks never returned
+- Sparse segment merges reduce fragmentation
+- Warm HNSW rebuild creates clean snapshot
+- Compaction runs with throttling to limit tail latency
+- Results before/after compaction are equivalent (SET comparison)
 
-**PROJECT STATUS: 45/45 plans completed (ALL PHASES COMPLETE)**
+**MILESTONE 1 COMPLETE:** All 7 phases executed successfully (45/45 plans)

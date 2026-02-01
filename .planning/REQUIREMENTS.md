@@ -230,12 +230,12 @@ Which phases cover which requirements. Updated during roadmap creation.
 | STRUCT-12 | Phase 6 | Pending |
 | STRUCT-13 | Phase 6 | Pending |
 | STRUCT-14 | Phase 6 | Pending |
-| COMPACT-01 | Phase 7 | Pending |
-| COMPACT-02 | Phase 7 | Pending |
-| COMPACT-03 | Phase 7 | Pending |
-| COMPACT-04 | Phase 7 | Pending |
-| COMPACT-05 | Phase 7 | Pending |
-| COMPACT-06 | Phase 7 | Pending |
+| COMPACT-01 | Phase 7 | Complete |
+| COMPACT-02 | Phase 7 | Complete |
+| COMPACT-03 | Phase 7 | Complete |
+| COMPACT-04 | Phase 7 | Complete |
+| COMPACT-05 | Phase 7 | Complete |
+| COMPACT-06 | Phase 7 | Complete |
 | EVAL-01 | Phase 1 | Complete |
 | EVAL-02 | Phase 1 | Complete |
 | EVAL-03 | Phase 1 | Complete |
@@ -248,7 +248,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | EVAL-10 | Phase 4 | Pending |
 | EVAL-11 | Phase 4 | Pending |
 | EVAL-12 | Phase 4 | Pending |
-| EVAL-13 | Phase 7 | Pending |
+| EVAL-13 | Phase 7 | Complete |
 | OBS-01 | Phase 1 | Complete |
 | OBS-02 | Phase 3 | Complete |
 | OBS-03 | Phase 3 | Complete |
