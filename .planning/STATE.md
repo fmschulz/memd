@@ -10,12 +10,12 @@ See: .planning/PROJECT.md (updated 2026-01-29)
 ## Current Position
 
 Phase: 6 of 6 (Structural Indexes)
-Plan: 03 of 08 (Call Graph)
+Plan: 05 of 08 (Trace Storage)
 Status: In progress
-Last activity: 2026-02-01 -- Completed 06-03-PLAN.md (Call Graph)
+Last activity: 2026-01-31 -- Completed 06-05-PLAN.md (Trace Storage)
 
-Progress: [===========================================---------] 87% (34 of 39 total plans)
-**Phase 6 PROGRESS**: Call graph extraction complete
+Progress: [=============================================-------] 90% (35 of 39 total plans)
+**Phase 6 PROGRESS**: Trace storage and parsing complete
 
 ## Performance Metrics
 
@@ -34,11 +34,11 @@ Progress: [===========================================---------] 87% (34 of 39 t
 | 04 | 6 | 27m | 4m |
 | 04.1 | 3 | 24m | 8m |
 | 05 | 5 | 53m | 11m |
-| 06 | 3 | 12m | 4m |
+| 06 | 5 | 30m | 6m |
 
 **Recent Trend:**
-- Last 5 plans: 05-04 (30m), 05-05 (8m), 06-01 (3m), 06-02 (3m), 06-03 (6m)
-- Trend: Phase 6 progressing - call graph extraction complete
+- Last 5 plans: 06-01 (3m), 06-02 (3m), 06-03 (6m), 06-04 (0m-skipped), 06-05 (18m)
+- Trend: Phase 6 progressing - trace storage complete
 
 *Updated after each plan completion*
 
@@ -186,6 +186,10 @@ Recent decisions affecting current work:
 - 06-03: Batch insert methods for efficient indexing
 - 06-03: Re-indexing deletes old edges before inserting new
 - 06-03: Aliased Python imports via aliased_import node pattern
+- 06-05: TimeRange struct for filtering time-based trace queries
+- 06-05: Dynamic SQL with parameter counting for optional filters
+- 06-05: Auto-detect trace format based on content patterns
+- 06-05: Normalize error signatures by removing addresses/timestamps/UUIDs
 
 ### Pending Todos
 
@@ -218,19 +222,19 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-01 02:54 UTC
-Stopped at: Completed 06-02-PLAN.md (Symbol Extractor + Storage)
+Last session: 2026-01-31 18:53 UTC
+Stopped at: Completed 06-05-PLAN.md (Trace Storage)
 Resume file: None
 
 **Latest work:**
-- Completed 06-02: Multi-language symbol extraction and SQLite storage
+- Completed 06-05: Trace storage and parsing for tool calls and stack traces
 
 **Phase 6 Progress:**
 - Plan 01: Tree-sitter Parser - COMPLETE
 - Plan 02: Symbol Extractor + Storage - COMPLETE
-- Plan 03: Call Graph - COMPLETE (parallel)
+- Plan 03: Call Graph - COMPLETE
 - Plan 04: Structural Search - pending
-- Plan 05: Traces + Indexing - pending
+- Plan 05: Trace Storage - COMPLETE
 - Plan 06: Persistence - pending
 - Plan 07: MCP Integration - pending
 - Plan 08: Eval Suite - pending
