@@ -13,14 +13,17 @@ use std::collections::HashMap;
 
 use super::error::McpError;
 use super::handlers::{
+    handle_find_callers, handle_find_definition, handle_find_imports, handle_find_references,
     handle_memory_add, handle_memory_add_batch, handle_memory_delete, handle_memory_get,
     handle_memory_metrics, handle_memory_search, handle_memory_stats, AddBatchParams, AddParams,
-    DeleteParams, GetParams, MetricsParams, SearchParams, StatsParams,
+    DeleteParams, FindCallersParams, FindDefinitionParams, FindImportsParams, FindReferencesParams,
+    GetParams, MetricsParams, SearchParams, StatsParams,
 };
 use super::protocol::{Request, Response};
 use super::tools::get_all_tools;
 use crate::metrics::MetricsCollector;
 use crate::store::{Store, TenantManager};
+use crate::structural::SymbolQueryService;
 use crate::Config;
 
 /// MCP protocol version supported by this server
@@ -38,6 +41,7 @@ pub struct McpServer<S: Store> {
     store: Arc<S>,
     tenant_manager: Option<TenantManager>,
     metrics: Arc<MetricsCollector>,
+    symbol_query_service: Option<Arc<SymbolQueryService>>,
     initialized: bool,
 }
 
@@ -55,6 +59,7 @@ impl<S: Store> McpServer<S> {
             store,
             tenant_manager,
             metrics: Arc::new(MetricsCollector::default()),
+            symbol_query_service: None,
             initialized: false,
         }
     }
@@ -71,8 +76,15 @@ impl<S: Store> McpServer<S> {
             store,
             tenant_manager,
             metrics,
+            symbol_query_service: None,
             initialized: false,
         }
+    }
+
+    /// Set the symbol query service for code navigation tools
+    pub fn with_symbol_query_service(mut self, service: Arc<SymbolQueryService>) -> Self {
+        self.symbol_query_service = Some(service);
+        self
     }
 
     /// Get reference to metrics collector
@@ -290,6 +302,34 @@ impl<S: Store> McpServer<S> {
                 let index_stats = HashMap::new();
                 handle_memory_metrics(&self.metrics, index_stats, params)
             }
+            "code.find_definition" => {
+                let params: FindDefinitionParams = serde_json::from_value(arguments)
+                    .map_err(|e| McpError::InvalidParams(format!("invalid find_definition params: {}", e)))?;
+                let query_service = self.symbol_query_service.as_ref()
+                    .ok_or_else(|| McpError::ToolError("Structural index not initialized".to_string()))?;
+                handle_find_definition(query_service, params)
+            }
+            "code.find_references" => {
+                let params: FindReferencesParams = serde_json::from_value(arguments)
+                    .map_err(|e| McpError::InvalidParams(format!("invalid find_references params: {}", e)))?;
+                let query_service = self.symbol_query_service.as_ref()
+                    .ok_or_else(|| McpError::ToolError("Structural index not initialized".to_string()))?;
+                handle_find_references(query_service, params)
+            }
+            "code.find_callers" => {
+                let params: FindCallersParams = serde_json::from_value(arguments)
+                    .map_err(|e| McpError::InvalidParams(format!("invalid find_callers params: {}", e)))?;
+                let query_service = self.symbol_query_service.as_ref()
+                    .ok_or_else(|| McpError::ToolError("Structural index not initialized".to_string()))?;
+                handle_find_callers(query_service, params)
+            }
+            "code.find_imports" => {
+                let params: FindImportsParams = serde_json::from_value(arguments)
+                    .map_err(|e| McpError::InvalidParams(format!("invalid find_imports params: {}", e)))?;
+                let query_service = self.symbol_query_service.as_ref()
+                    .ok_or_else(|| McpError::ToolError("Structural index not initialized".to_string()))?;
+                handle_find_imports(query_service, params)
+            }
             _ => Err(McpError::InvalidParams(format!("unknown tool '{}'", name))),
         }
     }
@@ -344,6 +384,7 @@ mod tests {
             store,
             tenant_manager: None,
             metrics: Arc::new(MetricsCollector::default()),
+            symbol_query_service: None,
             initialized: false,
         }
     }
