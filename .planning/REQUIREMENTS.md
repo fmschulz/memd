@@ -77,20 +77,20 @@ Requirements for Architecture A baseline (Milestones 1-7). Each maps to roadmap 
 
 ### Structural Indexes
 
-- [ ] **STRUCT-01**: Tree-sitter parser integration for multi-language AST extraction
-- [ ] **STRUCT-02**: Symbol table extraction (functions, classes, definitions)
-- [ ] **STRUCT-03**: Call graph extraction with caller -> callee edges
-- [ ] **STRUCT-04**: Import graph extraction with file -> module dependencies
-- [ ] **STRUCT-05**: find_symbol_definition(name) query support
-- [ ] **STRUCT-06**: find_references(name) query support
-- [ ] **STRUCT-07**: find_callers(name) query support
-- [ ] **STRUCT-08**: find_imports(module) query support
-- [ ] **STRUCT-09**: Trace indexing for tool calls (tool name, args, results, errors)
-- [ ] **STRUCT-10**: Trace indexing for stack traces (frames, paths, signatures)
-- [ ] **STRUCT-11**: find_tool_calls(tool_name, time_range) query support
-- [ ] **STRUCT-12**: find_errors(error_signature) query support
-- [ ] **STRUCT-13**: Query router classifies intent (code_search, debug_trace, doc_qa, decision_why, plan_next)
-- [ ] **STRUCT-14**: Query router weights retrieval sources based on intent
+- [x] **STRUCT-01**: Tree-sitter parser integration for multi-language AST extraction
+- [x] **STRUCT-02**: Symbol table extraction (functions, classes, definitions)
+- [x] **STRUCT-03**: Call graph extraction with caller -> callee edges
+- [x] **STRUCT-04**: Import graph extraction with file -> module dependencies
+- [x] **STRUCT-05**: find_symbol_definition(name) query support
+- [x] **STRUCT-06**: find_references(name) query support
+- [x] **STRUCT-07**: find_callers(name) query support
+- [x] **STRUCT-08**: find_imports(module) query support
+- [x] **STRUCT-09**: Trace indexing for tool calls (tool name, args, results, errors)
+- [x] **STRUCT-10**: Trace indexing for stack traces (frames, paths, signatures)
+- [x] **STRUCT-11**: find_tool_calls(tool_name, time_range) query support
+- [x] **STRUCT-12**: find_errors(error_signature) query support
+- [x] **STRUCT-13**: Query router classifies intent (code_search, debug_trace, doc_qa, decision_why, plan_next)
+- [x] **STRUCT-14**: Query router weights retrieval sources based on intent
 
 ### Compaction & Cleanup
 
