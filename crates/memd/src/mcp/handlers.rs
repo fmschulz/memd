@@ -131,6 +131,14 @@ pub struct MetricsParams {
     pub include_tiered: bool,
 }
 
+/// Parameters for memory.compact
+#[derive(Debug, Deserialize)]
+pub struct CompactParams {
+    pub tenant_id: String,
+    #[serde(default)]
+    pub force: bool,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -848,6 +856,99 @@ pub fn handle_memory_metrics(
     }
 
     format_mcp_response(&snapshot)
+}
+
+/// Handle memory.compact tool call
+pub async fn handle_memory_compact<S: Store>(
+    store: &S,
+    params: CompactParams,
+) -> Result<Value, McpError> {
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+
+    info!(
+        tenant_id = %tenant_id,
+        force = params.force,
+        "memory.compact"
+    );
+
+    if params.force {
+        // Force compaction regardless of thresholds
+        let result = store
+            .run_compaction(&tenant_id)
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+        info!(
+            tenant_id = %tenant_id,
+            tombstones = result.tombstones_processed,
+            hnsw_rebuilt = result.hnsw_rebuild.is_some(),
+            segments_merged = result.segment_merge.is_some(),
+            cache_invalidated = result.cache_entries_invalidated,
+            duration_ms = result.duration.as_millis(),
+            "compaction completed (forced)"
+        );
+
+        return format_mcp_response(&json!({
+            "status": "completed",
+            "tombstones_processed": result.tombstones_processed,
+            "hnsw_rebuild": result.hnsw_rebuild.map(|r| json!({
+                "embeddings_processed": r.embeddings_processed,
+                "embeddings_included": r.embeddings_included,
+                "embeddings_excluded": r.embeddings_excluded,
+                "duration_ms": r.duration.as_millis()
+            })),
+            "segment_merge": result.segment_merge.map(|r| json!({
+                "segments_before": r.segments_before,
+                "segments_after": r.segments_after,
+                "segments_merged": r.segments_merged,
+                "duration_ms": r.duration.as_millis()
+            })),
+            "cache_entries_invalidated": result.cache_entries_invalidated,
+            "duration_ms": result.duration.as_millis()
+        }));
+    }
+
+    // Check thresholds first
+    match store.run_compaction_if_needed(&tenant_id) {
+        Ok(Some(result)) => {
+            info!(
+                tenant_id = %tenant_id,
+                tombstones = result.tombstones_processed,
+                hnsw_rebuilt = result.hnsw_rebuild.is_some(),
+                segments_merged = result.segment_merge.is_some(),
+                cache_invalidated = result.cache_entries_invalidated,
+                duration_ms = result.duration.as_millis(),
+                "compaction completed"
+            );
+
+            format_mcp_response(&json!({
+                "status": "completed",
+                "tombstones_processed": result.tombstones_processed,
+                "hnsw_rebuild": result.hnsw_rebuild.map(|r| json!({
+                    "embeddings_processed": r.embeddings_processed,
+                    "embeddings_included": r.embeddings_included,
+                    "embeddings_excluded": r.embeddings_excluded,
+                    "duration_ms": r.duration.as_millis()
+                })),
+                "segment_merge": result.segment_merge.map(|r| json!({
+                    "segments_before": r.segments_before,
+                    "segments_after": r.segments_after,
+                    "segments_merged": r.segments_merged,
+                    "duration_ms": r.duration.as_millis()
+                })),
+                "cache_entries_invalidated": result.cache_entries_invalidated,
+                "duration_ms": result.duration.as_millis()
+            }))
+        }
+        Ok(None) => {
+            debug!(tenant_id = %tenant_id, "compaction skipped - thresholds not exceeded");
+
+            format_mcp_response(&json!({
+                "status": "skipped",
+                "reason": "No compaction needed - all thresholds below limits"
+            }))
+        }
+        Err(e) => Err(McpError::ToolError(e.to_string())),
+    }
 }
 
 // ---------- Structural Query Handlers ----------
