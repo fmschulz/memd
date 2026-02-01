@@ -1,0 +1,88 @@
+{
+  "version": "1.0",
+  "description": "TypeScript structural query test dataset",
+  "test_project": {
+    "name": "typescript-test-codebase",
+    "description": "Small TypeScript codebase for testing structural queries",
+    "files": [
+      {
+        "path": "src/index.ts",
+        "content": "import { UserService } from './services/user';\n\nconst service = new UserService();\n\nexport function main(): void {\n    service.getUser('test');\n}",
+        "language": "typescript"
+      },
+      {
+        "path": "src/services/user.ts",
+        "content": "import { validateId } from '../utils';\n\nexport interface User {\n    id: string;\n    name: string;\n}\n\nexport class UserService {\n    getUser(id: string): User | null {\n        if (!validateId(id)) return null;\n        return { id, name: 'Test User' };\n    }\n\n    createUser(name: string): User {\n        return { id: 'new-id', name };\n    }\n}",
+        "language": "typescript"
+      },
+      {
+        "path": "src/utils.ts",
+        "content": "export function validateId(id: string): boolean {\n    return id.length > 0;\n}\n\nexport function formatName(name: string): string {\n    return name.trim().toUpperCase();\n}",
+        "language": "typescript"
+      }
+    ]
+  },
+  "queries": [
+    {
+      "id": "ts-def-1",
+      "type": "find_definition",
+      "query": "UserService",
+      "expected": {
+        "file": "src/services/user.ts",
+        "line_start": 8,
+        "kind": "class"
+      }
+    },
+    {
+      "id": "ts-def-2",
+      "type": "find_definition",
+      "query": "User",
+      "expected": {
+        "file": "src/services/user.ts",
+        "line_start": 3,
+        "kind": "interface"
+      }
+    },
+    {
+      "id": "ts-def-3",
+      "type": "find_definition",
+      "query": "validateId",
+      "expected": {
+        "file": "src/utils.ts",
+        "line_start": 1,
+        "kind": "function"
+      }
+    },
+    {
+      "id": "ts-callers-1",
+      "type": "find_callers",
+      "query": "validateId",
+      "expected_callers": [
+        { "function": "getUser", "file": "src/services/user.ts" }
+      ]
+    },
+    {
+      "id": "ts-refs-1",
+      "type": "find_references",
+      "query": "User",
+      "expected_count": 3,
+      "expected_files": ["src/services/user.ts"]
+    },
+    {
+      "id": "ts-imports-1",
+      "type": "find_imports",
+      "query": "UserService",
+      "expected_importers": [
+        { "file": "src/index.ts" }
+      ]
+    },
+    {
+      "id": "ts-imports-2",
+      "type": "find_imports",
+      "query": "validateId",
+      "expected_importers": [
+        { "file": "src/services/user.ts" }
+      ]
+    }
+  ]
+}
