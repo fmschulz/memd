@@ -155,12 +155,17 @@ Plans:
   3. find_tool_calls retrieves past tool invocations by name and time range
   4. Query router classifies intent and weights retrieval sources appropriately
   5. Structural queries integrated into Suite B with measurable quality metrics
-**Plans**: TBD
+**Plans**: 8 plans in 5 waves
 
 Plans:
-- [ ] 06-01: TBD
-- [ ] 06-02: TBD
-- [ ] 06-03: TBD
+- [ ] 06-01-PLAN.md — Add tree-sitter dependencies, multi-language parser wrapper
+- [ ] 06-02-PLAN.md — Symbol extraction from AST, SQLite storage schema
+- [ ] 06-03-PLAN.md — Call graph extraction, import graph tracking
+- [ ] 06-04-PLAN.md — MCP tools: find_definition, find_references, find_callers, find_imports
+- [ ] 06-05-PLAN.md — Trace indexing for tool calls and stack traces
+- [ ] 06-06-PLAN.md — MCP tools: find_tool_calls, find_errors
+- [ ] 06-07-PLAN.md — Query router with intent classification, hybrid integration
+- [ ] 06-08-PLAN.md — Structural eval suite integrated with Suite B
 
 ### Phase 7: Compaction + Cleanup
 **Goal**: System maintains performance and correctness as data grows and changes
@@ -191,9 +196,9 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 4.1 -> 5 -> 6 -> 7
 | 4. Sparse Lexical + Fusion | 6/6 | Complete | 2026-01-30 |
 | 4.1. Pooling Strategy Support | 3/3 | Complete | 2026-01-31 |
 | 5. Hot Tier + Cache | 5/5 | Complete | 2026-01-31 |
-| 6. Structural Indexes | 0/TBD | Not started | - |
+| 6. Structural Indexes | 0/8 | Planned | - |
 | 7. Compaction + Cleanup | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-01-29*
-*Last updated: 2026-01-31 (Phase 5 complete)*
+*Last updated: 2026-01-31 (Phase 6 planned)*
