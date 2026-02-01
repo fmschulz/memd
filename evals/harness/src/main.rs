@@ -16,7 +16,7 @@ struct Args {
     #[arg(long, default_value = "target/debug/memd")]
     memd_path: String,
 
-    /// Suite to run (all, mcp, persistence, retrieval, hybrid)
+    /// Suite to run (all, sanity, mcp, persistence, retrieval, hybrid, scifact, true-semantic, nfcorpus, codesearchnet, tiered)
     #[arg(long, default_value = "all")]
     suite: String,
 
@@ -27,6 +27,10 @@ struct Args {
     /// Skip build step
     #[arg(long)]
     skip_build: bool,
+
+    /// Embedding model to use (all-minilm, qwen3)
+    #[arg(long, default_value = "all-minilm")]
+    embedding_model: String,
 }
 
 fn main() -> ExitCode {
@@ -49,22 +53,42 @@ fn main() -> ExitCode {
 
     // Run the specified suite
     let memd_binary = std::path::PathBuf::from(&args.memd_path);
+    let embedding_model = &args.embedding_model;
     let results: Vec<TestResult> = match args.suite.as_str() {
         "all" => {
             let mut all = vec![];
+            // Run sanity check first - halt if it fails
+            let sanity_results = suites::sanity::run_sanity_tests(&memd_binary, embedding_model);
+            if sanity_results.iter().any(|r| !r.passed) {
+                eprintln!("\n✗ Sanity checks FAILED - halting benchmarks");
+                eprintln!("Fix evaluation harness bugs before running full benchmarks.");
+                return ExitCode::FAILURE;
+            }
+            println!("\n✓ Sanity checks PASSED - proceeding with benchmarks\n");
+
+            all.extend(sanity_results);
             all.extend(suites::mcp_conformance::run(&args.memd_path));
             all.extend(suites::persistence::run_all(&memd_binary));
-            all.extend(suites::retrieval::run_retrieval_tests(&memd_binary));
-            all.extend(suites::hybrid::run_hybrid_tests(&memd_binary));
+            all.extend(suites::retrieval::run_retrieval_tests(&memd_binary, embedding_model));
+            all.extend(suites::hybrid::run_hybrid_tests(&memd_binary, embedding_model));
+            all.extend(suites::true_semantic::run_true_semantic_tests(&memd_binary, embedding_model));
+            all.extend(suites::scifact::run_scifact_tests(&memd_binary, embedding_model));
+            all.extend(suites::codesearchnet::run_codesearchnet_tests(&memd_binary, embedding_model));
             all
         }
+        "sanity" => suites::sanity::run_sanity_tests(&memd_binary, embedding_model),
         "mcp" => suites::mcp_conformance::run(&args.memd_path),
         "persistence" => suites::persistence::run_all(&memd_binary),
-        "retrieval" => suites::retrieval::run_retrieval_tests(&memd_binary),
-        "hybrid" => suites::hybrid::run_hybrid_tests(&memd_binary),
+        "retrieval" => suites::retrieval::run_retrieval_tests(&memd_binary, embedding_model),
+        "hybrid" => suites::hybrid::run_hybrid_tests(&memd_binary, embedding_model),
+        "true-semantic" => suites::true_semantic::run_true_semantic_tests(&memd_binary, embedding_model),
+        "scifact" => suites::scifact::run_scifact_tests(&memd_binary, embedding_model),
+        "nfcorpus" => suites::nfcorpus::run_nfcorpus_tests(&memd_binary, embedding_model),
+        "codesearchnet" => suites::codesearchnet::run_codesearchnet_tests(&memd_binary, embedding_model),
+        "tiered" => suites::tiered::run_tiered_tests(&memd_binary, embedding_model),
         _ => {
             eprintln!(
-                "Unknown suite: {}. Available: all, mcp, persistence, retrieval, hybrid",
+                "Unknown suite: {}. Available: all, sanity, mcp, persistence, retrieval, hybrid, true-semantic, scifact, nfcorpus, codesearchnet, tiered",
                 args.suite
             );
             return ExitCode::FAILURE;
