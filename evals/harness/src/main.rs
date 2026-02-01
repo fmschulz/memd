@@ -16,7 +16,7 @@ struct Args {
     #[arg(long, default_value = "target/debug/memd")]
     memd_path: String,
 
-    /// Suite to run (all, sanity, mcp, persistence, retrieval, hybrid, scifact, true-semantic, nfcorpus, codesearchnet, tiered)
+    /// Suite to run (all, sanity, mcp, persistence, retrieval, hybrid, scifact, true-semantic, nfcorpus, codesearchnet, tiered, structural)
     #[arg(long, default_value = "all")]
     suite: String,
 
@@ -31,6 +31,10 @@ struct Args {
     /// Embedding model to use (all-minilm, qwen3)
     #[arg(long, default_value = "all-minilm")]
     embedding_model: String,
+
+    /// Include structural tests in 'all' suite
+    #[arg(long, default_value = "true")]
+    include_structural: bool,
 }
 
 fn main() -> ExitCode {
@@ -60,11 +64,11 @@ fn main() -> ExitCode {
             // Run sanity check first - halt if it fails
             let sanity_results = suites::sanity::run_sanity_tests(&memd_binary, embedding_model);
             if sanity_results.iter().any(|r| !r.passed) {
-                eprintln!("\n✗ Sanity checks FAILED - halting benchmarks");
+                eprintln!("\n[X] Sanity checks FAILED - halting benchmarks");
                 eprintln!("Fix evaluation harness bugs before running full benchmarks.");
                 return ExitCode::FAILURE;
             }
-            println!("\n✓ Sanity checks PASSED - proceeding with benchmarks\n");
+            println!("\n[OK] Sanity checks PASSED - proceeding with benchmarks\n");
 
             all.extend(sanity_results);
             all.extend(suites::mcp_conformance::run(&args.memd_path));
@@ -74,6 +78,11 @@ fn main() -> ExitCode {
             all.extend(suites::true_semantic::run_true_semantic_tests(&memd_binary, embedding_model));
             all.extend(suites::scifact::run_scifact_tests(&memd_binary, embedding_model));
             all.extend(suites::codesearchnet::run_codesearchnet_tests(&memd_binary, embedding_model));
+
+            // Structural tests (Suite E)
+            if args.include_structural {
+                all.extend(suites::structural::run_structural_tests(&memd_binary, embedding_model));
+            }
             all
         }
         "sanity" => suites::sanity::run_sanity_tests(&memd_binary, embedding_model),
@@ -86,9 +95,10 @@ fn main() -> ExitCode {
         "nfcorpus" => suites::nfcorpus::run_nfcorpus_tests(&memd_binary, embedding_model),
         "codesearchnet" => suites::codesearchnet::run_codesearchnet_tests(&memd_binary, embedding_model),
         "tiered" => suites::tiered::run_tiered_tests(&memd_binary, embedding_model),
+        "structural" => suites::structural::run_structural_tests(&memd_binary, embedding_model),
         _ => {
             eprintln!(
-                "Unknown suite: {}. Available: all, sanity, mcp, persistence, retrieval, hybrid, true-semantic, scifact, nfcorpus, codesearchnet, tiered",
+                "Unknown suite: {}. Available: all, sanity, mcp, persistence, retrieval, hybrid, true-semantic, scifact, nfcorpus, codesearchnet, tiered, structural",
                 args.suite
             );
             return ExitCode::FAILURE;
