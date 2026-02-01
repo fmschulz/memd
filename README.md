@@ -31,7 +31,7 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/memd.git
+git clone https://github.com/fmschulz/memd.git
 cd memd
 
 # Build release binary
@@ -299,22 +299,20 @@ Key architectural choices:
 | **Three-Tier** | Hot cache for latency, warm for quality, cold for capacity |
 | **Structural Indexes** | Code-aware queries outperform pure embedding search |
 
-See [STATE.md](.planning/STATE.md) for 235+ detailed decisions logged during development.
+All architectural decisions are documented in code comments and design docs.
 
 ## Implementation Status
 
-**Milestone 1 Complete** - All 7 phases executed (45 plans, ~5 hours total):
+**v0.1.0 - Milestone 1 Complete**
 
-- ✅ Phase 1: Skeleton + MCP Server
-- ✅ Phase 2: Persistent Cold Store
-- ✅ Phase 3: Dense Warm Index
-- ✅ Phase 4: Sparse Lexical + Fusion
-- ✅ Phase 4.1: Pooling Strategy Support
-- ✅ Phase 5: Hot Tier + Cache
-- ✅ Phase 6: Structural Indexes
-- ✅ Phase 7: Compaction + Cleanup
-
-See [ROADMAP.md](.planning/ROADMAP.md) for detailed phase breakdown and success criteria.
+Core features implemented:
+- ✅ MCP Server with 13 tools
+- ✅ Persistent storage with crash recovery
+- ✅ Hybrid retrieval (dense HNSW + sparse BM25)
+- ✅ Three-tier caching (hot/warm/cold)
+- ✅ Structural code indexes (6 languages)
+- ✅ Compaction and cleanup
+- ✅ Comprehensive evaluation suite (6 test suites)
 
 ## Known Limitations
 
@@ -331,15 +329,11 @@ See [ROADMAP.md](.planning/ROADMAP.md) for detailed phase breakdown and success 
 - **Cold-Tier Dense**: Binary coarse index + int8 rescoring
 - **Additional Languages**: Java, C#, Ruby, etc.
 
-See [PROJECT.md](.planning/PROJECT.md) for out-of-scope features.
-
 ## Documentation
 
 - **[QUICKSTART.md](QUICKSTART.md)** - Getting started guide with examples
-- **[docs/implementation_v0.md](docs/implementation_v0.md)** - Original technical specification
-- **[.planning/ROADMAP.md](.planning/ROADMAP.md)** - Development roadmap and phases
-- **[.planning/STATE.md](.planning/STATE.md)** - Current status and decision log
-- **[.planning/REQUIREMENTS.md](.planning/REQUIREMENTS.md)** - Requirements specification
+- **[docs/implementation_v0.md](docs/implementation_v0.md)** - Technical specification
+- **[docs/QWEN3_UPGRADE.md](docs/QWEN3_UPGRADE.md)** - Embedding model upgrade guide
 
 ## Contributing
 
@@ -347,11 +341,11 @@ This is currently a personal project under active development. Contributions wel
 
 ### Development Workflow
 
-1. Read [.planning/PROJECT.md](.planning/PROJECT.md) for context
-2. Check [.planning/STATE.md](.planning/STATE.md) for current status
-3. Follow existing code patterns (trait-based abstractions)
-4. Add tests for new features
-5. Run full evaluation suite before submitting
+1. Follow existing code patterns (trait-based abstractions)
+2. Add tests for new features
+3. Run evaluation suite: `cargo test && cargo run --bin memd-evals -- --suite all`
+4. Format code: `cargo fmt`
+5. Check lints: `cargo clippy -- -D warnings`
 
 ## License
 
@@ -369,9 +363,9 @@ Inspired by memory systems in LangChain, LlamaIndex, and agent architectures fro
 
 ## Support
 
-- **Issues**: File bugs and feature requests in GitHub Issues
+- **Issues**: File bugs and feature requests at [GitHub Issues](https://github.com/fmschulz/memd/issues)
+- **Contact**: fmschulz@gmail.com
 - **Documentation**: See `docs/` directory for technical details
-- **Planning Artifacts**: `.planning/` contains development history and decisions
 
 ---
 

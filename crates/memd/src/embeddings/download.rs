@@ -46,7 +46,7 @@ impl EmbeddingModel {
                 "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model_quantized.onnx"
             }
             Self::Qwen3Embedding0_6B => {
-                "https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/resolve/main/onnx/model_q8.onnx"
+                "https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/resolve/main/onnx/model_int8.onnx"
             }
         }
     }
@@ -102,6 +102,47 @@ impl EmbeddingModel {
             Self::Qwen3Embedding0_6B => true,
         }
     }
+
+    /// Whether this model requires position_ids as an input
+    ///
+    /// Decoder-style models (Qwen3) require explicit position IDs,
+    /// while encoder models (BERT, all-MiniLM) compute them internally.
+    pub fn requires_position_ids(&self) -> bool {
+        match self {
+            Self::AllMiniLmL6V2 => false,
+            Self::Qwen3Embedding0_6B => true,
+        }
+    }
+
+    /// Get KV-cache configuration for decoder models
+    ///
+    /// Returns None for encoder models (BERT-style) that don't use KV-cache.
+    /// Returns configuration for decoder models that require empty KV-cache tensors.
+    pub fn kv_cache_config(&self) -> Option<KvCacheConfig> {
+        match self {
+            Self::AllMiniLmL6V2 => None,
+            Self::Qwen3Embedding0_6B => Some(KvCacheConfig {
+                num_layers: 28,
+                num_kv_heads: 8,
+                head_dim: 128,
+            }),
+        }
+    }
+}
+
+/// KV-cache configuration for decoder models
+///
+/// Decoder models (like Qwen3) use key-value caching for efficient autoregressive
+/// generation. For embedding generation (single forward pass), we pass empty
+/// KV-cache tensors with sequence length 0.
+#[derive(Debug, Clone, Copy)]
+pub struct KvCacheConfig {
+    /// Number of transformer layers
+    pub num_layers: usize,
+    /// Number of key-value attention heads
+    pub num_kv_heads: usize,
+    /// Dimension of each attention head
+    pub head_dim: usize,
 }
 
 // Legacy constants for backward compatibility (used by existing get_model_path/get_tokenizer_path)
