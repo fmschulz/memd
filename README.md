@@ -24,22 +24,48 @@
 
 ### Prerequisites
 
-- Rust 1.75+ ([install](https://rustup.rs/))
-- Linux or macOS
+- Linux (x64)
 - 4GB RAM minimum (8GB recommended)
+- curl (for installation)
 
 ### Installation
 
+**Option 1: Automated Install Script (Recommended)**
+
 ```bash
-# Clone the repository
+curl -sSL https://raw.githubusercontent.com/fmschulz/memd/main/install.sh | bash
+```
+
+This will:
+- Download the latest binary to `~/.local/bin/memd`
+- Create default configuration at `~/.config/memd/config.toml`
+- Optionally configure MCP for Claude Code and/or Codex CLI
+- Verify the installation
+
+**Option 2: Manual Installation**
+
+Download the binary from [releases](https://github.com/fmschulz/memd/releases):
+
+```bash
+# Download latest release
+curl -sSL https://github.com/fmschulz/memd/releases/latest/download/memd-linux-x64 -o ~/.local/bin/memd
+chmod +x ~/.local/bin/memd
+
+# Create config directory
+mkdir -p ~/.config/memd
+
+# Run memd
+memd
+```
+
+**Option 3: Build from Source**
+
+```bash
+# Prerequisites: Rust 1.75+ (https://rustup.rs/)
 git clone https://github.com/fmschulz/memd.git
 cd memd
-
-# Build release binary
 cargo build --release
-
-# Run the server
-./target/release/memd
+cp target/release/memd ~/.local/bin/
 ```
 
 The server will start and listen for MCP requests on stdin/stdout.

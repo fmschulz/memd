@@ -31,26 +31,33 @@ Use this skill when you need to:
 
 ## Prerequisites
 
-- Rust 1.75+ ([install](https://rustup.rs/))
-- Linux or macOS
+- Linux (x64)
 - 4GB RAM minimum (8GB recommended)
 - AI agent with MCP support (Claude Code, Codex CLI)
+- curl (for automated installation)
 
 ## Setup Instructions
 
 ### 1. Install memd
 
+**Automated Installation (Recommended):**
+
 ```bash
-# Clone the repository
-git clone https://github.com/fmschulz/memd.git
-cd memd
+curl -sSL https://raw.githubusercontent.com/fmschulz/memd/main/install.sh | bash
+```
 
-# Build release binary
-cargo build --release
+The install script will:
+- Download and install the memd binary to `~/.local/bin/memd`
+- Create default configuration at `~/.config/memd/config.toml`
+- Prompt to configure MCP for Claude Code and/or Codex CLI
+- Verify the installation
 
-# Install to user bin directory
-mkdir -p ~/.local/bin
-cp target/release/memd ~/.local/bin/
+**Manual Installation:**
+
+```bash
+# Download binary from releases
+curl -sSL https://github.com/fmschulz/memd/releases/latest/download/memd-linux-x64 -o ~/.local/bin/memd
+chmod +x ~/.local/bin/memd
 
 # Ensure ~/.local/bin is in PATH
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
