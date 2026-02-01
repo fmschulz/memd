@@ -467,6 +467,27 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                 "required": ["tenant_id"]
             }),
         ),
+        // COMPACT-05: memory.compact
+        ToolDefinition::new(
+            "memory.compact",
+            "Run compaction to clean up deleted chunks, merge segments, and rebuild indexes. \
+            Use 'force: true' to run regardless of thresholds.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier"
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": "Force compaction regardless of thresholds (default: false)",
+                        "default": false
+                    }
+                },
+                "required": ["tenant_id"]
+            }),
+        ),
     ]
 });
 
@@ -494,6 +515,7 @@ pub fn tool_names() -> Vec<&'static str> {
         "memory.delete",
         "memory.stats",
         "memory.metrics",
+        "memory.compact",
         "code.find_definition",
         "code.find_references",
         "code.find_callers",
@@ -508,9 +530,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn get_all_tools_returns_thirteen() {
+    fn get_all_tools_returns_fourteen() {
         let tools = get_all_tools();
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 14);
     }
 
     #[test]
@@ -589,9 +611,10 @@ mod tests {
     #[test]
     fn tool_names_list() {
         let names = tool_names();
-        assert_eq!(names.len(), 13);
+        assert_eq!(names.len(), 14);
         assert!(names.contains(&"memory.search"));
         assert!(names.contains(&"memory.metrics"));
+        assert!(names.contains(&"memory.compact"));
         assert!(names.contains(&"code.find_definition"));
         assert!(names.contains(&"code.find_references"));
         assert!(names.contains(&"code.find_callers"));
