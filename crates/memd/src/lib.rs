@@ -16,6 +16,10 @@ pub mod tiered;
 pub mod types;
 
 pub use chunking::{Chunk, ChunkingConfig, chunk_text};
+pub use compaction::{
+    AuditResult, CompactionConfig, CompactionManager, CompactionMetrics, CompactionThresholds,
+    TombstoneAudit,
+};
 pub use config::{load_config, Config, ServerConfig};
 pub use embeddings::{CandleEmbedder, Embedder, EmbeddingConfig, EmbeddingResult, MockEmbedder};
 pub use error::{MemdError, Result};
