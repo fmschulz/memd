@@ -177,11 +177,15 @@ Plans:
   3. Warm HNSW rebuild creates clean snapshot without deleted items
   4. Compaction runs with throttling to limit tail latency impact
   5. Results before/after compaction are equivalent (minus deleted chunks)
-**Plans**: TBD
+**Plans**: 6 plans in 5 waves
 
 Plans:
-- [ ] 07-01: TBD
-- [ ] 07-02: TBD
+- [ ] 07-01-PLAN.md — Compaction module foundation: metrics gathering and tombstone audit
+- [ ] 07-02-PLAN.md — HNSW rebuild and sparse segment merge operations
+- [ ] 07-03-PLAN.md — Throttle module for rate-limiting compaction
+- [ ] 07-04-PLAN.md — CompactionRunner workflow coordinator
+- [ ] 07-05-PLAN.md — PersistentStore and MCP integration (memory.compact tool)
+- [ ] 07-06-PLAN.md — Compaction eval suite (Suite F)
 
 ## Progress
 
@@ -197,8 +201,8 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 4.1 -> 5 -> 6 -> 7
 | 4.1. Pooling Strategy Support | 3/3 | Complete | 2026-01-31 |
 | 5. Hot Tier + Cache | 5/5 | Complete | 2026-01-31 |
 | 6. Structural Indexes | 8/8 | Complete | 2026-02-01 |
-| 7. Compaction + Cleanup | 0/TBD | Not started | - |
+| 7. Compaction + Cleanup | 0/6 | Not started | - |
 
 ---
 *Roadmap created: 2026-01-29*
-*Last updated: 2026-02-01 (Phase 6 complete)*
+*Last updated: 2026-01-31 (Phase 7 planned)*
