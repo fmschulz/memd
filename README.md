@@ -64,9 +64,35 @@ memd
 # Prerequisites: Rust 1.75+ (https://rustup.rs/)
 git clone https://github.com/fmschulz/memd.git
 cd memd
+```
+
+**Ubuntu/Debian:**
+
+```bash
+# Install dependencies
+sudo apt update
+sudo apt install build-essential pkg-config libssl-dev
+
+# Build
 cargo build --release
 cp target/release/memd ~/.local/bin/
 ```
+
+**Arch Linux:**
+
+```bash
+# Install dependencies
+sudo pacman -S base-devel openssl lld
+
+# Build (Arch Rust uses lld linker - requires explicit gcc)
+CC=/usr/bin/gcc cargo build --release
+cp target/release/memd ~/.local/bin/
+```
+
+**Build Troubleshooting:**
+
+- Linker errors with `-m64` or `-fuse-ld=`: Use `CC=/usr/bin/gcc cargo build --release`
+- Clear sccache if experiencing stale builds: `sccache --stop-server && cargo clean`
 
 The server will start and listen for MCP requests on stdin/stdout.
 
@@ -245,7 +271,7 @@ Based on comprehensive benchmarks (January 31, 2026):
 ### Running Tests
 
 ```bash
-# Unit tests
+# Unit tests (on Arch Linux, prefix with CC=/usr/bin/gcc)
 cargo test
 
 # Integration tests
@@ -254,6 +280,8 @@ cargo test --test integration
 # Run evaluation suite
 cargo run --release --bin memd-evals -- --suite all
 ```
+
+**Note for Arch Linux users:** Prefix commands with `CC=/usr/bin/gcc` if you encounter linker errors.
 
 ### Evaluation Suites
 
