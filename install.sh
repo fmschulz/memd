@@ -94,6 +94,43 @@ download_binary() {
     echo "$tmp_file"
 }
 
+# Check build dependencies for source compilation
+check_build_dependencies() {
+    if [ -f /etc/debian_version ]; then
+        # Debian/Ubuntu
+        local missing=()
+        if ! dpkg -l build-essential &> /dev/null 2>&1; then
+            missing+=("build-essential")
+        fi
+        if ! dpkg -l pkg-config &> /dev/null 2>&1; then
+            missing+=("pkg-config")
+        fi
+        if ! dpkg -l libssl-dev &> /dev/null 2>&1; then
+            missing+=("libssl-dev")
+        fi
+        if [ ${#missing[@]} -ne 0 ]; then
+            warn "Missing build dependencies: ${missing[*]}"
+            info "Install with: sudo apt install ${missing[*]}"
+        fi
+    elif [ -f /etc/arch-release ]; then
+        # Arch Linux
+        local missing=()
+        if ! pacman -Qi base-devel &> /dev/null 2>&1; then
+            missing+=("base-devel")
+        fi
+        if ! pacman -Qi openssl &> /dev/null 2>&1; then
+            missing+=("openssl")
+        fi
+        if ! pacman -Qi lld &> /dev/null 2>&1; then
+            missing+=("lld")
+        fi
+        if [ ${#missing[@]} -ne 0 ]; then
+            warn "Missing build dependencies: ${missing[*]}"
+            info "Install with: sudo pacman -S ${missing[*]}"
+        fi
+    fi
+}
+
 # Build from source as fallback
 build_from_source() {
     local output_file=$1
@@ -102,19 +139,29 @@ build_from_source() {
         error "Rust toolchain not found. Please install Rust from https://rustup.rs/"
     fi
 
+    # Check for required build dependencies
+    check_build_dependencies
+
     info "Building memd from source..."
+
+    # Detect if we need CC override (Arch Linux uses lld by default)
+    local build_cmd="cargo build --release"
+    if [ -f /etc/arch-release ]; then
+        info "Detected Arch Linux - using gcc explicitly to avoid linker conflicts"
+        build_cmd="CC=/usr/bin/gcc cargo build --release"
+    fi
 
     # Clone or use current directory
     if [ -f "Cargo.toml" ] && grep -q "name = \"memd\"" Cargo.toml 2>/dev/null; then
         # Already in memd directory
-        cargo build --release
+        eval "$build_cmd"
         cp target/release/memd "$output_file"
     else
         # Need to clone
         local tmp_repo=$(mktemp -d)
         git clone https://github.com/fmschulz/memd.git "$tmp_repo"
         cd "$tmp_repo"
-        cargo build --release
+        eval "$build_cmd"
         cp target/release/memd "$output_file"
         cd - > /dev/null
         rm -rf "$tmp_repo"

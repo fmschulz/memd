@@ -25,17 +25,41 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 ```
 
+### Install Build Dependencies
+
+**Ubuntu/Debian:**
+```bash
+sudo apt update
+sudo apt install build-essential pkg-config libssl-dev
+```
+
+**Arch Linux:**
+```bash
+sudo pacman -S base-devel openssl lld
+```
+
 ### Build from Source
 
 ```bash
 # Clone the repository
 git clone https://github.com/fmschulz/memd.git
 cd memd
+```
 
+**Ubuntu/Debian:**
+```bash
 # Build release binary (takes ~5-10 minutes first time)
 cargo build --release
+```
 
-# Verify build
+**Arch Linux:**
+```bash
+# Build (Arch Rust uses lld linker - requires explicit gcc)
+CC=/usr/bin/gcc cargo build --release
+```
+
+**Verify build:**
+```bash
 ./target/release/memd --version
 ```
 
@@ -645,6 +669,45 @@ Trigger compaction manually:
 ```
 
 ## Troubleshooting
+
+### Build Failures
+
+**Arch Linux linker errors:**
+```
+error: linking with `cc` failed
+error: unknown option '-m64'
+```
+
+This happens because Arch Linux's Rust package uses lld by default. Fix:
+```bash
+CC=/usr/bin/gcc cargo build --release
+```
+
+**Ubuntu/Debian missing dependencies:**
+```
+error: linker `cc` not found
+```
+
+Install build tools:
+```bash
+sudo apt install build-essential pkg-config libssl-dev
+```
+
+**sccache cache issues:**
+
+If builds fail after config changes, clear sccache:
+```bash
+sccache --stop-server
+cargo clean
+cargo build --release
+```
+
+**Custom `cc` in PATH:**
+
+If you have a custom script at `~/.local/bin/cc` that intercepts the compiler, either remove it or explicitly set the C compiler:
+```bash
+CC=/usr/bin/gcc cargo build --release
+```
 
 ### Server Won't Start
 
