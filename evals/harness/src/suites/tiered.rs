@@ -124,7 +124,8 @@ pub fn run_tiered_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestR
     let mut results = Vec::new();
 
     // Load dataset
-    let config = TieredEvalConfig::default();
+    let mut config = TieredEvalConfig::default();
+    config.dataset_path = crate::resolve_dataset_path("evals/datasets/retrieval/tiered_eval.json");
     let dataset = match load_dataset(&config.dataset_path) {
         Ok(d) => d,
         Err(e) => {
@@ -174,17 +175,38 @@ pub fn run_tiered_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestR
     results.push(run_d5_latency_comparison(&hot_results, &warm_results));
 
     // D6: Cache hit rate check
-    results.push(run_d6_cache_hit_rate(&cache_results, config.min_cache_hit_rate));
+    results.push(run_d6_cache_hit_rate(
+        &cache_results,
+        config.min_cache_hit_rate,
+    ));
 
     // D7: Overall tiered quality thresholds
-    results.push(run_d7_quality_thresholds(&cache_results, &hot_results, &warm_results));
+    results.push(run_d7_quality_thresholds(
+        &cache_results,
+        &hot_results,
+        &warm_results,
+    ));
 
     results
 }
 
 fn load_dataset(path: &PathBuf) -> Result<TieredDataset, String> {
     let content = std::fs::read_to_string(path).map_err(|e| format!("read file: {}", e))?;
-    serde_json::from_str(&content).map_err(|e| format!("parse json: {}", e))
+    let mut dataset: TieredDataset =
+        serde_json::from_str(&content).map_err(|e| format!("parse json: {}", e))?;
+
+    for doc in &mut dataset.documents {
+        let raw_type = doc.doc_type.clone();
+        let Some(normalized) = crate::normalize_eval_chunk_type(&raw_type) else {
+            return Err(format!(
+                "unsupported chunk type '{}' for document {}",
+                raw_type, doc.id
+            ));
+        };
+        doc.doc_type = normalized.to_string();
+    }
+
+    Ok(dataset)
 }
 
 fn run_d1_index_and_warmup(
@@ -262,7 +284,10 @@ fn run_d1_index_and_warmup(
         }
     }
 
-    println!("  Warmup: {} queries to populate access patterns", warmup_count);
+    println!(
+        "  Warmup: {} queries to populate access patterns",
+        warmup_count
+    );
     TestResult::pass_with_duration(name, start)
 }
 
@@ -362,8 +387,7 @@ fn run_d2_cache_hit_tests(
                 if let Some(text) = extract_content_text(&response) {
                     if let Ok(parsed) = serde_json::from_str::<Value>(text) {
                         if let Some(tier_info) = parsed.get("tier_info") {
-                            if tier_info.get("cache_hit").and_then(|v| v.as_bool()) == Some(true)
-                            {
+                            if tier_info.get("cache_hit").and_then(|v| v.as_bool()) == Some(true) {
                                 cache_hits += 1;
                             }
                         }
@@ -569,7 +593,10 @@ fn run_d3_hot_tier_tests(
         });
     }
 
-    println!("\n  Hot Tier Tests (threshold: {}ms):", config.hot_tier_latency_threshold_ms);
+    println!(
+        "\n  Hot Tier Tests (threshold: {}ms):",
+        config.hot_tier_latency_threshold_ms
+    );
     for result in &hot_results {
         println!(
             "    {} - tier: {}, latency: {}ms, recall: {:.2}, pass: {}",
@@ -787,7 +814,10 @@ fn run_d6_cache_hit_rate(cache_results: &[CacheTestResult], min_rate: f32) -> Te
         return TestResult::fail_with_duration(name, "No cache test results", start);
     }
 
-    let total_expected_hits: usize = cache_results.iter().map(|r| r.repeat_count.saturating_sub(1)).sum();
+    let total_expected_hits: usize = cache_results
+        .iter()
+        .map(|r| r.repeat_count.saturating_sub(1))
+        .sum();
     let total_hits: usize = cache_results.iter().map(|r| r.cache_hits).sum();
 
     let hit_rate = if total_expected_hits > 0 {
@@ -798,14 +828,22 @@ fn run_d6_cache_hit_rate(cache_results: &[CacheTestResult], min_rate: f32) -> Te
 
     println!("\n=== Cache Hit Rate ===");
     println!("  Hits: {}/{}", total_hits, total_expected_hits);
-    println!("  Rate: {:.1}% (threshold: {:.1}%)", hit_rate * 100.0, min_rate * 100.0);
+    println!(
+        "  Rate: {:.1}% (threshold: {:.1}%)",
+        hit_rate * 100.0,
+        min_rate * 100.0
+    );
 
     if hit_rate >= min_rate {
         TestResult::pass_with_duration(name, start)
     } else {
         TestResult::fail_with_duration(
             name,
-            &format!("Cache hit rate {:.1}% below threshold {:.1}%", hit_rate * 100.0, min_rate * 100.0),
+            &format!(
+                "Cache hit rate {:.1}% below threshold {:.1}%",
+                hit_rate * 100.0,
+                min_rate * 100.0
+            ),
             start,
         )
     }
@@ -829,7 +867,10 @@ fn run_d7_quality_thresholds(
     };
 
     if cache_pass_rate < 0.8 {
-        failures.push(format!("Cache pass rate {:.1}% < 80%", cache_pass_rate * 100.0));
+        failures.push(format!(
+            "Cache pass rate {:.1}% < 80%",
+            cache_pass_rate * 100.0
+        ));
     }
 
     // Check hot tier pass rate
@@ -840,7 +881,10 @@ fn run_d7_quality_thresholds(
     };
 
     if hot_pass_rate < 0.8 {
-        failures.push(format!("Hot tier pass rate {:.1}% < 80%", hot_pass_rate * 100.0));
+        failures.push(format!(
+            "Hot tier pass rate {:.1}% < 80%",
+            hot_pass_rate * 100.0
+        ));
     }
 
     // Check warm tier recall (should find relevant docs)
@@ -851,13 +895,25 @@ fn run_d7_quality_thresholds(
     };
 
     if avg_warm_recall < 0.5 {
-        failures.push(format!("Warm tier recall {:.1}% < 50%", avg_warm_recall * 100.0));
+        failures.push(format!(
+            "Warm tier recall {:.1}% < 50%",
+            avg_warm_recall * 100.0
+        ));
     }
 
     println!("\n=== Quality Thresholds ===");
-    println!("  Cache pass rate: {:.1}% (threshold: 80%)", cache_pass_rate * 100.0);
-    println!("  Hot tier pass rate: {:.1}% (threshold: 80%)", hot_pass_rate * 100.0);
-    println!("  Warm tier recall: {:.1}% (threshold: 50%)", avg_warm_recall * 100.0);
+    println!(
+        "  Cache pass rate: {:.1}% (threshold: 80%)",
+        cache_pass_rate * 100.0
+    );
+    println!(
+        "  Hot tier pass rate: {:.1}% (threshold: 80%)",
+        hot_pass_rate * 100.0
+    );
+    println!(
+        "  Warm tier recall: {:.1}% (threshold: 50%)",
+        avg_warm_recall * 100.0
+    );
 
     if failures.is_empty() {
         println!("  All quality thresholds met!");

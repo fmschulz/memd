@@ -71,9 +71,12 @@ impl SegmentReader {
             ));
         }
 
-        name[4..]
-            .parse()
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, format!("invalid segment id: {}", name)))
+        name[4..].parse().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid segment id: {}", name),
+            )
+        })
     }
 
     fn load_index(path: &Path) -> io::Result<Vec<PayloadIndexRecord>> {

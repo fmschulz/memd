@@ -165,7 +165,9 @@ impl HnswIndex {
         let internal_id = self.mapping.write().insert(chunk_id);
 
         // Store in cache for persistence
-        self.embedding_cache.write().insert(internal_id, embedding)?;
+        self.embedding_cache
+            .write()
+            .insert(internal_id, embedding)?;
 
         let hnsw = self.hnsw.write();
         hnsw.insert_slice((embedding, internal_id));
@@ -445,7 +447,10 @@ impl HnswIndex {
     ///
     /// # Returns
     /// RebuildResult with statistics about the rebuild operation
-    pub fn rebuild_clean_in_place(&self, deleted_chunk_ids: &HashSet<ChunkId>) -> Result<RebuildResult> {
+    pub fn rebuild_clean_in_place(
+        &self,
+        deleted_chunk_ids: &HashSet<ChunkId>,
+    ) -> Result<RebuildResult> {
         // Convert chunk IDs to internal IDs
         let mapping = self.mapping.read();
         let deleted_internal_ids: HashSet<usize> = deleted_chunk_ids
@@ -456,7 +461,8 @@ impl HnswIndex {
 
         // Use HnswRebuilder to create clean index
         let rebuilder = HnswRebuilder::new();
-        let (_new_hnsw, result) = rebuilder.rebuild_clean(self, &deleted_internal_ids, &self.config)?;
+        let (_new_hnsw, result) =
+            rebuilder.rebuild_clean(self, &deleted_internal_ids, &self.config)?;
 
         // Note: The actual atomic swap happens at DenseSearcher level
         // where the tenant_indices map is stored. This method does the

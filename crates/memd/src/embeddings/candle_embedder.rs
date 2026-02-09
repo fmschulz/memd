@@ -21,7 +21,7 @@ const DEFAULT_MODEL: &str = "sentence-transformers/all-MiniLM-L6-v2";
 const DEFAULT_DIMENSION: usize = 384;
 const DEFAULT_MAX_LENGTH: usize = 512;
 const MODEL_POOL_SIZE: usize = 4; // 4 models for parallel inference
-// MAX_CONCURRENT derived from MODEL_POOL_SIZE to avoid duplication
+                                  // MAX_CONCURRENT derived from MODEL_POOL_SIZE to avoid duplication
 const MAX_CONCURRENT: usize = MODEL_POOL_SIZE;
 
 // Global counter for round-robin model selection
@@ -115,8 +115,9 @@ impl CandleEmbedder {
         };
 
         // Download model files from Hugging Face Hub
-        let api = Api::new()
-            .map_err(|e| MemdError::EmbeddingError(format!("Failed to initialize HF API: {}", e)))?;
+        let api = Api::new().map_err(|e| {
+            MemdError::EmbeddingError(format!("Failed to initialize HF API: {}", e))
+        })?;
 
         let repo = api.repo(Repo::new(DEFAULT_MODEL.to_string(), RepoType::Model));
 
@@ -124,9 +125,9 @@ impl CandleEmbedder {
             .get("config.json")
             .map_err(|e| MemdError::EmbeddingError(format!("Failed to download config: {}", e)))?;
 
-        let tokenizer_path = repo
-            .get("tokenizer.json")
-            .map_err(|e| MemdError::EmbeddingError(format!("Failed to download tokenizer: {}", e)))?;
+        let tokenizer_path = repo.get("tokenizer.json").map_err(|e| {
+            MemdError::EmbeddingError(format!("Failed to download tokenizer: {}", e))
+        })?;
 
         let weights_path = repo
             .get("model.safetensors")
@@ -266,21 +267,20 @@ impl CandleEmbedder {
                 .map_err(|e| MemdError::EmbeddingError(format!("Tokenization failed: {}", e)))?;
 
             // Convert to tensors
-            let token_ids: Vec<Vec<u32>> = encodings
-                .iter()
-                .map(|e| e.get_ids().to_vec())
-                .collect();
+            let token_ids: Vec<Vec<u32>> = encodings.iter().map(|e| e.get_ids().to_vec()).collect();
 
             let attention_mask: Vec<Vec<u32>> = encodings
                 .iter()
                 .map(|e| e.get_attention_mask().to_vec())
                 .collect();
 
-            let token_ids_tensor = Tensor::new(token_ids, &*device)
-                .map_err(|e| MemdError::EmbeddingError(format!("Failed to create token tensor: {}", e)))?;
+            let token_ids_tensor = Tensor::new(token_ids, &*device).map_err(|e| {
+                MemdError::EmbeddingError(format!("Failed to create token tensor: {}", e))
+            })?;
 
-            let attention_mask_tensor = Tensor::new(attention_mask, &*device)
-                .map_err(|e| MemdError::EmbeddingError(format!("Failed to create mask tensor: {}", e)))?;
+            let attention_mask_tensor = Tensor::new(attention_mask, &*device).map_err(|e| {
+                MemdError::EmbeddingError(format!("Failed to create mask tensor: {}", e))
+            })?;
 
             // Run model inference
             let model = model.lock();
@@ -293,9 +293,7 @@ impl CandleEmbedder {
                 PoolingStrategy::Mean => mean_pool(&outputs, &attention_mask_tensor)?,
                 PoolingStrategy::Cls => {
                     // Take CLS token (first token) - select all batches, first sequence position
-                    outputs
-                        .narrow(1, 0, 1)?
-                        .squeeze(1)?
+                    outputs.narrow(1, 0, 1)?.squeeze(1)?
                 }
                 PoolingStrategy::LastToken => {
                     // Take last non-padding token for each sequence
@@ -308,14 +306,12 @@ impl CandleEmbedder {
                         let mask_vec = mask.to_vec1::<u32>()?;
 
                         // Find last non-zero position in attention mask
-                        let last_pos = mask_vec
-                            .iter()
-                            .rposition(|&x| x != 0)
-                            .unwrap_or(0);
+                        let last_pos = mask_vec.iter().rposition(|&x| x != 0).unwrap_or(0);
 
                         // Extract the token at last_pos for batch item i
                         let batch_item = outputs.narrow(0, i, 1)?;
-                        let last_token = batch_item.narrow(1, last_pos, 1)?.squeeze(1)?.squeeze(0)?;
+                        let last_token =
+                            batch_item.narrow(1, last_pos, 1)?.squeeze(1)?.squeeze(0)?;
                         last_outputs.push(last_token);
                     }
 
@@ -331,9 +327,9 @@ impl CandleEmbedder {
             };
 
             // Convert to Vec<Vec<f32>>
-            let embeddings_2d = final_embeddings
-                .to_vec2::<f32>()
-                .map_err(|e| MemdError::EmbeddingError(format!("Failed to convert to vec: {}", e)))?;
+            let embeddings_2d = final_embeddings.to_vec2::<f32>().map_err(|e| {
+                MemdError::EmbeddingError(format!("Failed to convert to vec: {}", e))
+            })?;
 
             Ok::<Vec<Vec<f32>>, MemdError>(embeddings_2d)
         })
@@ -379,6 +375,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "requires model download and network access"]
     async fn test_embed_basic() {
         let embedder = CandleEmbedder::new().unwrap();
         let embeddings = embedder.embed_texts(&["hello world"]).await.unwrap();
@@ -391,6 +388,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires model download and network access"]
     async fn test_embed_batch() {
         let embedder = CandleEmbedder::new().unwrap();
         let texts = vec!["hello world", "test embedding", "another example"];
@@ -405,6 +403,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires model download and network access"]
     async fn test_embed_concurrency() {
         let embedder = Arc::new(CandleEmbedder::new().unwrap());
         let mut handles = vec![];
@@ -423,6 +422,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires model download and network access"]
     async fn test_semantic_similarity() {
         let embedder = CandleEmbedder::new().unwrap();
 

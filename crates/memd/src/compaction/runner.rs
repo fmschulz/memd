@@ -80,8 +80,7 @@ impl CompactionRunner {
 
         // 1. Get deleted chunk IDs from metadata
         let deleted_chunk_ids = metadata.get_deleted_chunk_ids(tenant_id)?;
-        let deleted_chunk_ids_set: HashSet<ChunkId> =
-            deleted_chunk_ids.iter().cloned().collect();
+        let deleted_chunk_ids_set: HashSet<ChunkId> = deleted_chunk_ids.iter().cloned().collect();
         let tombstones_processed = deleted_chunk_ids.len();
 
         tracing::debug!(
@@ -102,9 +101,9 @@ impl CompactionRunner {
         self.throttle.delay_sync();
 
         // 3. HNSW Rebuild (if staleness exceeds threshold)
-        let hnsw_rebuild = if metrics.exceeds_hnsw_staleness_threshold(
-            self.config.thresholds.hnsw_staleness_pct,
-        ) {
+        let hnsw_rebuild = if metrics
+            .exceeds_hnsw_staleness_threshold(self.config.thresholds.hnsw_staleness_pct)
+        {
             tracing::info!(
                 tenant_id = %tenant_id,
                 staleness = metrics.hnsw_staleness,

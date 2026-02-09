@@ -68,7 +68,10 @@ impl QueryIntent {
 
     /// Returns true if this is a trace/debug query (no semantic blending).
     pub fn is_trace_query(&self) -> bool {
-        matches!(self, QueryIntent::ToolCalls(_) | QueryIntent::ErrorSearch(_))
+        matches!(
+            self,
+            QueryIntent::ToolCalls(_) | QueryIntent::ErrorSearch(_)
+        )
     }
 }
 
@@ -179,10 +182,7 @@ impl QueryRouter {
                 CompiledPattern::new(r"(?i)references to (\w+)", 1),
                 CompiledPattern::new(r"(?i)usages of (\w+)", 1),
                 CompiledPattern::new(r"(?i)where is (\w+) used", 1),
-                CompiledPattern::new(
-                    r"(?i)find all (?:uses|usages|references) (?:of )?(\w+)",
-                    1,
-                ),
+                CompiledPattern::new(r"(?i)find all (?:uses|usages|references) (?:of )?(\w+)", 1),
                 CompiledPattern::new(r"(?i)find (\w+) references", 1),
             ],
             import_patterns: vec![

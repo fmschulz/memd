@@ -126,14 +126,12 @@ fn expand_tilde(path: &Path) -> Result<PathBuf> {
     let path_str = path.to_string_lossy();
 
     if path_str.starts_with("~/") {
-        let home = std::env::var("HOME").map_err(|_| {
-            MemdError::ConfigError("HOME environment variable not set".to_string())
-        })?;
+        let home = std::env::var("HOME")
+            .map_err(|_| MemdError::ConfigError("HOME environment variable not set".to_string()))?;
         Ok(PathBuf::from(home).join(&path_str[2..]))
     } else if path_str == "~" {
-        let home = std::env::var("HOME").map_err(|_| {
-            MemdError::ConfigError("HOME environment variable not set".to_string())
-        })?;
+        let home = std::env::var("HOME")
+            .map_err(|_| MemdError::ConfigError("HOME environment variable not set".to_string()))?;
         Ok(PathBuf::from(home))
     } else {
         Ok(path.to_path_buf())
@@ -255,7 +253,10 @@ mod tests {
         let toml = r#"log_level = "invalid""#;
         let result = load_from_str(toml);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid log_level"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid log_level"));
     }
 
     #[test]
@@ -263,7 +264,10 @@ mod tests {
         let toml = r#"log_format = "xml""#;
         let result = load_from_str(toml);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid log_format"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid log_format"));
     }
 
     #[test]

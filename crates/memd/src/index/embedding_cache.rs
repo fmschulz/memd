@@ -104,7 +104,11 @@ impl EmbeddingCache {
     }
 
     /// Validate cache consistency with index metadata
-    pub fn validate_consistency(&self, expected_dimension: usize, expected_next_id: usize) -> Result<()> {
+    pub fn validate_consistency(
+        &self,
+        expected_dimension: usize,
+        expected_next_id: usize,
+    ) -> Result<()> {
         if self.dimension != expected_dimension {
             return Err(MemdError::ValidationError(format!(
                 "Embedding cache dimension mismatch: cache has {}, config expects {}. \
@@ -117,7 +121,8 @@ impl EmbeddingCache {
             return Err(MemdError::ValidationError(format!(
                 "Embedding cache count mismatch: cache has {} IDs, mapping expects {}. \
                 Delete warm_index/embeddings.bin to rebuild.",
-                self.next_id(), expected_next_id
+                self.next_id(),
+                expected_next_id
             )));
         }
 
@@ -130,8 +135,9 @@ impl EmbeddingCache {
 
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| MemdError::StorageError(format!("Failed to create directory: {}", e)))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                MemdError::StorageError(format!("Failed to create directory: {}", e))
+            })?;
         }
 
         // Write to temp file
@@ -145,15 +151,20 @@ impl EmbeddingCache {
         let mut writer = BufWriter::new(file);
 
         // Write header
-        writer.write_all(MAGIC)
+        writer
+            .write_all(MAGIC)
             .map_err(|e| MemdError::StorageError(format!("Failed to write magic: {}", e)))?;
-        writer.write_u32::<LittleEndian>(VERSION)
+        writer
+            .write_u32::<LittleEndian>(VERSION)
             .map_err(|e| MemdError::StorageError(format!("Failed to write version: {}", e)))?;
-        writer.write_u32::<LittleEndian>(self.dimension as u32)
+        writer
+            .write_u32::<LittleEndian>(self.dimension as u32)
             .map_err(|e| MemdError::StorageError(format!("Failed to write dimension: {}", e)))?;
-        writer.write_u32::<LittleEndian>(self.count as u32)
+        writer
+            .write_u32::<LittleEndian>(self.count as u32)
             .map_err(|e| MemdError::StorageError(format!("Failed to write count: {}", e)))?;
-        writer.write_u32::<LittleEndian>(self.next_id() as u32)
+        writer
+            .write_u32::<LittleEndian>(self.next_id() as u32)
             .map_err(|e| MemdError::StorageError(format!("Failed to write next_id: {}", e)))?;
 
         // Calculate header CRC
@@ -165,7 +176,8 @@ impl EmbeddingCache {
         header_hasher.update(&(self.next_id() as u32).to_le_bytes());
         let header_crc = header_hasher.finalize();
 
-        writer.write_u32::<LittleEndian>(header_crc)
+        writer
+            .write_u32::<LittleEndian>(header_crc)
             .map_err(|e| MemdError::StorageError(format!("Failed to write header CRC: {}", e)))?;
 
         // Calculate data CRC (includes both valid flags and embeddings)
@@ -184,25 +196,30 @@ impl EmbeddingCache {
 
         // Write valid flags
         for &valid in &self.valid_ids {
-            writer.write_u8(if valid { 1 } else { 0 })
-                .map_err(|e| MemdError::StorageError(format!("Failed to write valid flag: {}", e)))?;
+            writer.write_u8(if valid { 1 } else { 0 }).map_err(|e| {
+                MemdError::StorageError(format!("Failed to write valid flag: {}", e))
+            })?;
         }
 
         // Write embeddings data
         for &value in &self.embeddings {
             let bytes = value.to_le_bytes();
-            writer.write_all(&bytes)
-                .map_err(|e| MemdError::StorageError(format!("Failed to write embedding: {}", e)))?;
+            writer.write_all(&bytes).map_err(|e| {
+                MemdError::StorageError(format!("Failed to write embedding: {}", e))
+            })?;
         }
 
         // Write data CRC
-        writer.write_u32::<LittleEndian>(data_crc)
+        writer
+            .write_u32::<LittleEndian>(data_crc)
             .map_err(|e| MemdError::StorageError(format!("Failed to write data CRC: {}", e)))?;
 
         // Flush and sync
-        writer.flush()
+        writer
+            .flush()
             .map_err(|e| MemdError::StorageError(format!("Failed to flush: {}", e)))?;
-        let file = writer.into_inner()
+        let file = writer
+            .into_inner()
             .map_err(|e| MemdError::StorageError(format!("Failed to get file handle: {}", e)))?;
         file.sync_all()
             .map_err(|e| MemdError::StorageError(format!("Failed to sync file: {}", e)))?;
@@ -230,17 +247,20 @@ impl EmbeddingCache {
 
         // Read and validate header
         let mut magic_buf = [0u8; 4];
-        reader.read_exact(&mut magic_buf)
+        reader
+            .read_exact(&mut magic_buf)
             .map_err(|e| MemdError::StorageError(format!("Failed to read magic: {}", e)))?;
 
         if &magic_buf != MAGIC {
             return Err(MemdError::ValidationError(
                 "Embedding cache corrupted: invalid magic bytes. \
-                Delete warm_index/embeddings.bin to rebuild.".to_string()
+                Delete warm_index/embeddings.bin to rebuild."
+                    .to_string(),
             ));
         }
 
-        let version = reader.read_u32::<LittleEndian>()
+        let version = reader
+            .read_u32::<LittleEndian>()
             .map_err(|e| MemdError::StorageError(format!("Failed to read version: {}", e)))?;
 
         if version != VERSION {
@@ -251,16 +271,23 @@ impl EmbeddingCache {
             )));
         }
 
-        let dimension = reader.read_u32::<LittleEndian>()
-            .map_err(|e| MemdError::StorageError(format!("Failed to read dimension: {}", e)))? as usize;
+        let dimension = reader
+            .read_u32::<LittleEndian>()
+            .map_err(|e| MemdError::StorageError(format!("Failed to read dimension: {}", e)))?
+            as usize;
 
-        let count = reader.read_u32::<LittleEndian>()
-            .map_err(|e| MemdError::StorageError(format!("Failed to read count: {}", e)))? as usize;
+        let count = reader
+            .read_u32::<LittleEndian>()
+            .map_err(|e| MemdError::StorageError(format!("Failed to read count: {}", e)))?
+            as usize;
 
-        let next_id = reader.read_u32::<LittleEndian>()
-            .map_err(|e| MemdError::StorageError(format!("Failed to read next_id: {}", e)))? as usize;
+        let next_id = reader
+            .read_u32::<LittleEndian>()
+            .map_err(|e| MemdError::StorageError(format!("Failed to read next_id: {}", e)))?
+            as usize;
 
-        let stored_header_crc = reader.read_u32::<LittleEndian>()
+        let stored_header_crc = reader
+            .read_u32::<LittleEndian>()
             .map_err(|e| MemdError::StorageError(format!("Failed to read header CRC: {}", e)))?;
 
         // Verify header CRC
@@ -275,15 +302,17 @@ impl EmbeddingCache {
         if stored_header_crc != calculated_header_crc {
             return Err(MemdError::ValidationError(
                 "Embedding cache corrupted: header CRC mismatch. \
-                Delete warm_index/embeddings.bin to rebuild.".to_string()
+                Delete warm_index/embeddings.bin to rebuild."
+                    .to_string(),
             ));
         }
 
         // Read valid flags
         let mut valid_ids = vec![false; next_id];
         for i in 0..next_id {
-            let flag = reader.read_u8()
-                .map_err(|e| MemdError::StorageError(format!("Failed to read valid flag {}: {}", i, e)))?;
+            let flag = reader.read_u8().map_err(|e| {
+                MemdError::StorageError(format!("Failed to read valid flag {}: {}", i, e))
+            })?;
             valid_ids[i] = flag != 0;
         }
 
@@ -303,13 +332,15 @@ impl EmbeddingCache {
 
         for _ in 0..total_floats {
             let mut bytes = [0u8; 4];
-            reader.read_exact(&mut bytes)
-                .map_err(|e| MemdError::StorageError(format!("Failed to read embedding data: {}", e)))?;
+            reader.read_exact(&mut bytes).map_err(|e| {
+                MemdError::StorageError(format!("Failed to read embedding data: {}", e))
+            })?;
             embeddings.push(f32::from_le_bytes(bytes));
         }
 
         // Verify data CRC (recalculate including valid flags)
-        let stored_data_crc = reader.read_u32::<LittleEndian>()
+        let stored_data_crc = reader
+            .read_u32::<LittleEndian>()
             .map_err(|e| MemdError::StorageError(format!("Failed to read data CRC: {}", e)))?;
 
         let mut data_hasher = Hasher::new();
@@ -329,7 +360,8 @@ impl EmbeddingCache {
         if stored_data_crc != calculated_data_crc {
             return Err(MemdError::ValidationError(
                 "Embedding cache corrupted: data CRC mismatch. \
-                Delete warm_index/embeddings.bin to rebuild.".to_string()
+                Delete warm_index/embeddings.bin to rebuild."
+                    .to_string(),
             ));
         }
 
@@ -419,7 +451,10 @@ mod tests {
         // Should fail with wrong dimension
         let result = cache.validate_consistency(256, 2);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("dimension mismatch"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("dimension mismatch"));
 
         // Should fail with wrong count
         let result = cache.validate_consistency(384, 5);

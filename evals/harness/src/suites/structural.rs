@@ -461,11 +461,7 @@ fn run_e2_definition_tests(
         });
     }
 
-    println!(
-        "  Definitions: {}/{} passed",
-        passed,
-        def_queries.len()
-    );
+    println!("  Definitions: {}/{} passed", passed, def_queries.len());
 
     let result = if passed == def_queries.len() || def_queries.is_empty() {
         TestResult::pass_with_duration(name, start)
@@ -520,10 +516,7 @@ fn evaluate_definition_result(
         .and_then(|l| l.as_u64())
         .unwrap_or(0) as u32;
 
-    let actual = format!(
-        "file={}, kind={}, line={}",
-        file_path, kind, line
-    );
+    let actual = format!("file={}, kind={}, line={}", file_path, kind, line);
 
     // Score: 1.0 for exact match, 0.5 for file match, 0.25 for kind match
     let file_match = file_path.ends_with(&expected.file);
@@ -604,11 +597,7 @@ fn run_e3_callers_tests(
         });
     }
 
-    println!(
-        "  Callers: {}/{} passed",
-        passed,
-        caller_queries.len()
-    );
+    println!("  Callers: {}/{} passed", passed, caller_queries.len());
 
     let result = if passed == caller_queries.len() || caller_queries.is_empty() {
         TestResult::pass_with_duration(name, start)
@@ -701,7 +690,10 @@ fn run_e4_references_tests(
                     query_id: query.id.clone(),
                     passed: false,
                     score: 0.0,
-                    expected: format!("count={:?}, files={:?}", query.expected_count, query.expected_files),
+                    expected: format!(
+                        "count={:?}, files={:?}",
+                        query.expected_count, query.expected_files
+                    ),
                     actual: format!("Error: {}", e),
                     duration_ms: query_start.elapsed().as_millis() as u64,
                 });
@@ -709,11 +701,8 @@ fn run_e4_references_tests(
             }
         };
 
-        let (is_passed, score, actual) = evaluate_references_result(
-            &response,
-            query.expected_count,
-            &query.expected_files,
-        );
+        let (is_passed, score, actual) =
+            evaluate_references_result(&response, query.expected_count, &query.expected_files);
 
         if is_passed {
             passed += 1;
@@ -723,17 +712,16 @@ fn run_e4_references_tests(
             query_id: query.id.clone(),
             passed: is_passed,
             score,
-            expected: format!("count={:?}, files={:?}", query.expected_count, query.expected_files),
+            expected: format!(
+                "count={:?}, files={:?}",
+                query.expected_count, query.expected_files
+            ),
             actual,
             duration_ms: query_start.elapsed().as_millis() as u64,
         });
     }
 
-    println!(
-        "  References: {}/{} passed",
-        passed,
-        refs_queries.len()
-    );
+    println!("  References: {}/{} passed", passed, refs_queries.len());
 
     let result = if passed == refs_queries.len() || refs_queries.is_empty() {
         TestResult::pass_with_duration(name, start)
@@ -786,13 +774,19 @@ fn evaluate_references_result(
 
     // Check files
     let files_ok = expected_files.as_ref().map_or(true, |expected| {
-        expected.iter().all(|f| {
-            actual_files.iter().any(|af| af.ends_with(f))
-        })
+        expected
+            .iter()
+            .all(|f| actual_files.iter().any(|af| af.ends_with(f)))
     });
 
     let passed = count_ok && files_ok;
-    let score = if passed { 1.0 } else if count_ok || files_ok { 0.5 } else { 0.0 };
+    let score = if passed {
+        1.0
+    } else if count_ok || files_ok {
+        0.5
+    } else {
+        0.0
+    };
 
     (passed, score, actual)
 }
@@ -853,11 +847,7 @@ fn run_e5_imports_tests(
         });
     }
 
-    println!(
-        "  Imports: {}/{} passed",
-        passed,
-        imports_queries.len()
-    );
+    println!("  Imports: {}/{} passed", passed, imports_queries.len());
 
     let result = if passed == imports_queries.len() || imports_queries.is_empty() {
         TestResult::pass_with_duration(name, start)
@@ -910,9 +900,9 @@ fn evaluate_imports_result(
     let actual = format!("importing_files: {:?}", found_files);
 
     // Check if all expected files were found
-    let all_found = expected_files.iter().all(|ef| {
-        found_files.iter().any(|ff| ff.ends_with(ef))
-    });
+    let all_found = expected_files
+        .iter()
+        .all(|ef| found_files.iter().any(|ff| ff.ends_with(ef)));
 
     let score = if all_found { 1.0 } else { 0.0 };
 
@@ -1171,13 +1161,11 @@ mod tests {
 
     #[test]
     fn test_callers_scoring() {
-        let expected = vec![
-            ExpectedCaller {
-                function: "main".to_string(),
-                file: "src/main.rs".to_string(),
-                line: Some(2),
-            },
-        ];
+        let expected = vec![ExpectedCaller {
+            function: "main".to_string(),
+            file: "src/main.rs".to_string(),
+            line: Some(2),
+        }];
 
         let response = serde_json::json!({
             "result": {

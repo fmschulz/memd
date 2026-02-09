@@ -47,7 +47,7 @@ struct NFCorpusDocument {
 }
 
 fn default_doc_type() -> String {
-    "biomedical".to_string()
+    "scientific".to_string()
 }
 
 /// Quality metrics
@@ -104,8 +104,8 @@ pub fn run_nfcorpus_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<Tes
     let mut results = Vec::new();
 
     // Load dataset
-    let dataset_path = std::path::Path::new("evals/datasets/retrieval/beir_nfcorpus.json");
-    let dataset = match load_dataset(dataset_path) {
+    let dataset_path = crate::resolve_dataset_path("evals/datasets/retrieval/beir_nfcorpus.json");
+    let dataset = match load_dataset(dataset_path.as_path()) {
         Ok(d) => d,
         Err(e) => {
             results.push(TestResult::fail(
@@ -129,7 +129,8 @@ pub fn run_nfcorpus_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<Tes
     );
 
     // Test 1: Index all documents and evaluate
-    let (test_result, quality_metrics) = run_index_and_evaluate(memd_path, &dataset, embedding_model);
+    let (test_result, quality_metrics) =
+        run_index_and_evaluate(memd_path, &dataset, embedding_model);
     results.push(test_result);
 
     let metrics = match quality_metrics {
@@ -141,17 +142,33 @@ pub fn run_nfcorpus_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<Tes
     results.push(check_quality_threshold(&metrics));
 
     // Test 3: Performance baseline
-    results.push(run_performance_baseline(memd_path, &dataset, embedding_model));
+    results.push(run_performance_baseline(
+        memd_path,
+        &dataset,
+        embedding_model,
+    ));
 
     results
 }
 
 fn load_dataset(path: &std::path::Path) -> Result<NFCorpusDataset, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("read file: {}", e))?;
+    let content = std::fs::read_to_string(path).map_err(|e| format!("read file: {}", e))?;
 
-    serde_json::from_str(&content)
-        .map_err(|e| format!("parse JSON: {}", e))
+    let mut dataset: NFCorpusDataset =
+        serde_json::from_str(&content).map_err(|e| format!("parse JSON: {}", e))?;
+
+    for doc in &mut dataset.documents {
+        let raw_type = doc.doc_type.clone();
+        let Some(normalized) = crate::normalize_eval_chunk_type(&raw_type) else {
+            return Err(format!(
+                "unsupported chunk type '{}' for document {}",
+                raw_type, doc.id
+            ));
+        };
+        doc.doc_type = normalized.to_string();
+    }
+
+    Ok(dataset)
 }
 
 fn create_indexed_client(
@@ -217,17 +234,17 @@ fn run_index_and_evaluate(
         .filter(|q| !q.relevant.is_empty())
         .collect();
 
-    println!("  Evaluating {} queries with relevance judgments", queries_with_qrels.len());
+    println!(
+        "  Evaluating {} queries with relevance judgments",
+        queries_with_qrels.len()
+    );
 
     // Evaluate queries
     let metrics = evaluate_queries(&mut client, &queries_with_qrels);
 
     println!("\n  Overall: {}", metrics);
 
-    (
-        TestResult::pass_with_duration(name, start),
-        Some(metrics),
-    )
+    (TestResult::pass_with_duration(name, start), Some(metrics))
 }
 
 fn check_quality_threshold(metrics: &QualityMetrics) -> TestResult {
@@ -240,10 +257,7 @@ fn check_quality_threshold(metrics: &QualityMetrics) -> TestResult {
     } else {
         TestResult::fail_with_duration(
             name,
-            &format!(
-                "Recall@10 {:.3} below threshold 0.25",
-                metrics.recall_at_10
-            ),
+            &format!("Recall@10 {:.3} below threshold 0.25", metrics.recall_at_10),
             start,
         )
     }
@@ -389,8 +403,7 @@ fn parse_search_results(response: &Value) -> Option<Vec<String>> {
         .map(|arr| {
             arr.iter()
                 .filter_map(|item| {
-                    item
-                        .get("tags")
+                    item.get("tags")
                         .and_then(|tags| tags.as_array())
                         .and_then(|tag_arr| tag_arr.first())
                         .and_then(|tag| tag.as_str())

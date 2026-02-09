@@ -185,13 +185,14 @@ impl WalRecord {
 
         // Deserialize the record
         let (record, _): (WalRecord, _) =
-            bincode::serde::decode_from_slice(payload_bytes, bincode::config::standard())
-                .map_err(|e| {
+            bincode::serde::decode_from_slice(payload_bytes, bincode::config::standard()).map_err(
+                |e| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("failed to deserialize WAL record: {}", e),
                     )
-                })?;
+                },
+            )?;
 
         // Verify the record type matches what we read from the header
         if record.record_type != record_type {
@@ -336,7 +337,10 @@ mod tests {
 
         let result = WalRecord::decode_from_bytes(&bytes);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid WAL magic"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid WAL magic"));
     }
 
     #[test]
@@ -427,12 +431,7 @@ mod tests {
     #[test]
     fn multiple_records_in_sequence() {
         let records = vec![
-            WalRecord::add(
-                "t1".to_string(),
-                "c1".to_string(),
-                1000,
-                b"data1".to_vec(),
-            ),
+            WalRecord::add("t1".to_string(), "c1".to_string(), 1000, b"data1".to_vec()),
             WalRecord::delete("t1".to_string(), "c2".to_string(), 2000),
             WalRecord::checkpoint("t1".to_string(), 3000),
         ];

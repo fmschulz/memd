@@ -219,13 +219,9 @@ mod tests {
         // Write records with checkpoint
         {
             let mut writer = WalWriter::create(&wal_path).unwrap();
-            writer
-                .append_add("t1", "c1", 1000, b"d1".to_vec())
-                .unwrap();
+            writer.append_add("t1", "c1", 1000, b"d1".to_vec()).unwrap();
             writer.append_checkpoint("t1", 2000).unwrap();
-            writer
-                .append_add("t1", "c2", 3000, b"d2".to_vec())
-                .unwrap();
+            writer.append_add("t1", "c2", 3000, b"d2".to_vec()).unwrap();
         }
 
         let reader = WalReader::open(&wal_path).unwrap();
@@ -241,19 +237,11 @@ mod tests {
         // Write records with checkpoint in middle
         {
             let mut writer = WalWriter::create(&wal_path).unwrap();
-            writer
-                .append_add("t1", "c1", 1000, b"d1".to_vec())
-                .unwrap();
-            writer
-                .append_add("t1", "c2", 2000, b"d2".to_vec())
-                .unwrap();
+            writer.append_add("t1", "c1", 1000, b"d1".to_vec()).unwrap();
+            writer.append_add("t1", "c2", 2000, b"d2".to_vec()).unwrap();
             writer.append_checkpoint("t1", 3000).unwrap();
-            writer
-                .append_add("t1", "c3", 4000, b"d3".to_vec())
-                .unwrap();
-            writer
-                .append_add("t1", "c4", 5000, b"d4".to_vec())
-                .unwrap();
+            writer.append_add("t1", "c3", 4000, b"d3".to_vec()).unwrap();
+            writer.append_add("t1", "c4", 5000, b"d4".to_vec()).unwrap();
         }
 
         let reader = WalReader::open(&wal_path).unwrap();
@@ -273,12 +261,8 @@ mod tests {
         // Write records without checkpoint
         {
             let mut writer = WalWriter::create(&wal_path).unwrap();
-            writer
-                .append_add("t1", "c1", 1000, b"d1".to_vec())
-                .unwrap();
-            writer
-                .append_add("t1", "c2", 2000, b"d2".to_vec())
-                .unwrap();
+            writer.append_add("t1", "c1", 1000, b"d1".to_vec()).unwrap();
+            writer.append_add("t1", "c2", 2000, b"d2".to_vec()).unwrap();
         }
 
         let reader = WalReader::open(&wal_path).unwrap();
@@ -384,9 +368,9 @@ mod tests {
         assert_eq!(
             stats,
             RecoveryStats {
-                adds: 1,         // Only new_chunk added
-                skipped: 1,      // existing_chunk skipped
-                deletes: 1,      // to_delete processed
+                adds: 1,    // Only new_chunk added
+                skipped: 1, // existing_chunk skipped
+                deletes: 1, // to_delete processed
                 checkpoints: 0,
             }
         );
@@ -425,17 +409,11 @@ mod tests {
         {
             let mut writer = WalWriter::create(&wal_path).unwrap();
             // Before checkpoint - these should NOT be replayed
-            writer
-                .append_add("t1", "c1", 1000, b"d1".to_vec())
-                .unwrap();
-            writer
-                .append_add("t1", "c2", 2000, b"d2".to_vec())
-                .unwrap();
+            writer.append_add("t1", "c1", 1000, b"d1".to_vec()).unwrap();
+            writer.append_add("t1", "c2", 2000, b"d2".to_vec()).unwrap();
             writer.append_checkpoint("t1", 3000).unwrap();
             // After checkpoint - these SHOULD be replayed
-            writer
-                .append_add("t1", "c3", 4000, b"d3".to_vec())
-                .unwrap();
+            writer.append_add("t1", "c3", 4000, b"d3".to_vec()).unwrap();
         }
 
         let reader = WalReader::open(&wal_path).unwrap();

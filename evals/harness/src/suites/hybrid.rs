@@ -106,8 +106,8 @@ pub fn run_hybrid_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestR
     let mut results = Vec::new();
 
     // Load dataset
-    let dataset_path = std::path::Path::new("evals/datasets/retrieval/hybrid_test.json");
-    let dataset = match load_dataset(dataset_path) {
+    let dataset_path = crate::resolve_dataset_path("evals/datasets/retrieval/hybrid_test.json");
+    let dataset = match load_dataset(dataset_path.as_path()) {
         Ok(d) => d,
         Err(e) => {
             results.push(TestResult::fail(
@@ -156,7 +156,11 @@ pub fn run_hybrid_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestR
     ));
 
     // C6: Performance baseline
-    results.push(run_c6_performance_baseline(memd_path, &dataset, embedding_model));
+    results.push(run_c6_performance_baseline(
+        memd_path,
+        &dataset,
+        embedding_model,
+    ));
 
     // C7: Quality thresholds check
     results.push(run_c7_quality_thresholds(
@@ -170,7 +174,21 @@ pub fn run_hybrid_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestR
 
 fn load_dataset(path: &std::path::Path) -> Result<HybridDataset, String> {
     let content = std::fs::read_to_string(path).map_err(|e| format!("read file: {}", e))?;
-    serde_json::from_str(&content).map_err(|e| format!("parse json: {}", e))
+    let mut dataset: HybridDataset =
+        serde_json::from_str(&content).map_err(|e| format!("parse json: {}", e))?;
+
+    for doc in &mut dataset.documents {
+        let raw_type = doc.doc_type.clone();
+        let Some(normalized) = crate::normalize_eval_chunk_type(&raw_type) else {
+            return Err(format!(
+                "unsupported chunk type '{}' for document {}",
+                raw_type, doc.id
+            ));
+        };
+        doc.doc_type = normalized.to_string();
+    }
+
+    Ok(dataset)
 }
 
 /// Generic dataset loader (public for reuse in other test suites)

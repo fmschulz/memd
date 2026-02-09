@@ -133,13 +133,20 @@ impl FeatureReranker {
     ///       + project_weight * project_bonus
     ///       + type_weight * type_bonus
     /// ```
-    pub fn rerank(&self, chunks: Vec<ChunkWithMeta>, context: &RerankerContext) -> Vec<RankedResult> {
+    pub fn rerank(
+        &self,
+        chunks: Vec<ChunkWithMeta>,
+        context: &RerankerContext,
+    ) -> Vec<RankedResult> {
         let mut results: Vec<RankedResult> = chunks
             .into_iter()
             .map(|chunk| {
-                let recency_bonus = self.compute_recency_bonus(chunk.timestamp_created, context.now_ms);
-                let project_bonus = self.compute_project_bonus(&chunk.project_id, &context.current_project);
-                let type_bonus = self.compute_type_bonus(chunk.chunk_type, &context.preferred_types);
+                let recency_bonus =
+                    self.compute_recency_bonus(chunk.timestamp_created, context.now_ms);
+                let project_bonus =
+                    self.compute_project_bonus(&chunk.project_id, &context.current_project);
+                let type_bonus =
+                    self.compute_type_bonus(chunk.chunk_type, &context.preferred_types);
 
                 let final_score = self.config.rrf_weight * chunk.rrf_score
                     + self.config.recency_weight * recency_bonus
@@ -158,7 +165,11 @@ impl FeatureReranker {
             .collect();
 
         // Sort by final score descending
-        results.sort_by(|a, b| b.final_score.partial_cmp(&a.final_score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.final_score
+                .partial_cmp(&a.final_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         results
     }
@@ -320,7 +331,10 @@ mod tests {
         let result = &results[0];
 
         // Verify all bonuses are applied
-        assert!((result.recency_bonus - 1.0).abs() < 0.001, "Just created should have recency ~1.0");
+        assert!(
+            (result.recency_bonus - 1.0).abs() < 0.001,
+            "Just created should have recency ~1.0"
+        );
         assert_eq!(result.project_bonus, 1.0);
         assert_eq!(result.type_bonus, 1.0);
 

@@ -35,10 +35,7 @@ impl WalWriter {
             std::fs::create_dir_all(parent)?;
         }
 
-        let file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(path)?;
+        let file = OpenOptions::new().create_new(true).write(true).open(path)?;
 
         Ok(Self {
             file,
@@ -334,7 +331,12 @@ mod tests {
     #[test]
     fn creates_parent_directories() {
         let temp_dir = TempDir::new().unwrap();
-        let nested_path = temp_dir.path().join("a").join("b").join("c").join("test.wal");
+        let nested_path = temp_dir
+            .path()
+            .join("a")
+            .join("b")
+            .join("c")
+            .join("test.wal");
 
         assert!(!nested_path.parent().unwrap().exists());
 
@@ -343,7 +345,12 @@ mod tests {
         drop(writer);
 
         // Same for open_or_create
-        let nested_path2 = temp_dir.path().join("x").join("y").join("z").join("test.wal");
+        let nested_path2 = temp_dir
+            .path()
+            .join("x")
+            .join("y")
+            .join("z")
+            .join("test.wal");
         let writer = WalWriter::open_or_create(&nested_path2).unwrap();
         assert!(nested_path2.exists());
         drop(writer);

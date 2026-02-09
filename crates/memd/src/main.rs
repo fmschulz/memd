@@ -133,8 +133,9 @@ async fn main() {
                 };
                 match PersistentStore::open(store_config) {
                     Ok(store) => {
+                        let metrics = store.metrics_arc();
                         let store = Arc::new(store);
-                        let mut server = memd::mcp::McpServer::new(config, store);
+                        let mut server = memd::mcp::McpServer::with_metrics(config, store, metrics);
                         if let Err(e) = server.run().await {
                             eprintln!("error: MCP server error: {}", e);
                             std::process::exit(1);

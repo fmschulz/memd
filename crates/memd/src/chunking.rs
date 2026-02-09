@@ -182,9 +182,7 @@ pub fn chunk_text(text: &str, config: &ChunkingConfig) -> Vec<Chunk> {
     }
 
     // Add final chunk if it meets minimum size or is the only chunk
-    if current_length > 0
-        && (current_length >= config.min_chunk_size || chunks.is_empty())
-    {
+    if current_length > 0 && (current_length >= config.min_chunk_size || chunks.is_empty()) {
         let chunk_text: String = current_chunk_sentences
             .iter()
             .map(|s| s.text.as_str())
@@ -273,9 +271,11 @@ mod tests {
         // With 1500 chars and chunk_size 1200, we expect it to be split
         // But without sentence boundaries, it might not split correctly
         // This test will reveal the bug
-        assert!(chunks.len() > 1,
-                "Expected multiple chunks for 1500 char text (chunk_size=1200), got {} chunk(s)",
-                chunks.len());
+        assert!(
+            chunks.len() > 1,
+            "Expected multiple chunks for 1500 char text (chunk_size=1200), got {} chunk(s)",
+            chunks.len()
+        );
     }
 
     #[test]
@@ -298,7 +298,9 @@ mod tests {
 
         // Verify no chunk is too small (except possibly last if merged)
         for chunk in &chunks {
-            assert!(chunk.text.len() >= config.min_chunk_size || chunk.chunk_index == chunks.len() - 1);
+            assert!(
+                chunk.text.len() >= config.min_chunk_size || chunk.chunk_index == chunks.len() - 1
+            );
         }
     }
 
