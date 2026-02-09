@@ -13,9 +13,10 @@ use super::error::McpError;
 use super::handlers::{
     handle_find_callers, handle_find_definition, handle_find_errors, handle_find_imports,
     handle_find_references, handle_find_tool_calls, handle_memory_add, handle_memory_add_batch,
-    handle_memory_compact, handle_memory_delete, handle_memory_get, handle_memory_metrics,
-    handle_memory_search, handle_memory_stats, AddBatchParams, AddParams, CompactParams,
-    DeleteParams, FindCallersParams, FindDefinitionParams, FindErrorsParams, FindImportsParams,
+    handle_memory_compact, handle_memory_consolidate_episode, handle_memory_delete,
+    handle_memory_get, handle_memory_metrics, handle_memory_search, handle_memory_stats,
+    AddBatchParams, AddParams, CompactParams, ConsolidateEpisodeParams, DeleteParams,
+    FindCallersParams, FindDefinitionParams, FindErrorsParams, FindImportsParams,
     FindReferencesParams, FindToolCallsParams, GetParams, MetricsParams, SearchParams, StatsParams,
 };
 use super::protocol::{Request, Response};
@@ -313,6 +314,16 @@ impl<S: Store> McpServer<S> {
                 })?;
                 handle_memory_compact(&*self.store, params).await
             }
+            "memory.consolidate_episode" => {
+                let params: ConsolidateEpisodeParams =
+                    serde_json::from_value(arguments).map_err(|e| {
+                        McpError::InvalidParams(format!(
+                            "invalid consolidate_episode params: {}",
+                            e
+                        ))
+                    })?;
+                handle_memory_consolidate_episode(&*self.store, params).await
+            }
             "code.find_definition" => {
                 let params: FindDefinitionParams =
                     serde_json::from_value(arguments).map_err(|e| {
@@ -568,6 +579,120 @@ mod tests {
             .as_str()
             .expect("compact payload should include status");
         assert!(matches!(status, "completed" | "skipped"));
+    }
+
+    async fn run_memory_add_batch_tool_flow<S: Store>(server: &McpServer<S>, tenant_id: &str) {
+        let add_batch_result = server
+            .handle_tools_call(Some(json!({
+                "name": "memory.add_batch",
+                "arguments": {
+                    "tenant_id": tenant_id,
+                    "chunks": [
+                        {
+                            "text": "batch document chunk",
+                            "type": "doc",
+                            "project_id": "batch_project"
+                        },
+                        {
+                            "text": "batch code chunk",
+                            "type": "code"
+                        }
+                    ]
+                }
+            })))
+            .await
+            .expect("memory.add_batch should succeed");
+
+        let add_batch_payload = parse_tool_payload(&add_batch_result);
+        let chunk_ids = add_batch_payload["chunk_ids"]
+            .as_array()
+            .expect("add_batch payload should include chunk_ids");
+        assert_eq!(chunk_ids.len(), 2);
+        assert!(chunk_ids.iter().all(|id| id.as_str().is_some()));
+
+        let search_result = server
+            .handle_tools_call(Some(json!({
+                "name": "memory.search",
+                "arguments": {
+                    "tenant_id": tenant_id,
+                    "query": "batch",
+                    "k": 10
+                }
+            })))
+            .await
+            .expect("memory.search should succeed after add_batch");
+
+        let search_payload = parse_tool_payload(&search_result);
+        let results = search_payload["results"]
+            .as_array()
+            .expect("search payload should include results");
+        assert_eq!(results.len(), 2);
+    }
+
+    async fn run_episode_consolidation_flow<S: Store>(server: &McpServer<S>, tenant_id: &str) {
+        server
+            .handle_tools_call(Some(json!({
+                "name": "memory.add_batch",
+                "arguments": {
+                    "tenant_id": tenant_id,
+                    "chunks": [
+                        {
+                            "text": "Episode event one",
+                            "type": "doc",
+                            "episode_id": "ep_alpha"
+                        },
+                        {
+                            "text": "Episode event two",
+                            "type": "decision",
+                            "episode_id": "ep_alpha"
+                        }
+                    ]
+                }
+            })))
+            .await
+            .expect("memory.add_batch should succeed");
+
+        let consolidate_result = server
+            .handle_tools_call(Some(json!({
+                "name": "memory.consolidate_episode",
+                "arguments": {
+                    "tenant_id": tenant_id,
+                    "episode_id": "ep_alpha",
+                    "max_chunks": 20,
+                    "retain_source_chunks": false
+                }
+            })))
+            .await
+            .expect("memory.consolidate_episode should succeed");
+
+        let consolidate_payload = parse_tool_payload(&consolidate_result);
+        assert!(consolidate_payload["summary_chunk_id"].as_str().is_some());
+        assert_eq!(consolidate_payload["source_chunk_count"], 2);
+        assert_eq!(consolidate_payload["retained_source_chunks"], false);
+
+        let search_result = server
+            .handle_tools_call(Some(json!({
+                "name": "memory.search",
+                "arguments": {
+                    "tenant_id": tenant_id,
+                    "query": "Episode ep_alpha summary",
+                    "k": 10,
+                    "filters": {
+                        "episode_id": "ep_alpha",
+                        "types": ["summary"]
+                    }
+                }
+            })))
+            .await
+            .expect("memory.search should succeed");
+
+        let search_payload = parse_tool_payload(&search_result);
+        let results = search_payload["results"]
+            .as_array()
+            .expect("search payload should include results");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["chunk_type"], "summary");
+        assert_eq!(results[0]["episode_id"], "ep_alpha");
     }
 
     #[tokio::test]
@@ -866,6 +991,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn e2e_memory_add_batch_with_memory_store() {
+        let server = test_server_no_tenant_manager();
+        run_memory_add_batch_tool_flow(&server, "e2e_memory_batch_tenant").await;
+    }
+
+    #[tokio::test]
+    async fn e2e_episode_consolidation_with_memory_store() {
+        let server = test_server_no_tenant_manager();
+        run_episode_consolidation_flow(&server, "e2e_episode_memory_tenant").await;
+    }
+
+    #[tokio::test]
     async fn e2e_memory_tools_with_persistent_store() {
         let dir = tempdir().expect("tempdir");
         let store = Arc::new(
@@ -883,5 +1020,97 @@ mod tests {
         let server = McpServer::new(test_config_with_data_dir(dir.path().to_path_buf()), store);
 
         run_memory_tool_flow(&server, "e2e_persistent_tenant").await;
+    }
+
+    #[tokio::test]
+    async fn e2e_memory_add_batch_with_persistent_store() {
+        let dir = tempdir().expect("tempdir");
+        let store = Arc::new(
+            PersistentStore::open(PersistentStoreConfig {
+                data_dir: dir.path().to_path_buf(),
+                segment_max_chunks: 100,
+                wal_checkpoint_interval: 10,
+                enable_dense_search: false,
+                enable_hybrid_search: false,
+                enable_tiered_search: false,
+                ..Default::default()
+            })
+            .expect("persistent store"),
+        );
+        let server = McpServer::new(test_config_with_data_dir(dir.path().to_path_buf()), store);
+
+        run_memory_add_batch_tool_flow(&server, "e2e_persistent_batch_tenant").await;
+    }
+
+    #[tokio::test]
+    async fn e2e_episode_consolidation_with_persistent_store() {
+        let dir = tempdir().expect("tempdir");
+        let store = Arc::new(
+            PersistentStore::open(PersistentStoreConfig {
+                data_dir: dir.path().to_path_buf(),
+                segment_max_chunks: 100,
+                wal_checkpoint_interval: 10,
+                enable_dense_search: false,
+                enable_hybrid_search: false,
+                enable_tiered_search: false,
+                ..Default::default()
+            })
+            .expect("persistent store"),
+        );
+        let server = McpServer::new(test_config_with_data_dir(dir.path().to_path_buf()), store);
+
+        run_episode_consolidation_flow(&server, "e2e_episode_persistent_tenant").await;
+    }
+
+    #[tokio::test]
+    async fn e2e_memory_compact_force_with_persistent_store() {
+        let dir = tempdir().expect("tempdir");
+        let store = Arc::new(
+            PersistentStore::open(PersistentStoreConfig {
+                data_dir: dir.path().to_path_buf(),
+                segment_max_chunks: 100,
+                wal_checkpoint_interval: 10,
+                enable_dense_search: false,
+                enable_hybrid_search: false,
+                enable_tiered_search: false,
+                ..Default::default()
+            })
+            .expect("persistent store"),
+        );
+        let server = McpServer::new(test_config_with_data_dir(dir.path().to_path_buf()), store);
+        let tenant_id = "e2e_persistent_compact_tenant";
+
+        server
+            .handle_tools_call(Some(json!({
+                "name": "memory.add",
+                "arguments": {
+                    "tenant_id": tenant_id,
+                    "text": "chunk before forced compaction",
+                    "type": "doc"
+                }
+            })))
+            .await
+            .expect("memory.add should succeed");
+
+        let compact_result = server
+            .handle_tools_call(Some(json!({
+                "name": "memory.compact",
+                "arguments": {
+                    "tenant_id": tenant_id,
+                    "force": true
+                }
+            })))
+            .await;
+
+        match compact_result {
+            Ok(value) => {
+                let payload = parse_tool_payload(&value);
+                assert_eq!(payload["status"], "completed");
+            }
+            Err(McpError::ToolError(msg)) => {
+                assert!(!msg.contains("compaction not supported"));
+            }
+            Err(err) => panic!("unexpected error: {}", err),
+        }
     }
 }

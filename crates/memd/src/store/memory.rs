@@ -246,6 +246,37 @@ impl Store for MemoryStore {
 
         Ok(stats)
     }
+
+    async fn list_chunks(
+        &self,
+        tenant_id: &TenantId,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<MemoryChunk>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let tenant_str = tenant_id.to_string();
+        let store = self.chunks.read().unwrap();
+        let mut chunks: Vec<MemoryChunk> = store
+            .get(&tenant_str)
+            .map(|tenant_chunks| {
+                tenant_chunks
+                    .values()
+                    .filter(|chunk| chunk.status != ChunkStatus::Deleted)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        chunks.sort_by_key(|chunk| std::cmp::Reverse(chunk.timestamp_created));
+        if offset >= chunks.len() {
+            return Ok(Vec::new());
+        }
+
+        Ok(chunks.into_iter().skip(offset).take(limit).collect())
+    }
 }
 
 #[cfg(test)]

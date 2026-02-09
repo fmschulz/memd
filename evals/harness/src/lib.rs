@@ -10,6 +10,7 @@
 //! - **Suite C**: Hybrid retrieval (hybrid)
 //! - **Suite D**: Tiered search (tiered)
 //! - **Suite E**: Structural queries (structural)
+//! - **Suite P6**: Offline benchmark protocol (benchmark)
 
 pub mod mcp_client;
 pub mod metrics;

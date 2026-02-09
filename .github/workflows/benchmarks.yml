@@ -1,0 +1,62 @@
+name: Benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      embedding_model:
+        description: Embedding model (all-minilm or qwen3)
+        default: all-minilm
+        required: true
+      max_queries:
+        description: Optional max queries per dataset (blank = full dataset)
+        default: "200"
+        required: false
+      max_documents:
+        description: Optional max documents per dataset (blank = full dataset)
+        default: "10000"
+        required: false
+
+jobs:
+  offline-benchmark:
+    name: Offline Retrieval Benchmark
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run offline benchmark protocol
+        run: |
+          chmod +x evals/scripts/run_offline_retrieval_benchmark.sh
+          evals/scripts/run_offline_retrieval_benchmark.sh \
+            --model "${{ github.event.inputs.embedding_model }}" \
+            --output-dir "evals/results/ci-${{ github.run_id }}" \
+            --max-queries "${{ github.event.inputs.max_queries }}" \
+            --max-documents "${{ github.event.inputs.max_documents }}"
+
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.run_id }}
+          path: evals/results/ci-${{ github.run_id }}

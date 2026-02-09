@@ -96,7 +96,12 @@ Validation rules:
 
 Current behavior notes:
 
-- `filters.types` and `project_id` are accepted fields, but not yet enforced as search result filters
+- `filters.types`, `project_id`, and `filters.time_range` are enforced as search result filters
+- `filters.episode_id` is enforced via episode tags (`episode:<id>`)
+- each search result includes a `citation` object (content hash + provenance + split offsets when chunked)
+- each search result may include `episode_id` when present
+- search applies adaptive retrieval depth for complex queries and filters
+- when initial retrieval is empty, query normalization retry may run; response includes `repair_info`
 
 ### Get / Delete / Stats
 
@@ -186,6 +191,25 @@ Compaction behavior:
 - persistent store: runs if thresholds exceeded, or immediately when `force=true`
 - in-memory store: returns `status: "skipped"`
 
+### Consolidate Episode
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 22,
+  "method": "tools/call",
+  "params": {
+    "name": "memory.consolidate_episode",
+    "arguments": {
+      "tenant_id": "quickstart_tenant",
+      "episode_id": "session-2026-02-09",
+      "max_chunks": 40,
+      "retain_source_chunks": true
+    }
+  }
+}
+```
+
 ## 6. Chunk types
 
 Canonical values:
@@ -213,6 +237,8 @@ Stored chunks get tags:
 
 - `chunk_index:<n>`
 - `total_chunks:<m>`
+- `char_start:<n>`
+- `char_end:<n>`
 
 API return semantics:
 
@@ -259,6 +285,12 @@ Optional quality/eval suites:
 RUST_LOG=error cargo run -p memd-evals -- --suite hybrid --skip-build
 RUST_LOG=error cargo run -p memd-evals -- --suite retrieval --skip-build
 RUST_LOG=error cargo run -p memd-evals -- --suite true-semantic --skip-build
+```
+
+Offline benchmark protocol:
+
+```bash
+./evals/scripts/run_offline_retrieval_benchmark.sh --model all-minilm --seed 42
 ```
 
 ## 11. Troubleshooting
