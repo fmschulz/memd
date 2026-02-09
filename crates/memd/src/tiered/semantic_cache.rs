@@ -231,8 +231,7 @@ impl SemanticCache {
         // Update hit statistics
         entry.last_hit = now_ms;
         entry.hit_count += 1;
-        entry.confidence =
-            (entry.confidence + self.config.confidence_boost_on_hit).min(1.0);
+        entry.confidence = (entry.confidence + self.config.confidence_boost_on_hit).min(1.0);
 
         // Re-insert with updated stats
         self.entries.insert(cache_key.clone(), entry.clone());
@@ -476,7 +475,9 @@ mod tests {
 
     fn make_embedding(seed: u64) -> Vec<f32> {
         // Create a simple normalized embedding for testing
-        let mut vec: Vec<f32> = (0..384).map(|i| ((seed + i) % 100) as f32 / 100.0).collect();
+        let mut vec: Vec<f32> = (0..384)
+            .map(|i| ((seed + i) % 100) as f32 / 100.0)
+            .collect();
         let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
         if norm > 0.0 {
             for v in &mut vec {
@@ -530,7 +531,10 @@ mod tests {
         assert!(hit.is_some(), "Similar query should hit cache");
 
         let hit = hit.unwrap();
-        assert!(hit.similarity > 0.85, "Similarity should be above threshold");
+        assert!(
+            hit.similarity > 0.85,
+            "Similarity should be above threshold"
+        );
         assert_eq!(hit.results.len(), 1);
 
         // Lookup with dissimilar query should miss
@@ -630,15 +634,24 @@ mod tests {
 
         // First hit
         let hit1 = cache.lookup(&embedding, &tenant, None, 1).unwrap();
-        assert!((hit1.confidence - 0.6).abs() < 0.01, "Confidence should be 0.6 after first hit");
+        assert!(
+            (hit1.confidence - 0.6).abs() < 0.01,
+            "Confidence should be 0.6 after first hit"
+        );
 
         // Second hit
         let hit2 = cache.lookup(&embedding, &tenant, None, 1).unwrap();
-        assert!((hit2.confidence - 0.7).abs() < 0.01, "Confidence should be 0.7 after second hit");
+        assert!(
+            (hit2.confidence - 0.7).abs() < 0.01,
+            "Confidence should be 0.7 after second hit"
+        );
 
         // Third hit
         let hit3 = cache.lookup(&embedding, &tenant, None, 1).unwrap();
-        assert!((hit3.confidence - 0.8).abs() < 0.01, "Confidence should be 0.8 after third hit");
+        assert!(
+            (hit3.confidence - 0.8).abs() < 0.01,
+            "Confidence should be 0.8 after third hit"
+        );
     }
 
     #[test]
@@ -676,7 +689,10 @@ mod tests {
 
         // Verify entry removed
         let miss = cache.lookup(&embedding, &tenant, None, 1);
-        assert!(miss.is_none(), "Entry should be removed after chunk invalidation");
+        assert!(
+            miss.is_none(),
+            "Entry should be removed after chunk invalidation"
+        );
 
         let stats = cache.get_stats();
         assert_eq!(stats.entry_count, 0);
@@ -716,7 +732,10 @@ mod tests {
 
         // Lookup with no project should miss
         let miss_no_project = cache.lookup(&embedding, &tenant, None, 1);
-        assert!(miss_no_project.is_none(), "No project should not see Project A's cache");
+        assert!(
+            miss_no_project.is_none(),
+            "No project should not see Project A's cache"
+        );
     }
 
     #[test]

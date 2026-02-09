@@ -39,10 +39,25 @@ struct Args {
     /// Include compaction tests in 'all' suite (slower, tests compaction correctness)
     #[arg(long, default_value = "false")]
     include_compaction: bool,
+
+    /// Override dataset file path for dataset-backed suites
+    ///
+    /// Supported for single-suite runs (e.g. `--suite retrieval`).
+    #[arg(long)]
+    dataset_path: Option<String>,
 }
 
 fn main() -> ExitCode {
     let args = Args::parse();
+
+    if args.dataset_path.is_some() && args.suite == "all" {
+        eprintln!("--dataset-path is only supported with a specific --suite, not --suite all");
+        return ExitCode::FAILURE;
+    }
+
+    if let Some(path) = args.dataset_path.as_deref() {
+        std::env::set_var("MEMD_EVAL_DATASET_PATH", path);
+    }
 
     // Build memd first (unless skipped)
     if !args.skip_build {
@@ -77,20 +92,41 @@ fn main() -> ExitCode {
             all.extend(sanity_results);
             all.extend(suites::mcp_conformance::run(&args.memd_path));
             all.extend(suites::persistence::run_all(&memd_binary));
-            all.extend(suites::retrieval::run_retrieval_tests(&memd_binary, embedding_model));
-            all.extend(suites::hybrid::run_hybrid_tests(&memd_binary, embedding_model));
-            all.extend(suites::true_semantic::run_true_semantic_tests(&memd_binary, embedding_model));
-            all.extend(suites::scifact::run_scifact_tests(&memd_binary, embedding_model));
-            all.extend(suites::codesearchnet::run_codesearchnet_tests(&memd_binary, embedding_model));
+            all.extend(suites::retrieval::run_retrieval_tests(
+                &memd_binary,
+                embedding_model,
+            ));
+            all.extend(suites::hybrid::run_hybrid_tests(
+                &memd_binary,
+                embedding_model,
+            ));
+            all.extend(suites::true_semantic::run_true_semantic_tests(
+                &memd_binary,
+                embedding_model,
+            ));
+            all.extend(suites::scifact::run_scifact_tests(
+                &memd_binary,
+                embedding_model,
+            ));
+            all.extend(suites::codesearchnet::run_codesearchnet_tests(
+                &memd_binary,
+                embedding_model,
+            ));
 
             // Structural tests (Suite E)
             if args.include_structural {
-                all.extend(suites::structural::run_structural_tests(&memd_binary, embedding_model));
+                all.extend(suites::structural::run_structural_tests(
+                    &memd_binary,
+                    embedding_model,
+                ));
             }
 
             // Compaction tests (Suite F) - excluded by default (slower)
             if args.include_compaction {
-                all.extend(suites::compaction::run_compaction_tests(&memd_binary, embedding_model));
+                all.extend(suites::compaction::run_compaction_tests(
+                    &memd_binary,
+                    embedding_model,
+                ));
             }
             all
         }
@@ -99,13 +135,19 @@ fn main() -> ExitCode {
         "persistence" => suites::persistence::run_all(&memd_binary),
         "retrieval" => suites::retrieval::run_retrieval_tests(&memd_binary, embedding_model),
         "hybrid" => suites::hybrid::run_hybrid_tests(&memd_binary, embedding_model),
-        "true-semantic" => suites::true_semantic::run_true_semantic_tests(&memd_binary, embedding_model),
+        "true-semantic" => {
+            suites::true_semantic::run_true_semantic_tests(&memd_binary, embedding_model)
+        }
         "scifact" => suites::scifact::run_scifact_tests(&memd_binary, embedding_model),
         "nfcorpus" => suites::nfcorpus::run_nfcorpus_tests(&memd_binary, embedding_model),
-        "codesearchnet" => suites::codesearchnet::run_codesearchnet_tests(&memd_binary, embedding_model),
+        "codesearchnet" => {
+            suites::codesearchnet::run_codesearchnet_tests(&memd_binary, embedding_model)
+        }
         "tiered" => suites::tiered::run_tiered_tests(&memd_binary, embedding_model),
         "structural" => suites::structural::run_structural_tests(&memd_binary, embedding_model),
-        "compaction" | "f" => suites::compaction::run_compaction_tests(&memd_binary, embedding_model),
+        "compaction" | "f" => {
+            suites::compaction::run_compaction_tests(&memd_binary, embedding_model)
+        }
         _ => {
             eprintln!(
                 "Unknown suite: {}. Available: all, sanity, mcp, persistence, retrieval, hybrid, true-semantic, scifact, nfcorpus, codesearchnet, tiered, structural, compaction",
@@ -149,10 +191,7 @@ fn main() -> ExitCode {
                 })
             })
             .collect();
-        println!(
-            "\n{}",
-            serde_json::to_string_pretty(&json_results).unwrap()
-        );
+        println!("\n{}", serde_json::to_string_pretty(&json_results).unwrap());
     }
 
     if passed == total {

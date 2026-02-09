@@ -26,12 +26,7 @@ pub trait SparseIndex: Send + Sync {
     /// Index a chunk's sentences for keyword search.
     ///
     /// Each sentence is indexed separately to enable fine-grained matching.
-    fn insert(
-        &self,
-        tenant_id: &TenantId,
-        chunk_id: &ChunkId,
-        sentences: &[String],
-    ) -> Result<()>;
+    fn insert(&self, tenant_id: &TenantId, chunk_id: &ChunkId, sentences: &[String]) -> Result<()>;
 
     /// Search for chunks matching the query.
     ///

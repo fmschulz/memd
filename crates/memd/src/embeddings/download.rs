@@ -90,7 +90,7 @@ impl EmbeddingModel {
     /// Get minimum expected tokenizer file size (bytes)
     pub fn min_tokenizer_size(&self) -> u64 {
         match self {
-            Self::AllMiniLmL6V2 => 500_000, // ~700KB
+            Self::AllMiniLmL6V2 => 500_000,     // ~700KB
             Self::Qwen3Embedding0_6B => 10_000, // ~varies
         }
     }
@@ -146,9 +146,11 @@ pub struct KvCacheConfig {
 }
 
 // Legacy constants for backward compatibility (used by existing get_model_path/get_tokenizer_path)
-const MODEL_URL: &str = "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model_quantized.onnx";
+const MODEL_URL: &str =
+    "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model_quantized.onnx";
 const MODEL_FILENAME: &str = "all-MiniLM-L6-v2-quantized.onnx";
-const TOKENIZER_URL: &str = "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json";
+const TOKENIZER_URL: &str =
+    "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json";
 const TOKENIZER_FILENAME: &str = "tokenizer.json";
 const MIN_MODEL_SIZE: u64 = 20_000_000;
 const MIN_TOKENIZER_SIZE: u64 = 500_000;
@@ -295,7 +297,11 @@ pub fn get_tokenizer_path_for(model: EmbeddingModel) -> Result<PathBuf> {
     let tokenizer_path = cache_dir.join(model.tokenizer_filename());
 
     if !tokenizer_path.exists() {
-        download_file(model.tokenizer_url(), &tokenizer_path, model.tokenizer_filename())?;
+        download_file(
+            model.tokenizer_url(),
+            &tokenizer_path,
+            model.tokenizer_filename(),
+        )?;
     }
 
     // Verify tokenizer exists and has expected size

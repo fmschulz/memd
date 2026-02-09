@@ -188,19 +188,14 @@ impl LanguageSupport {
 /// Detects language from file extension, creates appropriate parser,
 /// and returns the parse result with AST tree and metadata.
 pub fn parse_file(path: &Path, content: &str) -> Result<ParseResult, ParseError> {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     let language = extension_to_language(ext)
         .ok_or_else(|| ParseError::UnsupportedLanguage(ext.to_string()))?;
 
     let mut support = LanguageSupport::for_language(language);
 
-    let tree = support
-        .parse(content)
-        .ok_or(ParseError::ParseFailed)?;
+    let tree = support.parse(content).ok_or(ParseError::ParseFailed)?;
 
     Ok(ParseResult {
         tree,

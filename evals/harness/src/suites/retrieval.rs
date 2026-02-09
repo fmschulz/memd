@@ -77,8 +77,8 @@ pub fn run_retrieval_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<Te
     let mut results = Vec::new();
 
     // Load dataset
-    let dataset_path = std::path::Path::new("evals/datasets/retrieval/code_pairs.json");
-    let dataset = match load_dataset(dataset_path) {
+    let dataset_path = crate::resolve_dataset_path("evals/datasets/retrieval/code_pairs.json");
+    let dataset = match load_dataset(dataset_path.as_path()) {
         Ok(d) => d,
         Err(e) => {
             results.push(TestResult::fail(
@@ -115,7 +115,21 @@ pub fn run_retrieval_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<Te
 
 fn load_dataset(path: &std::path::Path) -> Result<Dataset, String> {
     let content = std::fs::read_to_string(path).map_err(|e| format!("read file: {}", e))?;
-    serde_json::from_str(&content).map_err(|e| format!("parse json: {}", e))
+    let mut dataset: Dataset =
+        serde_json::from_str(&content).map_err(|e| format!("parse json: {}", e))?;
+
+    for doc in &mut dataset.documents {
+        let raw_type = doc.doc_type.clone();
+        let Some(normalized) = crate::normalize_eval_chunk_type(&raw_type) else {
+            return Err(format!(
+                "unsupported chunk type '{}' for document {}",
+                raw_type, doc.id
+            ));
+        };
+        doc.doc_type = normalized.to_string();
+    }
+
+    Ok(dataset)
 }
 
 fn run_b1_index_documents(
@@ -141,12 +155,23 @@ fn run_b1_index_documents(
         ],
     ) {
         Ok(c) => c,
-        Err(e) => return TestResult::fail_with_duration(name, &format!("start memd: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(name, &format!("start memd: {}", e), start)
+        }
     };
 
     // Initialize
     if let Err(e) = client.initialize() {
         return TestResult::fail_with_duration(name, &format!("initialize: {}", e), start);
+    }
+
+    // Regression guard: ensure tool-call RPC errors are surfaced as Err.
+    if let Err(e) = verify_tool_error_propagation(&mut client, "eval_retrieval") {
+        return TestResult::fail_with_duration(
+            name,
+            &format!("error propagation guard: {}", e),
+            start,
+        );
     }
 
     // Index all documents
@@ -210,6 +235,13 @@ fn run_b2_retrieval_quality(
     if let Err(e) = client.initialize() {
         return (
             TestResult::fail_with_duration(name, &format!("initialize: {}", e), start),
+            RetrievalMetrics::default(),
+        );
+    }
+
+    if let Err(e) = verify_tool_error_propagation(&mut client, "eval_retrieval") {
+        return (
+            TestResult::fail_with_duration(name, &format!("error propagation guard: {}", e), start),
             RetrievalMetrics::default(),
         );
     }
@@ -283,6 +315,20 @@ fn run_b2_retrieval_quality(
     println!("================================\n");
 
     (TestResult::pass_with_duration(name, start), metrics)
+}
+
+/// Regression helper: invalid tool calls must return Err, not a successful response.
+fn verify_tool_error_propagation(client: &mut McpClient, tenant_id: &str) -> Result<(), String> {
+    let params = serde_json::json!({
+        "tenant_id": tenant_id,
+        "text": "error propagation regression probe",
+        "type": "invalid_type_xyz"
+    });
+
+    match client.call_tool("memory.add", params) {
+        Ok(_) => Err("memory.add unexpectedly succeeded for invalid type".to_string()),
+        Err(_) => Ok(()),
+    }
 }
 
 fn extract_retrieved_ids(response: &Value) -> Vec<String> {

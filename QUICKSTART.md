@@ -1,969 +1,269 @@
-# Quick Start Guide
+# Quick Start
 
-Get memd running in **15 minutes** and start using intelligent memory for your AI agents.
+This guide gets `memd` running, validates MCP behavior, and connects it to Claude Code/Codex.
 
-## Table of Contents
-
-1. [Installation](#installation)
-2. [First Run](#first-run)
-3. [MCP Integration](#mcp-integration)
-4. [Basic Operations](#basic-operations)
-5. [Advanced Features](#advanced-features)
-6. [Performance Tuning](#performance-tuning)
-7. [Troubleshooting](#troubleshooting)
-
-## Installation
-
-### Prerequisites Check
+## 1. Build
 
 ```bash
-# Check Rust version (need 1.75+)
-rustc --version
-
-# Install Rust if needed
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source $HOME/.cargo/env
-```
-
-### Install Build Dependencies
-
-**Ubuntu/Debian:**
-```bash
-sudo apt update
-sudo apt install build-essential pkg-config libssl-dev
-```
-
-**Arch Linux:**
-```bash
-sudo pacman -S base-devel openssl lld
-```
-
-### Build from Source
-
-```bash
-# Clone the repository
-git clone https://github.com/fmschulz/memd.git
-cd memd
-```
-
-**Ubuntu/Debian:**
-```bash
-# Build release binary (takes ~5-10 minutes first time)
 cargo build --release
-```
-
-**Arch Linux:**
-```bash
-# Build (Arch Rust uses lld linker - requires explicit gcc)
-CC=/usr/bin/gcc cargo build --release
-```
-
-**Verify build:**
-```bash
 ./target/release/memd --version
 ```
 
-### Directory Setup
-
-memd automatically creates directories on first run:
+## 2. Start memd
 
 ```bash
-~/.config/memd/          # Configuration
-~/.local/share/memd/     # Data storage
-  └── tenants/
-      └── <tenant-id>/
-          ├── segments/    # Chunk storage
-          ├── wal/         # Write-ahead log
-          ├── indexes/     # HNSW, BM25, symbols
-          └── cache/       # Hot tier cache
+# Persistent mode (default data dir: ~/.memd/data)
+./target/release/memd --mode mcp
+
+# Or isolated in-memory mode for local testing
+./target/release/memd --mode mcp --in-memory --data-dir /tmp/memd-quickstart
 ```
 
-## First Run
+## 3. Send MCP requests manually
 
-### 1. Start the Server
+In another terminal, pipe JSON-RPC lines into `memd`:
 
 ```bash
-# Run in MCP mode (default)
-./target/release/memd
-
-# Or run in CLI mode for testing
-./target/release/memd --mode cli
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"quickstart","version":"0.1.0"}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"memory.add","arguments":{"tenant_id":"quickstart_tenant","text":"parseConfig reads TOML and validates required fields","type":"code","tags":["rust","config"]}}}' \
+  '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"memory.search","arguments":{"tenant_id":"quickstart_tenant","query":"parseConfig","k":5}}}' \
+  | ./target/release/memd --mode mcp --in-memory --data-dir /tmp/memd-quickstart
 ```
 
-The server will output:
+You will see JSON-RPC responses. Tool payloads come inside:
 
-```
-[2026-01-31T12:00:00Z INFO memd] Starting memd server
-[2026-01-31T12:00:00Z INFO memd] Mode: mcp
-[2026-01-31T12:00:00Z INFO memd] Data directory: /home/user/.local/share/memd
-[2026-01-31T12:00:00Z INFO memd] Ready to accept requests
-```
+- `result.content[0].type == "text"`
+- `result.content[0].text == "<JSON string payload>"`
 
-### 2. Test with Manual MCP Request
+## 4. Core memory tool examples
 
-In another terminal, send a test request:
+### Add
 
-```bash
-cat << 'EOF' | ./target/release/memd
+```json
 {
   "jsonrpc": "2.0",
-  "method": "tools/list",
-  "id": 1
-}
-EOF
-```
-
-You should see a JSON response listing all 13 available tools.
-
-### 3. Add Your First Memory
-
-```bash
-cat << 'EOF' | ./target/release/memd
-{
-  "jsonrpc": "2.0",
+  "id": 10,
   "method": "tools/call",
   "params": {
     "name": "memory.add",
     "arguments": {
-      "tenant_id": "quickstart",
-      "text": "The parseConfig function reads TOML configuration files and returns a Config struct. It validates all required fields and returns detailed error messages on parse failures.",
-      "chunk_type": "code",
-      "tags": ["rust", "config", "toml", "parsing"],
+      "tenant_id": "quickstart_tenant",
+      "text": "Config parser now rejects missing api_key",
+      "type": "decision",
+      "project_id": "backend",
       "source": {
-        "uri": "file:///src/config.rs",
-        "repo": "memd",
-        "commit": "abc123"
-      }
+        "path": "src/config.rs",
+        "repo": "memd"
+      },
+      "tags": ["config", "validation"]
     }
-  },
-  "id": 2
+  }
 }
-EOF
 ```
 
-Expected response:
+### Search
 
 ```json
 {
   "jsonrpc": "2.0",
-  "result": {
-    "chunk_id": "01932abc-def0-7123-4567-89abcdef0123",
-    "status": "indexed"
-  },
-  "id": 2
-}
-```
-
-### 4. Search for Memories
-
-```bash
-cat << 'EOF' | ./target/release/memd
-{
-  "jsonrpc": "2.0",
+  "id": 11,
   "method": "tools/call",
   "params": {
     "name": "memory.search",
     "arguments": {
-      "tenant_id": "quickstart",
-      "query": "how to parse configuration files",
-      "k": 5
+      "tenant_id": "quickstart_tenant",
+      "query": "config parser",
+      "k": 10,
+      "debug_tiers": true,
+      "filters": {
+        "time_range": {
+          "from": "2026-01-01T00:00:00Z",
+          "to": "2026-01-31T23:59:59Z"
+        }
+      }
     }
-  },
-  "id": 3
+  }
 }
-EOF
 ```
 
-Expected response:
+Validation rules:
+
+- `k` must be between `1` and `100`
+- `filters.time_range.from/to` must be ISO 8601
+- if both are set, `from <= to`
+
+Current behavior notes:
+
+- `filters.types` and `project_id` are accepted fields, but not yet enforced as search result filters
+
+### Get / Delete / Stats
 
 ```json
 {
   "jsonrpc": "2.0",
-  "result": [
-    {
-      "chunk_id": "01932abc-def0-7123-4567-89abcdef0123",
-      "text": "The parseConfig function reads TOML...",
-      "score": 0.89,
-      "chunk_type": "code",
-      "tags": ["rust", "config", "toml", "parsing"],
-      "source": {
-        "uri": "file:///src/config.rs",
-        "repo": "memd",
-        "commit": "abc123"
-      }
+  "id": 12,
+  "method": "tools/call",
+  "params": {
+    "name": "memory.get",
+    "arguments": {
+      "tenant_id": "quickstart_tenant",
+      "chunk_id": "<uuid>"
     }
-  ],
-  "id": 3
+  }
 }
 ```
 
-## MCP Integration
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 13,
+  "method": "tools/call",
+  "params": {
+    "name": "memory.delete",
+    "arguments": {
+      "tenant_id": "quickstart_tenant",
+      "chunk_id": "<uuid>"
+    }
+  }
+}
+```
 
-### Claude Code Integration
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 14,
+  "method": "tools/call",
+  "params": {
+    "name": "memory.stats",
+    "arguments": {
+      "tenant_id": "quickstart_tenant"
+    }
+  }
+}
+```
 
-Add to your Claude Code MCP configuration (`~/.config/claude/mcp.json`):
+## 5. Metrics and compaction
+
+### Metrics
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 20,
+  "method": "tools/call",
+  "params": {
+    "name": "memory.metrics",
+    "arguments": {
+      "tenant_id": "quickstart_tenant",
+      "include_recent": false,
+      "include_tiered": true
+    }
+  }
+}
+```
+
+### Compaction
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 21,
+  "method": "tools/call",
+  "params": {
+    "name": "memory.compact",
+    "arguments": {
+      "tenant_id": "quickstart_tenant",
+      "force": false
+    }
+  }
+}
+```
+
+Compaction behavior:
+
+- persistent store: runs if thresholds exceeded, or immediately when `force=true`
+- in-memory store: returns `status: "skipped"`
+
+## 6. Chunk types
+
+Canonical values:
+
+- `code`
+- `doc`
+- `trace`
+- `decision`
+- `plan`
+- `research`
+- `message`
+- `summary`
+- `other`
+
+Accepted aliases:
+
+- `scientific` maps to `doc`
+- `general` maps to `other`
+
+## 7. Long-document behavior
+
+When `text` length is greater than `1000` characters, `memory.add`/`memory.add_batch` split input into multiple chunks.
+
+Stored chunks get tags:
+
+- `chunk_index:<n>`
+- `total_chunks:<m>`
+
+API return semantics:
+
+- one returned `chunk_id` per input chunk (first stored chunk ID)
+
+## 8. Connect to Claude Code
+
+Add an MCP server entry (path may vary by installation):
 
 ```json
 {
   "mcpServers": {
     "memd": {
-      "command": "/path/to/memd/target/release/memd",
-      "args": [],
-      "env": {}
+      "command": "/absolute/path/to/memd",
+      "args": ["--mode", "mcp"]
     }
   }
 }
 ```
 
-Restart Claude Code, and you'll see memd tools available:
-
-```
-Available tools:
-- memory.add
-- memory.search
-- memory.get
-- memory.delete
-- memory.stats
-- code.find_definition
-- code.find_references
-- debug.find_tool_calls
-... (13 tools total)
-```
-
-### Codex CLI Integration
-
-Add to your Codex MCP configuration (`~/.codex/mcp-servers.json`):
+## 9. Connect to Codex
 
 ```json
 {
   "memd": {
-    "command": "/path/to/memd/target/release/memd",
-    "type": "stdio"
+    "command": "/absolute/path/to/memd",
+    "type": "stdio",
+    "args": ["--mode", "mcp"]
   }
 }
 ```
 
-Test the integration:
+## 10. Validate locally
 
 ```bash
-codex --mcp-server memd "Search my memories for authentication code"
+cargo test -p memd
+cargo test -p memd-evals
+RUST_LOG=error cargo run -p memd-evals -- --suite mcp --skip-build
 ```
 
-## Basic Operations
-
-### Adding Different Chunk Types
-
-#### Code Snippet
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "memory.add",
-    "arguments": {
-      "tenant_id": "my-project",
-      "text": "async fn process_request(req: Request) -> Result<Response> { ... }",
-      "chunk_type": "code",
-      "tags": ["rust", "async", "http"],
-      "source": {
-        "uri": "file:///src/handlers.rs",
-        "line_start": 45,
-        "line_end": 67
-      }
-    }
-  }
-}
-```
-
-#### Documentation
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "memory.add",
-    "arguments": {
-      "tenant_id": "my-project",
-      "text": "API Endpoint: POST /api/users - Creates a new user account. Requires authentication token in Authorization header.",
-      "chunk_type": "doc",
-      "tags": ["api", "users", "authentication"]
-    }
-  }
-}
-```
-
-#### Decision Record
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "memory.add",
-    "arguments": {
-      "tenant_id": "my-project",
-      "text": "Decision: Use SQLite for metadata storage instead of PostgreSQL. Rationale: Simplifies deployment, no external dependencies, sufficient performance for local daemon.",
-      "chunk_type": "decision",
-      "tags": ["architecture", "database", "sqlite"]
-    }
-  }
-}
-```
-
-#### Trace / Debug Log
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "memory.add",
-    "arguments": {
-      "tenant_id": "my-project",
-      "text": "Error: Failed to parse config at line 45: Invalid TOML syntax\nStack trace:\n  at parseConfig (config.rs:45)\n  at main (main.rs:12)",
-      "chunk_type": "trace",
-      "tags": ["error", "config", "parsing"]
-    }
-  }
-}
-```
-
-### Batch Insert (Efficient)
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "memory.add_batch",
-    "arguments": {
-      "tenant_id": "my-project",
-      "chunks": [
-        {
-          "text": "Function A does X",
-          "chunk_type": "code",
-          "tags": ["function-a"]
-        },
-        {
-          "text": "Function B does Y",
-          "chunk_type": "code",
-          "tags": ["function-b"]
-        }
-      ]
-    }
-  }
-}
-```
-
-### Search with Filters
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "memory.search",
-    "arguments": {
-      "tenant_id": "my-project",
-      "query": "authentication error handling",
-      "k": 10,
-      "filter": {
-        "chunk_type": "code",
-        "tags": ["authentication"],
-        "project_id": "backend-api"
-      }
-    }
-  }
-}
-```
-
-### Get Specific Chunk
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "memory.get",
-    "arguments": {
-      "tenant_id": "my-project",
-      "chunk_id": "01932abc-def0-7123-4567-89abcdef0123"
-    }
-  }
-}
-```
-
-### Delete Chunk
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "memory.delete",
-    "arguments": {
-      "tenant_id": "my-project",
-      "chunk_id": "01932abc-def0-7123-4567-89abcdef0123"
-    }
-  }
-}
-```
-
-### Check Statistics
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "memory.stats",
-    "arguments": {
-      "tenant_id": "my-project"
-    }
-  }
-}
-```
-
-Response:
-
-```json
-{
-  "total_chunks": 1543,
-  "total_size_bytes": 4829384,
-  "segments": 3,
-  "index_stats": {
-    "hnsw_size": 1543,
-    "bm25_docs": 1543,
-    "cache_hit_rate": 0.82
-  }
-}
-```
-
-## Advanced Features
-
-### Structural Code Queries
-
-#### Find Function Definition
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "code.find_definition",
-    "arguments": {
-      "tenant_id": "my-project",
-      "symbol_name": "parseConfig",
-      "symbol_kind": "function"
-    }
-  }
-}
-```
-
-#### Find Callers
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "code.find_callers",
-    "arguments": {
-      "tenant_id": "my-project",
-      "function_name": "parseConfig",
-      "depth": 2
-    }
-  }
-}
-```
-
-Response shows multi-hop call chain:
-
-```json
-{
-  "callers": [
-    {
-      "name": "main",
-      "file": "src/main.rs",
-      "line": 12,
-      "hops": 1
-    },
-    {
-      "name": "init_app",
-      "file": "src/app.rs",
-      "line": 45,
-      "hops": 1
-    },
-    {
-      "name": "run_server",
-      "file": "src/server.rs",
-      "line": 23,
-      "hops": 2
-    }
-  ]
-}
-```
-
-#### Find Imports
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "code.find_imports",
-    "arguments": {
-      "tenant_id": "my-project",
-      "module_name": "config"
-    }
-  }
-}
-```
-
-### Debug Trace Queries
-
-#### Find Tool Calls
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "debug.find_tool_calls",
-    "arguments": {
-      "tenant_id": "my-project",
-      "tool_name": "memory.add",
-      "time_range": {
-        "start": "2026-01-31T00:00:00Z",
-        "end": "2026-01-31T23:59:59Z"
-      }
-    }
-  }
-}
-```
-
-#### Find Errors
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "debug.find_errors",
-    "arguments": {
-      "tenant_id": "my-project",
-      "error_pattern": "parse.*config",
-      "limit": 10
-    }
-  }
-}
-```
-
-### Performance Metrics
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "memory.metrics",
-    "arguments": {
-      "tenant_id": "my-project"
-    }
-  }
-}
-```
-
-Response:
-
-```json
-{
-  "query_stats": {
-    "total_queries": 1247,
-    "avg_latency_ms": 45.3,
-    "p50_latency_ms": 32.1,
-    "p90_latency_ms": 87.4,
-    "p99_latency_ms": 234.5
-  },
-  "cache_stats": {
-    "hit_rate": 0.82,
-    "hot_tier_size": 842,
-    "semantic_cache_entries": 156
-  },
-  "index_stats": {
-    "hnsw_nodes": 1543,
-    "bm25_docs": 1543,
-    "memory_usage_mb": 124.5
-  }
-}
-```
-
-## Performance Tuning
-
-### Configuration File
-
-Create `~/.config/memd/config.toml`:
-
-```toml
-[storage]
-data_dir = "~/.local/share/memd"
-
-[embeddings]
-model = "all-MiniLM-L6-v2"
-dimension = 384
-pooling_strategy = "mean"
-
-[index]
-# HNSW parameters
-hnsw_m = 16                    # Higher = better recall, more memory
-hnsw_ef_construction = 200     # Higher = better quality, slower build
-hnsw_ef_search = 50            # Higher = better recall, slower search
-
-[cache]
-# Hot tier configuration
-hot_tier_size = 1000           # Number of chunks in hot tier
-semantic_cache_ttl = 2700      # 45 minutes
-
-# Promotion thresholds
-promotion_frequency = 5         # Access 5+ times
-promotion_recency_weight = 0.3  # Recency vs frequency balance
-
-[compaction]
-# Auto-compaction triggers
-tombstone_threshold = 0.20      # Compact at 20% deleted
-segment_threshold = 10          # Merge when 10+ segments
-hnsw_staleness_threshold = 0.15 # Rebuild at 15% stale
-
-# Throttling
-batch_delay_ms = 10
-batch_size = 100
-```
-
-### Memory Usage Optimization
-
-For **low memory** environments (< 4GB):
-
-```toml
-[index]
-hnsw_m = 8                     # Reduce from 16
-hnsw_ef_construction = 100     # Reduce from 200
-
-[cache]
-hot_tier_size = 500            # Reduce from 1000
-```
-
-For **high performance** (8GB+):
-
-```toml
-[index]
-hnsw_m = 32                    # Increase from 16
-hnsw_ef_construction = 400     # Increase from 200
-hnsw_ef_search = 100           # Increase from 50
-
-[cache]
-hot_tier_size = 5000           # Increase from 1000
-```
-
-### Manual Compaction
-
-Trigger compaction manually:
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "memory.compact",
-    "arguments": {
-      "tenant_id": "my-project",
-      "force": true
-    }
-  }
-}
-```
-
-## Troubleshooting
-
-### Build Failures
-
-**Arch Linux linker errors:**
-```
-error: linking with `cc` failed
-error: unknown option '-m64'
-```
-
-This happens because Arch Linux's Rust package uses lld by default. Fix:
-```bash
-CC=/usr/bin/gcc cargo build --release
-```
-
-**Ubuntu/Debian missing dependencies:**
-```
-error: linker `cc` not found
-```
-
-Install build tools:
-```bash
-sudo apt install build-essential pkg-config libssl-dev
-```
-
-**sccache cache issues:**
-
-If builds fail after config changes, clear sccache:
-```bash
-sccache --stop-server
-cargo clean
-cargo build --release
-```
-
-**Custom `cc` in PATH:**
-
-If you have a custom script at `~/.local/bin/cc` that intercepts the compiler, either remove it or explicitly set the C compiler:
-```bash
-CC=/usr/bin/gcc cargo build --release
-```
-
-### Server Won't Start
-
-**Check logs:**
+Optional quality/eval suites:
 
 ```bash
-RUST_LOG=debug ./target/release/memd 2> memd.log
-cat memd.log
+RUST_LOG=error cargo run -p memd-evals -- --suite hybrid --skip-build
+RUST_LOG=error cargo run -p memd-evals -- --suite retrieval --skip-build
+RUST_LOG=error cargo run -p memd-evals -- --suite true-semantic --skip-build
 ```
 
-**Common issues:**
-
-1. **Port already in use**: Check if another instance is running
-   ```bash
-   ps aux | grep memd
-   kill <pid>
-   ```
-
-2. **Permission denied on data directory**:
-   ```bash
-   chmod 700 ~/.local/share/memd
-   ```
-
-3. **Configuration error**:
-   ```bash
-   # Validate config
-   toml-check ~/.config/memd/config.toml
-   ```
-
-### Search Returns No Results
-
-**Debug checklist:**
-
-1. **Verify chunks exist:**
-   ```json
-   {"method": "tools/call", "params": {"name": "memory.stats", "arguments": {"tenant_id": "my-project"}}}
-   ```
-
-2. **Check tenant_id matches:**
-   - Adding with `tenant_id: "project-a"`
-   - Searching with `tenant_id: "project-a"` (must match exactly)
-
-3. **Increase k parameter:**
-   ```json
-   {"arguments": {"k": 100}}
-   ```
-
-4. **Test with exact text match:**
-   Search for exact phrase from a known chunk
-
-### Slow Search Performance
-
-**Diagnostics:**
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "memory.metrics",
-    "arguments": {"tenant_id": "my-project"}
-  }
-}
-```
-
-**Check:**
-
-1. **Cache hit rate < 50%**: Increase `hot_tier_size`
-2. **p99 latency > 500ms**: Run compaction or increase `hnsw_ef_search`
-3. **High memory usage**: Reduce `hnsw_m` or `hot_tier_size`
-
-**Optimization:**
-
-```bash
-# Force compaction
-# (sends JSON request for memory.compact)
-
-# Restart server to rebuild HNSW
-kill <pid>
-./target/release/memd
-```
-
-### MCP Integration Not Working
-
-**Claude Code:**
-
-1. Check MCP config syntax:
-   ```bash
-   jq . ~/.config/claude/mcp.json
-   ```
-
-2. Verify binary path:
-   ```bash
-   ls -l /path/to/memd/target/release/memd
-   ```
-
-3. Test binary directly:
-   ```bash
-   echo '{"jsonrpc":"2.0","method":"tools/list","id":1}' | ./target/release/memd
-   ```
-
-**Codex CLI:**
-
-1. List MCP servers:
-   ```bash
-   codex --list-mcp-servers
-   ```
-
-2. Test specific server:
-   ```bash
-   codex --mcp-server memd --test
-   ```
-
-### Embedding Errors
-
-**Model download failed:**
-
-```bash
-# Check internet connection
-ping huggingface.co
-
-# Verify model cache
-ls ~/.cache/huggingface/hub/
-
-# Clear cache and retry
-rm -rf ~/.cache/huggingface/
-```
-
-**Out of memory:**
-
-```toml
-# Use smaller model
-[embeddings]
-model = "all-MiniLM-L6-v2"  # 384 dim instead of 1024
-```
-
-## Next Steps
-
-### Run Evaluations
-
-Test memd with benchmark datasets:
-
-```bash
-# Quick sanity check (should get 100% recall)
-cargo run --release --bin memd-evals -- --suite sanity
-
-# Scientific papers dataset
-cargo run --release --bin memd-evals -- --suite scifact
-
-# Code search dataset
-cargo run --release --bin memd-evals -- --suite codesearchnet
-
-# Full evaluation suite (takes ~30 min)
-cargo run --release --bin memd-evals -- --suite all
-```
-
-### Integrate with Your Agent Workflow
-
-See [examples/](examples/) for:
-- Claude Code integration patterns
-- Codex CLI workflows
-- Batch ingestion scripts
-- Custom MCP clients
-
-### Production Deployment
-
-1. **Build optimized binary:**
-   ```bash
-   cargo build --release --target x86_64-unknown-linux-musl
-   ```
-
-2. **Create systemd service:**
-   ```ini
-   [Unit]
-   Description=memd - Agent Memory Service
-   After=network.target
-
-   [Service]
-   Type=simple
-   User=youruser
-   ExecStart=/usr/local/bin/memd
-   Restart=on-failure
-
-   [Install]
-   WantedBy=multi-user.target
-   ```
-
-3. **Configure monitoring:**
-   - Query `memory.metrics` periodically
-   - Alert on p99 latency > 1000ms
-   - Monitor disk usage in data_dir
-
-## Support
-
-- **Documentation**: See [README.md](README.md) for architecture overview
-- **Issues**: File bugs at GitHub Issues
-- **Planning Docs**: `.planning/` contains detailed development history
-
-## Appendix: Complete Tool Reference
-
-### memory.add
-
-**Required:**
-- `tenant_id` (string)
-- `text` (string)
-
-**Optional:**
-- `chunk_type` (code|doc|trace|decision|plan)
-- `tags` (string[])
-- `project_id` (string)
-- `source` (object with uri, repo, commit, etc.)
-
-### memory.search
-
-**Required:**
-- `tenant_id` (string)
-- `query` (string)
-
-**Optional:**
-- `k` (number, default: 10)
-- `filter` (object with chunk_type, tags, project_id)
-
-### memory.get
-
-**Required:**
-- `tenant_id` (string)
-- `chunk_id` (string)
-
-### memory.delete
-
-**Required:**
-- `tenant_id` (string)
-- `chunk_id` (string)
-
-### memory.stats
-
-**Required:**
-- `tenant_id` (string)
-
-### code.find_definition
-
-**Required:**
-- `tenant_id` (string)
-- `symbol_name` (string)
-
-**Optional:**
-- `symbol_kind` (function|class|interface|type|enum|variable)
-
-### code.find_callers
-
-**Required:**
-- `tenant_id` (string)
-- `function_name` (string)
-
-**Optional:**
-- `depth` (number, 1-3, default: 1)
-
----
-
-Ready to build intelligent agent memory!
+## 11. Troubleshooting
+
+- `invalid 'k': must be between 1 and 100`: adjust `k`
+- `invalid filters.time_range.*`: use ISO 8601 timestamps
+- `tenant_id ... invalid characters`: use only letters, digits, underscores
+- `memory.compact` returns skipped: expected in in-memory mode, or no thresholds exceeded in persistent mode

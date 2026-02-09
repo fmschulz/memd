@@ -181,6 +181,10 @@ mod tests {
         let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
 
         // Without normalization, norm should NOT be 1.0
-        assert!((norm - 1.0).abs() > 0.1, "unexpectedly normalized: {}", norm);
+        assert!(
+            (norm - 1.0).abs() > 0.1,
+            "unexpectedly normalized: {}",
+            norm
+        );
     }
 }

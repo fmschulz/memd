@@ -6,6 +6,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 
 use serde_json::{json, Value};
+use tempfile::TempDir;
 use thiserror::Error;
 
 /// Errors that can occur during MCP client operations
@@ -25,6 +26,9 @@ pub enum McpClientError {
 
     #[error("read timeout or EOF")]
     ReadError,
+
+    #[error("rpc error: {0}")]
+    RpcError(String),
 }
 
 /// MCP test client that communicates with memd over stdio
@@ -33,6 +37,7 @@ pub struct McpClient {
     stdin: std::process::ChildStdin,
     stdout: BufReader<std::process::ChildStdout>,
     request_id: i64,
+    _temp_dir_guard: Option<TempDir>,
 }
 
 impl McpClient {
@@ -44,7 +49,10 @@ impl McpClient {
     ///
     /// # Returns
     /// An McpClient connected to the memd process
-    pub fn start_with_args(memd_path: &std::path::PathBuf, extra_args: &[&str]) -> Result<Self, McpClientError> {
+    pub fn start_with_args(
+        memd_path: &std::path::PathBuf,
+        extra_args: &[&str],
+    ) -> Result<Self, McpClientError> {
         let mut cmd = Command::new(memd_path);
         cmd.arg("--mode").arg("mcp");
         for arg in extra_args {
@@ -57,7 +65,10 @@ impl McpClient {
             .stderr(Stdio::inherit()) // Show logs for debugging (model downloads, etc)
             .spawn()?;
 
-        let stdin = process.stdin.take().ok_or(McpClientError::StdinNotAvailable)?;
+        let stdin = process
+            .stdin
+            .take()
+            .ok_or(McpClientError::StdinNotAvailable)?;
         let stdout = process
             .stdout
             .take()
@@ -68,6 +79,7 @@ impl McpClient {
             stdin,
             stdout: BufReader::new(stdout),
             request_id: 0,
+            _temp_dir_guard: None,
         })
     }
 
@@ -80,7 +92,38 @@ impl McpClient {
     /// An McpClient connected to the memd process
     pub fn start(memd_path: &str) -> Result<Self, McpClientError> {
         let path = std::path::PathBuf::from(memd_path);
-        Self::start_with_args(&path, &[])
+        let data_dir = TempDir::new()?;
+        let data_dir_arg = data_dir.path().to_string_lossy().to_string();
+
+        let mut cmd = Command::new(&path);
+        cmd.arg("--mode")
+            .arg("mcp")
+            .arg("--in-memory")
+            .arg("--data-dir")
+            .arg(data_dir_arg);
+
+        let mut process = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()?;
+
+        let stdin = process
+            .stdin
+            .take()
+            .ok_or(McpClientError::StdinNotAvailable)?;
+        let stdout = process
+            .stdout
+            .take()
+            .ok_or(McpClientError::StdoutNotAvailable)?;
+
+        Ok(Self {
+            process,
+            stdin,
+            stdout: BufReader::new(stdout),
+            request_id: 0,
+            _temp_dir_guard: Some(data_dir),
+        })
     }
 
     /// Send a JSON-RPC request and get the response
@@ -91,7 +134,11 @@ impl McpClient {
     ///
     /// # Returns
     /// The JSON-RPC response
-    pub fn request(&mut self, method: &str, params: Option<Value>) -> Result<Value, McpClientError> {
+    pub fn request(
+        &mut self,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<Value, McpClientError> {
         self.request_id += 1;
         let request = json!({
             "jsonrpc": "2.0",
@@ -161,6 +208,25 @@ impl McpClient {
     /// * `name` - Tool name (e.g., "memory.add")
     /// * `arguments` - Tool arguments as JSON
     pub fn call_tool(&mut self, name: &str, arguments: Value) -> Result<Value, McpClientError> {
+        let response = self.request(
+            "tools/call",
+            Some(json!({
+                "name": name,
+                "arguments": arguments
+            })),
+        )?;
+
+        if let Some(error) = response.get("error") {
+            return Err(McpClientError::RpcError(error.to_string()));
+        }
+
+        Ok(response)
+    }
+
+    /// Call a tool and return raw JSON-RPC response, including error payloads.
+    ///
+    /// Use this for conformance tests that need to validate exact MCP error codes.
+    pub fn call_tool_raw(&mut self, name: &str, arguments: Value) -> Result<Value, McpClientError> {
         self.request(
             "tools/call",
             Some(json!({
@@ -172,7 +238,10 @@ impl McpClient {
 
     /// Check if process is still running
     pub fn is_running(&mut self) -> bool {
-        self.process.try_wait().map(|s| s.is_none()).unwrap_or(false)
+        self.process
+            .try_wait()
+            .map(|s| s.is_none())
+            .unwrap_or(false)
     }
 }
 

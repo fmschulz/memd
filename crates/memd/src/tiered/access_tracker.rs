@@ -192,7 +192,9 @@ impl AccessTracker {
         let stats = self.stats.read();
 
         match stats.get(chunk_id) {
-            Some(access_stats) => self.compute_score(chunk_id.clone(), access_stats, current_project),
+            Some(access_stats) => {
+                self.compute_score(chunk_id.clone(), access_stats, current_project)
+            }
             None => PromotionScore::new(chunk_id.clone()),
         }
     }
@@ -214,7 +216,11 @@ impl AccessTracker {
             .collect();
 
         // Sort by score descending
-        scores.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        scores.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         scores.truncate(k);
         scores
     }
@@ -337,8 +343,14 @@ mod tests {
         let chunk_id = ChunkId::new();
 
         // Access from project A
-        tracker.record_access(AccessEvent::with_project(chunk_id.clone(), "project_a".into()));
-        tracker.record_access(AccessEvent::with_project(chunk_id.clone(), "project_a".into()));
+        tracker.record_access(AccessEvent::with_project(
+            chunk_id.clone(),
+            "project_a".into(),
+        ));
+        tracker.record_access(AccessEvent::with_project(
+            chunk_id.clone(),
+            "project_a".into(),
+        ));
 
         // Score should be higher when querying from project A
         let score_a = tracker.get_promotion_score(&chunk_id, Some("project_a"));
@@ -453,6 +465,9 @@ mod tests {
             ..Default::default()
         };
 
-        assert!((config.frequency_weight + config.recency_weight + config.project_weight - 1.0).abs() < 0.001);
+        assert!(
+            (config.frequency_weight + config.recency_weight + config.project_weight - 1.0).abs()
+                < 0.001
+        );
     }
 }

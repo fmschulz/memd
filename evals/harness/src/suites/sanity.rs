@@ -55,8 +55,8 @@ fn extract_content_text(response: &Value) -> Option<&str> {
 pub fn run_sanity_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestResult> {
     let mut results = Vec::new();
 
-    let dataset_path = std::path::Path::new("evals/datasets/retrieval/sanity_check.json");
-    let dataset = match load_dataset(dataset_path) {
+    let dataset_path = crate::resolve_dataset_path("evals/datasets/retrieval/sanity_check.json");
+    let dataset = match load_dataset(dataset_path.as_path()) {
         Ok(d) => d,
         Err(e) => {
             results.push(TestResult::fail(
@@ -87,7 +87,21 @@ pub fn run_sanity_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestR
 
 fn load_dataset(path: &std::path::Path) -> Result<SanityDataset, String> {
     let content = std::fs::read_to_string(path).map_err(|e| format!("read file: {}", e))?;
-    serde_json::from_str(&content).map_err(|e| format!("parse json: {}", e))
+    let mut dataset: SanityDataset =
+        serde_json::from_str(&content).map_err(|e| format!("parse json: {}", e))?;
+
+    for doc in &mut dataset.documents {
+        let raw_type = doc.doc_type.clone();
+        let Some(normalized) = crate::normalize_eval_chunk_type(&raw_type) else {
+            return Err(format!(
+                "unsupported chunk type '{}' for document {}",
+                raw_type, doc.id
+            ));
+        };
+        doc.doc_type = normalized.to_string();
+    }
+
+    Ok(dataset)
 }
 
 fn run_exact_match_test(
@@ -176,20 +190,14 @@ fn run_exact_match_test(
         if recall < 1.0 {
             failed_queries.push(format!(
                 "{} (recall: {:.3}, expected: {}, got: {:?})",
-                query.id,
-                recall,
-                query.relevant[0],
-                retrieved_ids
+                query.id, recall, query.relevant[0], retrieved_ids
             ));
         }
     }
 
     let avg_recall = total_recall / dataset.queries.len() as f64;
 
-    println!(
-        "  Recall@10: {:.3} (expected: 1.000)",
-        avg_recall
-    );
+    println!("  Recall@10: {:.3} (expected: 1.000)", avg_recall);
 
     // Sanity check MUST achieve perfect recall
     if avg_recall >= 1.0 {
@@ -210,7 +218,10 @@ fn run_exact_match_test(
 
 fn extract_retrieved_ids(response: &Value) -> Vec<String> {
     // Debug: print the actual response structure
-    eprintln!("[DEBUG] Full response: {}", serde_json::to_string_pretty(response).unwrap_or_default());
+    eprintln!(
+        "[DEBUG] Full response: {}",
+        serde_json::to_string_pretty(response).unwrap_or_default()
+    );
 
     let text = match extract_content_text(response) {
         Some(t) => t,

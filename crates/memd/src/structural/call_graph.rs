@@ -324,7 +324,8 @@ impl CallGraphExtractor {
 
         // Deduplicate imports by module name and line
         imports.sort_by(|a, b| {
-            a.import_line.cmp(&b.import_line)
+            a.import_line
+                .cmp(&b.import_line)
                 .then(a.imported_module.cmp(&b.imported_module))
         });
         imports.dedup_by(|a, b| {
@@ -552,21 +553,9 @@ impl CallGraphIndexer {
         language: SupportedLanguage,
         file_symbols: &[SymbolRecord],
     ) -> Result<(usize, usize), rusqlite::Error> {
-        let call_count = self.index_file_calls(
-            tenant_id,
-            file_path,
-            tree,
-            source,
-            language,
-            file_symbols,
-        )?;
-        let import_count = self.index_file_imports(
-            tenant_id,
-            file_path,
-            tree,
-            source,
-            language,
-        )?;
+        let call_count =
+            self.index_file_calls(tenant_id, file_path, tree, source, language, file_symbols)?;
+        let import_count = self.index_file_imports(tenant_id, file_path, tree, source, language)?;
 
         Ok((call_count, import_count))
     }
@@ -591,7 +580,8 @@ fn main() {
         let result = parse_file(&path, source).unwrap();
 
         let extractor = CallGraphExtractor::new();
-        let calls = extractor.extract_calls(&result.tree, source.as_bytes(), SupportedLanguage::Rust);
+        let calls =
+            extractor.extract_calls(&result.tree, source.as_bytes(), SupportedLanguage::Rust);
 
         assert!(!calls.is_empty());
         assert!(calls.iter().any(|c| c.callee_name == "helper"));
@@ -609,7 +599,8 @@ fn main() {
         let result = parse_file(&path, source).unwrap();
 
         let extractor = CallGraphExtractor::new();
-        let calls = extractor.extract_calls(&result.tree, source.as_bytes(), SupportedLanguage::Rust);
+        let calls =
+            extractor.extract_calls(&result.tree, source.as_bytes(), SupportedLanguage::Rust);
 
         let method_call = calls.iter().find(|c| c.callee_name == "push_str");
         assert!(method_call.is_some());
@@ -627,7 +618,8 @@ fn main() {
         let result = parse_file(&path, source).unwrap();
 
         let extractor = CallGraphExtractor::new();
-        let calls = extractor.extract_calls(&result.tree, source.as_bytes(), SupportedLanguage::Rust);
+        let calls =
+            extractor.extract_calls(&result.tree, source.as_bytes(), SupportedLanguage::Rust);
 
         let qualified_call = calls.iter().find(|c| c.callee_name == "var");
         assert!(qualified_call.is_some());
@@ -645,7 +637,8 @@ from pathlib import Path
         let result = parse_file(&path, source).unwrap();
 
         let extractor = CallGraphExtractor::new();
-        let imports = extractor.extract_imports(&result.tree, source.as_bytes(), SupportedLanguage::Python);
+        let imports =
+            extractor.extract_imports(&result.tree, source.as_bytes(), SupportedLanguage::Python);
 
         assert!(imports.iter().any(|i| i.imported_module == "os"));
         assert!(imports.iter().any(|i| i.imported_module == "json"));
@@ -663,7 +656,11 @@ import { helper } from './utils';
         let result = parse_file(&path, source).unwrap();
 
         let extractor = CallGraphExtractor::new();
-        let imports = extractor.extract_imports(&result.tree, source.as_bytes(), SupportedLanguage::TypeScript);
+        let imports = extractor.extract_imports(
+            &result.tree,
+            source.as_bytes(),
+            SupportedLanguage::TypeScript,
+        );
 
         assert!(imports.iter().any(|i| i.imported_module == "react"));
         assert!(imports.iter().any(|i| i.imported_module == "axios"));
@@ -683,7 +680,8 @@ from ..models import User
         let result = parse_file(&path, source).unwrap();
 
         let extractor = CallGraphExtractor::new();
-        let imports = extractor.extract_imports(&result.tree, source.as_bytes(), SupportedLanguage::Python);
+        let imports =
+            extractor.extract_imports(&result.tree, source.as_bytes(), SupportedLanguage::Python);
 
         assert!(imports.iter().any(|i| i.is_relative));
     }
@@ -702,7 +700,8 @@ import (
         let result = parse_file(&path, source).unwrap();
 
         let extractor = CallGraphExtractor::new();
-        let imports = extractor.extract_imports(&result.tree, source.as_bytes(), SupportedLanguage::Go);
+        let imports =
+            extractor.extract_imports(&result.tree, source.as_bytes(), SupportedLanguage::Go);
 
         assert!(imports.iter().any(|i| i.imported_module == "fmt"));
         assert!(imports.iter().any(|i| i.imported_module == "os"));
@@ -724,7 +723,8 @@ public class Main {
         let result = parse_file(&path, source).unwrap();
 
         let extractor = CallGraphExtractor::new();
-        let calls = extractor.extract_calls(&result.tree, source.as_bytes(), SupportedLanguage::Java);
+        let calls =
+            extractor.extract_calls(&result.tree, source.as_bytes(), SupportedLanguage::Java);
 
         assert!(calls.iter().any(|c| c.callee_name == "println"));
         assert!(calls.iter().any(|c| c.callee_name == "helper"));

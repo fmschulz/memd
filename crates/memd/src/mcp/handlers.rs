@@ -48,8 +48,8 @@ pub struct SearchFilters {
 /// Time range filter
 #[derive(Debug, Deserialize)]
 pub struct TimeRange {
-    pub from: Option<i64>,
-    pub to: Option<i64>,
+    pub from: Option<String>,
+    pub to: Option<String>,
 }
 
 /// Parameters for memory.add
@@ -480,6 +480,52 @@ pub struct ImportInfoResult {
 
 // ---------- Helper Functions ----------
 
+fn validate_search_k(k: usize) -> Result<(), McpError> {
+    if (1..=100).contains(&k) {
+        return Ok(());
+    }
+
+    Err(McpError::InvalidParams(
+        "invalid 'k': must be between 1 and 100".to_string(),
+    ))
+}
+
+fn validate_search_time_range(filters: Option<&SearchFilters>) -> Result<(), McpError> {
+    let Some(time_range) = filters.and_then(|f| f.time_range.as_ref()) else {
+        return Ok(());
+    };
+
+    let from_ms = time_range
+        .from
+        .as_deref()
+        .map(|s| {
+            crate::structural::parse_iso_datetime(s).map_err(|e| {
+                McpError::InvalidParams(format!("invalid filters.time_range.from: {}", e))
+            })
+        })
+        .transpose()?;
+
+    let to_ms = time_range
+        .to
+        .as_deref()
+        .map(|s| {
+            crate::structural::parse_iso_datetime(s).map_err(|e| {
+                McpError::InvalidParams(format!("invalid filters.time_range.to: {}", e))
+            })
+        })
+        .transpose()?;
+
+    if let (Some(from_ms), Some(to_ms)) = (from_ms, to_ms) {
+        if from_ms > to_ms {
+            return Err(McpError::InvalidParams(
+                "invalid filters.time_range: 'from' must be <= 'to'".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Parse a chunk type string into ChunkType enum
 fn parse_chunk_type(s: &str) -> Result<ChunkType, McpError> {
     match s.to_lowercase().as_str() {
@@ -525,9 +571,8 @@ fn params_to_source(params: Option<SourceParams>) -> Source {
 
 /// Format result as MCP content response
 fn format_mcp_response<T: Serialize>(result: &T) -> Result<Value, McpError> {
-    let json_str = serde_json::to_string(result).map_err(|e| {
-        McpError::ToolError(format!("failed to serialize response: {}", e))
-    })?;
+    let json_str = serde_json::to_string(result)
+        .map_err(|e| McpError::ToolError(format!("failed to serialize response: {}", e)))?;
 
     Ok(json!({
         "content": [{
@@ -545,6 +590,8 @@ pub async fn handle_memory_search<S: Store>(
     params: SearchParams,
 ) -> Result<Value, McpError> {
     let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    validate_search_k(params.k)?;
+    validate_search_time_range(params.filters.as_ref())?;
     let debug_tiers = params.debug_tiers.unwrap_or(false);
 
     info!(
@@ -562,11 +609,15 @@ pub async fn handle_memory_search<S: Store>(
             .await
             .map_err(|e| McpError::ToolError(e.to_string()))?;
 
-        debug!(results_count = scored_chunks.len(), "search completed with tier info");
+        debug!(
+            results_count = scored_chunks.len(),
+            "search completed with tier info"
+        );
 
         // Build tier debug info if timing is available
         let tier_info = timing.map(|t| {
-            let source_tier = if t.cache_lookup_ms > 0 && t.hot_tier_ms == 0 && t.warm_tier_ms == 0 {
+            let source_tier = if t.cache_lookup_ms > 0 && t.hot_tier_ms == 0 && t.warm_tier_ms == 0
+            {
                 "cache".to_string()
             } else if t.hot_tier_ms > 0 && t.warm_tier_ms == 0 {
                 "hot".to_string()
@@ -632,7 +683,10 @@ pub async fn handle_memory_search<S: Store>(
         })
         .collect();
 
-    format_mcp_response(&SearchResult { results, tier_info: None })
+    format_mcp_response(&SearchResult {
+        results,
+        tier_info: None,
+    })
 }
 
 /// Handle memory.add tool call
@@ -641,28 +695,8 @@ pub async fn handle_memory_add<S: Store>(
     tenant_manager: Option<&TenantManager>,
     params: AddParams,
 ) -> Result<Value, McpError> {
-    warn!("🔍 [DEBUG] handle_memory_add CALLED - tenant_id={}, text_len={}",
-          params.tenant_id, params.text.len());
-    let tenant_id = match validate_tenant_id(&params.tenant_id) {
-        Ok(tid) => {
-            warn!("🔍 [DEBUG] tenant_id validation succeeded: {}", tid);
-            tid
-        }
-        Err(e) => {
-            warn!("❌ [DEBUG] tenant_id validation FAILED: {}", e);
-            return Err(e);
-        }
-    };
-    let chunk_type = match parse_chunk_type(&params.chunk_type) {
-        Ok(ct) => {
-            warn!("🔍 [DEBUG] chunk_type validation succeeded: {:?}", ct);
-            ct
-        }
-        Err(e) => {
-            warn!("❌ [DEBUG] chunk_type validation FAILED: {}", e);
-            return Err(e);
-        }
-    };
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let chunk_type = parse_chunk_type(&params.chunk_type)?;
 
     info!(
         tenant_id = %tenant_id,
@@ -690,7 +724,9 @@ pub async fn handle_memory_add<S: Store>(
         chunk = chunk.with_tags(params.tags);
     }
 
-    let chunk_id = store.add(chunk).await
+    let chunk_id = store
+        .add(chunk)
+        .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
 
     info!(chunk_id = %chunk_id, "chunk added");
@@ -739,7 +775,9 @@ pub async fn handle_memory_add_batch<S: Store>(
         chunks.push(chunk);
     }
 
-    let chunk_ids = store.add_batch(chunks).await
+    let chunk_ids = store
+        .add_batch(chunks)
+        .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
 
     info!(count = chunk_ids.len(), "batch add completed");
@@ -750,10 +788,7 @@ pub async fn handle_memory_add_batch<S: Store>(
 }
 
 /// Handle memory.get tool call
-pub async fn handle_memory_get<S: Store>(
-    store: &S,
-    params: GetParams,
-) -> Result<Value, McpError> {
+pub async fn handle_memory_get<S: Store>(store: &S, params: GetParams) -> Result<Value, McpError> {
     let tenant_id = validate_tenant_id(&params.tenant_id)?;
     let chunk_id = validate_chunk_id(&params.chunk_id)?;
 
@@ -763,14 +798,15 @@ pub async fn handle_memory_get<S: Store>(
         "memory.get"
     );
 
-    let chunk = store.get(&tenant_id, &chunk_id).await
+    let chunk = store
+        .get(&tenant_id, &chunk_id)
+        .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
 
     let json_str = if let Some(c) = chunk {
         info!(chunk_id = %chunk_id, "chunk found");
-        serde_json::to_string(&c).map_err(|e| {
-            McpError::ToolError(format!("failed to serialize chunk: {}", e))
-        })?
+        serde_json::to_string(&c)
+            .map_err(|e| McpError::ToolError(format!("failed to serialize chunk: {}", e)))?
     } else {
         debug!(chunk_id = %chunk_id, "chunk not found");
         "null".to_string()
@@ -798,7 +834,9 @@ pub async fn handle_memory_delete<S: Store>(
         "memory.delete"
     );
 
-    let deleted = store.delete(&tenant_id, &chunk_id).await
+    let deleted = store
+        .delete(&tenant_id, &chunk_id)
+        .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
 
     if deleted {
@@ -820,7 +858,9 @@ pub async fn handle_memory_stats<S: Store>(
 
     info!(tenant_id = %tenant_id, "memory.stats");
 
-    let store_stats: StoreStats = store.stats(&tenant_id).await
+    let store_stats: StoreStats = store
+        .stats(&tenant_id)
+        .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
 
     // Get disk stats if tenant_manager is available
@@ -836,8 +876,10 @@ pub async fn handle_memory_stats<S: Store>(
         .flatten();
 
     // Get compaction metrics if available
-    let compaction = store.get_compaction_metrics(&tenant_id).ok().map(|m| {
-        CompactionStatsResult {
+    let compaction = store
+        .get_compaction_metrics(&tenant_id)
+        .ok()
+        .map(|m| CompactionStatsResult {
             tombstone_ratio: m.tombstone_ratio,
             active_chunks: m.active_chunks,
             deleted_chunks: m.deleted_chunks,
@@ -848,8 +890,7 @@ pub async fn handle_memory_stats<S: Store>(
             needs_compaction: m.tombstone_ratio > 0.20
                 || m.segment_count > 10
                 || m.hnsw_staleness > 0.15,
-        }
-    });
+        });
 
     format_mcp_response(&StatsResult {
         total_chunks: store_stats.total_chunks,
@@ -1067,7 +1108,12 @@ pub fn handle_find_callers(
     );
 
     let caller_infos = query_service
-        .find_callers(&tenant_id, &params.name, depth, params.project_id.as_deref())
+        .find_callers(
+            &tenant_id,
+            &params.name,
+            depth,
+            params.project_id.as_deref(),
+        )
         .map_err(|e| McpError::ToolError(e.to_string()))?;
 
     debug!(results_count = caller_infos.len(), "find_callers completed");
@@ -1148,8 +1194,8 @@ fn import_info_to_result(info: ImportInfo) -> ImportInfoResult {
 // ---------- Trace Query Handlers ----------
 
 use crate::structural::{
-    parse_iso_datetime, ErrorResult, FrameInfo, TimeRange as StructuralTimeRange,
-    ToolCallResult, TraceQueryService,
+    parse_iso_datetime, ErrorResult, FrameInfo, TimeRange as StructuralTimeRange, ToolCallResult,
+    TraceQueryService,
 };
 
 /// Result type for debug.find_tool_calls
@@ -1188,13 +1234,20 @@ fn error_to_response(error: ErrorResult, include_frames: bool) -> ErrorResultRes
         error_message: error.error_message,
         timestamp_ms: error.timestamp_ms,
         timestamp_formatted: error.timestamp_formatted,
-        frames: if include_frames { Some(error.frames) } else { None },
+        frames: if include_frames {
+            Some(error.frames)
+        } else {
+            None
+        },
         session_id: error.session_id,
     }
 }
 
 /// Parse time range from optional ISO 8601 strings
-fn parse_trace_time_range(time_from: Option<&str>, time_to: Option<&str>) -> Result<Option<StructuralTimeRange>, McpError> {
+fn parse_trace_time_range(
+    time_from: Option<&str>,
+    time_to: Option<&str>,
+) -> Result<Option<StructuralTimeRange>, McpError> {
     let from_ms = match time_from {
         Some(s) => Some(parse_iso_datetime(s).map_err(|e| McpError::InvalidParams(e.to_string()))?),
         None => None,
@@ -1207,10 +1260,7 @@ fn parse_trace_time_range(time_from: Option<&str>, time_to: Option<&str>) -> Res
     if from_ms.is_none() && to_ms.is_none() {
         Ok(None)
     } else {
-        Ok(Some(StructuralTimeRange {
-            from_ms,
-            to_ms,
-        }))
+        Ok(Some(StructuralTimeRange { from_ms, to_ms }))
     }
 }
 
@@ -1223,7 +1273,8 @@ pub fn handle_find_tool_calls(
     let limit = params.limit.min(100);
 
     // Parse time range
-    let time_range = parse_trace_time_range(params.time_from.as_deref(), params.time_to.as_deref())?;
+    let time_range =
+        parse_trace_time_range(params.time_from.as_deref(), params.time_to.as_deref())?;
 
     info!(
         tenant_id = %tenant_id,
@@ -1250,10 +1301,16 @@ pub fn handle_find_tool_calls(
             .map_err(|e| McpError::ToolError(e.to_string()))?
     };
 
-    debug!(results_count = tool_calls.len(), "find_tool_calls completed");
+    debug!(
+        results_count = tool_calls.len(),
+        "find_tool_calls completed"
+    );
 
     let total_count = tool_calls.len();
-    format_mcp_response(&FindToolCallsResult { tool_calls, total_count })
+    format_mcp_response(&FindToolCallsResult {
+        tool_calls,
+        total_count,
+    })
 }
 
 /// Handle debug.find_errors tool call
@@ -1265,7 +1322,8 @@ pub fn handle_find_errors(
     let limit = params.limit.min(100);
 
     // Parse time range
-    let time_range = parse_trace_time_range(params.time_from.as_deref(), params.time_to.as_deref())?;
+    let time_range =
+        parse_trace_time_range(params.time_from.as_deref(), params.time_to.as_deref())?;
 
     info!(
         tenant_id = %tenant_id,
@@ -1295,13 +1353,17 @@ pub fn handle_find_errors(
         .map(|e| error_to_response(e, params.include_frames))
         .collect();
 
-    format_mcp_response(&FindErrorsResult { errors, total_count })
+    format_mcp_response(&FindErrorsResult {
+        errors,
+        total_count,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::store::MemoryStore;
+    use proptest::prelude::*;
 
     fn make_store() -> MemoryStore {
         MemoryStore::new()
@@ -1325,6 +1387,88 @@ mod tests {
         let text = result["content"][0]["text"].as_str().unwrap();
         let search_result: SearchResult = serde_json::from_str(text).unwrap();
         assert!(search_result.results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_rejects_k_zero() {
+        let store = make_store();
+        let params = SearchParams {
+            tenant_id: "test".to_string(),
+            query: "hello".to_string(),
+            project_id: None,
+            k: 0,
+            filters: None,
+            debug_tiers: None,
+        };
+
+        let result = handle_memory_search(&store, params).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), McpError::InvalidParams(_)));
+    }
+
+    #[tokio::test]
+    async fn search_rejects_k_above_max() {
+        let store = make_store();
+        let params = SearchParams {
+            tenant_id: "test".to_string(),
+            query: "hello".to_string(),
+            project_id: None,
+            k: 101,
+            filters: None,
+            debug_tiers: None,
+        };
+
+        let result = handle_memory_search(&store, params).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), McpError::InvalidParams(_)));
+    }
+
+    proptest! {
+        #[test]
+        fn validate_search_k_property(k in 0usize..=200usize) {
+            let result = validate_search_k(k);
+            if (1..=100).contains(&k) {
+                prop_assert!(result.is_ok());
+            } else {
+                prop_assert!(matches!(result, Err(McpError::InvalidParams(_))));
+            }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn validate_search_time_range_order_property(day_a in 1u8..=28, day_b in 1u8..=28) {
+            let filters = SearchFilters {
+                types: None,
+                time_range: Some(TimeRange {
+                    from: Some(format!("2026-01-{day_a:02}T00:00:00Z")),
+                    to: Some(format!("2026-01-{day_b:02}T23:59:59Z")),
+                }),
+            };
+
+            let result = validate_search_time_range(Some(&filters));
+            if day_a <= day_b {
+                prop_assert!(result.is_ok());
+            } else {
+                prop_assert!(matches!(result, Err(McpError::InvalidParams(_))));
+            }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn validate_search_time_range_rejects_invalid_iso(invalid in "[A-Za-z]{1,16}") {
+            let filters = SearchFilters {
+                types: None,
+                time_range: Some(TimeRange {
+                    from: Some(invalid),
+                    to: Some("2026-01-01T00:00:00Z".to_string()),
+                }),
+            };
+
+            let result = validate_search_time_range(Some(&filters));
+            prop_assert!(matches!(result, Err(McpError::InvalidParams(_))));
+        }
     }
 
     #[tokio::test]

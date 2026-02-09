@@ -2,7 +2,9 @@
 //!
 //! Provides per-query metric tracking and statistical analysis using bootstrap CIs.
 
-use crate::statistics::{bootstrap_ci, effect_size_cohens_d, paired_test, MetricsWithCI, PairedTestResult};
+use crate::statistics::{
+    bootstrap_ci, effect_size_cohens_d, paired_test, MetricsWithCI, PairedTestResult,
+};
 
 /// Per-query metrics
 #[derive(Debug, Clone)]
@@ -72,12 +74,27 @@ pub struct ComparisonResult {
 
 impl std::fmt::Display for ComparisonResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "\n=== Model Comparison: {} vs {} ===", self.model_a_name, self.model_b_name)?;
+        writeln!(
+            f,
+            "\n=== Model Comparison: {} vs {} ===",
+            self.model_a_name, self.model_b_name
+        )?;
         writeln!(f, "\nRecall@10:")?;
-        writeln!(f, "  Mean difference: {:.3} (B - A)", self.recall_comparison.mean_difference)?;
-        writeln!(f, "  t-statistic: {:.3}, p-value: {:.3}", self.recall_comparison.t_statistic, self.recall_comparison.p_value)?;
-        writeln!(f, "  Wins: {}, Losses: {}, Ties: {}",
-            self.recall_comparison.wins, self.recall_comparison.losses, self.recall_comparison.ties)?;
+        writeln!(
+            f,
+            "  Mean difference: {:.3} (B - A)",
+            self.recall_comparison.mean_difference
+        )?;
+        writeln!(
+            f,
+            "  t-statistic: {:.3}, p-value: {:.3}",
+            self.recall_comparison.t_statistic, self.recall_comparison.p_value
+        )?;
+        writeln!(
+            f,
+            "  Wins: {}, Losses: {}, Ties: {}",
+            self.recall_comparison.wins, self.recall_comparison.losses, self.recall_comparison.ties
+        )?;
         writeln!(f, "  Cohen's d: {:.3}", self.recall_effect_size)?;
 
         let significance = if self.recall_comparison.p_value < 0.01 {

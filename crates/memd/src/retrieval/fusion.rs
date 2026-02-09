@@ -135,7 +135,11 @@ impl RrfFusion {
             .collect();
 
         // Sort by RRF score descending
-        results.sort_by(|a, b| b.rrf_score.partial_cmp(&a.rrf_score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.rrf_score
+                .partial_cmp(&a.rrf_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         results
     }
@@ -234,12 +238,27 @@ mod tests {
         // B should be first (dense rank 2 + sparse rank 1)
         // A should be second (dense rank 1 + sparse rank 3)
         // C should be last (dense rank 3 only)
-        let b_result = results.iter().find(|r| r.chunk_id == make_chunk_id(2)).unwrap();
-        let a_result = results.iter().find(|r| r.chunk_id == make_chunk_id(1)).unwrap();
-        let c_result = results.iter().find(|r| r.chunk_id == make_chunk_id(3)).unwrap();
+        let b_result = results
+            .iter()
+            .find(|r| r.chunk_id == make_chunk_id(2))
+            .unwrap();
+        let a_result = results
+            .iter()
+            .find(|r| r.chunk_id == make_chunk_id(1))
+            .unwrap();
+        let c_result = results
+            .iter()
+            .find(|r| r.chunk_id == make_chunk_id(3))
+            .unwrap();
 
-        assert!(b_result.rrf_score > a_result.rrf_score, "B should rank higher than A");
-        assert!(a_result.rrf_score > c_result.rrf_score, "A should rank higher than C");
+        assert!(
+            b_result.rrf_score > a_result.rrf_score,
+            "B should rank higher than A"
+        );
+        assert!(
+            a_result.rrf_score > c_result.rrf_score,
+            "A should rank higher than C"
+        );
     }
 
     #[test]
@@ -301,8 +320,14 @@ mod tests {
 
         let results = fusion.fuse(candidates);
 
-        let dense_result = results.iter().find(|r| r.chunk_id == make_chunk_id(1)).unwrap();
-        let sparse_result = results.iter().find(|r| r.chunk_id == make_chunk_id(2)).unwrap();
+        let dense_result = results
+            .iter()
+            .find(|r| r.chunk_id == make_chunk_id(1))
+            .unwrap();
+        let sparse_result = results
+            .iter()
+            .find(|r| r.chunk_id == make_chunk_id(2))
+            .unwrap();
 
         // Dense should have double the score due to weight
         assert!(

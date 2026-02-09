@@ -17,7 +17,7 @@ use super::hybrid::{HybridConfig, HybridSearcher};
 use super::metadata::{ChunkMetadata, MetadataStore, SqliteMetadataStore};
 use crate::compaction::{CompactionConfig, CompactionMetrics, CompactionResult, CompactionRunner};
 use crate::metrics::TieredMetrics;
-use crate::tiered::{CacheStats, HotTierStats, TieredTiming, TierDecision};
+use crate::tiered::{CacheStats, HotTierStats, TierDecision, TieredTiming};
 
 /// Combined tiered search statistics
 #[derive(Debug, Clone)]
@@ -140,7 +140,9 @@ impl PersistentStore {
                         error = %e,
                         "failed to initialize dense searcher, falling back to text search"
                     );
-                    eprintln!("WARNING: Dense searcher initialization failed - embeddings will NOT work!");
+                    eprintln!(
+                        "WARNING: Dense searcher initialization failed - embeddings will NOT work!"
+                    );
                     eprintln!("ERROR: {}", e);
                     eprintln!("This will cause 0.000 Recall on semantic queries!");
                     eprintln!("Check that Candle and model files are available.");
@@ -208,6 +210,11 @@ impl PersistentStore {
         &self.metrics
     }
 
+    /// Get shared metrics collector
+    pub fn metrics_arc(&self) -> Arc<MetricsCollector> {
+        Arc::clone(&self.metrics)
+    }
+
     /// Get index statistics per tenant
     pub fn get_index_stats(&self, tenant_id: Option<&TenantId>) -> HashMap<String, IndexStats> {
         if let Some(ref searcher) = self.dense_searcher {
@@ -241,7 +248,7 @@ impl PersistentStore {
 
         Some(TieredStats {
             cache: cache_stats,
-            hot_tier: None, // Hot tier stats would need per-tenant access
+            hot_tier: None,            // Hot tier stats would need per-tenant access
             access_tracker_entries: 0, // Access tracker is per-tenant
             tiered_metrics,
         })
@@ -254,7 +261,10 @@ impl PersistentStore {
     /// - Demote stale chunks from hot tier
     /// - Evict if hot tier is over capacity
     /// - Prune expired cache entries
-    pub fn run_maintenance(&self, tenant_id: &TenantId) -> Option<crate::tiered::MaintenanceResult> {
+    pub fn run_maintenance(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Option<crate::tiered::MaintenanceResult> {
         let hybrid = self.hybrid_searcher.as_ref()?;
         let result = hybrid.run_tiered_maintenance(tenant_id)?;
 
@@ -295,9 +305,9 @@ impl PersistentStore {
         runner.run_compaction(
             tenant_id,
             &self.metadata,
-            self.dense_searcher.as_ref().ok_or_else(|| {
-                MemdError::StorageError("dense searcher not available".into())
-            })?,
+            self.dense_searcher
+                .as_ref()
+                .ok_or_else(|| MemdError::StorageError("dense searcher not available".into()))?,
             self.sparse_index.as_deref(),
             semantic_cache,
         )
@@ -307,7 +317,10 @@ impl PersistentStore {
     ///
     /// Returns None if no compaction needed (all thresholds below limits).
     /// Returns Some(CompactionResult) if compaction was performed.
-    pub fn run_compaction_if_needed(&self, tenant_id: &TenantId) -> Result<Option<CompactionResult>> {
+    pub fn run_compaction_if_needed(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Option<CompactionResult>> {
         let runner = match &self.compaction_runner {
             Some(r) => r,
             None => return Ok(None),
@@ -326,7 +339,8 @@ impl PersistentStore {
             .map(|s| s.segment_count().unwrap_or(0))
             .unwrap_or(0);
 
-        let metrics = CompactionMetrics::gather(&self.metadata, hnsw_stats, segment_count, tenant_id)?;
+        let metrics =
+            CompactionMetrics::gather(&self.metadata, hnsw_stats, segment_count, tenant_id)?;
 
         if !runner.should_run(&metrics) {
             return Ok(None);
@@ -363,14 +377,17 @@ impl PersistentStore {
         tenant_id: &TenantId,
         query: &str,
         k: usize,
-    ) -> Result<(Vec<(MemoryChunk, f32)>, Option<TieredTiming>, Option<Vec<TierDecision>>)> {
+    ) -> Result<(
+        Vec<(MemoryChunk, f32)>,
+        Option<TieredTiming>,
+        Option<Vec<TierDecision>>,
+    )> {
         let total_start = Instant::now();
 
         // Use hybrid search if available
         if let Some(ref hybrid) = self.hybrid_searcher {
-            let (hybrid_results, timing) = hybrid
-                .search_with_timing(tenant_id, query, k, None)
-                .await?;
+            let (hybrid_results, timing) =
+                hybrid.search_with_timing(tenant_id, query, k, None).await?;
 
             let mut results = Vec::with_capacity(hybrid_results.len());
             for result in hybrid_results {
@@ -597,7 +614,12 @@ impl TenantStore {
                         // Try to read from segment to verify data is intact
                         let segments = self.segments.read();
                         if let Some(reader) = segments.get(&existing_meta.segment_id) {
-                            if reader.read_chunk(existing_meta.ordinal).ok().flatten().is_some() {
+                            if reader
+                                .read_chunk(existing_meta.ordinal)
+                                .ok()
+                                .flatten()
+                                .is_some()
+                            {
                                 // Data exists and is readable, skip
                                 skipped += 1;
                                 continue;
@@ -612,9 +634,10 @@ impl TenantStore {
                     }
 
                     // Deserialize chunk from payload
-                    let chunk: MemoryChunk = serde_json::from_slice(&record.payload).map_err(
-                        |e| MemdError::StorageError(format!("deserialize WAL chunk: {}", e)),
-                    )?;
+                    let chunk: MemoryChunk =
+                        serde_json::from_slice(&record.payload).map_err(|e| {
+                            MemdError::StorageError(format!("deserialize WAL chunk: {}", e))
+                        })?;
 
                     // Write to active segment
                     self.get_or_create_active_segment(self.segment_max_chunks)?;
@@ -714,7 +737,11 @@ impl TenantStore {
             // Need to rotate - finalize current segment
             let seg = active.take().unwrap();
             let meta = seg.writer.finalize()?;
-            info!(segment_id = meta.id, chunks = meta.chunk_count, "segment finalized");
+            info!(
+                segment_id = meta.id,
+                chunks = meta.chunk_count,
+                "segment finalized"
+            );
 
             // Load as reader
             let segments_dir = self.base_dir.join("segments");
@@ -787,64 +814,33 @@ impl Drop for TenantStore {
 #[async_trait::async_trait]
 impl Store for PersistentStore {
     async fn add(&self, chunk: MemoryChunk) -> Result<ChunkId> {
-        use crate::chunking::{chunk_text, ChunkingConfig};
-
         let tenant_id_str = chunk.tenant_id.to_string();
         info!(text_len = chunk.text.len(), "[PERSISTENT_ADD] called");
         debug!(tenant_id = %tenant_id_str, "[ADD] step 1: getting tenant");
         let _tenant = self.get_or_create_tenant(&tenant_id_str)?;
 
-        // Check if document needs chunking (> 1000 chars = ~250 tokens)
-        // Scientific abstracts average 1400 chars; chunking improves granularity
-        const CHUNK_THRESHOLD: usize = 1000;
-
-        if chunk.text.len() > CHUNK_THRESHOLD {
-            // Document is long, chunk it
-            let config = ChunkingConfig::default();
-            let text_chunks = chunk_text(&chunk.text, &config);
-
-            info!(
-                text_len = chunk.text.len(),
-                chunks_produced = text_chunks.len(),
-                "[CHUNKING] analysis result"
-            );
-
-            if text_chunks.len() > 1 {
-                info!(
-                    text_len = chunk.text.len(),
-                    chunk_count = text_chunks.len(),
-                    "[CHUNKING] splitting document"
-                );
-
-                // Store each chunk with chunk metadata in tags
-                // Each chunk inherits original tags (including document ID for benchmarks)
-                let mut chunk_ids = Vec::with_capacity(text_chunks.len());
-                for (idx, text_chunk) in text_chunks.iter().enumerate() {
-                    let mut sub_chunk = chunk.clone();
-                    sub_chunk.text = text_chunk.text.clone();
-
-                    // Add chunk metadata via tags
-                    sub_chunk.tags.push(format!("chunk_index:{}", idx));
-                    sub_chunk.tags.push(format!("total_chunks:{}", text_chunks.len()));
-
-                    // Store the sub-chunk
-                    let sub_chunk_id = self.add_single_chunk(sub_chunk).await?;
-                    chunk_ids.push(sub_chunk_id);
-                }
-
-                info!(
-                    first_chunk_id = %chunk_ids[0],
-                    chunks = chunk_ids.len(),
-                    "chunked document stored"
-                );
-
-                // Return the first chunk's ID (caller will use this to identify the document)
-                return Ok(chunk_ids[0].clone());
-            }
+        let mut chunks = super::split_for_add(chunk);
+        if chunks.len() == 1 {
+            return self
+                .add_single_chunk(
+                    chunks
+                        .pop()
+                        .ok_or_else(|| MemdError::StorageError("no chunk to add".into()))?,
+                )
+                .await;
         }
 
-        // Document is short or chunking produced only 1 chunk, store normally
-        self.add_single_chunk(chunk).await
+        info!(chunk_count = chunks.len(), "[CHUNKING] splitting document");
+
+        let mut chunk_ids = Vec::with_capacity(chunks.len());
+        for chunk in chunks {
+            chunk_ids.push(self.add_single_chunk(chunk).await?);
+        }
+
+        chunk_ids
+            .into_iter()
+            .next()
+            .ok_or_else(|| MemdError::StorageError("no chunk id produced".into()))
     }
 
     async fn add_batch(&self, chunks: Vec<MemoryChunk>) -> Result<Vec<ChunkId>> {
@@ -860,7 +856,12 @@ impl Store for PersistentStore {
         self.get_chunk(tenant_id, chunk_id).await
     }
 
-    async fn search(&self, tenant_id: &TenantId, query: &str, k: usize) -> Result<Vec<MemoryChunk>> {
+    async fn search(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        k: usize,
+    ) -> Result<Vec<MemoryChunk>> {
         let scored = self.search_with_scores(tenant_id, query, k).await?;
         Ok(scored.into_iter().map(|(chunk, _score)| chunk).collect())
     }
@@ -889,12 +890,17 @@ impl Store for PersistentStore {
         k: usize,
     ) -> Result<(Vec<(MemoryChunk, f32)>, Option<TieredTiming>)> {
         // Delegate to the specific method that returns timing info
-        let (results, timing, _) = PersistentStore::search_with_tier_info(self, tenant_id, query, k).await?;
+        let (results, timing, _) =
+            PersistentStore::search_with_tier_info(self, tenant_id, query, k).await?;
         Ok((results, timing))
     }
 
     fn get_tiered_stats(&self) -> Option<TieredStats> {
         PersistentStore::get_tiered_stats(self)
+    }
+
+    fn get_index_stats(&self, tenant_id: Option<&TenantId>) -> HashMap<String, IndexStats> {
+        PersistentStore::get_index_stats(self, tenant_id)
     }
 }
 
@@ -923,14 +929,22 @@ impl PersistentStore {
         // Serialize chunk for storage
         let payload = serde_json::to_vec(&chunk)
             .map_err(|e| MemdError::StorageError(format!("serialize chunk: {}", e)))?;
-        debug!(payload_len = payload.len(), "[ADD] step 3: serialized payload");
+        debug!(
+            payload_len = payload.len(),
+            "[ADD] step 3: serialized payload"
+        );
 
         // Write to WAL first (durability)
         debug!("[ADD] step 4: acquiring WAL lock");
         {
             let mut wal = tenant.wal.lock();
             debug!("[ADD] step 4b: acquired WAL lock, writing");
-            wal.append_add(&tenant_id_str, &chunk_id.to_string(), timestamp, payload.clone())?;
+            wal.append_add(
+                &tenant_id_str,
+                &chunk_id.to_string(),
+                timestamp,
+                payload.clone(),
+            )?;
         }
         debug!("[ADD] step 4c: WAL write complete");
 
@@ -976,8 +990,12 @@ impl PersistentStore {
         );
         if let Some(ref hybrid) = self.hybrid_searcher {
             debug!("[ADD] step 7b: calling hybrid.index_chunk");
-            warn!("[DEBUG] About to call hybrid.index_chunk for tenant={}, chunk_id={}, text_len={}",
-                  chunk.tenant_id, chunk_id, chunk.text.len());
+            warn!(
+                "[DEBUG] About to call hybrid.index_chunk for tenant={}, chunk_id={}, text_len={}",
+                chunk.tenant_id,
+                chunk_id,
+                chunk.text.len()
+            );
             if let Err(e) = hybrid
                 .index_chunk(&chunk.tenant_id, &chunk_id, &chunk.text)
                 .await
@@ -989,13 +1007,18 @@ impl PersistentStore {
                 );
                 // Don't fail the add - search will fall back to text matching
             } else {
-                warn!("[DEBUG] ✅ hybrid.index_chunk succeeded for chunk_id={}", chunk_id);
+                warn!(
+                    "[DEBUG] ✅ hybrid.index_chunk succeeded for chunk_id={}",
+                    chunk_id
+                );
             }
             debug!("[ADD] step 7c: hybrid indexing complete");
         } else if let Some(ref searcher) = self.dense_searcher {
             debug!("[ADD] step 7d: falling back to dense-only");
-            warn!("[DEBUG] About to call dense_searcher.index_chunk for tenant={}, chunk_id={}",
-                  chunk.tenant_id, chunk_id);
+            warn!(
+                "[DEBUG] About to call dense_searcher.index_chunk for tenant={}, chunk_id={}",
+                chunk.tenant_id, chunk_id
+            );
             // Fallback to dense-only if hybrid not available
             if let Err(e) = searcher
                 .index_chunk(&chunk.tenant_id, &chunk_id, &chunk.text)
@@ -1007,7 +1030,10 @@ impl PersistentStore {
                     "❌ [DEBUG] ERROR in dense_searcher.index_chunk - THIS IS WHY INDEXING FAILED"
                 );
             } else {
-                warn!("[DEBUG] ✅ dense_searcher.index_chunk succeeded for chunk_id={}", chunk_id);
+                warn!(
+                    "[DEBUG] ✅ dense_searcher.index_chunk succeeded for chunk_id={}",
+                    chunk_id
+                );
             }
         } else {
             warn!("⚠️ [DEBUG] CRITICAL: Neither hybrid_searcher nor dense_searcher exists - NO INDEXING HAPPENING!");
@@ -1031,7 +1057,11 @@ impl PersistentStore {
 }
 
 impl PersistentStore {
-    async fn get_chunk(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<Option<MemoryChunk>> {
+    async fn get_chunk(
+        &self,
+        tenant_id: &TenantId,
+        chunk_id: &ChunkId,
+    ) -> Result<Option<MemoryChunk>> {
         // Query metadata first
         let meta = self.metadata.get(tenant_id, chunk_id)?;
         let meta = match meta {
@@ -1125,8 +1155,7 @@ impl PersistentStore {
             if let Some(bytes) = tenant.read_from_active_segment(meta.segment_id, meta.ordinal)? {
                 if let Ok(chunk) = serde_json::from_slice::<MemoryChunk>(&bytes) {
                     // Basic text match
-                    if query.is_empty()
-                        || chunk.text.to_lowercase().contains(&query.to_lowercase())
+                    if query.is_empty() || chunk.text.to_lowercase().contains(&query.to_lowercase())
                     {
                         results.push(chunk);
                         if results.len() >= k {
@@ -1178,9 +1207,8 @@ impl PersistentStore {
         // Use hybrid search if available (combines dense + sparse)
         if let Some(ref hybrid) = self.hybrid_searcher {
             warn!("using HYBRID search path");
-            let (hybrid_results, timing) = hybrid
-                .search_with_timing(tenant_id, query, k, None)
-                .await?;
+            let (hybrid_results, timing) =
+                hybrid.search_with_timing(tenant_id, query, k, None).await?;
 
             let fetch_start = Instant::now();
             let mut results = Vec::with_capacity(hybrid_results.len());
@@ -1203,7 +1231,10 @@ impl PersistentStore {
             if timing.tiered.is_some() {
                 let tiered_timing = timing.tiered.as_ref().unwrap();
                 self.metrics.record_tiered_query(TieredQueryMetrics {
-                    source_tier: if tiered_timing.cache_lookup_ms > 0 && tiered_timing.hot_tier_ms == 0 && tiered_timing.warm_tier_ms == 0 {
+                    source_tier: if tiered_timing.cache_lookup_ms > 0
+                        && tiered_timing.hot_tier_ms == 0
+                        && tiered_timing.warm_tier_ms == 0
+                    {
                         "cache".to_string()
                     } else if tiered_timing.hot_tier_ms > 0 {
                         "hot".to_string()
@@ -1227,7 +1258,10 @@ impl PersistentStore {
             let (dense_results, embed_time, search_time) =
                 searcher.search_with_timing(tenant_id, query, k).await?;
 
-            warn!(dense_count = dense_results.len(), "dense search returned results");
+            warn!(
+                dense_count = dense_results.len(),
+                "dense search returned results"
+            );
 
             let fetch_start = Instant::now();
             let mut results = Vec::with_capacity(dense_results.len());
@@ -1353,6 +1387,12 @@ mod tests {
 
     fn make_chunk(tenant: &TenantId, text: &str) -> MemoryChunk {
         MemoryChunk::new(tenant.clone(), text, ChunkType::Doc)
+    }
+
+    fn make_long_document() -> String {
+        let sentence =
+            "This is a long test sentence that should trigger document chunking behavior. ";
+        sentence.repeat(40)
     }
 
     #[tokio::test]
@@ -1505,5 +1545,17 @@ mod tests {
         let stats = store.stats(&tenant).await.unwrap();
         assert_eq!(stats.total_chunks, 3);
         assert_eq!(stats.deleted_chunks, 1);
+    }
+
+    #[tokio::test]
+    async fn add_long_document_splits_into_multiple_chunks() {
+        let (store, _dir) = make_test_store();
+        let tenant = make_tenant();
+        let long_text = make_long_document();
+
+        let _chunk_id = store.add(make_chunk(&tenant, &long_text)).await.unwrap();
+
+        let stats = store.stats(&tenant).await.unwrap();
+        assert!(stats.total_chunks > 1);
     }
 }

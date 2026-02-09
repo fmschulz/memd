@@ -224,7 +224,8 @@ mod tests {
 
     #[test]
     fn success_response_serialization() {
-        let response = Response::success(Some(RequestId::Number(1)), serde_json::json!({"ok": true}));
+        let response =
+            Response::success(Some(RequestId::Number(1)), serde_json::json!({"ok": true}));
         let json = response.to_json().unwrap();
         assert!(json.contains("\"result\""));
         assert!(!json.contains("\"error\""));

@@ -551,7 +551,11 @@ mod tests {
     fn all_tools_have_descriptions() {
         let tools = get_all_tools();
         for tool in tools {
-            assert!(!tool.description.is_empty(), "Tool {} has empty description", tool.name);
+            assert!(
+                !tool.description.is_empty(),
+                "Tool {} has empty description",
+                tool.name
+            );
         }
     }
 
@@ -592,7 +596,12 @@ mod tests {
     #[test]
     fn search_schema_has_required_fields() {
         let tool = get_tool("memory.search").unwrap();
-        let required = tool.input_schema.get("required").unwrap().as_array().unwrap();
+        let required = tool
+            .input_schema
+            .get("required")
+            .unwrap()
+            .as_array()
+            .unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(required_strs.contains(&"query"));
         assert!(required_strs.contains(&"tenant_id"));
@@ -601,7 +610,12 @@ mod tests {
     #[test]
     fn add_schema_has_required_fields() {
         let tool = get_tool("memory.add").unwrap();
-        let required = tool.input_schema.get("required").unwrap().as_array().unwrap();
+        let required = tool
+            .input_schema
+            .get("required")
+            .unwrap()
+            .as_array()
+            .unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(required_strs.contains(&"tenant_id"));
         assert!(required_strs.contains(&"text"));
@@ -626,7 +640,12 @@ mod tests {
     #[test]
     fn code_find_definition_schema_has_required_fields() {
         let tool = get_tool("code.find_definition").unwrap();
-        let required = tool.input_schema.get("required").unwrap().as_array().unwrap();
+        let required = tool
+            .input_schema
+            .get("required")
+            .unwrap()
+            .as_array()
+            .unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(required_strs.contains(&"tenant_id"));
         assert!(required_strs.contains(&"name"));
@@ -644,7 +663,12 @@ mod tests {
     #[test]
     fn code_find_imports_schema_has_required_fields() {
         let tool = get_tool("code.find_imports").unwrap();
-        let required = tool.input_schema.get("required").unwrap().as_array().unwrap();
+        let required = tool
+            .input_schema
+            .get("required")
+            .unwrap()
+            .as_array()
+            .unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(required_strs.contains(&"tenant_id"));
         assert!(required_strs.contains(&"module"));
@@ -653,7 +677,12 @@ mod tests {
     #[test]
     fn debug_find_tool_calls_schema_has_required_fields() {
         let tool = get_tool("debug.find_tool_calls").unwrap();
-        let required = tool.input_schema.get("required").unwrap().as_array().unwrap();
+        let required = tool
+            .input_schema
+            .get("required")
+            .unwrap()
+            .as_array()
+            .unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(required_strs.contains(&"tenant_id"));
     }
@@ -673,7 +702,12 @@ mod tests {
     #[test]
     fn debug_find_errors_schema_has_required_fields() {
         let tool = get_tool("debug.find_errors").unwrap();
-        let required = tool.input_schema.get("required").unwrap().as_array().unwrap();
+        let required = tool
+            .input_schema
+            .get("required")
+            .unwrap()
+            .as_array()
+            .unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(required_strs.contains(&"tenant_id"));
     }

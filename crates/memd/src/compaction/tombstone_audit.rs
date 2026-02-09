@@ -141,7 +141,11 @@ impl TombstoneAudit {
                 passed: true,
             })
         } else {
-            Ok(AuditResult::failed(total_deleted, tombstone_leaks, paths_audited))
+            Ok(AuditResult::failed(
+                total_deleted,
+                tombstone_leaks,
+                paths_audited,
+            ))
         }
     }
 
@@ -179,7 +183,11 @@ impl TombstoneAudit {
         if tombstone_leaks.is_empty() {
             Ok(AuditResult::passed(paths_audited))
         } else {
-            Ok(AuditResult::failed(tombstone_leaks.len(), tombstone_leaks, paths_audited))
+            Ok(AuditResult::failed(
+                tombstone_leaks.len(),
+                tombstone_leaks,
+                paths_audited,
+            ))
         }
     }
 }
@@ -205,11 +213,7 @@ mod tests {
     #[test]
     fn audit_result_failed() {
         let chunk_id = ChunkId::new();
-        let result = AuditResult::failed(
-            5,
-            vec![chunk_id],
-            vec!["test_path".to_string()],
-        );
+        let result = AuditResult::failed(5, vec![chunk_id], vec!["test_path".to_string()]);
         assert!(!result.passed);
         assert_eq!(result.tombstone_leaks.len(), 1);
         assert_eq!(result.total_deleted, 5);

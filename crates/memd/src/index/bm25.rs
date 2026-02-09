@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
+use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING,
 };
@@ -21,6 +21,40 @@ use crate::types::{ChunkId, TenantId};
 
 /// Default memory budget for index writer (50MB).
 const DEFAULT_WRITER_MEMORY_BYTES: usize = 50_000_000;
+
+fn escape_query_text(query: &str) -> String {
+    const SPECIAL_CHARS: &str = "\\+-&|!(){}[]^\"~*?:/";
+    let mut escaped = String::with_capacity(query.len() + 8);
+    for ch in query.chars() {
+        if SPECIAL_CHARS.contains(ch) {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+fn parse_text_query(parser: &QueryParser, query: &str) -> Result<Box<dyn Query>> {
+    match parser.parse_query(query) {
+        Ok(parsed) => Ok(parsed),
+        Err(primary_err) => {
+            let escaped_query = escape_query_text(query);
+            if let Ok(parsed) = parser.parse_query(&escaped_query) {
+                return Ok(parsed);
+            }
+
+            let (lenient_query, parse_errors) = parser.parse_query_lenient(&escaped_query);
+            if parse_errors.is_empty() {
+                return Ok(lenient_query);
+            }
+
+            Err(MemdError::ValidationError(format!(
+                "parse query: {}; lenient parser also reported syntax issues",
+                primary_err
+            )))
+        }
+    }
+}
 
 /// BM25 sparse index using Tantivy.
 ///
@@ -160,12 +194,7 @@ impl Default for Bm25Index {
 }
 
 impl SparseIndex for Bm25Index {
-    fn insert(
-        &self,
-        tenant_id: &TenantId,
-        chunk_id: &ChunkId,
-        sentences: &[String],
-    ) -> Result<()> {
+    fn insert(&self, tenant_id: &TenantId, chunk_id: &ChunkId, sentences: &[String]) -> Result<()> {
         let mut writer = self
             .writer
             .lock()
@@ -210,17 +239,12 @@ impl SparseIndex for Bm25Index {
             Box::new(TermQuery::new(tenant_term, IndexRecordOption::Basic));
 
         // Build text query using tokenizer
-        let query_parser =
-            tantivy::query::QueryParser::for_index(&self.index, vec![self.text_field]);
-        let text_query = query_parser
-            .parse_query(query)
-            .map_err(|e| MemdError::ValidationError(format!("parse query: {}", e)))?;
+        let query_parser = QueryParser::for_index(&self.index, vec![self.text_field]);
+        let text_query = parse_text_query(&query_parser, query)?;
 
         // Combine with boolean query: must match tenant AND text
-        let combined_query = BooleanQuery::new(vec![
-            (Occur::Must, tenant_query),
-            (Occur::Must, text_query),
-        ]);
+        let combined_query =
+            BooleanQuery::new(vec![(Occur::Must, tenant_query), (Occur::Must, text_query)]);
 
         // Execute search
         let top_docs = searcher
@@ -230,9 +254,9 @@ impl SparseIndex for Bm25Index {
         // Convert results
         let mut results = Vec::with_capacity(top_docs.len());
         for (score, doc_address) in top_docs {
-            let doc = searcher.doc::<tantivy::TantivyDocument>(doc_address).map_err(|e| {
-                MemdError::StorageError(format!("retrieve doc: {}", e))
-            })?;
+            let doc = searcher
+                .doc::<tantivy::TantivyDocument>(doc_address)
+                .map_err(|e| MemdError::StorageError(format!("retrieve doc: {}", e)))?;
 
             // Extract fields
             let chunk_id_str = doc
@@ -353,9 +377,7 @@ mod tests {
         let tenant = create_test_tenant();
         let chunk_id = ChunkId::new();
 
-        let sentences = vec![
-            "The getUserById function returns a User object".to_string(),
-        ];
+        let sentences = vec!["The getUserById function returns a User object".to_string()];
 
         index.insert(&tenant, &chunk_id, &sentences).unwrap();
 
@@ -429,7 +451,10 @@ mod tests {
         // Search for oranges (sentence index 1)
         let results = index.search(&tenant, "oranges", 10).unwrap();
         assert!(!results.is_empty());
-        assert_eq!(results[0].sentence_idx, 1, "should match sentence at index 1");
+        assert_eq!(
+            results[0].sentence_idx, 1,
+            "should match sentence at index 1"
+        );
     }
 
     #[test]
@@ -438,9 +463,7 @@ mod tests {
         let tenant = create_test_tenant();
         let chunk_id = ChunkId::new();
 
-        let sentences = vec![
-            "snake_case_function and camelCaseMethod examples".to_string(),
-        ];
+        let sentences = vec!["snake_case_function and camelCaseMethod examples".to_string()];
 
         index.insert(&tenant, &chunk_id, &sentences).unwrap();
 
@@ -456,7 +479,10 @@ mod tests {
         assert!(!results.is_empty(), "should find 'camel' from camelCase");
 
         let results = index.search(&tenant, "method", 10).unwrap();
-        assert!(!results.is_empty(), "should find 'method' from camelCaseMethod");
+        assert!(
+            !results.is_empty(),
+            "should find 'method' from camelCaseMethod"
+        );
     }
 
     #[test]
@@ -514,5 +540,41 @@ mod tests {
 
         let results = index.search(&tenant, "Error", 10).unwrap();
         assert!(!results.is_empty(), "should find Error");
+    }
+
+    #[test]
+    fn test_natural_language_query_with_punctuation() {
+        let index = Bm25Index::new().unwrap();
+        let tenant = create_test_tenant();
+        let chunk_id = ChunkId::new();
+
+        let sentences = vec![
+            "Verify user identity with OAuth access tokens".to_string(),
+            "Identity verification checks token signatures".to_string(),
+        ];
+        index.insert(&tenant, &chunk_id, &sentences).unwrap();
+
+        let results = index.search(&tenant, "How do I verify a user's identity?", 10);
+        assert!(
+            results.is_ok(),
+            "punctuated natural-language query should not error"
+        );
+    }
+
+    #[test]
+    fn test_unbalanced_quote_query_does_not_error() {
+        let index = Bm25Index::new().unwrap();
+        let tenant = create_test_tenant();
+        let chunk_id = ChunkId::new();
+        index
+            .insert(
+                &tenant,
+                &chunk_id,
+                &["identity verification flow".to_string()],
+            )
+            .unwrap();
+
+        let results = index.search(&tenant, "\"identity verification", 10);
+        assert!(results.is_ok(), "unbalanced quote query should not error");
     }
 }

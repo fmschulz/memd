@@ -37,10 +37,7 @@ impl TenantId {
             ));
         }
 
-        if !id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
+        if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             return Err(MemdError::ValidationError(format!(
                 "tenant_id '{}' contains invalid characters (only alphanumeric and underscore allowed)",
                 id
@@ -357,11 +354,7 @@ impl MemoryChunk {
     /// Create a new MemoryChunk with the given parameters
     ///
     /// Generates a new ChunkId and sets timestamp_created to now.
-    pub fn new(
-        tenant_id: TenantId,
-        text: impl Into<String>,
-        chunk_type: ChunkType,
-    ) -> Self {
+    pub fn new(tenant_id: TenantId, text: impl Into<String>, chunk_type: ChunkType) -> Self {
         let text = text.into();
         let hash = Self::compute_hash(&text);
         let now_ms = std::time::SystemTime::now()

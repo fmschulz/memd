@@ -199,25 +199,46 @@ impl SymbolExtractor {
         let mut queries = HashMap::new();
 
         // Compile queries for each language
-        if let Ok(q) = Query::new(&SupportedLanguage::Rust.tree_sitter_language(), RUST_SYMBOLS_QUERY) {
+        if let Ok(q) = Query::new(
+            &SupportedLanguage::Rust.tree_sitter_language(),
+            RUST_SYMBOLS_QUERY,
+        ) {
             queries.insert(SupportedLanguage::Rust, q);
         }
-        if let Ok(q) = Query::new(&SupportedLanguage::Python.tree_sitter_language(), PYTHON_SYMBOLS_QUERY) {
+        if let Ok(q) = Query::new(
+            &SupportedLanguage::Python.tree_sitter_language(),
+            PYTHON_SYMBOLS_QUERY,
+        ) {
             queries.insert(SupportedLanguage::Python, q);
         }
-        if let Ok(q) = Query::new(&SupportedLanguage::TypeScript.tree_sitter_language(), TS_SYMBOLS_QUERY) {
+        if let Ok(q) = Query::new(
+            &SupportedLanguage::TypeScript.tree_sitter_language(),
+            TS_SYMBOLS_QUERY,
+        ) {
             queries.insert(SupportedLanguage::TypeScript, q);
         }
-        if let Ok(q) = Query::new(&SupportedLanguage::JavaScript.tree_sitter_language(), JS_SYMBOLS_QUERY) {
+        if let Ok(q) = Query::new(
+            &SupportedLanguage::JavaScript.tree_sitter_language(),
+            JS_SYMBOLS_QUERY,
+        ) {
             queries.insert(SupportedLanguage::JavaScript, q);
         }
-        if let Ok(q) = Query::new(&SupportedLanguage::Go.tree_sitter_language(), GO_SYMBOLS_QUERY) {
+        if let Ok(q) = Query::new(
+            &SupportedLanguage::Go.tree_sitter_language(),
+            GO_SYMBOLS_QUERY,
+        ) {
             queries.insert(SupportedLanguage::Go, q);
         }
-        if let Ok(q) = Query::new(&SupportedLanguage::Java.tree_sitter_language(), JAVA_SYMBOLS_QUERY) {
+        if let Ok(q) = Query::new(
+            &SupportedLanguage::Java.tree_sitter_language(),
+            JAVA_SYMBOLS_QUERY,
+        ) {
             queries.insert(SupportedLanguage::Java, q);
         }
-        if let Ok(q) = Query::new(&SupportedLanguage::Cpp.tree_sitter_language(), CPP_SYMBOLS_QUERY) {
+        if let Ok(q) = Query::new(
+            &SupportedLanguage::Cpp.tree_sitter_language(),
+            CPP_SYMBOLS_QUERY,
+        ) {
             queries.insert(SupportedLanguage::Cpp, q);
         }
 
@@ -325,25 +346,15 @@ fn extract_docstring(
     while let Some(prev_node) = prev {
         let node_kind = prev_node.kind();
         let is_doc_comment = match language {
-            SupportedLanguage::Rust => {
-                node_kind == "line_comment" || node_kind == "block_comment"
-            }
+            SupportedLanguage::Rust => node_kind == "line_comment" || node_kind == "block_comment",
             SupportedLanguage::Python => {
                 // Python docstrings are inside the function body
                 false
             }
-            SupportedLanguage::TypeScript | SupportedLanguage::JavaScript => {
-                node_kind == "comment"
-            }
-            SupportedLanguage::Go => {
-                node_kind == "comment"
-            }
-            SupportedLanguage::Java => {
-                node_kind == "line_comment" || node_kind == "block_comment"
-            }
-            SupportedLanguage::Cpp => {
-                node_kind == "comment"
-            }
+            SupportedLanguage::TypeScript | SupportedLanguage::JavaScript => node_kind == "comment",
+            SupportedLanguage::Go => node_kind == "comment",
+            SupportedLanguage::Java => node_kind == "line_comment" || node_kind == "block_comment",
+            SupportedLanguage::Cpp => node_kind == "comment",
         };
 
         if is_doc_comment {
@@ -500,7 +511,12 @@ fn extract_visibility(
             // Go: exported if name starts with uppercase
             if let Some(name_node) = node.child_by_field_name("name") {
                 if let Ok(name) = name_node.utf8_text(source) {
-                    if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                    if name
+                        .chars()
+                        .next()
+                        .map(|c| c.is_uppercase())
+                        .unwrap_or(false)
+                    {
                         return Some("public".to_string());
                     } else {
                         return Some("private".to_string());
@@ -639,9 +655,7 @@ fn find_parent_symbol(
             SupportedLanguage::Java => {
                 kind == "class_declaration" || kind == "interface_declaration"
             }
-            SupportedLanguage::Cpp => {
-                kind == "class_specifier" || kind == "struct_specifier"
-            }
+            SupportedLanguage::Cpp => kind == "class_specifier" || kind == "struct_specifier",
         };
 
         if is_container {
@@ -763,7 +777,8 @@ fn private_helper() {
         let result = parse_file(path, source).expect("parsing should succeed");
 
         let extractor = SymbolExtractor::new();
-        let symbols = extractor.extract(&result.tree, source.as_bytes(), result.language, "test.rs");
+        let symbols =
+            extractor.extract(&result.tree, source.as_bytes(), result.language, "test.rs");
 
         assert!(!symbols.is_empty());
 
@@ -797,7 +812,8 @@ class MyClass:
         let result = parse_file(path, source).expect("parsing should succeed");
 
         let extractor = SymbolExtractor::new();
-        let symbols = extractor.extract(&result.tree, source.as_bytes(), result.language, "test.py");
+        let symbols =
+            extractor.extract(&result.tree, source.as_bytes(), result.language, "test.py");
 
         // Find the class
         let my_class = symbols.iter().find(|s| s.name == "MyClass");
@@ -838,7 +854,8 @@ class UserService {
         let result = parse_file(path, source).expect("parsing should succeed");
 
         let extractor = SymbolExtractor::new();
-        let symbols = extractor.extract(&result.tree, source.as_bytes(), result.language, "test.ts");
+        let symbols =
+            extractor.extract(&result.tree, source.as_bytes(), result.language, "test.ts");
 
         // Find interface
         let user_interface = symbols.iter().find(|s| s.name == "User");
@@ -879,7 +896,8 @@ type User struct {
         let result = parse_file(path, source).expect("parsing should succeed");
 
         let extractor = SymbolExtractor::new();
-        let symbols = extractor.extract(&result.tree, source.as_bytes(), result.language, "test.go");
+        let symbols =
+            extractor.extract(&result.tree, source.as_bytes(), result.language, "test.go");
 
         // Find exported function
         let process_data = symbols.iter().find(|s| s.name == "ProcessData");
@@ -917,7 +935,12 @@ public class UserService {
         let result = parse_file(path, source).expect("parsing should succeed");
 
         let extractor = SymbolExtractor::new();
-        let symbols = extractor.extract(&result.tree, source.as_bytes(), result.language, "UserService.java");
+        let symbols = extractor.extract(
+            &result.tree,
+            source.as_bytes(),
+            result.language,
+            "UserService.java",
+        );
 
         // Find class
         let service = symbols.iter().find(|s| s.name == "UserService");
@@ -925,7 +948,9 @@ public class UserService {
         assert_eq!(service.unwrap().kind, SymbolKind::Class);
 
         // Find constructor and method
-        let constructor = symbols.iter().find(|s| s.name == "UserService" && s.kind == SymbolKind::Method);
+        let constructor = symbols
+            .iter()
+            .find(|s| s.name == "UserService" && s.kind == SymbolKind::Method);
         // The class and constructor have the same name, which is expected
         let get_name = symbols.iter().find(|s| s.name == "getName");
         assert!(get_name.is_some());
@@ -962,7 +987,9 @@ fn helper() {}
         assert!(count >= 2);
 
         // Verify symbols are in store
-        let found = store.find_symbols_by_file(&tenant_id, "src/main.rs").unwrap();
+        let found = store
+            .find_symbols_by_file(&tenant_id, "src/main.rs")
+            .unwrap();
         assert!(!found.is_empty());
         assert!(found.iter().any(|s| s.name == "main"));
         assert!(found.iter().any(|s| s.name == "helper"));
@@ -990,7 +1017,9 @@ fn helper() {}
             )
             .unwrap();
 
-        let found1 = store.find_symbols_by_file(&tenant_id, "src/lib.rs").unwrap();
+        let found1 = store
+            .find_symbols_by_file(&tenant_id, "src/lib.rs")
+            .unwrap();
         assert_eq!(found1.len(), 2);
         assert!(found1.iter().any(|s| s.name == "foo"));
         assert!(found1.iter().any(|s| s.name == "bar"));
@@ -1009,7 +1038,9 @@ fn helper() {}
             )
             .unwrap();
 
-        let found2 = store.find_symbols_by_file(&tenant_id, "src/lib.rs").unwrap();
+        let found2 = store
+            .find_symbols_by_file(&tenant_id, "src/lib.rs")
+            .unwrap();
         assert_eq!(found2.len(), 3);
         assert!(found2.iter().any(|s| s.name == "baz"));
         assert!(found2.iter().any(|s| s.name == "qux"));

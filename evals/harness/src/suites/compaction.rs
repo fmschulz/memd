@@ -183,10 +183,18 @@ pub fn run_compaction_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<T
     results.push(run_f3_hnsw_rebuild(memd_path, embedding_model));
 
     // F4: Results invariant
-    results.push(run_f4_results_invariant(memd_path, &config, embedding_model));
+    results.push(run_f4_results_invariant(
+        memd_path,
+        &config,
+        embedding_model,
+    ));
 
     // F5: Latency during compaction
-    results.push(run_f5_latency_during_compaction(memd_path, &config, embedding_model));
+    results.push(run_f5_latency_during_compaction(
+        memd_path,
+        &config,
+        embedding_model,
+    ));
 
     // F6: Force compaction
     results.push(run_f6_force_compaction(memd_path, embedding_model));
@@ -219,7 +227,9 @@ fn run_f1_tombstone_filtering(memd_path: &PathBuf, embedding_model: &str) -> Tes
         ],
     ) {
         Ok(c) => c,
-        Err(e) => return TestResult::fail_with_duration(name, &format!("start memd: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(name, &format!("start memd: {}", e), start)
+        }
     };
 
     if let Err(e) = client.initialize() {
@@ -229,7 +239,10 @@ fn run_f1_tombstone_filtering(memd_path: &PathBuf, embedding_model: &str) -> Tes
     // Add 10 chunks
     let mut chunk_ids = Vec::new();
     for i in 0..10 {
-        let text = format!("Test document number {} with unique content for filtering test", i);
+        let text = format!(
+            "Test document number {} with unique content for filtering test",
+            i
+        );
         let params = serde_json::json!({
             "tenant_id": "eval_compaction",
             "text": text,
@@ -248,7 +261,11 @@ fn run_f1_tombstone_filtering(memd_path: &PathBuf, embedding_model: &str) -> Tes
                 }
             }
             Err(e) => {
-                return TestResult::fail_with_duration(name, &format!("add chunk {}: {}", i, e), start);
+                return TestResult::fail_with_duration(
+                    name,
+                    &format!("add chunk {}: {}", i, e),
+                    start,
+                );
             }
         }
     }
@@ -322,7 +339,9 @@ fn run_f2_segment_merge(memd_path: &PathBuf, embedding_model: &str) -> TestResul
         ],
     ) {
         Ok(c) => c,
-        Err(e) => return TestResult::fail_with_duration(name, &format!("start memd: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(name, &format!("start memd: {}", e), start)
+        }
     };
 
     if let Err(e) = client.initialize() {
@@ -331,7 +350,10 @@ fn run_f2_segment_merge(memd_path: &PathBuf, embedding_model: &str) -> TestResul
 
     // Add chunks to generate segments
     for i in 0..20 {
-        let text = format!("Segment merge test document {} with content for indexing", i);
+        let text = format!(
+            "Segment merge test document {} with content for indexing",
+            i
+        );
         let params = serde_json::json!({
             "tenant_id": "eval_compaction",
             "text": text,
@@ -344,9 +366,14 @@ fn run_f2_segment_merge(memd_path: &PathBuf, embedding_model: &str) -> TestResul
     }
 
     // Get stats before compaction
-    let stats_before = match client.call_tool("memory.stats", serde_json::json!({"tenant_id": "eval_compaction"})) {
+    let stats_before = match client.call_tool(
+        "memory.stats",
+        serde_json::json!({"tenant_id": "eval_compaction"}),
+    ) {
         Ok(r) => parse_compaction_stats(&r).unwrap_or_default(),
-        Err(e) => return TestResult::fail_with_duration(name, &format!("stats before: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(name, &format!("stats before: {}", e), start)
+        }
     };
 
     // Run compaction with force=true
@@ -360,9 +387,14 @@ fn run_f2_segment_merge(memd_path: &PathBuf, embedding_model: &str) -> TestResul
     }
 
     // Get stats after compaction
-    let stats_after = match client.call_tool("memory.stats", serde_json::json!({"tenant_id": "eval_compaction"})) {
+    let stats_after = match client.call_tool(
+        "memory.stats",
+        serde_json::json!({"tenant_id": "eval_compaction"}),
+    ) {
         Ok(r) => parse_compaction_stats(&r).unwrap_or_default(),
-        Err(e) => return TestResult::fail_with_duration(name, &format!("stats after: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(name, &format!("stats after: {}", e), start)
+        }
     };
 
     // Segment count should decrease or stay same (already minimal)
@@ -404,7 +436,9 @@ fn run_f3_hnsw_rebuild(memd_path: &PathBuf, embedding_model: &str) -> TestResult
         ],
     ) {
         Ok(c) => c,
-        Err(e) => return TestResult::fail_with_duration(name, &format!("start memd: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(name, &format!("start memd: {}", e), start)
+        }
     };
 
     if let Err(e) = client.initialize() {
@@ -450,9 +484,14 @@ fn run_f3_hnsw_rebuild(memd_path: &PathBuf, embedding_model: &str) -> TestResult
     }
 
     // Get stats before compaction
-    let stats_before = match client.call_tool("memory.stats", serde_json::json!({"tenant_id": "eval_compaction"})) {
+    let stats_before = match client.call_tool(
+        "memory.stats",
+        serde_json::json!({"tenant_id": "eval_compaction"}),
+    ) {
         Ok(r) => parse_compaction_stats(&r).unwrap_or_default(),
-        Err(e) => return TestResult::fail_with_duration(name, &format!("stats before: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(name, &format!("stats before: {}", e), start)
+        }
     };
 
     // Run compaction with force=true
@@ -466,9 +505,14 @@ fn run_f3_hnsw_rebuild(memd_path: &PathBuf, embedding_model: &str) -> TestResult
     }
 
     // Get stats after compaction
-    let stats_after = match client.call_tool("memory.stats", serde_json::json!({"tenant_id": "eval_compaction"})) {
+    let stats_after = match client.call_tool(
+        "memory.stats",
+        serde_json::json!({"tenant_id": "eval_compaction"}),
+    ) {
         Ok(r) => parse_compaction_stats(&r).unwrap_or_default(),
-        Err(e) => return TestResult::fail_with_duration(name, &format!("stats after: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(name, &format!("stats after: {}", e), start)
+        }
     };
 
     // HNSW staleness should decrease or stay same
@@ -525,7 +569,9 @@ fn run_f4_results_invariant(
         ],
     ) {
         Ok(c) => c,
-        Err(e) => return TestResult::fail_with_duration(name, &format!("start memd: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(name, &format!("start memd: {}", e), start)
+        }
     };
 
     if let Err(e) = client.initialize() {
@@ -534,24 +580,42 @@ fn run_f4_results_invariant(
 
     // Use dataset or inline data
     let (chunks_to_add, chunks_to_delete, test_query) = if let Some(ref ds) = dataset {
-        let keep: Vec<_> = ds.chunks.iter()
+        let keep: Vec<_> = ds
+            .chunks
+            .iter()
             .filter(|c| !ds.delete_tags.iter().any(|tag| c.tags.contains(tag)))
             .map(|c| (c.id.clone(), c.text.clone(), c.chunk_type.clone()))
             .collect();
-        let delete: Vec<_> = ds.chunks.iter()
+        let delete: Vec<_> = ds
+            .chunks
+            .iter()
             .filter(|c| ds.delete_tags.iter().any(|tag| c.tags.contains(tag)))
             .map(|c| c.id.clone())
             .collect();
-        let query = ds.queries.first()
+        let query = ds
+            .queries
+            .first()
             .map(|q| q.query.clone())
             .unwrap_or_else(|| "search query".to_string());
         (keep, delete, query)
     } else {
         // Inline test data
         let keep = vec![
-            ("k1".to_string(), "The quick brown fox jumps over the lazy dog".to_string(), "doc".to_string()),
-            ("k2".to_string(), "Vector search using cosine distance".to_string(), "doc".to_string()),
-            ("k3".to_string(), "Memory management strategies".to_string(), "doc".to_string()),
+            (
+                "k1".to_string(),
+                "The quick brown fox jumps over the lazy dog".to_string(),
+                "doc".to_string(),
+            ),
+            (
+                "k2".to_string(),
+                "Vector search using cosine distance".to_string(),
+                "doc".to_string(),
+            ),
+            (
+                "k3".to_string(),
+                "Memory management strategies".to_string(),
+                "doc".to_string(),
+            ),
         ];
         let delete = vec!["d1".to_string(), "d2".to_string()];
         let query = "fox dog lazy".to_string();
@@ -607,7 +671,11 @@ fn run_f4_results_invariant(
                 }
             }
             Err(e) => {
-                return TestResult::fail_with_duration(name, &format!("add delete chunk: {}", e), start);
+                return TestResult::fail_with_duration(
+                    name,
+                    &format!("add delete chunk: {}", e),
+                    start,
+                );
             }
         }
     }
@@ -633,7 +701,9 @@ fn run_f4_results_invariant(
 
     let response_before = match client.call_tool("memory.search", params.clone()) {
         Ok(r) => r,
-        Err(e) => return TestResult::fail_with_duration(name, &format!("search before: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(name, &format!("search before: {}", e), start)
+        }
     };
 
     let ids_before = extract_chunk_ids(&response_before);
@@ -651,7 +721,9 @@ fn run_f4_results_invariant(
     // Search AFTER compaction
     let response_after = match client.call_tool("memory.search", params) {
         Ok(r) => r,
-        Err(e) => return TestResult::fail_with_duration(name, &format!("search after: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(name, &format!("search after: {}", e), start)
+        }
     };
 
     let ids_after = extract_chunk_ids(&response_after);
@@ -660,7 +732,8 @@ fn run_f4_results_invariant(
     if ids_before != ids_after {
         // Check if the difference is only in deleted chunks (acceptable)
         let deleted_set: HashSet<String> = delete_chunk_ids.iter().cloned().collect();
-        let before_minus_deleted: HashSet<_> = ids_before.difference(&deleted_set).cloned().collect();
+        let before_minus_deleted: HashSet<_> =
+            ids_before.difference(&deleted_set).cloned().collect();
         let after_minus_deleted: HashSet<_> = ids_after.difference(&deleted_set).cloned().collect();
 
         if before_minus_deleted != after_minus_deleted {
@@ -706,7 +779,9 @@ fn run_f5_latency_during_compaction(
         ],
     ) {
         Ok(c) => c,
-        Err(e) => return TestResult::fail_with_duration(name, &format!("start memd: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(name, &format!("start memd: {}", e), start)
+        }
     };
 
     if let Err(e) = client.initialize() {
@@ -781,7 +856,10 @@ fn run_f5_latency_during_compaction(
     if p99 > config.max_p99_during_compaction_ms {
         return TestResult::fail_with_duration(
             name,
-            &format!("p99 {}ms exceeds threshold {}ms", p99, config.max_p99_during_compaction_ms),
+            &format!(
+                "p99 {}ms exceeds threshold {}ms",
+                p99, config.max_p99_during_compaction_ms
+            ),
             start,
         );
     }
@@ -809,7 +887,9 @@ fn run_f6_force_compaction(memd_path: &PathBuf, embedding_model: &str) -> TestRe
         ],
     ) {
         Ok(c) => c,
-        Err(e) => return TestResult::fail_with_duration(name, &format!("start memd: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(name, &format!("start memd: {}", e), start)
+        }
     };
 
     if let Err(e) = client.initialize() {
@@ -831,7 +911,10 @@ fn run_f6_force_compaction(memd_path: &PathBuf, embedding_model: &str) -> TestRe
     }
 
     // Check that needs_compaction is false (below thresholds)
-    let stats = match client.call_tool("memory.stats", serde_json::json!({"tenant_id": "eval_compaction"})) {
+    let stats = match client.call_tool(
+        "memory.stats",
+        serde_json::json!({"tenant_id": "eval_compaction"}),
+    ) {
         Ok(r) => parse_compaction_stats(&r).unwrap_or_default(),
         Err(e) => return TestResult::fail_with_duration(name, &format!("stats: {}", e), start),
     };
@@ -852,7 +935,9 @@ fn run_f6_force_compaction(memd_path: &PathBuf, embedding_model: &str) -> TestRe
 
     let response_force = match client.call_tool("memory.compact", params_force) {
         Ok(r) => r,
-        Err(e) => return TestResult::fail_with_duration(name, &format!("compact force: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(name, &format!("compact force: {}", e), start)
+        }
     };
 
     // Verify force worked by checking response

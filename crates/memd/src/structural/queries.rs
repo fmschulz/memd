@@ -220,8 +220,9 @@ impl SymbolQueryService {
                 visited.insert(edge.caller_symbol_id);
 
                 // Look up caller symbol to get name and kind
-                let caller_symbols =
-                    self.store.find_symbols_by_name(tenant_id, &edge.callee_name);
+                let caller_symbols = self
+                    .store
+                    .find_symbols_by_name(tenant_id, &edge.callee_name);
 
                 // Get caller info from symbol if available
                 let (caller_name, caller_kind) = if let Ok(symbols) = &caller_symbols {
@@ -229,10 +230,16 @@ impl SymbolQueryService {
                         (sym.name.clone(), sym.kind)
                     } else {
                         // Fallback: use edge info
-                        (format!("caller_{}", edge.caller_symbol_id), SymbolKind::Function)
+                        (
+                            format!("caller_{}", edge.caller_symbol_id),
+                            SymbolKind::Function,
+                        )
                     }
                 } else {
-                    (format!("caller_{}", edge.caller_symbol_id), SymbolKind::Function)
+                    (
+                        format!("caller_{}", edge.caller_symbol_id),
+                        SymbolKind::Function,
+                    )
                 };
 
                 // Filter by project_id if specified
@@ -465,7 +472,9 @@ impl TraceQueryService {
         }
 
         // Use standard query
-        let traces = self.store.find_tool_traces(tenant_id, tool_name, time_range)?;
+        let traces = self
+            .store
+            .find_tool_traces(tenant_id, tool_name, time_range)?;
 
         let results: Vec<ToolCallResult> = traces
             .into_iter()
@@ -514,7 +523,9 @@ impl TraceQueryService {
     ) -> Result<Vec<ErrorResult>> {
         // If function_name filter is specified, use function-specific query
         if let Some(func_name) = function_name {
-            let traces = self.store.find_stack_traces_by_function(tenant_id, func_name)?;
+            let traces = self
+                .store
+                .find_stack_traces_by_function(tenant_id, func_name)?;
 
             let mut results = Vec::new();
             for trace in traces.into_iter().take(limit) {
@@ -550,7 +561,9 @@ impl TraceQueryService {
         }
 
         // Use standard query
-        let traces = self.store.find_stack_traces(tenant_id, error_signature, time_range)?;
+        let traces = self
+            .store
+            .find_stack_traces(tenant_id, error_signature, time_range)?;
 
         let mut results = Vec::new();
         for trace in traces.into_iter().take(limit) {
@@ -576,7 +589,9 @@ impl TraceQueryService {
         tenant_id: &TenantId,
         function_name: &str,
     ) -> Result<Vec<ErrorResult>> {
-        let traces = self.store.find_stack_traces_by_function(tenant_id, function_name)?;
+        let traces = self
+            .store
+            .find_stack_traces_by_function(tenant_id, function_name)?;
 
         let mut results = Vec::new();
         for trace in traces {
@@ -600,7 +615,10 @@ impl TraceQueryService {
         let mut groups: HashMap<String, (u64, i64, i64)> = HashMap::new();
 
         for trace in traces {
-            let entry = groups.entry(trace.error_signature.clone()).or_insert((0, i64::MAX, i64::MIN));
+            let entry =
+                groups
+                    .entry(trace.error_signature.clone())
+                    .or_insert((0, i64::MAX, i64::MIN));
             entry.0 += 1;
             entry.1 = entry.1.min(trace.timestamp_ms);
             entry.2 = entry.2.max(trace.timestamp_ms);
@@ -632,7 +650,9 @@ impl TraceQueryService {
             timestamp_ms: trace.timestamp_ms,
             timestamp_formatted: format_timestamp(trace.timestamp_ms),
             input: trace.input_json.and_then(|s| serde_json::from_str(&s).ok()),
-            output: trace.output_json.and_then(|s| serde_json::from_str(&s).ok()),
+            output: trace
+                .output_json
+                .and_then(|s| serde_json::from_str(&s).ok()),
             error: trace.error_json.and_then(|s| serde_json::from_str(&s).ok()),
             duration_ms: trace.duration_ms,
             session_id: trace.session_id,
@@ -765,11 +785,9 @@ fn parse_rfc3339(s: &str) -> Option<i64> {
 
     // Convert to Unix timestamp
     let days = ymd_to_days(year, month, day)?;
-    let secs = (days as i64) * 86400
-        + (hour as i64) * 3600
-        + (minute as i64) * 60
-        + (second as i64)
-        - (tz_offset_mins as i64) * 60;
+    let secs =
+        (days as i64) * 86400 + (hour as i64) * 3600 + (minute as i64) * 60 + (second as i64)
+            - (tz_offset_mins as i64) * 60;
     let ms = secs * 1000 + (millis as i64);
 
     Some(ms)
@@ -878,7 +896,11 @@ mod tests {
 
         // Insert a symbol
         store
-            .insert_symbol(&create_test_symbol("process_data", SymbolKind::Function, "src/lib.rs"))
+            .insert_symbol(&create_test_symbol(
+                "process_data",
+                SymbolKind::Function,
+                "src/lib.rs",
+            ))
             .unwrap();
 
         // Find it
@@ -900,10 +922,18 @@ mod tests {
 
         // Insert multiple symbols with same name but different kinds
         store
-            .insert_symbol(&create_test_symbol("Handler", SymbolKind::Class, "src/a.rs"))
+            .insert_symbol(&create_test_symbol(
+                "Handler",
+                SymbolKind::Class,
+                "src/a.rs",
+            ))
             .unwrap();
         store
-            .insert_symbol(&create_test_symbol("Handler", SymbolKind::Function, "src/b.rs"))
+            .insert_symbol(&create_test_symbol(
+                "Handler",
+                SymbolKind::Function,
+                "src/b.rs",
+            ))
             .unwrap();
         store
             .insert_symbol(&create_test_symbol("Handler", SymbolKind::Type, "src/c.rs"))
@@ -928,7 +958,11 @@ mod tests {
 
         // Insert caller symbol
         let caller_id = store
-            .insert_symbol(&create_test_symbol("main", SymbolKind::Function, "src/main.rs"))
+            .insert_symbol(&create_test_symbol(
+                "main",
+                SymbolKind::Function,
+                "src/main.rs",
+            ))
             .unwrap();
 
         // Insert call edge
@@ -963,10 +997,18 @@ mod tests {
 
         // Insert symbols for chain: entry -> middleware -> handler
         let entry_id = store
-            .insert_symbol(&create_test_symbol("entry", SymbolKind::Function, "src/main.rs"))
+            .insert_symbol(&create_test_symbol(
+                "entry",
+                SymbolKind::Function,
+                "src/main.rs",
+            ))
             .unwrap();
         let middleware_id = store
-            .insert_symbol(&create_test_symbol("middleware", SymbolKind::Function, "src/mid.rs"))
+            .insert_symbol(&create_test_symbol(
+                "middleware",
+                SymbolKind::Function,
+                "src/mid.rs",
+            ))
             .unwrap();
 
         // entry calls middleware
@@ -1058,12 +1100,20 @@ mod tests {
 
         // Insert function definition
         store
-            .insert_symbol(&create_test_symbol("process", SymbolKind::Function, "src/lib.rs"))
+            .insert_symbol(&create_test_symbol(
+                "process",
+                SymbolKind::Function,
+                "src/lib.rs",
+            ))
             .unwrap();
 
         // Insert caller
         let caller_id = store
-            .insert_symbol(&create_test_symbol("main", SymbolKind::Function, "src/main.rs"))
+            .insert_symbol(&create_test_symbol(
+                "main",
+                SymbolKind::Function,
+                "src/main.rs",
+            ))
             .unwrap();
 
         // Insert call edge
@@ -1161,7 +1211,13 @@ mod tests {
 
         // Find in range 1500-2500
         let results = service
-            .find_tool_calls(&tenant, None, Some(TimeRange::between(1500, 2500)), None, 100)
+            .find_tool_calls(
+                &tenant,
+                None,
+                Some(TimeRange::between(1500, 2500)),
+                None,
+                100,
+            )
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].timestamp_ms, 2000);

@@ -25,6 +25,40 @@ pub struct Sentence {
 #[derive(Debug, Clone, Default)]
 pub struct SentenceSplitter;
 
+#[derive(Debug, Clone, Copy)]
+struct LineSlice<'a> {
+    text: &'a str,
+    start: usize,
+}
+
+fn split_lines_with_offsets(text: &str) -> Vec<LineSlice<'_>> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+    let mut line_start = 0usize;
+
+    for (idx, ch) in text.char_indices() {
+        if ch == '\n' {
+            lines.push(LineSlice {
+                text: &text[line_start..idx],
+                start: line_start,
+            });
+            line_start = idx + 1;
+        }
+    }
+
+    if line_start < text.len() {
+        lines.push(LineSlice {
+            text: &text[line_start..],
+            start: line_start,
+        });
+    }
+
+    lines
+}
+
 impl SentenceSplitter {
     /// Create a new sentence splitter.
     pub fn new() -> Self {
@@ -37,10 +71,7 @@ impl SentenceSplitter {
     /// on natural sentence boundaries.
     pub fn split(&self, text: &str) -> Vec<Sentence> {
         let mut sentences = Vec::new();
-        let mut current_offset = 0;
-
-        // First, try to identify code blocks (consecutive lines with code indicators)
-        let lines: Vec<&str> = text.lines().collect();
+        let lines = split_lines_with_offsets(text);
 
         if lines.is_empty() {
             return sentences;
@@ -50,28 +81,18 @@ impl SentenceSplitter {
         let mut i = 0;
         while i < lines.len() {
             let line = lines[i];
-            let line_start = text[current_offset..]
-                .find(line)
-                .map(|pos| current_offset + pos)
-                .unwrap_or(current_offset);
 
-            if is_code_line(line) {
+            if is_code_line(line.text) {
                 // Start of a code block - collect consecutive code lines
-                let block_start = line_start;
-                let mut block_end = line_start + line.len();
-                let mut code_lines = vec![line];
+                let block_start = line.start;
+                let mut code_lines = vec![line.text];
 
                 i += 1;
                 while i < lines.len() {
                     let next_line = lines[i];
-                    if is_code_line(next_line) || next_line.trim().is_empty() {
+                    if is_code_line(next_line.text) || next_line.text.trim().is_empty() {
                         // Include empty lines within code blocks
-                        code_lines.push(next_line);
-                        let next_start = text[block_end..]
-                            .find(next_line)
-                            .map(|pos| block_end + pos)
-                            .unwrap_or(block_end);
-                        block_end = next_start + next_line.len();
+                        code_lines.push(next_line.text);
                         i += 1;
                     } else {
                         break;
@@ -91,29 +112,29 @@ impl SentenceSplitter {
                         is_code: true,
                     });
                 }
-
-                current_offset = block_end;
             } else {
                 // Prose line - use unicode sentence segmentation
-                let prose_sentences = line.unicode_sentences().collect::<Vec<_>>();
+                let prose_sentences = line.text.unicode_sentences().collect::<Vec<_>>();
+                let mut cursor = 0usize;
 
                 for sent in prose_sentences {
                     let sent_trimmed = sent.trim();
+                    let relative_start = line.text[cursor..]
+                        .find(sent)
+                        .map(|pos| cursor + pos)
+                        .unwrap_or(cursor);
+                    cursor = relative_start + sent.len();
+
                     if !sent_trimmed.is_empty() {
-                        let sent_offset = text[line_start..]
-                            .find(sent)
-                            .map(|pos| line_start + pos)
-                            .unwrap_or(line_start);
+                        let leading_ws = sent.len() - sent.trim_start().len();
 
                         sentences.push(Sentence {
                             text: sent_trimmed.to_string(),
-                            offset: sent_offset,
+                            offset: line.start + relative_start + leading_ws,
                             is_code: false,
                         });
                     }
                 }
-
-                current_offset = line_start + line.len();
                 i += 1;
             }
         }
@@ -148,7 +169,6 @@ fn is_code_line(line: &str) -> bool {
         // Function syntax
         "fn ",
         "func ",
-        "function ",
         "def ",
         "async fn",
         "pub fn",
@@ -194,6 +214,12 @@ fn is_code_line(line: &str) -> bool {
         if trimmed.contains(pattern) {
             return true;
         }
+    }
+
+    // JavaScript function declarations, but avoid prose false-positives like
+    // "This function parses JSON data."
+    if trimmed.starts_with("function ") || trimmed.starts_with("async function ") {
+        return true;
     }
 
     // Check for indentation with code-like content (4+ spaces or tab)
@@ -316,5 +342,17 @@ pub fn process(data: &str) -> Result<String, Error> {
         assert_eq!(sentences.len(), 2);
         // First sentence starts at 0
         assert_eq!(sentences[0].offset, 0);
+    }
+
+    #[test]
+    fn test_repeated_lines_have_stable_offsets() {
+        let splitter = SentenceSplitter::new();
+        let text = "repeat.\nrepeat.\nrepeat.";
+        let sentences = splitter.split(text);
+
+        assert_eq!(sentences.len(), 3);
+        assert_eq!(sentences[0].offset, 0);
+        assert_eq!(sentences[1].offset, 8);
+        assert_eq!(sentences[2].offset, 16);
     }
 }
