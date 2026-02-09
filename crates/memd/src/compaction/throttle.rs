@@ -146,7 +146,10 @@ mod tests {
         throttle.delay_sync();
         let elapsed = start.elapsed();
 
-        assert!(elapsed.as_millis() < 10, "Disabled throttle should not delay");
+        assert!(
+            elapsed.as_millis() < 10,
+            "Disabled throttle should not delay"
+        );
     }
 
     #[test]
@@ -178,9 +181,8 @@ mod tests {
         let throttle = Throttle::new(config);
 
         let items: Vec<i32> = (0..10).collect();
-        let results = throttle.process_batched(items, |batch| {
-            batch.iter().map(|x| x * 2).collect()
-        });
+        let results =
+            throttle.process_batched(items, |batch| batch.iter().map(|x| x * 2).collect());
 
         assert_eq!(results, vec![0, 2, 4, 6, 8, 10, 12, 14, 16, 18]);
     }
@@ -189,9 +191,8 @@ mod tests {
     fn test_process_batched_empty() {
         let throttle = Throttle::default();
         let items: Vec<i32> = vec![];
-        let results = throttle.process_batched(items, |batch| {
-            batch.iter().map(|x| x * 2).collect()
-        });
+        let results =
+            throttle.process_batched(items, |batch| batch.iter().map(|x| x * 2).collect());
 
         assert!(results.is_empty());
     }

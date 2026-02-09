@@ -366,7 +366,9 @@ mod tests {
         normalize(&mut embedding);
 
         // Promote chunk
-        let added = tier.promote(chunk_id.clone(), embedding.clone(), tenant_id, 0.5).unwrap();
+        let added = tier
+            .promote(chunk_id.clone(), embedding.clone(), tenant_id, 0.5)
+            .unwrap();
         assert!(added);
         assert_eq!(tier.len(), 1);
         assert!(tier.contains(&chunk_id));
@@ -389,11 +391,15 @@ mod tests {
         normalize(&mut embedding);
 
         // First promote succeeds
-        let added1 = tier.promote(chunk_id.clone(), embedding.clone(), tenant_id.clone(), 0.5).unwrap();
+        let added1 = tier
+            .promote(chunk_id.clone(), embedding.clone(), tenant_id.clone(), 0.5)
+            .unwrap();
         assert!(added1);
 
         // Second promote returns false (already present)
-        let added2 = tier.promote(chunk_id.clone(), embedding.clone(), tenant_id, 0.5).unwrap();
+        let added2 = tier
+            .promote(chunk_id.clone(), embedding.clone(), tenant_id, 0.5)
+            .unwrap();
         assert!(!added2);
         assert_eq!(tier.len(), 1);
     }
@@ -408,7 +414,8 @@ mod tests {
         let mut embedding = vec![1.0, 0.0, 0.0, 0.0];
         normalize(&mut embedding);
 
-        tier.promote(chunk_id.clone(), embedding.clone(), tenant_id, 0.5).unwrap();
+        tier.promote(chunk_id.clone(), embedding.clone(), tenant_id, 0.5)
+            .unwrap();
         assert_eq!(tier.len(), 1);
 
         // Demote
@@ -434,7 +441,8 @@ mod tests {
 
         let v0 = tier.version();
 
-        tier.promote(chunk_id.clone(), embedding, tenant_id, 0.5).unwrap();
+        tier.promote(chunk_id.clone(), embedding, tenant_id, 0.5)
+            .unwrap();
         let v1 = tier.version();
         assert!(v1 > v0, "Version should increment on promote");
 
@@ -456,7 +464,8 @@ mod tests {
             let chunk_id = ChunkId::new();
             let mut embedding = vec![i as f32, (i + 1) as f32, (i + 2) as f32, (i + 3) as f32];
             normalize(&mut embedding);
-            tier.promote(chunk_id, embedding, tenant_id.clone(), i as f32 * 0.1).unwrap();
+            tier.promote(chunk_id, embedding, tenant_id.clone(), i as f32 * 0.1)
+                .unwrap();
         }
 
         assert_eq!(tier.len(), 5);
@@ -480,7 +489,8 @@ mod tests {
             let mut embedding = vec![i as f32, (i + 1) as f32, (i + 2) as f32, (i + 3) as f32];
             normalize(&mut embedding);
             let score = (i + 1) as f32 * 0.2; // 0.2, 0.4, 0.6
-            tier.promote(chunk_id, embedding, tenant_id.clone(), score).unwrap();
+            tier.promote(chunk_id, embedding, tenant_id.clone(), score)
+                .unwrap();
         }
 
         let stats = tier.get_stats();
@@ -500,7 +510,8 @@ mod tests {
         let mut embedding = vec![1.0, 0.0, 0.0, 0.0];
         normalize(&mut embedding);
 
-        tier.promote(chunk_id.clone(), embedding.clone(), tenant_id, 0.5).unwrap();
+        tier.promote(chunk_id.clone(), embedding.clone(), tenant_id, 0.5)
+            .unwrap();
 
         let (results, duration) = tier.search_with_timing(&embedding, 1).unwrap();
         assert_eq!(results.len(), 1);

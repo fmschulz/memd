@@ -167,10 +167,16 @@ fn test_hnsw_corrupted_cache_recovery() {
 
     // Load should succeed but with empty cache (corrupted file deleted)
     let loaded = HnswIndex::load(&index_path, config).unwrap();
-    assert!(loaded.cache_is_empty(), "Cache should be empty after corruption");
+    assert!(
+        loaded.cache_is_empty(),
+        "Cache should be empty after corruption"
+    );
 
     // Cache file should be deleted
-    assert!(!cache_path.exists(), "Corrupted cache file should be deleted");
+    assert!(
+        !cache_path.exists(),
+        "Corrupted cache file should be deleted"
+    );
 }
 
 #[test]
@@ -201,7 +207,10 @@ fn test_hnsw_dimension_mismatch() {
     let loaded = HnswIndex::load(&index_path, wrong_config).unwrap();
 
     // Should load but with empty cache (dimension mismatch)
-    assert!(loaded.cache_is_empty(), "Cache should be empty due to dimension mismatch");
+    assert!(
+        loaded.cache_is_empty(),
+        "Cache should be empty due to dimension mismatch"
+    );
 }
 
 #[test]

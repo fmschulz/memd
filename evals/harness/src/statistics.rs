@@ -68,9 +68,7 @@ pub fn bootstrap_ci(values: &[f64], alpha: f64, iterations: usize) -> MetricsWit
 
     for _ in 0..iterations {
         // Resample with replacement
-        let resample: Vec<f64> = (0..n)
-            .map(|_| *values.choose(&mut rng).unwrap())
-            .collect();
+        let resample: Vec<f64> = (0..n).map(|_| *values.choose(&mut rng).unwrap()).collect();
 
         let bootstrap_mean = resample.iter().sum::<f64>() / n as f64;
         bootstrap_means.push(bootstrap_mean);
@@ -143,9 +141,11 @@ pub fn paired_test(pairs: &[(f64, f64)]) -> PairedTestResult {
     }
 
     // Calculate standard deviation of differences
-    let variance = differences.iter()
+    let variance = differences
+        .iter()
         .map(|d| (d - mean_diff).powi(2))
-        .sum::<f64>() / (n - 1) as f64;
+        .sum::<f64>()
+        / (n - 1) as f64;
     let std_dev = variance.sqrt();
 
     // Calculate t-statistic
@@ -206,9 +206,11 @@ pub fn effect_size_cohens_d(pairs: &[(f64, f64)]) -> f64 {
         return 0.0;
     }
 
-    let variance = differences.iter()
+    let variance = differences
+        .iter()
         .map(|d| (d - mean_diff).powi(2))
-        .sum::<f64>() / (n - 1) as f64;
+        .sum::<f64>()
+        / (n - 1) as f64;
     let std_dev = variance.sqrt();
 
     if std_dev > 0.0 {

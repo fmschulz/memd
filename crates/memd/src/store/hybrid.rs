@@ -16,19 +16,19 @@ use super::dense::DenseSearcher;
 use crate::error::Result;
 use crate::index::{Bm25Index, SearchResult, SparseIndex};
 use crate::metrics::TieredQueryMetrics;
+use crate::retrieval::packer::{ContextPacker, PackerConfig};
 use crate::retrieval::{
     ChunkWithMeta, FeatureReranker, FusionCandidate, FusionSource, RerankerConfig, RerankerContext,
     RrfConfig, RrfFusion,
 };
-use crate::retrieval::packer::{ContextPacker, PackerConfig};
 use crate::structural::{
-    CallerInfo, ErrorResult, ImportInfo, QueryIntent, QueryRouter, RouteResult,
-    SymbolLocation, SymbolQueryService, ToolCallResult, TraceQueryService,
+    CallerInfo, ErrorResult, ImportInfo, QueryIntent, QueryRouter, RouteResult, SymbolLocation,
+    SymbolQueryService, ToolCallResult, TraceQueryService,
 };
 use crate::text::TextProcessor;
 use crate::tiered::{
-    AccessTracker, AccessTrackerConfig, HotTier, HotTierConfig, SemanticCache,
-    SemanticCacheConfig, TieredSearcher, TieredSearcherConfig, TieredTiming, WarmTierSearch,
+    AccessTracker, AccessTrackerConfig, HotTier, HotTierConfig, SemanticCache, SemanticCacheConfig,
+    TieredSearcher, TieredSearcherConfig, TieredTiming, WarmTierSearch,
 };
 use crate::types::{ChunkId, ChunkType, TenantId};
 
@@ -280,7 +280,8 @@ pub struct HybridSearcher {
     packer: ContextPacker,
     config: HybridConfig,
     /// Per-tenant tiered searchers (only populated if enable_tiered is true)
-    tiered_searchers: RwLock<std::collections::HashMap<String, Arc<TieredSearcher<WarmTierAdapter>>>>,
+    tiered_searchers:
+        RwLock<std::collections::HashMap<String, Arc<TieredSearcher<WarmTierAdapter>>>>,
     /// Shared semantic cache (across tenants)
     semantic_cache: Option<Arc<SemanticCache>>,
     /// Access tracker config for creating per-tenant access trackers
@@ -415,11 +416,7 @@ impl HybridSearcher {
             Arc::clone(&access_tracker),
         )));
 
-        let tiered_config = self
-            .config
-            .tiered_config
-            .clone()
-            .unwrap_or_default();
+        let tiered_config = self.config.tiered_config.clone().unwrap_or_default();
 
         let tiered_searcher = TieredSearcher::new(
             Arc::clone(self.semantic_cache.as_ref()?),
@@ -581,57 +578,58 @@ impl HybridSearcher {
 
         // Step 4: Build results
         // For cache hits, return directly; for non-cache, fuse with sparse
-        let results: Vec<HybridSearchResult> = if tiered_result.cache_hit || sparse_results.is_empty() {
-            // Direct conversion from tiered results
-            tiered_result
-                .results
-                .into_iter()
-                .map(|r| HybridSearchResult {
-                    chunk_id: r.chunk_id,
-                    final_score: r.score,
-                    dense_rank: None, // Tier doesn't track separate ranks
-                    sparse_rank: None,
-                })
-                .collect()
-        } else {
-            // Fuse tiered (dense) results with sparse
-            let fusion_start = Instant::now();
-            let mut candidates: Vec<FusionCandidate> = Vec::new();
+        let results: Vec<HybridSearchResult> =
+            if tiered_result.cache_hit || sparse_results.is_empty() {
+                // Direct conversion from tiered results
+                tiered_result
+                    .results
+                    .into_iter()
+                    .map(|r| HybridSearchResult {
+                        chunk_id: r.chunk_id,
+                        final_score: r.score,
+                        dense_rank: None, // Tier doesn't track separate ranks
+                        sparse_rank: None,
+                    })
+                    .collect()
+            } else {
+                // Fuse tiered (dense) results with sparse
+                let fusion_start = Instant::now();
+                let mut candidates: Vec<FusionCandidate> = Vec::new();
 
-            // Tiered results as dense candidates
-            for (rank, result) in tiered_result.results.iter().enumerate() {
-                candidates.push(FusionCandidate {
-                    chunk_id: result.chunk_id.clone(),
-                    source: FusionSource::Dense,
-                    rank: rank + 1,
-                    source_score: result.score,
-                });
-            }
+                // Tiered results as dense candidates
+                for (rank, result) in tiered_result.results.iter().enumerate() {
+                    candidates.push(FusionCandidate {
+                        chunk_id: result.chunk_id.clone(),
+                        source: FusionSource::Dense,
+                        rank: rank + 1,
+                        source_score: result.score,
+                    });
+                }
 
-            // Sparse candidates
-            for (rank, result) in sparse_results.iter().enumerate() {
-                candidates.push(FusionCandidate {
-                    chunk_id: result.chunk_id.clone(),
-                    source: FusionSource::Sparse,
-                    rank: rank + 1,
-                    source_score: result.score,
-                });
-            }
+                // Sparse candidates
+                for (rank, result) in sparse_results.iter().enumerate() {
+                    candidates.push(FusionCandidate {
+                        chunk_id: result.chunk_id.clone(),
+                        source: FusionSource::Sparse,
+                        rank: rank + 1,
+                        source_score: result.score,
+                    });
+                }
 
-            let fused = self.fusion.fuse(candidates);
-            timing.fusion_time = fusion_start.elapsed();
+                let fused = self.fusion.fuse(candidates);
+                timing.fusion_time = fusion_start.elapsed();
 
-            fused
-                .into_iter()
-                .take(k)
-                .map(|f| HybridSearchResult {
-                    chunk_id: f.chunk_id,
-                    final_score: f.rrf_score,
-                    dense_rank: f.dense_rank,
-                    sparse_rank: f.sparse_rank,
-                })
-                .collect()
-        };
+                fused
+                    .into_iter()
+                    .take(k)
+                    .map(|f| HybridSearchResult {
+                        chunk_id: f.chunk_id,
+                        final_score: f.rrf_score,
+                        dense_rank: f.dense_rank,
+                        sparse_rank: f.sparse_rank,
+                    })
+                    .collect()
+            };
 
         timing.total_time = total_start.elapsed();
 
@@ -782,9 +780,7 @@ impl HybridSearcher {
             .into_iter()
             .map(|r| {
                 // Find original result to preserve dense/sparse ranks
-                let original = results
-                    .iter()
-                    .find(|orig| orig.chunk_id == r.chunk_id);
+                let original = results.iter().find(|orig| orig.chunk_id == r.chunk_id);
 
                 HybridSearchResult {
                     chunk_id: r.chunk_id,
@@ -1042,11 +1038,9 @@ impl HybridSearcher {
     ) -> Result<SearchWithRoutingResult> {
         let errors = if let Some(ref svc) = self.trace_query_service {
             svc.find_errors(
-                tenant_id,
-                signature,
-                None,  // function_name
-                None,  // file_path
-                None,  // time_range
+                tenant_id, signature, None, // function_name
+                None, // file_path
+                None, // time_range
                 k,
             )?
         } else {
@@ -1085,10 +1079,12 @@ impl HybridSearcher {
             // Trigger semantic search (result not used for structural return, but ensures fallback behavior)
             let _results = self.search(tenant_id, query_term, k, context).await?;
 
-            return Ok(SearchWithRoutingResult::Structural(StructuralSearchResult {
-                fell_back_to_semantic: true,
-                ..structural
-            }));
+            return Ok(SearchWithRoutingResult::Structural(
+                StructuralSearchResult {
+                    fell_back_to_semantic: true,
+                    ..structural
+                },
+            ));
         }
 
         // If blending is enabled and we have structural results, add semantic context
@@ -1100,7 +1096,9 @@ impl HybridSearcher {
 
             // Get fewer semantic results since they're supplementary
             let semantic_k = (k / 2).max(3);
-            let semantic_context = self.search(tenant_id, query_term, semantic_k, context).await?;
+            let semantic_context = self
+                .search(tenant_id, query_term, semantic_k, context)
+                .await?;
 
             return Ok(SearchWithRoutingResult::Blended(BlendedSearchResult {
                 intent: structural.intent.clone(),
@@ -1147,7 +1145,10 @@ impl HybridSearcher {
     /// Run tiered maintenance for a tenant (promotions, demotions, evictions)
     ///
     /// Should be called periodically (e.g., every 60 seconds).
-    pub fn run_tiered_maintenance(&self, tenant_id: &TenantId) -> Option<crate::tiered::MaintenanceResult> {
+    pub fn run_tiered_maintenance(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Option<crate::tiered::MaintenanceResult> {
         let tiered_searcher = self.get_or_create_tiered_searcher(tenant_id)?;
         Some(tiered_searcher.run_maintenance(tenant_id))
     }
@@ -1155,7 +1156,11 @@ impl HybridSearcher {
     /// Get tiered metrics for recording
     ///
     /// Returns a TieredQueryMetrics for the given timing and cache/hot tier hit info.
-    pub fn create_tiered_metrics(timing: &HybridTiming, cache_hit: bool, hot_tier_hit: bool) -> TieredQueryMetrics {
+    pub fn create_tiered_metrics(
+        timing: &HybridTiming,
+        cache_hit: bool,
+        hot_tier_hit: bool,
+    ) -> TieredQueryMetrics {
         let tiered = timing.tiered.as_ref();
         let source_tier = if cache_hit {
             "cache"
@@ -1204,7 +1209,7 @@ mod tests {
     use crate::store::DenseSearchConfig;
 
     fn make_test_hybrid_searcher(enable_sparse: bool) -> HybridSearcher {
-        let embedder = Arc::new(MockEmbedder::new());  // Uses default config (1024 dims)
+        let embedder = Arc::new(MockEmbedder::new()); // Uses default config (1024 dims)
         let dense_config = DenseSearchConfig {
             persist: false,
             ..Default::default()
@@ -1238,12 +1243,19 @@ mod tests {
 
         // Index a chunk
         searcher
-            .index_chunk(&tenant, &chunk_id, "The getUserById function returns user data")
+            .index_chunk(
+                &tenant,
+                &chunk_id,
+                "The getUserById function returns user data",
+            )
             .await
             .unwrap();
 
         // Search should find it
-        let results = searcher.search(&tenant, "getUserById", 10, None).await.unwrap();
+        let results = searcher
+            .search(&tenant, "getUserById", 10, None)
+            .await
+            .unwrap();
 
         // Should have results (at least from sparse)
         assert!(!results.is_empty());
@@ -1273,7 +1285,10 @@ mod tests {
             .unwrap();
 
         // Hybrid should find it via sparse (keyword) search
-        assert!(!results.is_empty(), "Should find unique identifier via sparse search");
+        assert!(
+            !results.is_empty(),
+            "Should find unique identifier via sparse search"
+        );
         assert_eq!(results[0].chunk_id, chunk_id);
     }
 
@@ -1290,7 +1305,10 @@ mod tests {
             .unwrap();
 
         // Verify searchable
-        let results = searcher.search(&tenant, "deletable", 10, None).await.unwrap();
+        let results = searcher
+            .search(&tenant, "deletable", 10, None)
+            .await
+            .unwrap();
         assert!(!results.is_empty(), "Should be searchable after indexing");
 
         // Delete from sparse
@@ -1300,7 +1318,10 @@ mod tests {
         // (dense may still have it until full deletion support is added)
         if let Some(ref sparse) = searcher.sparse {
             let sparse_results = sparse.search(&tenant, "deletable", 10).unwrap();
-            assert!(sparse_results.is_empty(), "Should not be in sparse after delete");
+            assert!(
+                sparse_results.is_empty(),
+                "Should not be in sparse after delete"
+            );
         }
     }
 
@@ -1410,23 +1431,41 @@ mod tests {
         let chunk_id3 = ChunkId::new();
 
         searcher
-            .index_chunk(&tenant, &chunk_id1, "The parseConfig function reads configuration files")
+            .index_chunk(
+                &tenant,
+                &chunk_id1,
+                "The parseConfig function reads configuration files",
+            )
             .await
             .unwrap();
         searcher
-            .index_chunk(&tenant, &chunk_id2, "Configuration parsing is handled by parseConfig")
+            .index_chunk(
+                &tenant,
+                &chunk_id2,
+                "Configuration parsing is handled by parseConfig",
+            )
             .await
             .unwrap();
         searcher
-            .index_chunk(&tenant, &chunk_id3, "This module handles user authentication")
+            .index_chunk(
+                &tenant,
+                &chunk_id3,
+                "This module handles user authentication",
+            )
             .await
             .unwrap();
 
         // Search for parseConfig - should find chunks 1 and 2
-        let results = searcher.search(&tenant, "parseConfig", 10, None).await.unwrap();
+        let results = searcher
+            .search(&tenant, "parseConfig", 10, None)
+            .await
+            .unwrap();
 
         // Should find the relevant chunks
-        assert!(!results.is_empty(), "Should find chunks matching parseConfig");
+        assert!(
+            !results.is_empty(),
+            "Should find chunks matching parseConfig"
+        );
 
         // Results should include chunks with parseConfig
         let result_ids: Vec<ChunkId> = results.iter().map(|r| r.chunk_id.clone()).collect();
@@ -1450,14 +1489,23 @@ mod tests {
             .unwrap();
 
         // Tenant A should find it
-        let results_a = searcher.search(&tenant_a, "secret", 10, None).await.unwrap();
+        let results_a = searcher
+            .search(&tenant_a, "secret", 10, None)
+            .await
+            .unwrap();
         assert!(!results_a.is_empty(), "Tenant A should find their data");
 
         // Tenant B should not find it
-        let results_b = searcher.search(&tenant_b, "secret", 10, None).await.unwrap();
+        let results_b = searcher
+            .search(&tenant_b, "secret", 10, None)
+            .await
+            .unwrap();
         // Sparse index enforces tenant isolation
         let sparse_found_b = results_b.iter().any(|r| r.sparse_rank.is_some());
-        assert!(!sparse_found_b, "Tenant B should not find tenant A's data in sparse");
+        assert!(
+            !sparse_found_b,
+            "Tenant B should not find tenant A's data in sparse"
+        );
     }
 
     #[tokio::test]
@@ -1498,7 +1546,11 @@ mod tests {
 
         // Index some content
         searcher
-            .index_chunk(&tenant, &chunk_id, "How does authentication work in our system")
+            .index_chunk(
+                &tenant,
+                &chunk_id,
+                "How does authentication work in our system",
+            )
             .await
             .unwrap();
 
@@ -1610,7 +1662,9 @@ mod tests {
 
         match result {
             SearchWithRoutingResult::Trace(t) => {
-                assert!(matches!(t.intent, QueryIntent::ErrorSearch(Some(ref s)) if s == "TypeError"));
+                assert!(
+                    matches!(t.intent, QueryIntent::ErrorSearch(Some(ref s)) if s == "TypeError")
+                );
             }
             _ => panic!("Expected trace result"),
         }
@@ -1628,7 +1682,9 @@ mod tests {
 
         match result {
             SearchWithRoutingResult::Trace(t) => {
-                assert!(matches!(t.intent, QueryIntent::ToolCalls(Some(ref s)) if s == "read_file"));
+                assert!(
+                    matches!(t.intent, QueryIntent::ToolCalls(Some(ref s)) if s == "read_file")
+                );
             }
             _ => panic!("Expected trace result"),
         }

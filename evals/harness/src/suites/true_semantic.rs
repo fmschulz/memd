@@ -26,8 +26,9 @@ fn extract_content_text(response: &Value) -> Option<&str> {
 pub fn run_true_semantic_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestResult> {
     let mut results = Vec::new();
 
-    let dataset_path = std::path::Path::new("evals/datasets/retrieval/true_semantic_test.json");
-    let dataset = match load_dataset_generic(dataset_path) {
+    let dataset_path =
+        crate::resolve_dataset_path("evals/datasets/retrieval/true_semantic_test.json");
+    let dataset = match load_dataset_generic(dataset_path.as_path()) {
         Ok(d) => d,
         Err(e) => {
             results.push(TestResult::fail(
@@ -117,12 +118,12 @@ fn run_index_and_evaluate(
 
     let (recall, mrr, precision, count) = evaluate_queries(&mut client, &dataset.queries);
 
-    println!("\n  Overall: Recall@10: {:.3}, MRR: {:.3}, P@10: {:.3} (n={})", recall, mrr, precision, count);
+    println!(
+        "\n  Overall: Recall@10: {:.3}, MRR: {:.3}, P@10: {:.3} (n={})",
+        recall, mrr, precision, count
+    );
 
-    (
-        TestResult::pass_with_duration(name, start),
-        Some(recall),
-    )
+    (TestResult::pass_with_duration(name, start), Some(recall))
 }
 
 fn check_quality_threshold(recall: f64) -> TestResult {

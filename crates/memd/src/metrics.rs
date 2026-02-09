@@ -327,7 +327,7 @@ impl MetricsCollector {
             cache_lookups: lookups,
             cache_hits,
             cache_misses: lookups.saturating_sub(cache_hits),
-            cache_hit_rate: 0.0, // Calculated below
+            cache_hit_rate: 0.0,                   // Calculated below
             hot_tier_searches: warm_tier_searches, // Hot tier searched on non-cache-hit
             hot_tier_hits: hot_hits,
             warm_tier_searches,
@@ -363,7 +363,8 @@ fn percentile(sorted: &[u64], p: usize) -> u64 {
     if sorted.is_empty() {
         return 0;
     }
-    let idx = (p * sorted.len() / 100).min(sorted.len() - 1);
+    // Use an inclusive rank over n-1 so p50/p90 on small samples behave as expected.
+    let idx = (p * (sorted.len() - 1) / 100).min(sorted.len() - 1);
     sorted[idx]
 }
 

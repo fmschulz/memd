@@ -9,6 +9,7 @@ pub mod memory;
 pub mod metadata;
 pub mod persistent;
 pub mod segment;
+pub mod shared_add;
 pub mod tenant;
 pub mod tombstone;
 pub mod wal;
@@ -19,6 +20,7 @@ use async_trait::async_trait;
 
 use crate::compaction::{CompactionMetrics, CompactionResult};
 use crate::error::{MemdError, Result};
+use crate::metrics::IndexStats;
 use crate::tiered::TieredTiming;
 use crate::types::{ChunkId, MemoryChunk, TenantId};
 
@@ -57,12 +59,8 @@ pub trait Store: Send + Sync {
     ///
     /// The search is currently a simple substring match - real vector search
     /// comes in Phase 3.
-    async fn search(
-        &self,
-        tenant_id: &TenantId,
-        query: &str,
-        k: usize,
-    ) -> Result<Vec<MemoryChunk>>;
+    async fn search(&self, tenant_id: &TenantId, query: &str, k: usize)
+        -> Result<Vec<MemoryChunk>>;
 
     /// Search with scores (default: calls search with score 1.0)
     ///
@@ -110,6 +108,14 @@ pub trait Store: Send + Sync {
         None
     }
 
+    /// Get dense index statistics
+    ///
+    /// Returns per-tenant index stats when available.
+    /// Default implementation returns empty stats.
+    fn get_index_stats(&self, _tenant_id: Option<&TenantId>) -> HashMap<String, IndexStats> {
+        HashMap::new()
+    }
+
     /// Run compaction for a tenant regardless of thresholds
     ///
     /// Forces compaction to run even if no thresholds are exceeded.
@@ -135,13 +141,16 @@ pub trait Store: Send + Sync {
     /// Default implementation returns error (not available).
     /// PersistentStore overrides with real implementation.
     fn get_compaction_metrics(&self, _tenant_id: &TenantId) -> Result<CompactionMetrics> {
-        Err(MemdError::StorageError("compaction metrics not available".into()))
+        Err(MemdError::StorageError(
+            "compaction metrics not available".into(),
+        ))
     }
 }
 
 pub use dense::{DenseSearchConfig, DenseSearchResult, DenseSearcher};
-pub use hybrid::{HybridConfig, HybridSearcher, HybridSearchResult, HybridTiming, SearchContext};
+pub use hybrid::{HybridConfig, HybridSearchResult, HybridSearcher, HybridTiming, SearchContext};
 pub use memory::MemoryStore;
 pub use persistent::{PersistentStore, PersistentStoreConfig, TieredStats};
+pub use shared_add::{split_for_add, ADD_CHUNK_THRESHOLD};
 pub use tenant::TenantManager;
 pub use tombstone::TombstoneSet;

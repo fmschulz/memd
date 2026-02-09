@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
-use super::{Store, StoreStats};
+use super::{split_for_add, Store, StoreStats};
 use crate::error::Result;
 use crate::types::{ChunkId, ChunkStatus, MemoryChunk, TenantId};
 
@@ -38,17 +38,8 @@ impl MemoryStore {
         let result = hasher.finalize();
         format!("{:x}", result)
     }
-}
 
-impl Default for MemoryStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl Store for MemoryStore {
-    async fn add(&self, mut chunk: MemoryChunk) -> Result<ChunkId> {
+    async fn add_single_chunk(&self, mut chunk: MemoryChunk) -> Result<ChunkId> {
         // Generate a new UUIDv7 for the chunk_id (time-sortable)
         let chunk_id = ChunkId::new();
         chunk.chunk_id = chunk_id.clone();
@@ -70,6 +61,36 @@ impl Store for MemoryStore {
         tenant_chunks.insert(chunk_id.to_string(), chunk);
 
         Ok(chunk_id)
+    }
+}
+
+impl Default for MemoryStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Store for MemoryStore {
+    async fn add(&self, chunk: MemoryChunk) -> Result<ChunkId> {
+        let mut chunks = split_for_add(chunk);
+        if chunks.len() == 1 {
+            return self
+                .add_single_chunk(chunks.pop().ok_or_else(|| {
+                    crate::error::MemdError::StorageError("no chunk to add".into())
+                })?)
+                .await;
+        }
+
+        let mut chunk_ids = Vec::with_capacity(chunks.len());
+        for chunk in chunks {
+            chunk_ids.push(self.add_single_chunk(chunk).await?);
+        }
+
+        chunk_ids
+            .into_iter()
+            .next()
+            .ok_or_else(|| crate::error::MemdError::StorageError("no chunk id produced".into()))
     }
 
     async fn add_batch(&self, chunks: Vec<MemoryChunk>) -> Result<Vec<ChunkId>> {
@@ -238,6 +259,12 @@ mod tests {
 
     fn make_chunk(tenant: &TenantId, text: &str, chunk_type: ChunkType) -> MemoryChunk {
         MemoryChunk::new(tenant.clone(), text, chunk_type)
+    }
+
+    fn make_long_document() -> String {
+        let sentence =
+            "This is a long test sentence that should trigger document chunking behavior. ";
+        sentence.repeat(40)
     }
 
     #[tokio::test]
@@ -445,6 +472,21 @@ mod tests {
             let chunk = store.get(&tenant, &id).await.unwrap();
             assert!(chunk.is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn add_long_document_splits_into_multiple_chunks() {
+        let store = MemoryStore::new();
+        let tenant = make_tenant();
+        let long_text = make_long_document();
+
+        let _chunk_id = store
+            .add(make_chunk(&tenant, &long_text, ChunkType::Doc))
+            .await
+            .unwrap();
+
+        let stats = store.stats(&tenant).await.unwrap();
+        assert!(stats.total_chunks > 1);
     }
 
     #[tokio::test]

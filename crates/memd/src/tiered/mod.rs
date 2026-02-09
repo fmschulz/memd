@@ -11,12 +11,14 @@ pub mod hot_tier;
 pub mod semantic_cache;
 pub mod tiered_searcher;
 
-pub use access_tracker::{AccessEvent, AccessStats, AccessTracker, AccessTrackerConfig, PromotionScore};
+pub use access_tracker::{
+    AccessEvent, AccessStats, AccessTracker, AccessTrackerConfig, PromotionScore,
+};
 pub use hot_tier::{HotTier, HotTierConfig, HotTierStats};
 pub use semantic_cache::{
     CacheEntry, CacheHit, CacheStats, CachedResult, SemanticCache, SemanticCacheConfig,
 };
 pub use tiered_searcher::{
-    MaintenanceResult, ScoredChunk, SourceTier, TierAction, TierDecision, TieredSearcher,
-    TieredSearcherConfig, TieredSearchResult, TieredTiming, WarmTierSearch,
+    MaintenanceResult, ScoredChunk, SourceTier, TierAction, TierDecision, TieredSearchResult,
+    TieredSearcher, TieredSearcherConfig, TieredTiming, WarmTierSearch,
 };

@@ -527,7 +527,7 @@ impl StructuralStore {
                     tenant_id, project_id, file_path, name, kind,
                     line_start, line_end, col_start, col_end,
                     parent_symbol_id, signature, docstring, visibility, language
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             )?;
 
             for symbol in symbols {
@@ -556,7 +556,11 @@ impl StructuralStore {
     }
 
     /// Find symbols by exact name match.
-    pub fn find_symbols_by_name(&self, tenant_id: &TenantId, name: &str) -> Result<Vec<SymbolRecord>> {
+    pub fn find_symbols_by_name(
+        &self,
+        tenant_id: &TenantId,
+        name: &str,
+    ) -> Result<Vec<SymbolRecord>> {
         let conn = self.conn.lock().unwrap();
 
         let mut stmt = conn.prepare(
@@ -564,7 +568,7 @@ impl StructuralStore {
                     line_start, line_end, col_start, col_end,
                     parent_symbol_id, signature, docstring, visibility, language
              FROM symbols
-             WHERE tenant_id = ?1 AND name = ?2"
+             WHERE tenant_id = ?1 AND name = ?2",
         )?;
 
         let rows = stmt.query_map(params![tenant_id.as_str(), name], |row| {
@@ -597,7 +601,7 @@ impl StructuralStore {
              FROM symbols
              WHERE tenant_id = ?1 AND name LIKE ?2 ESCAPE '\\'
              ORDER BY name
-             LIMIT 100"
+             LIMIT 100",
         )?;
 
         let rows = stmt.query_map(params![tenant_id.as_str(), &pattern], |row| {
@@ -626,7 +630,7 @@ impl StructuralStore {
                     parent_symbol_id, signature, docstring, visibility, language
              FROM symbols
              WHERE tenant_id = ?1 AND file_path = ?2
-             ORDER BY line_start"
+             ORDER BY line_start",
         )?;
 
         let rows = stmt.query_map(params![tenant_id.as_str(), file_path], |row| {
@@ -642,11 +646,7 @@ impl StructuralStore {
     }
 
     /// Delete all symbols for a file (for re-indexing).
-    pub fn delete_file_symbols(
-        &self,
-        tenant_id: &TenantId,
-        file_path: &str,
-    ) -> Result<usize> {
+    pub fn delete_file_symbols(&self, tenant_id: &TenantId, file_path: &str) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
 
         let rows_deleted = conn.execute(
@@ -667,12 +667,10 @@ impl StructuralStore {
                     parent_symbol_id, signature, docstring, visibility, language
              FROM symbols
              WHERE parent_symbol_id = ?1
-             ORDER BY line_start"
+             ORDER BY line_start",
         )?;
 
-        let rows = stmt.query_map(params![symbol_id], |row| {
-            Self::row_to_symbol(row)
-        })?;
+        let rows = stmt.query_map(params![symbol_id], |row| Self::row_to_symbol(row))?;
 
         let mut results = Vec::new();
         for row in rows {
@@ -702,11 +700,7 @@ impl StructuralStore {
 
         // Parse tenant_id - this should not fail for valid stored data
         let tenant_id = TenantId::new(&tenant_id_str).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                1,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
+            rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e))
         })?;
 
         // Parse kind - default to Function if unknown
@@ -804,7 +798,10 @@ impl StructuralStore {
     }
 
     /// Find all callers by resolved symbol ID.
-    pub fn find_callers_by_symbol(&self, callee_symbol_id: i64) -> SqliteResult<Vec<CallEdgeRecord>> {
+    pub fn find_callers_by_symbol(
+        &self,
+        callee_symbol_id: i64,
+    ) -> SqliteResult<Vec<CallEdgeRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT edge_id, tenant_id, caller_symbol_id, callee_name, callee_symbol_id,
@@ -813,9 +810,7 @@ impl StructuralStore {
              WHERE callee_symbol_id = ?1",
         )?;
 
-        let rows = stmt.query_map(params![callee_symbol_id], |row| {
-            self.row_to_call_edge(row)
-        })?;
+        let rows = stmt.query_map(params![callee_symbol_id], |row| self.row_to_call_edge(row))?;
 
         rows.collect()
     }
@@ -830,9 +825,7 @@ impl StructuralStore {
              WHERE caller_symbol_id = ?1",
         )?;
 
-        let rows = stmt.query_map(params![caller_symbol_id], |row| {
-            self.row_to_call_edge(row)
-        })?;
+        let rows = stmt.query_map(params![caller_symbol_id], |row| self.row_to_call_edge(row))?;
 
         rows.collect()
     }
@@ -856,7 +849,10 @@ impl StructuralStore {
                 rusqlite::Error::FromSqlConversionFailure(
                     1,
                     rusqlite::types::Type::Text,
-                    Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())),
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        e.to_string(),
+                    )),
                 )
             })?,
             caller_symbol_id: row.get(2)?,
@@ -961,7 +957,11 @@ impl StructuralStore {
     }
 
     /// Delete all imports for a file (for re-indexing).
-    pub fn delete_file_imports(&self, tenant_id: &TenantId, file_path: &str) -> SqliteResult<usize> {
+    pub fn delete_file_imports(
+        &self,
+        tenant_id: &TenantId,
+        file_path: &str,
+    ) -> SqliteResult<usize> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "DELETE FROM imports WHERE tenant_id = ?1 AND source_file = ?2",
@@ -979,7 +979,10 @@ impl StructuralStore {
                 rusqlite::Error::FromSqlConversionFailure(
                     1,
                     rusqlite::types::Type::Text,
-                    Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())),
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        e.to_string(),
+                    )),
                 )
             })?,
             source_file: row.get(2)?,
@@ -1096,7 +1099,8 @@ impl StructuralStore {
         let mut stmt = conn.prepare(&sql)?;
 
         // Build parameter list dynamically
-        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(tenant_id.as_str().to_string())];
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(tenant_id.as_str().to_string())];
         if let Some(name) = tool_name {
             params_vec.push(Box::new(name.to_string()));
         }
@@ -1107,7 +1111,8 @@ impl StructuralStore {
             params_vec.push(Box::new(to));
         }
 
-        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
         let rows = stmt.query_map(params_refs.as_slice(), |row| self.row_to_tool_trace(row))?;
 
         rows.collect()
@@ -1279,7 +1284,8 @@ impl StructuralStore {
         let mut stmt = conn.prepare(&sql)?;
 
         // Build parameter list dynamically
-        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(tenant_id.as_str().to_string())];
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(tenant_id.as_str().to_string())];
         if let Some(sig) = error_signature {
             params_vec.push(Box::new(sig.to_string()));
         }
@@ -1290,7 +1296,8 @@ impl StructuralStore {
             params_vec.push(Box::new(to));
         }
 
-        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
         let rows = stmt.query_map(params_refs.as_slice(), |row| self.row_to_stack_trace(row))?;
 
         rows.collect()
@@ -1315,10 +1322,9 @@ impl StructuralStore {
             "#,
         )?;
 
-        let rows = stmt
-            .query_map(params![tenant_id.as_str(), function_name], |row| {
-                self.row_to_stack_trace(row)
-            })?;
+        let rows = stmt.query_map(params![tenant_id.as_str(), function_name], |row| {
+            self.row_to_stack_trace(row)
+        })?;
 
         rows.collect()
     }
@@ -1358,9 +1364,8 @@ impl StructuralStore {
 
         Ok(StackTraceRecord {
             trace_id: Some(row.get(0)?),
-            tenant_id: TenantId::new(&tenant_str).unwrap_or_else(|_| {
-                TenantId::new("unknown").unwrap()
-            }),
+            tenant_id: TenantId::new(&tenant_str)
+                .unwrap_or_else(|_| TenantId::new("unknown").unwrap()),
             project_id: row.get(2)?,
             session_id: row.get(3)?,
             timestamp_ms: row.get(4)?,
@@ -1420,14 +1425,34 @@ mod tests {
         let store = StructuralStore::in_memory().unwrap();
 
         // Insert symbols with similar names
-        store.insert_symbol(&create_test_symbol("tenant_a", "process_data", SymbolKind::Function)).unwrap();
-        store.insert_symbol(&create_test_symbol("tenant_a", "process_file", SymbolKind::Function)).unwrap();
-        store.insert_symbol(&create_test_symbol("tenant_a", "parse_input", SymbolKind::Function)).unwrap();
+        store
+            .insert_symbol(&create_test_symbol(
+                "tenant_a",
+                "process_data",
+                SymbolKind::Function,
+            ))
+            .unwrap();
+        store
+            .insert_symbol(&create_test_symbol(
+                "tenant_a",
+                "process_file",
+                SymbolKind::Function,
+            ))
+            .unwrap();
+        store
+            .insert_symbol(&create_test_symbol(
+                "tenant_a",
+                "parse_input",
+                SymbolKind::Function,
+            ))
+            .unwrap();
 
         let tenant_id = TenantId::new("tenant_a").unwrap();
 
         // Find by prefix "process"
-        let found = store.find_symbols_by_name_prefix(&tenant_id, "process").unwrap();
+        let found = store
+            .find_symbols_by_name_prefix(&tenant_id, "process")
+            .unwrap();
         assert_eq!(found.len(), 2);
         assert!(found.iter().all(|s| s.name.starts_with("process")));
 
@@ -1441,7 +1466,13 @@ mod tests {
         let store = StructuralStore::in_memory().unwrap();
 
         // Insert symbol for tenant_a
-        store.insert_symbol(&create_test_symbol("tenant_a", "secret_fn", SymbolKind::Function)).unwrap();
+        store
+            .insert_symbol(&create_test_symbol(
+                "tenant_a",
+                "secret_fn",
+                SymbolKind::Function,
+            ))
+            .unwrap();
 
         let tenant_a = TenantId::new("tenant_a").unwrap();
         let tenant_b = TenantId::new("tenant_b").unwrap();
@@ -1475,7 +1506,9 @@ mod tests {
         let tenant_id = TenantId::new("tenant_a").unwrap();
 
         // Verify all symbols exist
-        let lib_symbols = store.find_symbols_by_file(&tenant_id, "src/lib.rs").unwrap();
+        let lib_symbols = store
+            .find_symbols_by_file(&tenant_id, "src/lib.rs")
+            .unwrap();
         assert_eq!(lib_symbols.len(), 2);
 
         // Delete symbols for src/lib.rs
@@ -1483,11 +1516,15 @@ mod tests {
         assert_eq!(deleted, 2);
 
         // Verify lib.rs symbols are gone
-        let lib_symbols = store.find_symbols_by_file(&tenant_id, "src/lib.rs").unwrap();
+        let lib_symbols = store
+            .find_symbols_by_file(&tenant_id, "src/lib.rs")
+            .unwrap();
         assert_eq!(lib_symbols.len(), 0);
 
         // Verify other.rs symbols still exist
-        let other_symbols = store.find_symbols_by_file(&tenant_id, "src/other.rs").unwrap();
+        let other_symbols = store
+            .find_symbols_by_file(&tenant_id, "src/other.rs")
+            .unwrap();
         assert_eq!(other_symbols.len(), 1);
     }
 
@@ -1558,7 +1595,9 @@ mod tests {
         let children = store.get_symbol_children(class_id).unwrap();
         assert_eq!(children.len(), 2);
         assert!(children.iter().all(|s| s.kind == SymbolKind::Method));
-        assert!(children.iter().all(|s| s.parent_symbol_id == Some(class_id)));
+        assert!(children
+            .iter()
+            .all(|s| s.parent_symbol_id == Some(class_id)));
 
         // Verify ordering by line
         assert_eq!(children[0].name, "new");
@@ -1599,7 +1638,9 @@ mod tests {
 
         // Verify we can find them
         let tenant_id = TenantId::new("tenant_a").unwrap();
-        let found = store.find_symbols_by_file(&tenant_id, "src/big.rs").unwrap();
+        let found = store
+            .find_symbols_by_file(&tenant_id, "src/big.rs")
+            .unwrap();
         assert_eq!(found.len(), 100);
     }
 
@@ -1877,7 +1918,9 @@ mod tests {
         let id = store.insert_import(&import).unwrap();
         assert!(id > 0);
 
-        let imports = store.find_imports_by_file(&import.tenant_id, &import.source_file).unwrap();
+        let imports = store
+            .find_imports_by_file(&import.tenant_id, &import.source_file)
+            .unwrap();
         assert_eq!(imports.len(), 1);
         assert!(imports[0].is_relative);
         assert_eq!(imports[0].alias.as_deref(), Some("h"));
@@ -2068,8 +2111,14 @@ mod tests {
         // Verify frames were stored
         let stored_frames = store.get_stack_frames(trace_id).unwrap();
         assert_eq!(stored_frames.len(), 3);
-        assert_eq!(stored_frames[0].function_name.as_deref(), Some("processData"));
-        assert_eq!(stored_frames[1].function_name.as_deref(), Some("handleRequest"));
+        assert_eq!(
+            stored_frames[0].function_name.as_deref(),
+            Some("processData")
+        );
+        assert_eq!(
+            stored_frames[1].function_name.as_deref(),
+            Some("handleRequest")
+        );
         assert_eq!(stored_frames[2].function_name.as_deref(), Some("main"));
     }
 
@@ -2087,18 +2136,16 @@ mod tests {
             "trace",
         );
 
-        let frames = vec![
-            StackFrameRecord {
-                frame_id: None,
-                trace_id: 0,
-                frame_idx: 0,
-                file_path: None,
-                function_name: Some("target_function".to_string()),
-                line_number: None,
-                col_number: None,
-                context: None,
-            },
-        ];
+        let frames = vec![StackFrameRecord {
+            frame_id: None,
+            trace_id: 0,
+            frame_idx: 0,
+            file_path: None,
+            function_name: Some("target_function".to_string()),
+            line_number: None,
+            col_number: None,
+            context: None,
+        }];
 
         store.insert_stack_trace(&trace, &frames).unwrap();
 
@@ -2136,12 +2183,27 @@ mod tests {
         let store = StructuralStore::in_memory().unwrap();
         let tenant = test_tenant();
 
-        let trace1 =
-            StackTraceRecord::new(tenant.clone(), 1000, "TypeError", "null is not a function", "t1");
-        let trace2 =
-            StackTraceRecord::new(tenant.clone(), 2000, "TypeError", "undefined is not a function", "t2");
-        let trace3 =
-            StackTraceRecord::new(tenant.clone(), 3000, "ReferenceError", "x is not defined", "t3");
+        let trace1 = StackTraceRecord::new(
+            tenant.clone(),
+            1000,
+            "TypeError",
+            "null is not a function",
+            "t1",
+        );
+        let trace2 = StackTraceRecord::new(
+            tenant.clone(),
+            2000,
+            "TypeError",
+            "undefined is not a function",
+            "t2",
+        );
+        let trace3 = StackTraceRecord::new(
+            tenant.clone(),
+            3000,
+            "ReferenceError",
+            "x is not defined",
+            "t3",
+        );
 
         store.insert_stack_trace(&trace1, &[]).unwrap();
         store.insert_stack_trace(&trace2, &[]).unwrap();

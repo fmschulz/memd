@@ -8,7 +8,9 @@ use std::sync::Arc;
 use memd::mcp::handlers::{
     handle_find_errors, handle_find_tool_calls, FindErrorsParams, FindToolCallsParams,
 };
-use memd::structural::{StackFrameRecord, StackTraceRecord, StructuralStore, ToolTraceRecord, TraceQueryService};
+use memd::structural::{
+    StackFrameRecord, StackTraceRecord, StructuralStore, ToolTraceRecord, TraceQueryService,
+};
 use memd::types::TenantId;
 
 fn test_tenant() -> TenantId {
@@ -88,9 +90,15 @@ fn test_find_tool_calls_by_name() {
     let store = create_test_store();
     let tenant = test_tenant();
 
-    store.insert_tool_trace(&ToolTraceRecord::new(tenant.clone(), "memory.search", 1000)).unwrap();
-    store.insert_tool_trace(&ToolTraceRecord::new(tenant.clone(), "memory.add", 2000)).unwrap();
-    store.insert_tool_trace(&ToolTraceRecord::new(tenant.clone(), "memory.search", 3000)).unwrap();
+    store
+        .insert_tool_trace(&ToolTraceRecord::new(tenant.clone(), "memory.search", 1000))
+        .unwrap();
+    store
+        .insert_tool_trace(&ToolTraceRecord::new(tenant.clone(), "memory.add", 2000))
+        .unwrap();
+    store
+        .insert_tool_trace(&ToolTraceRecord::new(tenant.clone(), "memory.search", 3000))
+        .unwrap();
 
     let service = create_trace_service(store);
 
@@ -153,11 +161,17 @@ fn test_find_tool_calls_time_range() {
     let tenant = test_tenant();
 
     // 2024-01-01 00:00:00 UTC
-    store.insert_tool_trace(&ToolTraceRecord::new(tenant.clone(), "tool", 1704067200000)).unwrap();
+    store
+        .insert_tool_trace(&ToolTraceRecord::new(tenant.clone(), "tool", 1704067200000))
+        .unwrap();
     // 2024-01-02 00:00:00 UTC
-    store.insert_tool_trace(&ToolTraceRecord::new(tenant.clone(), "tool", 1704153600000)).unwrap();
+    store
+        .insert_tool_trace(&ToolTraceRecord::new(tenant.clone(), "tool", 1704153600000))
+        .unwrap();
     // 2024-01-03 00:00:00 UTC
-    store.insert_tool_trace(&ToolTraceRecord::new(tenant.clone(), "tool", 1704240000000)).unwrap();
+    store
+        .insert_tool_trace(&ToolTraceRecord::new(tenant.clone(), "tool", 1704240000000))
+        .unwrap();
 
     let service = create_trace_service(store);
 
@@ -271,18 +285,24 @@ fn test_find_errors_by_signature() {
     let store = create_test_store();
     let tenant = test_tenant();
 
-    store.insert_stack_trace(
-        &StackTraceRecord::new(tenant.clone(), 1000, "TypeError", "msg1", "t1"),
-        &[],
-    ).unwrap();
-    store.insert_stack_trace(
-        &StackTraceRecord::new(tenant.clone(), 2000, "ReferenceError", "msg2", "t2"),
-        &[],
-    ).unwrap();
-    store.insert_stack_trace(
-        &StackTraceRecord::new(tenant.clone(), 3000, "TypeError", "msg3", "t3"),
-        &[],
-    ).unwrap();
+    store
+        .insert_stack_trace(
+            &StackTraceRecord::new(tenant.clone(), 1000, "TypeError", "msg1", "t1"),
+            &[],
+        )
+        .unwrap();
+    store
+        .insert_stack_trace(
+            &StackTraceRecord::new(tenant.clone(), 2000, "ReferenceError", "msg2", "t2"),
+            &[],
+        )
+        .unwrap();
+    store
+        .insert_stack_trace(
+            &StackTraceRecord::new(tenant.clone(), 3000, "TypeError", "msg3", "t3"),
+            &[],
+        )
+        .unwrap();
 
     let service = create_trace_service(store);
 
@@ -445,7 +465,9 @@ fn test_limit_enforcement() {
 
     // Insert many traces
     for i in 0..20 {
-        store.insert_tool_trace(&ToolTraceRecord::new(tenant.clone(), "tool", i * 1000)).unwrap();
+        store
+            .insert_tool_trace(&ToolTraceRecord::new(tenant.clone(), "tool", i * 1000))
+            .unwrap();
     }
 
     let service = create_trace_service(store);

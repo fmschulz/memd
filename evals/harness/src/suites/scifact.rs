@@ -105,8 +105,9 @@ pub fn run_scifact_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<Test
     let mut results = Vec::new();
 
     // Load dataset
-    let dataset_path = std::path::Path::new("evals/datasets/retrieval/beir_scifact_fixed.json");
-    let dataset = match load_dataset(dataset_path) {
+    let dataset_path =
+        crate::resolve_dataset_path("evals/datasets/retrieval/beir_scifact_fixed.json");
+    let dataset = match load_dataset(dataset_path.as_path()) {
         Ok(d) => d,
         Err(e) => {
             results.push(TestResult::fail(
@@ -130,7 +131,8 @@ pub fn run_scifact_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<Test
     );
 
     // Test 1: Index all documents and evaluate
-    let (test_result, quality_metrics) = run_index_and_evaluate(memd_path, &dataset, embedding_model);
+    let (test_result, quality_metrics) =
+        run_index_and_evaluate(memd_path, &dataset, embedding_model);
     results.push(test_result);
 
     let metrics = match quality_metrics {
@@ -142,14 +144,32 @@ pub fn run_scifact_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<Test
     results.push(check_quality_threshold(&metrics));
 
     // Test 3: Performance baseline
-    results.push(run_performance_baseline(memd_path, &dataset, embedding_model));
+    results.push(run_performance_baseline(
+        memd_path,
+        &dataset,
+        embedding_model,
+    ));
 
     results
 }
 
 fn load_dataset(path: &std::path::Path) -> Result<SciFactDataset, String> {
     let content = std::fs::read_to_string(path).map_err(|e| format!("read file: {}", e))?;
-    serde_json::from_str(&content).map_err(|e| format!("parse json: {}", e))
+    let mut dataset: SciFactDataset =
+        serde_json::from_str(&content).map_err(|e| format!("parse json: {}", e))?;
+
+    for doc in &mut dataset.documents {
+        let raw_type = doc.doc_type.clone();
+        let Some(normalized) = crate::normalize_eval_chunk_type(&raw_type) else {
+            return Err(format!(
+                "unsupported chunk type '{}' for document {}",
+                raw_type, doc.id
+            ));
+        };
+        doc.doc_type = normalized.to_string();
+    }
+
+    Ok(dataset)
 }
 
 /// Create a client, index documents, and optionally run queries
@@ -221,11 +241,18 @@ fn run_index_and_evaluate(
     match client.call_tool("memory.search", sanity_params) {
         Ok(response) => {
             let ids = extract_retrieved_ids(&response);
-            eprintln!("[SciFact Diagnostic] Sanity check returned {} results", ids.len());
+            eprintln!(
+                "[SciFact Diagnostic] Sanity check returned {} results",
+                ids.len()
+            );
             if ids.is_empty() {
                 eprintln!("[SciFact Diagnostic] WARNING: Exact text query returned 0 results!");
-                eprintln!("[SciFact Diagnostic] This likely indicates embeddings failed to initialize.");
-                eprintln!("[SciFact Diagnostic] Check that --embedding-model flag is passed correctly.");
+                eprintln!(
+                    "[SciFact Diagnostic] This likely indicates embeddings failed to initialize."
+                );
+                eprintln!(
+                    "[SciFact Diagnostic] Check that --embedding-model flag is passed correctly."
+                );
             } else if ids.contains(&first_doc.id) {
                 eprintln!("[SciFact Diagnostic] Sanity check PASSED: Found exact document");
             } else {
@@ -239,24 +266,21 @@ fn run_index_and_evaluate(
     }
 
     // Sample queries to keep evaluation time reasonable (50 out of 300)
-    let sampled_queries: Vec<_> = dataset
-        .queries
-        .iter()
-        .step_by(dataset.queries.len() / 50)
-        .take(50)
-        .collect();
+    let step = std::cmp::max(dataset.queries.len() / 50, 1);
+    let sampled_queries: Vec<_> = dataset.queries.iter().step_by(step).take(50).collect();
 
-    println!("  Evaluating {} sampled queries (of {})", sampled_queries.len(), dataset.queries.len());
+    println!(
+        "  Evaluating {} sampled queries (of {})",
+        sampled_queries.len(),
+        dataset.queries.len()
+    );
 
     // Evaluate sampled queries
     let metrics = evaluate_queries(&mut client, &sampled_queries);
 
     println!("\n  Overall: {}", metrics);
 
-    (
-        TestResult::pass_with_duration(name, start),
-        Some(metrics),
-    )
+    (TestResult::pass_with_duration(name, start), Some(metrics))
 }
 
 fn check_quality_threshold(metrics: &QualityMetrics) -> TestResult {
@@ -269,10 +293,7 @@ fn check_quality_threshold(metrics: &QualityMetrics) -> TestResult {
     } else {
         TestResult::fail_with_duration(
             name,
-            &format!(
-                "Recall@10 {:.3} below threshold 0.4",
-                metrics.recall_at_10
-            ),
+            &format!("Recall@10 {:.3} below threshold 0.4", metrics.recall_at_10),
             start,
         )
     }
@@ -344,7 +365,10 @@ fn evaluate_queries(client: &mut McpClient, queries: &[&SciFactQuery]) -> Qualit
     let mut evaluated = 0;
     let mut zero_results_count = 0;
 
-    eprintln!("\n[SciFact Diagnostic] Starting evaluation of {} queries", queries.len());
+    eprintln!(
+        "\n[SciFact Diagnostic] Starting evaluation of {} queries",
+        queries.len()
+    );
 
     for (idx, query) in queries.iter().enumerate() {
         let params = serde_json::json!({
@@ -366,14 +390,25 @@ fn evaluate_queries(client: &mut McpClient, queries: &[&SciFactQuery]) -> Qualit
 
         // Diagnostic logging for first 3 queries
         if idx < 3 {
-            eprintln!("[SciFact Diagnostic] Query {}: \"{}\"", query.id, &query.query[..query.query.len().min(60)]);
-            eprintln!("[SciFact Diagnostic]   Expected {} relevant docs: {:?}", relevant_set.len(), relevant_set);
-            eprintln!("[SciFact Diagnostic]   Retrieved {} docs: {:?}", retrieved_ids.len(),
+            eprintln!(
+                "[SciFact Diagnostic] Query {}: \"{}\"",
+                query.id,
+                &query.query[..query.query.len().min(60)]
+            );
+            eprintln!(
+                "[SciFact Diagnostic]   Expected {} relevant docs: {:?}",
+                relevant_set.len(),
+                relevant_set
+            );
+            eprintln!(
+                "[SciFact Diagnostic]   Retrieved {} docs: {:?}",
+                retrieved_ids.len(),
                 if retrieved_ids.is_empty() {
                     "NONE (0 results)".to_string()
                 } else {
                     format!("{:?}", &retrieved_ids[..retrieved_ids.len().min(3)])
-                });
+                }
+            );
         }
 
         if retrieved_ids.is_empty() {
@@ -389,9 +424,15 @@ fn evaluate_queries(client: &mut McpClient, queries: &[&SciFactQuery]) -> Qualit
 
     eprintln!("[SciFact Diagnostic] Evaluation complete:");
     eprintln!("[SciFact Diagnostic]   {} queries evaluated", evaluated);
-    eprintln!("[SciFact Diagnostic]   {} queries returned 0 results", zero_results_count);
+    eprintln!(
+        "[SciFact Diagnostic]   {} queries returned 0 results",
+        zero_results_count
+    );
     if evaluated > 0 {
-        eprintln!("[SciFact Diagnostic]   Average Recall@10: {:.3}", total_recall / evaluated as f64);
+        eprintln!(
+            "[SciFact Diagnostic]   Average Recall@10: {:.3}",
+            total_recall / evaluated as f64
+        );
     }
 
     if evaluated > 0 {

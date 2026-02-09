@@ -4,11 +4,15 @@
 //! - EVAL-02: Protocol methods and tool execution
 //! - EVAL-03: Schema validation and error handling
 
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use serde_json::json;
+use serde_json::Value;
+use tempfile::TempDir;
 
-use crate::mcp_client::McpClient;
+use crate::mcp_client::{McpClient, McpClientError};
 use crate::TestResult;
 
 /// Run all MCP conformance tests
@@ -23,11 +27,114 @@ pub fn run(memd_path: &str) -> Vec<TestResult> {
         test_tool_call_delete(memd_path),
         test_tool_call_stats(memd_path),
         test_tool_call_add_batch(memd_path),
+        test_e2e_memory_tools_in_memory(memd_path),
+        test_e2e_memory_tools_persistent(memd_path),
         test_invalid_json(memd_path),
         test_unknown_method(memd_path),
         test_missing_tenant_id(memd_path),
         test_invalid_chunk_type(memd_path),
+        test_tool_error_propagates(memd_path),
     ]
+}
+
+fn parse_tool_payload(response: &Value) -> Result<Value, String> {
+    let text = response
+        .get("result")
+        .and_then(|r| r.get("content"))
+        .and_then(|c| c.get(0))
+        .and_then(|item| item.get("text"))
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| "response missing content text".to_string())?;
+
+    serde_json::from_str(text).map_err(|e| format!("invalid response payload JSON: {}", e))
+}
+
+fn start_persistent_client(memd_path: &str) -> Result<(McpClient, TempDir), McpClientError> {
+    let data_dir = TempDir::new()?;
+    let memd_binary = PathBuf::from(memd_path);
+    let data_dir_arg = data_dir.path().to_string_lossy().to_string();
+    let client = McpClient::start_with_args(&memd_binary, &["--data-dir", data_dir_arg.as_str()])?;
+    Ok((client, data_dir))
+}
+
+fn run_memory_tools_flow(client: &mut McpClient, tenant_id: &str) -> Result<(), String> {
+    client
+        .initialize()
+        .map_err(|e| format!("initialize failed: {}", e))?;
+
+    let add_response = client
+        .call_tool(
+            "memory.add",
+            json!({
+                "tenant_id": tenant_id,
+                "text": "end to end MCP test content",
+                "type": "doc"
+            }),
+        )
+        .map_err(|e| format!("memory.add failed: {}", e))?;
+    let add_payload = parse_tool_payload(&add_response)?;
+    let chunk_id = add_payload
+        .get("chunk_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "memory.add payload missing chunk_id".to_string())?;
+
+    let search_response = client
+        .call_tool(
+            "memory.search",
+            json!({
+                "tenant_id": tenant_id,
+                "query": "end to end",
+                "k": 5
+            }),
+        )
+        .map_err(|e| format!("memory.search failed: {}", e))?;
+    let search_payload = parse_tool_payload(&search_response)?;
+    let results = search_payload
+        .get("results")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "memory.search payload missing results array".to_string())?;
+    let found = results
+        .iter()
+        .any(|r| r.get("chunk_id").and_then(|id| id.as_str()) == Some(chunk_id));
+    if !found {
+        return Err("memory.search did not return added chunk".to_string());
+    }
+
+    let metrics_response = client
+        .call_tool(
+            "memory.metrics",
+            json!({
+                "include_recent": false
+            }),
+        )
+        .map_err(|e| format!("memory.metrics failed: {}", e))?;
+    let metrics_payload = parse_tool_payload(&metrics_response)?;
+    if !metrics_payload.get("index").is_some_and(Value::is_object) {
+        return Err("memory.metrics payload missing index object".to_string());
+    }
+
+    let compact_response = client
+        .call_tool(
+            "memory.compact",
+            json!({
+                "tenant_id": tenant_id,
+                "force": false
+            }),
+        )
+        .map_err(|e| format!("memory.compact failed: {}", e))?;
+    let compact_payload = parse_tool_payload(&compact_response)?;
+    let status = compact_payload
+        .get("status")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "memory.compact payload missing status".to_string())?;
+    if !matches!(status, "completed" | "skipped") {
+        return Err(format!(
+            "memory.compact returned unexpected status '{}'",
+            status
+        ));
+    }
+
+    Ok(())
 }
 
 /// A1: Initialize returns protocol version and capabilities
@@ -35,7 +142,13 @@ fn test_initialize(memd_path: &str) -> TestResult {
     let start = Instant::now();
     let mut client = match McpClient::start(memd_path) {
         Ok(c) => c,
-        Err(e) => return TestResult::fail_with_duration("A1_initialize", &format!("Failed to start: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(
+                "A1_initialize",
+                &format!("Failed to start: {}", e),
+                start,
+            )
+        }
     };
 
     match client.initialize() {
@@ -59,7 +172,11 @@ fn test_initialize(memd_path: &str) -> TestResult {
                 )
             }
         }
-        Err(e) => TestResult::fail_with_duration("A1_initialize", &format!("Request failed: {}", e), start),
+        Err(e) => TestResult::fail_with_duration(
+            "A1_initialize",
+            &format!("Request failed: {}", e),
+            start,
+        ),
     }
 }
 
@@ -68,7 +185,13 @@ fn test_tools_list(memd_path: &str) -> TestResult {
     let start = Instant::now();
     let mut client = match McpClient::start(memd_path) {
         Ok(c) => c,
-        Err(e) => return TestResult::fail_with_duration("A1_tools_list", &format!("Failed to start: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(
+                "A1_tools_list",
+                &format!("Failed to start: {}", e),
+                start,
+            )
+        }
     };
 
     let _ = client.initialize();
@@ -84,43 +207,92 @@ fn test_tools_list(memd_path: &str) -> TestResult {
             if has_tools {
                 TestResult::pass_with_duration("A1_tools_list", start)
             } else {
-                TestResult::fail_with_duration("A1_tools_list", "Missing tools array in response", start)
+                TestResult::fail_with_duration(
+                    "A1_tools_list",
+                    "Missing tools array in response",
+                    start,
+                )
             }
         }
-        Err(e) => TestResult::fail_with_duration("A1_tools_list", &format!("Request failed: {}", e), start),
+        Err(e) => TestResult::fail_with_duration(
+            "A1_tools_list",
+            &format!("Request failed: {}", e),
+            start,
+        ),
     }
 }
 
-/// A1: Verify all 6 tools are present
+/// A1: Verify core tools are present (allowing additional tools)
 fn test_tools_list_count(memd_path: &str) -> TestResult {
     let start = Instant::now();
     let mut client = match McpClient::start(memd_path) {
         Ok(c) => c,
-        Err(e) => return TestResult::fail_with_duration("A1_tools_count", &format!("Failed to start: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(
+                "A1_tools_count",
+                &format!("Failed to start: {}", e),
+                start,
+            )
+        }
     };
 
     let _ = client.initialize();
 
     match client.tools_list() {
         Ok(response) => {
-            let tool_count = response
+            let tools = response
                 .get("result")
                 .and_then(|r| r.get("tools"))
                 .and_then(|t| t.as_array())
-                .map(|a| a.len())
-                .unwrap_or(0);
+                .cloned()
+                .unwrap_or_default();
 
-            if tool_count == 6 {
+            let tool_names: HashSet<String> = tools
+                .iter()
+                .filter_map(|tool| {
+                    tool.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(str::to_string)
+                })
+                .collect();
+
+            let required = [
+                "memory.search",
+                "memory.add",
+                "memory.add_batch",
+                "memory.get",
+                "memory.delete",
+                "memory.stats",
+                "memory.metrics",
+                "memory.compact",
+            ];
+
+            let missing: Vec<&str> = required
+                .iter()
+                .copied()
+                .filter(|name| !tool_names.contains(*name))
+                .collect();
+
+            if missing.is_empty() && tool_names.len() >= required.len() {
                 TestResult::pass_with_duration("A1_tools_count", start)
             } else {
+                let available: Vec<String> = tool_names.into_iter().collect();
                 TestResult::fail_with_duration(
                     "A1_tools_count",
-                    &format!("Expected 6 tools, got {}", tool_count),
+                    &format!(
+                        "Missing core tools: {:?}. Available tool count: {}",
+                        missing,
+                        available.len()
+                    ),
                     start,
                 )
             }
         }
-        Err(e) => TestResult::fail_with_duration("A1_tools_count", &format!("Request failed: {}", e), start),
+        Err(e) => TestResult::fail_with_duration(
+            "A1_tools_count",
+            &format!("Request failed: {}", e),
+            start,
+        ),
     }
 }
 
@@ -129,7 +301,13 @@ fn test_tool_call_add(memd_path: &str) -> TestResult {
     let start = Instant::now();
     let mut client = match McpClient::start(memd_path) {
         Ok(c) => c,
-        Err(e) => return TestResult::fail_with_duration("A1_tool_add", &format!("Failed to start: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(
+                "A1_tool_add",
+                &format!("Failed to start: {}", e),
+                start,
+            )
+        }
     };
 
     let _ = client.initialize();
@@ -173,10 +351,16 @@ fn test_tool_call_add(memd_path: &str) -> TestResult {
                     ),
                 }
             } else {
-                TestResult::fail_with_duration("A1_tool_add", "Response missing content text", start)
+                TestResult::fail_with_duration(
+                    "A1_tool_add",
+                    "Response missing content text",
+                    start,
+                )
             }
         }
-        Err(e) => TestResult::fail_with_duration("A1_tool_add", &format!("Request failed: {}", e), start),
+        Err(e) => {
+            TestResult::fail_with_duration("A1_tool_add", &format!("Request failed: {}", e), start)
+        }
     }
 }
 
@@ -185,7 +369,13 @@ fn test_tool_call_search(memd_path: &str) -> TestResult {
     let start = Instant::now();
     let mut client = match McpClient::start(memd_path) {
         Ok(c) => c,
-        Err(e) => return TestResult::fail_with_duration("A1_tool_search", &format!("Failed to start: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(
+                "A1_tool_search",
+                &format!("Failed to start: {}", e),
+                start,
+            )
+        }
     };
 
     let _ = client.initialize();
@@ -236,10 +426,18 @@ fn test_tool_call_search(memd_path: &str) -> TestResult {
                     ),
                 }
             } else {
-                TestResult::fail_with_duration("A1_tool_search", "Response missing content text", start)
+                TestResult::fail_with_duration(
+                    "A1_tool_search",
+                    "Response missing content text",
+                    start,
+                )
             }
         }
-        Err(e) => TestResult::fail_with_duration("A1_tool_search", &format!("Request failed: {}", e), start),
+        Err(e) => TestResult::fail_with_duration(
+            "A1_tool_search",
+            &format!("Request failed: {}", e),
+            start,
+        ),
     }
 }
 
@@ -248,7 +446,13 @@ fn test_tool_call_get(memd_path: &str) -> TestResult {
     let start = Instant::now();
     let mut client = match McpClient::start(memd_path) {
         Ok(c) => c,
-        Err(e) => return TestResult::fail_with_duration("A1_tool_get", &format!("Failed to start: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(
+                "A1_tool_get",
+                &format!("Failed to start: {}", e),
+                start,
+            )
+        }
     };
 
     let _ = client.initialize();
@@ -263,7 +467,13 @@ fn test_tool_call_get(memd_path: &str) -> TestResult {
         }),
     ) {
         Ok(r) => r,
-        Err(e) => return TestResult::fail_with_duration("A1_tool_get", &format!("Add failed: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(
+                "A1_tool_get",
+                &format!("Add failed: {}", e),
+                start,
+            )
+        }
     };
 
     // Extract chunk_id
@@ -274,11 +484,21 @@ fn test_tool_call_get(memd_path: &str) -> TestResult {
         .and_then(|item| item.get("text"))
         .and_then(|t| t.as_str())
         .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
-        .and_then(|v| v.get("chunk_id").and_then(|id| id.as_str()).map(String::from));
+        .and_then(|v| {
+            v.get("chunk_id")
+                .and_then(|id| id.as_str())
+                .map(String::from)
+        });
 
     let chunk_id = match chunk_id {
         Some(id) => id,
-        None => return TestResult::fail_with_duration("A1_tool_get", "Could not extract chunk_id from add", start),
+        None => {
+            return TestResult::fail_with_duration(
+                "A1_tool_get",
+                "Could not extract chunk_id from add",
+                start,
+            )
+        }
     };
 
     match client.call_tool(
@@ -318,10 +538,16 @@ fn test_tool_call_get(memd_path: &str) -> TestResult {
                     ),
                 }
             } else {
-                TestResult::fail_with_duration("A1_tool_get", "Response missing content text", start)
+                TestResult::fail_with_duration(
+                    "A1_tool_get",
+                    "Response missing content text",
+                    start,
+                )
             }
         }
-        Err(e) => TestResult::fail_with_duration("A1_tool_get", &format!("Request failed: {}", e), start),
+        Err(e) => {
+            TestResult::fail_with_duration("A1_tool_get", &format!("Request failed: {}", e), start)
+        }
     }
 }
 
@@ -330,7 +556,13 @@ fn test_tool_call_delete(memd_path: &str) -> TestResult {
     let start = Instant::now();
     let mut client = match McpClient::start(memd_path) {
         Ok(c) => c,
-        Err(e) => return TestResult::fail_with_duration("A1_tool_delete", &format!("Failed to start: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(
+                "A1_tool_delete",
+                &format!("Failed to start: {}", e),
+                start,
+            )
+        }
     };
 
     let _ = client.initialize();
@@ -345,7 +577,13 @@ fn test_tool_call_delete(memd_path: &str) -> TestResult {
         }),
     ) {
         Ok(r) => r,
-        Err(e) => return TestResult::fail_with_duration("A1_tool_delete", &format!("Add failed: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(
+                "A1_tool_delete",
+                &format!("Add failed: {}", e),
+                start,
+            )
+        }
     };
 
     // Extract chunk_id
@@ -356,11 +594,21 @@ fn test_tool_call_delete(memd_path: &str) -> TestResult {
         .and_then(|item| item.get("text"))
         .and_then(|t| t.as_str())
         .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
-        .and_then(|v| v.get("chunk_id").and_then(|id| id.as_str()).map(String::from));
+        .and_then(|v| {
+            v.get("chunk_id")
+                .and_then(|id| id.as_str())
+                .map(String::from)
+        });
 
     let chunk_id = match chunk_id {
         Some(id) => id,
-        None => return TestResult::fail_with_duration("A1_tool_delete", "Could not extract chunk_id from add", start),
+        None => {
+            return TestResult::fail_with_duration(
+                "A1_tool_delete",
+                "Could not extract chunk_id from add",
+                start,
+            )
+        }
     };
 
     match client.call_tool(
@@ -399,10 +647,18 @@ fn test_tool_call_delete(memd_path: &str) -> TestResult {
                     ),
                 }
             } else {
-                TestResult::fail_with_duration("A1_tool_delete", "Response missing content text", start)
+                TestResult::fail_with_duration(
+                    "A1_tool_delete",
+                    "Response missing content text",
+                    start,
+                )
             }
         }
-        Err(e) => TestResult::fail_with_duration("A1_tool_delete", &format!("Request failed: {}", e), start),
+        Err(e) => TestResult::fail_with_duration(
+            "A1_tool_delete",
+            &format!("Request failed: {}", e),
+            start,
+        ),
     }
 }
 
@@ -411,7 +667,13 @@ fn test_tool_call_stats(memd_path: &str) -> TestResult {
     let start = Instant::now();
     let mut client = match McpClient::start(memd_path) {
         Ok(c) => c,
-        Err(e) => return TestResult::fail_with_duration("A1_tool_stats", &format!("Failed to start: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(
+                "A1_tool_stats",
+                &format!("Failed to start: {}", e),
+                start,
+            )
+        }
     };
 
     let _ = client.initialize();
@@ -454,10 +716,18 @@ fn test_tool_call_stats(memd_path: &str) -> TestResult {
                     ),
                 }
             } else {
-                TestResult::fail_with_duration("A1_tool_stats", "Response missing content text", start)
+                TestResult::fail_with_duration(
+                    "A1_tool_stats",
+                    "Response missing content text",
+                    start,
+                )
             }
         }
-        Err(e) => TestResult::fail_with_duration("A1_tool_stats", &format!("Request failed: {}", e), start),
+        Err(e) => TestResult::fail_with_duration(
+            "A1_tool_stats",
+            &format!("Request failed: {}", e),
+            start,
+        ),
     }
 }
 
@@ -466,7 +736,13 @@ fn test_tool_call_add_batch(memd_path: &str) -> TestResult {
     let start = Instant::now();
     let mut client = match McpClient::start(memd_path) {
         Ok(c) => c,
-        Err(e) => return TestResult::fail_with_duration("A1_tool_add_batch", &format!("Failed to start: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(
+                "A1_tool_add_batch",
+                &format!("Failed to start: {}", e),
+                start,
+            )
+        }
     };
 
     let _ = client.initialize();
@@ -516,10 +792,58 @@ fn test_tool_call_add_batch(memd_path: &str) -> TestResult {
                     ),
                 }
             } else {
-                TestResult::fail_with_duration("A1_tool_add_batch", "Response missing content text", start)
+                TestResult::fail_with_duration(
+                    "A1_tool_add_batch",
+                    "Response missing content text",
+                    start,
+                )
             }
         }
-        Err(e) => TestResult::fail_with_duration("A1_tool_add_batch", &format!("Request failed: {}", e), start),
+        Err(e) => TestResult::fail_with_duration(
+            "A1_tool_add_batch",
+            &format!("Request failed: {}", e),
+            start,
+        ),
+    }
+}
+
+/// A1: End-to-end MCP memory flow in in-memory mode.
+fn test_e2e_memory_tools_in_memory(memd_path: &str) -> TestResult {
+    let start = Instant::now();
+    let mut client = match McpClient::start(memd_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return TestResult::fail_with_duration(
+                "A1_e2e_tools_in_memory",
+                &format!("Failed to start: {}", e),
+                start,
+            )
+        }
+    };
+
+    match run_memory_tools_flow(&mut client, "mcp_e2e_memory") {
+        Ok(_) => TestResult::pass_with_duration("A1_e2e_tools_in_memory", start),
+        Err(e) => TestResult::fail_with_duration("A1_e2e_tools_in_memory", &e, start),
+    }
+}
+
+/// A1: End-to-end MCP memory flow in persistent mode.
+fn test_e2e_memory_tools_persistent(memd_path: &str) -> TestResult {
+    let start = Instant::now();
+    let (mut client, _data_dir) = match start_persistent_client(memd_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return TestResult::fail_with_duration(
+                "A1_e2e_tools_persistent",
+                &format!("Failed to start: {}", e),
+                start,
+            )
+        }
+    };
+
+    match run_memory_tools_flow(&mut client, "mcp_e2e_persistent") {
+        Ok(_) => TestResult::pass_with_duration("A1_e2e_tools_persistent", start),
+        Err(e) => TestResult::fail_with_duration("A1_e2e_tools_persistent", &e, start),
     }
 }
 
@@ -528,7 +852,13 @@ fn test_invalid_json(memd_path: &str) -> TestResult {
     let start = Instant::now();
     let mut client = match McpClient::start(memd_path) {
         Ok(c) => c,
-        Err(e) => return TestResult::fail_with_duration("A2_invalid_json", &format!("Failed to start: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(
+                "A2_invalid_json",
+                &format!("Failed to start: {}", e),
+                start,
+            )
+        }
     };
 
     // Send malformed JSON
@@ -550,7 +880,11 @@ fn test_invalid_json(memd_path: &str) -> TestResult {
                 )
             }
         }
-        Err(e) => TestResult::fail_with_duration("A2_invalid_json", &format!("Request failed: {}", e), start),
+        Err(e) => TestResult::fail_with_duration(
+            "A2_invalid_json",
+            &format!("Request failed: {}", e),
+            start,
+        ),
     }
 }
 
@@ -559,7 +893,13 @@ fn test_unknown_method(memd_path: &str) -> TestResult {
     let start = Instant::now();
     let mut client = match McpClient::start(memd_path) {
         Ok(c) => c,
-        Err(e) => return TestResult::fail_with_duration("A2_unknown_method", &format!("Failed to start: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(
+                "A2_unknown_method",
+                &format!("Failed to start: {}", e),
+                start,
+            )
+        }
     };
 
     match client.request("nonexistent/method", None) {
@@ -580,7 +920,11 @@ fn test_unknown_method(memd_path: &str) -> TestResult {
                 )
             }
         }
-        Err(e) => TestResult::fail_with_duration("A2_unknown_method", &format!("Request failed: {}", e), start),
+        Err(e) => TestResult::fail_with_duration(
+            "A2_unknown_method",
+            &format!("Request failed: {}", e),
+            start,
+        ),
     }
 }
 
@@ -589,12 +933,18 @@ fn test_missing_tenant_id(memd_path: &str) -> TestResult {
     let start = Instant::now();
     let mut client = match McpClient::start(memd_path) {
         Ok(c) => c,
-        Err(e) => return TestResult::fail_with_duration("A2_missing_tenant", &format!("Failed to start: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(
+                "A2_missing_tenant",
+                &format!("Failed to start: {}", e),
+                start,
+            )
+        }
     };
 
     let _ = client.initialize();
 
-    match client.call_tool(
+    match client.call_tool_raw(
         "memory.search",
         json!({
             "query": "test"
@@ -618,7 +968,11 @@ fn test_missing_tenant_id(memd_path: &str) -> TestResult {
                 )
             }
         }
-        Err(e) => TestResult::fail_with_duration("A2_missing_tenant", &format!("Request failed: {}", e), start),
+        Err(e) => TestResult::fail_with_duration(
+            "A2_missing_tenant",
+            &format!("Request failed: {}", e),
+            start,
+        ),
     }
 }
 
@@ -627,12 +981,18 @@ fn test_invalid_chunk_type(memd_path: &str) -> TestResult {
     let start = Instant::now();
     let mut client = match McpClient::start(memd_path) {
         Ok(c) => c,
-        Err(e) => return TestResult::fail_with_duration("A2_invalid_chunk_type", &format!("Failed to start: {}", e), start),
+        Err(e) => {
+            return TestResult::fail_with_duration(
+                "A2_invalid_chunk_type",
+                &format!("Failed to start: {}", e),
+                start,
+            )
+        }
     };
 
     let _ = client.initialize();
 
-    match client.call_tool(
+    match client.call_tool_raw(
         "memory.add",
         json!({
             "tenant_id": "test_tenant",
@@ -657,6 +1017,50 @@ fn test_invalid_chunk_type(memd_path: &str) -> TestResult {
                 )
             }
         }
-        Err(e) => TestResult::fail_with_duration("A2_invalid_chunk_type", &format!("Request failed: {}", e), start),
+        Err(e) => TestResult::fail_with_duration(
+            "A2_invalid_chunk_type",
+            &format!("Request failed: {}", e),
+            start,
+        ),
+    }
+}
+
+/// A2: Regression test - tool call RPC errors must propagate as Err from McpClient::call_tool
+fn test_tool_error_propagates(memd_path: &str) -> TestResult {
+    let start = Instant::now();
+    let mut client = match McpClient::start(memd_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return TestResult::fail_with_duration(
+                "A2_tool_error_propagates",
+                &format!("Failed to start: {}", e),
+                start,
+            )
+        }
+    };
+
+    let _ = client.initialize();
+
+    match client.call_tool(
+        "memory.add",
+        json!({
+            "tenant_id": "test_tenant",
+            "text": "tool error propagation regression",
+            "type": "invalid_type_xyz"
+        }),
+    ) {
+        Err(McpClientError::RpcError(_)) => {
+            TestResult::pass_with_duration("A2_tool_error_propagates", start)
+        }
+        Err(e) => TestResult::fail_with_duration(
+            "A2_tool_error_propagates",
+            &format!("Expected RpcError, got: {}", e),
+            start,
+        ),
+        Ok(_) => TestResult::fail_with_duration(
+            "A2_tool_error_propagates",
+            "call_tool returned Ok for invalid chunk type (error propagation regression)",
+            start,
+        ),
     }
 }

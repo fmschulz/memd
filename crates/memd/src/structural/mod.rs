@@ -17,13 +17,14 @@ pub use call_graph::{
     CallGraphExtractor, CallGraphIndexer, ExtractedCall, ExtractedImport,
     SymbolRecord as CallGraphSymbolRecord,
 };
+pub use parser::{
+    detect_language, parse_file, LanguageSupport, ParseError, ParseResult, SupportedLanguage,
+};
 pub use queries::{
     format_timestamp, parse_iso_datetime, CallerInfo, ErrorResult, ErrorSummary, FrameInfo,
     ImportInfo, SymbolLocation, SymbolQueryService, ToolCallResult, TraceQueryService,
 };
-pub use parser::{
-    detect_language, parse_file, LanguageSupport, ParseError, ParseResult, SupportedLanguage,
-};
+pub use router::{QueryIntent, QueryRouter, RouteResult};
 pub use storage::{
     CallEdgeRecord, CallType, ImportRecord, StackFrameRecord, StackTraceRecord, StructuralStore,
     SymbolKind, SymbolRecord, TimeRange, ToolTraceRecord,
@@ -33,4 +34,3 @@ pub use traces::{
     normalize_error_signature, DefaultTraceIndexer, ParsedFrame, StackTraceParser, TraceCapture,
     TraceIndexer,
 };
-pub use router::{QueryIntent, QueryRouter, RouteResult};

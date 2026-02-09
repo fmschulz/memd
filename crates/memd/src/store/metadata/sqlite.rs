@@ -112,20 +112,12 @@ impl SqliteMetadataStore {
 
         // Parse chunk_id
         let chunk_id = ChunkId::parse(&chunk_id_str).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
         })?;
 
         // Parse tenant_id
         let tenant_id = TenantId::new(&tenant_id_str).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                1,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
+            rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e))
         })?;
 
         // Parse chunk_type
@@ -314,9 +306,8 @@ impl MetadataStore for SqliteMetadataStore {
     fn get_deleted_chunk_ids(&self, tenant_id: &TenantId) -> Result<Vec<ChunkId>> {
         let conn = self.conn.lock().unwrap();
 
-        let mut stmt = conn.prepare(
-            "SELECT chunk_id FROM chunks WHERE tenant_id = ?1 AND status = 'deleted'",
-        )?;
+        let mut stmt = conn
+            .prepare("SELECT chunk_id FROM chunks WHERE tenant_id = ?1 AND status = 'deleted'")?;
 
         let rows = stmt.query_map(rusqlite::params![tenant_id.as_str()], |row| {
             let chunk_id_str: String = row.get(0)?;

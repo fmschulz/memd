@@ -9,9 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use regex::Regex;
 use serde_json::Value;
 
-use super::storage::{
-    StackFrameRecord, StackTraceRecord, StructuralStore, ToolTraceRecord,
-};
+use super::storage::{StackFrameRecord, StackTraceRecord, StructuralStore, ToolTraceRecord};
 use crate::error::Result;
 use crate::types::TenantId;
 
@@ -89,7 +87,8 @@ impl StackTraceParser {
                 // Extract the panic message
                 if let Some(start) = first_line.find("panicked at '") {
                     if let Some(end) = first_line[start + 13..].find('\'') {
-                        error_signature = format!("panic: {}", &first_line[start + 13..start + 13 + end]);
+                        error_signature =
+                            format!("panic: {}", &first_line[start + 13..start + 13 + end]);
                     }
                 }
             } else if first_line.starts_with("Error:") || first_line.starts_with("error[") {
@@ -175,12 +174,18 @@ impl StackTraceParser {
         // Error is typically on the last non-empty line
         for line in trace.lines().rev() {
             let trimmed = line.trim();
-            if !trimmed.is_empty() && !trimmed.starts_with("File ") && !trimmed.starts_with("Traceback") {
+            if !trimmed.is_empty()
+                && !trimmed.starts_with("File ")
+                && !trimmed.starts_with("Traceback")
+            {
                 // Check if it's an error line (ErrorType: message)
                 if let Some(colon_pos) = trimmed.find(':') {
                     let error_type = &trimmed[..colon_pos];
                     // Skip if it looks like a file path (Windows or Unix)
-                    if !error_type.contains('/') && !error_type.contains('\\') && error_type.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    if !error_type.contains('/')
+                        && !error_type.contains('\\')
+                        && error_type.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    {
                         error_signature = trimmed.to_string();
                         break;
                     }
@@ -314,10 +319,14 @@ pub fn normalize_error_signature(error: &str) -> String {
 
     // Remove timestamps (various formats)
     let timestamp_re = Regex::new(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}").unwrap();
-    normalized = timestamp_re.replace_all(&normalized, "<timestamp>").to_string();
+    normalized = timestamp_re
+        .replace_all(&normalized, "<timestamp>")
+        .to_string();
 
     // Remove UUIDs
-    let uuid_re = Regex::new(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}").unwrap();
+    let uuid_re =
+        Regex::new(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+            .unwrap();
     normalized = uuid_re.replace_all(&normalized, "<uuid>").to_string();
 
     // Remove line numbers (in some contexts)
@@ -430,7 +439,10 @@ stack backtrace:
 
         assert!(sig.contains("index out of bounds"));
         assert_eq!(frames.len(), 3);
-        assert_eq!(frames[0].function_name.as_deref(), Some("std::panicking::begin_panic"));
+        assert_eq!(
+            frames[0].function_name.as_deref(),
+            Some("std::panicking::begin_panic")
+        );
         assert_eq!(frames[1].function_name.as_deref(), Some("test::main"));
         assert_eq!(frames[1].line_number, Some(10));
     }

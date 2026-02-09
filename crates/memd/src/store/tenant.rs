@@ -86,10 +86,7 @@ impl TenantManager {
             let path = tenant_dir.join(subdir);
             if !path.exists() {
                 fs::create_dir_all(&path).map_err(|e| {
-                    MemdError::StorageError(format!(
-                        "failed to create {} directory: {}",
-                        subdir, e
-                    ))
+                    MemdError::StorageError(format!("failed to create {} directory: {}", subdir, e))
                 })?;
                 debug!(subdir = %subdir, "created subdirectory");
             }
@@ -109,10 +106,7 @@ impl TenantManager {
         let mut tenants = Vec::new();
 
         let entries = fs::read_dir(&tenants_dir).map_err(|e| {
-            MemdError::StorageError(format!(
-                "failed to read tenants directory: {}",
-                e
-            ))
+            MemdError::StorageError(format!("failed to read tenants directory: {}", e))
         })?;
 
         for entry in entries {

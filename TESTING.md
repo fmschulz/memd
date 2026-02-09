@@ -1,216 +1,119 @@
-# Testing memd Installation Locally
+# Testing memd
 
-Since the repository is currently private, you can test the installation process using the local binary.
+This document reflects the current verification workflow for code, MCP conformance, and retrieval evaluation.
 
-## Test Installation Script
+## Scope
 
-The `test-install.sh` script simulates the production installation process using your local binary:
+Use this matrix to validate:
 
-```bash
-./test-install.sh
-```
-
-**What it does:**
-1. Uses the pre-built binary from `dist/memd-linux-x64`
-2. Installs to `~/.local/bin/memd` (or `$MEMD_INSTALL_DIR`)
-3. Creates configuration at `~/.config/memd/config.toml`
-4. Prompts to configure MCP for Claude Code
-5. Prompts to configure MCP for Codex CLI
-6. Verifies the installation
+- core crate behavior (`memd`)
+- eval harness behavior (`memd-evals`)
+- MCP end-to-end behavior for add/search/metrics/compact
+- retrieval quality suites
 
 ## Prerequisites
 
-Build the binary first if you haven't:
+```bash
+cargo --version
+rustc --version
+```
+
+Optional for isolated runtime checks:
 
 ```bash
-cargo build --release
-mkdir -p dist
-cp target/release/memd dist/memd-linux-x64
+mkdir -p /tmp/memd-test
 ```
 
-## Testing MCP Integration
-
-### For Claude Code
-
-1. Run the test installer:
-   ```bash
-   ./test-install.sh
-   ```
-
-2. When prompted, choose "Y" for Claude Code configuration
-
-3. Restart Claude Code completely
-
-4. Test in Claude Code:
-   ```markdown
-   User: "List available tools"
-
-   # You should see memd tools:
-   - memory.add
-   - memory.search
-   - code.find_definition
-   # ... etc
-   ```
-
-5. Test a tool:
-   ```markdown
-   User: "Use memory.add to store: Test installation works"
-   ```
-
-### For Codex CLI
-
-1. Run the test installer:
-   ```bash
-   ./test-install.sh
-   ```
-
-2. When prompted, choose "Y" for Codex CLI configuration
-
-3. Test with Codex:
-   ```bash
-   codex -p "What memory tools are available?"
-   ```
-
-## Manual Testing
-
-If you want to test without running the installer:
-
-### 1. Install Binary Manually
+## 1. Core test suites
 
 ```bash
-mkdir -p ~/.local/bin
-cp dist/memd-linux-x64 ~/.local/bin/memd
-chmod +x ~/.local/bin/memd
+cargo test -p memd
+cargo test -p memd-evals
 ```
 
-### 2. Create Config
+Expected:
+
+- `memd`: unit + integration tests pass
+- `memd-evals`: harness tests pass
+
+## 2. MCP conformance suite
 
 ```bash
-mkdir -p ~/.config/memd
-cat > ~/.config/memd/config.toml <<'EOF'
-[server]
-mode = "mcp"
-
-[storage]
-data_dir = "~/.local/share/memd"
-
-[embeddings]
-model = "all-MiniLM-L6-v2"
-dimension = 384
-pooling_strategy = "mean"
-
-[index]
-hnsw_m = 16
-hnsw_ef_construction = 200
-hnsw_ef_search = 50
-
-[cache]
-hot_tier_size = 1000
-semantic_cache_ttl = 2700
-
-[compaction]
-tombstone_threshold = 0.20
-segment_threshold = 10
-hnsw_staleness_threshold = 0.15
-EOF
+RUST_LOG=error cargo run -p memd-evals -- --suite mcp --skip-build
 ```
 
-### 3. Configure MCP (Claude Code)
+This suite validates MCP protocol/tool behavior including:
 
-Add to `~/.config/claude/mcp_settings.json`:
+- initialize and tools/list
+- memory add/search/get/delete/stats/add_batch
+- metrics/compact dispatch and payload shape
+- invalid JSON / unknown method / invalid params
+- end-to-end add/search/metrics/compact in:
+- in-memory mode
+- persistent mode
 
-```json
-{
-  "mcpServers": {
-    "memd": {
-      "command": "/home/fschulz/.local/bin/memd",
-      "args": [],
-      "env": {},
-      "disabled": false
-    }
-  }
-}
-```
-
-### 4. Test memd Directly
+## 3. Retrieval and hybrid suites
 
 ```bash
-# Test binary runs
-~/.local/bin/memd
-
-# It should wait for MCP input on stdin
-# Press Ctrl+C to exit
+RUST_LOG=error cargo run -p memd-evals -- --suite retrieval --skip-build
+RUST_LOG=error cargo run -p memd-evals -- --suite hybrid --skip-build
+RUST_LOG=error cargo run -p memd-evals -- --suite true-semantic --skip-build
 ```
 
-## Verification Checklist
-
-After installation, verify:
-
-- [ ] Binary exists: `ls -la ~/.local/bin/memd`
-- [ ] Binary is executable: `file ~/.local/bin/memd`
-- [ ] Config created: `cat ~/.config/memd/config.toml`
-- [ ] Data dir created: `ls -la ~/.local/share/memd`
-- [ ] MCP config added: `cat ~/.config/claude/mcp_settings.json | grep memd`
-- [ ] memd runs: `memd` (should start, press Ctrl+C)
-- [ ] Claude Code shows memd tools (after restart)
-- [ ] Can use memory.add tool successfully
-
-## Troubleshooting
-
-### Binary not in PATH
+Optional dataset override (single suite runs):
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
-# Add to ~/.bashrc to make permanent
+cargo run -p memd-evals -- --suite retrieval --dataset-path evals/datasets/retrieval/code_pairs.json --skip-build
 ```
 
-### MCP config not working
-
-Check Claude Code picks up the config:
-```bash
-cat ~/.config/claude/mcp_settings.json
-```
-
-Ensure memd is not disabled:
-```json
-"disabled": false
-```
-
-### memd fails to start
-
-Check binary is executable:
-```bash
-chmod +x ~/.local/bin/memd
-ldd ~/.local/bin/memd  # Check dependencies
-```
-
-### Tools not showing in Claude Code
-
-1. Verify MCP config is correct
-2. Restart Claude Code completely
-3. Check memd binary runs: `~/.local/bin/memd`
-4. Check logs if available
-
-## Cleanup
-
-To remove the test installation:
+## 4. Full eval run
 
 ```bash
-rm ~/.local/bin/memd
-rm -rf ~/.config/memd
-rm -rf ~/.local/share/memd
-
-# Remove from MCP config manually or:
-jq 'del(.mcpServers.memd)' ~/.config/claude/mcp_settings.json > /tmp/mcp.json
-mv /tmp/mcp.json ~/.config/claude/mcp_settings.json
+cargo run -p memd-evals -- --suite all
 ```
 
-## Production Testing
+Notes:
 
-Once the repository is public, test the production install script:
+- `all` runs sanity first and halts on sanity failure
+- use `--include-compaction true` if you want compaction suite included in the full run
+
+## 5. Property/fuzz-style tests currently in-tree
+
+`memd` includes `proptest` coverage for key invariants:
+
+- `validate_search_k` bounds and rejection cases
+- `time_range` ordering/ISO validation paths
+- add-time split invariants (`split_for_add`)
+
+Run via:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/fmschulz/memd/main/install.sh | bash
+cargo test -p memd
 ```
 
-This will download the binary from GitHub releases instead of using a local copy.
+## 6. Manual MCP smoke test
+
+```bash
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0.1.0"}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"memory.add","arguments":{"tenant_id":"smoke_tenant","text":"hello world","type":"doc"}}}' \
+  | ./target/release/memd --mode mcp --in-memory --data-dir /tmp/memd-smoke
+```
+
+## 7. Common failures
+
+- `invalid 'k': must be between 1 and 100`
+- `invalid filters.time_range.from` or `.to`
+- `tenant_id` validation failures (must be alnum/underscore)
+- filesystem permission failures in persistent mode if `--data-dir` is unwritable
+
+## 8. Release gate
+
+Minimum gate before tagging/push:
+
+```bash
+cargo test -p memd
+cargo test -p memd-evals
+RUST_LOG=error cargo run -p memd-evals -- --suite mcp --skip-build
+```

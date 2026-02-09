@@ -255,7 +255,8 @@ impl<W: WarmTierSearch> TieredSearcher<W> {
         let cache_start = Instant::now();
         let cache_result = if self.config.enable_cache {
             let version = self.warm_tier.get_version();
-            self.cache.lookup(query_embedding, tenant_id, project_id, version)
+            self.cache
+                .lookup(query_embedding, tenant_id, project_id, version)
         } else {
             None
         };
@@ -423,7 +424,11 @@ impl<W: WarmTierSearch> TieredSearcher<W> {
 
         // Sort by score descending and take top k
         let mut results: Vec<ScoredChunk> = seen.into_values().collect();
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(k);
         results
     }
@@ -526,7 +531,8 @@ impl<W: WarmTierSearch> TieredSearcher<W> {
 
         // Reset query counter
         self.query_counter.store(0, Ordering::Relaxed);
-        self.last_demotion_check.store(current_time_ms() as u64, Ordering::Relaxed);
+        self.last_demotion_check
+            .store(current_time_ms() as u64, Ordering::Relaxed);
 
         let mut decisions = Vec::new();
         let demotion_threshold = self.config.promotion_threshold * 0.5;

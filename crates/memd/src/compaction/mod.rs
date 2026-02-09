@@ -128,9 +128,9 @@ mod tests {
     fn check_thresholds_below() {
         let manager = CompactionManager::new(CompactionConfig::default());
         let metrics = CompactionMetrics {
-            tombstone_ratio: 0.10,     // Below 0.20 threshold
-            segment_count: 5,          // Below 10 threshold
-            hnsw_staleness: 0.05,      // Below 0.15 threshold
+            tombstone_ratio: 0.10, // Below 0.20 threshold
+            segment_count: 5,      // Below 10 threshold
+            hnsw_staleness: 0.05,  // Below 0.15 threshold
             ..Default::default()
         };
         assert!(!manager.check_thresholds(&metrics));
@@ -140,7 +140,7 @@ mod tests {
     fn check_thresholds_tombstone_exceeded() {
         let manager = CompactionManager::new(CompactionConfig::default());
         let metrics = CompactionMetrics {
-            tombstone_ratio: 0.25,     // Above 0.20 threshold
+            tombstone_ratio: 0.25, // Above 0.20 threshold
             segment_count: 5,
             hnsw_staleness: 0.05,
             ..Default::default()
@@ -153,7 +153,7 @@ mod tests {
         let manager = CompactionManager::new(CompactionConfig::default());
         let metrics = CompactionMetrics {
             tombstone_ratio: 0.10,
-            segment_count: 15,         // Above 10 threshold
+            segment_count: 15, // Above 10 threshold
             hnsw_staleness: 0.05,
             ..Default::default()
         };
@@ -166,7 +166,7 @@ mod tests {
         let metrics = CompactionMetrics {
             tombstone_ratio: 0.10,
             segment_count: 5,
-            hnsw_staleness: 0.20,      // Above 0.15 threshold
+            hnsw_staleness: 0.20, // Above 0.15 threshold
             ..Default::default()
         };
         assert!(manager.check_thresholds(&metrics));

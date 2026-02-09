@@ -34,7 +34,8 @@ pub trait MetadataStore: Send + Sync {
     fn get(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<Option<ChunkMetadata>>;
 
     /// List chunks for a tenant (non-deleted only)
-    fn list(&self, tenant_id: &TenantId, limit: usize, offset: usize) -> Result<Vec<ChunkMetadata>>;
+    fn list(&self, tenant_id: &TenantId, limit: usize, offset: usize)
+        -> Result<Vec<ChunkMetadata>>;
 
     /// Mark chunk as deleted (soft delete)
     fn mark_deleted(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<bool>;

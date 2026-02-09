@@ -90,7 +90,11 @@ impl ContextPacker {
         }
 
         // Step 1: Sort by score descending
-        chunks.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        chunks.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Step 2: Hash-based deduplication
         let (deduped, duplicates_removed) = self.deduplicate_by_hash(chunks);
@@ -288,7 +292,8 @@ impl ContextPacker {
 
         for chunk in chunks {
             let chunk_chars = chunk.text.len();
-            let chunk_tokens = (chunk_chars + self.config.chars_per_token - 1) / self.config.chars_per_token;
+            let chunk_tokens =
+                (chunk_chars + self.config.chars_per_token - 1) / self.config.chars_per_token;
 
             if total_chars + chunk_chars > max_chars {
                 // Would exceed budget - stop here
@@ -306,7 +311,8 @@ impl ContextPacker {
             });
         }
 
-        let total_tokens = (total_chars + self.config.chars_per_token - 1) / self.config.chars_per_token;
+        let total_tokens =
+            (total_chars + self.config.chars_per_token - 1) / self.config.chars_per_token;
 
         PackedContext {
             chunks: result,
@@ -338,7 +344,13 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 mod tests {
     use super::*;
 
-    fn make_chunk(id: &str, text: &str, chunk_type: ChunkType, score: f32, hash: &str) -> PackerInput {
+    fn make_chunk(
+        id: &str,
+        text: &str,
+        chunk_type: ChunkType,
+        score: f32,
+        hash: &str,
+    ) -> PackerInput {
         PackerInput {
             chunk_id: ChunkId::parse(id).unwrap_or_else(|_| ChunkId::new()),
             text: text.to_string(),
@@ -372,9 +384,27 @@ mod tests {
     fn test_hash_deduplication() {
         let packer = ContextPacker::new(PackerConfig::default());
         let chunks = vec![
-            make_chunk("019498f0-0000-7000-8000-000000000001", "content a", ChunkType::Code, 0.9, "hash_a"),
-            make_chunk("019498f0-0000-7000-8000-000000000002", "content b", ChunkType::Doc, 0.8, "hash_b"),
-            make_chunk("019498f0-0000-7000-8000-000000000003", "content c", ChunkType::Code, 0.7, "hash_a"), // duplicate
+            make_chunk(
+                "019498f0-0000-7000-8000-000000000001",
+                "content a",
+                ChunkType::Code,
+                0.9,
+                "hash_a",
+            ),
+            make_chunk(
+                "019498f0-0000-7000-8000-000000000002",
+                "content b",
+                ChunkType::Doc,
+                0.8,
+                "hash_b",
+            ),
+            make_chunk(
+                "019498f0-0000-7000-8000-000000000003",
+                "content c",
+                ChunkType::Code,
+                0.7,
+                "hash_a",
+            ), // duplicate
         ];
 
         let result = packer.pack(chunks);
@@ -397,9 +427,27 @@ mod tests {
 
         // Each chunk is 200 chars = 50 tokens
         let chunks = vec![
-            make_chunk("019498f0-0000-7000-8000-000000000001", &"a".repeat(200), ChunkType::Code, 0.9, "hash_a"),
-            make_chunk("019498f0-0000-7000-8000-000000000002", &"b".repeat(200), ChunkType::Doc, 0.8, "hash_b"),
-            make_chunk("019498f0-0000-7000-8000-000000000003", &"c".repeat(200), ChunkType::Trace, 0.7, "hash_c"),
+            make_chunk(
+                "019498f0-0000-7000-8000-000000000001",
+                &"a".repeat(200),
+                ChunkType::Code,
+                0.9,
+                "hash_a",
+            ),
+            make_chunk(
+                "019498f0-0000-7000-8000-000000000002",
+                &"b".repeat(200),
+                ChunkType::Doc,
+                0.8,
+                "hash_b",
+            ),
+            make_chunk(
+                "019498f0-0000-7000-8000-000000000003",
+                &"c".repeat(200),
+                ChunkType::Trace,
+                0.7,
+                "hash_c",
+            ),
         ];
 
         let result = packer.pack(chunks);
@@ -413,7 +461,7 @@ mod tests {
     #[test]
     fn test_mmr_diversity() {
         let config = PackerConfig {
-            mmr_lambda: 0.5, // balanced
+            mmr_lambda: 0.5,   // balanced
             max_tokens: 10000, // high limit
             ..Default::default()
         };
@@ -421,18 +469,56 @@ mod tests {
 
         // 3 Code chunks with high scores, 2 Doc chunks with lower scores
         let chunks = vec![
-            make_chunk("019498f0-0000-7000-8000-000000000001", "code 1", ChunkType::Code, 0.95, "hash_1"),
-            make_chunk("019498f0-0000-7000-8000-000000000002", "code 2", ChunkType::Code, 0.90, "hash_2"),
-            make_chunk("019498f0-0000-7000-8000-000000000003", "code 3", ChunkType::Code, 0.85, "hash_3"),
-            make_chunk("019498f0-0000-7000-8000-000000000004", "doc 1", ChunkType::Doc, 0.80, "hash_4"),
-            make_chunk("019498f0-0000-7000-8000-000000000005", "doc 2", ChunkType::Doc, 0.75, "hash_5"),
+            make_chunk(
+                "019498f0-0000-7000-8000-000000000001",
+                "code 1",
+                ChunkType::Code,
+                0.95,
+                "hash_1",
+            ),
+            make_chunk(
+                "019498f0-0000-7000-8000-000000000002",
+                "code 2",
+                ChunkType::Code,
+                0.90,
+                "hash_2",
+            ),
+            make_chunk(
+                "019498f0-0000-7000-8000-000000000003",
+                "code 3",
+                ChunkType::Code,
+                0.85,
+                "hash_3",
+            ),
+            make_chunk(
+                "019498f0-0000-7000-8000-000000000004",
+                "doc 1",
+                ChunkType::Doc,
+                0.80,
+                "hash_4",
+            ),
+            make_chunk(
+                "019498f0-0000-7000-8000-000000000005",
+                "doc 2",
+                ChunkType::Doc,
+                0.75,
+                "hash_5",
+            ),
         ];
 
         let result = packer.pack(chunks);
 
         // MMR should promote diversity - should have mix of types
-        let code_count = result.chunks.iter().filter(|c| c.chunk_type == ChunkType::Code).count();
-        let doc_count = result.chunks.iter().filter(|c| c.chunk_type == ChunkType::Doc).count();
+        let code_count = result
+            .chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Code)
+            .count();
+        let doc_count = result
+            .chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Doc)
+            .count();
 
         assert!(code_count > 0, "Should have Code chunks");
         assert!(doc_count > 0, "Should have Doc chunks");
@@ -480,12 +566,48 @@ mod tests {
 
         // 5 Code chunks with high scores, 1 Doc chunk with lower score
         let chunks = vec![
-            make_chunk("019498f0-0000-7000-8000-000000000001", "code 1", ChunkType::Code, 0.95, "hash_1"),
-            make_chunk("019498f0-0000-7000-8000-000000000002", "code 2", ChunkType::Code, 0.90, "hash_2"),
-            make_chunk("019498f0-0000-7000-8000-000000000003", "code 3", ChunkType::Code, 0.85, "hash_3"),
-            make_chunk("019498f0-0000-7000-8000-000000000004", "code 4", ChunkType::Code, 0.80, "hash_4"),
-            make_chunk("019498f0-0000-7000-8000-000000000005", "code 5", ChunkType::Code, 0.75, "hash_5"),
-            make_chunk("019498f0-0000-7000-8000-000000000006", "doc 1", ChunkType::Doc, 0.70, "hash_6"),
+            make_chunk(
+                "019498f0-0000-7000-8000-000000000001",
+                "code 1",
+                ChunkType::Code,
+                0.95,
+                "hash_1",
+            ),
+            make_chunk(
+                "019498f0-0000-7000-8000-000000000002",
+                "code 2",
+                ChunkType::Code,
+                0.90,
+                "hash_2",
+            ),
+            make_chunk(
+                "019498f0-0000-7000-8000-000000000003",
+                "code 3",
+                ChunkType::Code,
+                0.85,
+                "hash_3",
+            ),
+            make_chunk(
+                "019498f0-0000-7000-8000-000000000004",
+                "code 4",
+                ChunkType::Code,
+                0.80,
+                "hash_4",
+            ),
+            make_chunk(
+                "019498f0-0000-7000-8000-000000000005",
+                "code 5",
+                ChunkType::Code,
+                0.75,
+                "hash_5",
+            ),
+            make_chunk(
+                "019498f0-0000-7000-8000-000000000006",
+                "doc 1",
+                ChunkType::Doc,
+                0.70,
+                "hash_6",
+            ),
         ];
 
         let result = packer.pack(chunks);
@@ -510,9 +632,27 @@ mod tests {
     fn test_score_preservation() {
         let packer = ContextPacker::new(PackerConfig::default());
         let chunks = vec![
-            make_chunk("019498f0-0000-7000-8000-000000000001", "content a", ChunkType::Code, 0.9, "hash_a"),
-            make_chunk("019498f0-0000-7000-8000-000000000002", "content b", ChunkType::Doc, 0.8, "hash_b"),
-            make_chunk("019498f0-0000-7000-8000-000000000003", "content c", ChunkType::Trace, 0.7, "hash_c"),
+            make_chunk(
+                "019498f0-0000-7000-8000-000000000001",
+                "content a",
+                ChunkType::Code,
+                0.9,
+                "hash_a",
+            ),
+            make_chunk(
+                "019498f0-0000-7000-8000-000000000002",
+                "content b",
+                ChunkType::Doc,
+                0.8,
+                "hash_b",
+            ),
+            make_chunk(
+                "019498f0-0000-7000-8000-000000000003",
+                "content c",
+                ChunkType::Trace,
+                0.7,
+                "hash_c",
+            ),
         ];
 
         let result = packer.pack(chunks);

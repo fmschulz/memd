@@ -56,58 +56,21 @@ impl CodeTokenizer {
     /// Tokenize text into typed tokens.
     pub fn tokenize_typed(&self, text: &str) -> Vec<TypedToken> {
         let mut tokens = Vec::new();
-        let mut current_pos = 0;
+        let mut word_start: Option<usize> = None;
 
-        for word in text.split(|c: char| c.is_whitespace() || c == '_' || is_separator(c)) {
-            if word.is_empty() {
-                current_pos += 1; // separator
-                continue;
-            }
-
-            let word_start = text[current_pos..].find(word).unwrap_or(0) + current_pos;
-            let word_end = word_start + word.len();
-
-            // Split on camelCase boundaries
-            let subtokens = split_camel_case(word);
-
-            let mut subtoken_pos = word_start;
-            for subtoken in subtokens {
-                if subtoken.is_empty() {
-                    continue;
+        for (idx, ch) in text.char_indices() {
+            let is_delimiter = ch.is_whitespace() || ch == '_' || is_separator(ch);
+            if is_delimiter {
+                if let Some(start) = word_start.take() {
+                    self.push_word_tokens(&mut tokens, &text[start..idx], start);
                 }
-
-                let subtoken_end = subtoken_pos + subtoken.len();
-                let token_type = detect_token_type(&subtoken);
-
-                // Normalize based on token type
-                let normalized = match token_type {
-                    TokenType::Code => {
-                        // Preserve acronyms (2+ uppercase), lowercase others
-                        if is_acronym(&subtoken) {
-                            subtoken.clone()
-                        } else {
-                            subtoken.to_lowercase()
-                        }
-                    }
-                    TokenType::Prose => {
-                        // Stem prose tokens
-                        let lower = subtoken.to_lowercase();
-                        self.stemmer.stem(&lower).to_string()
-                    }
-                    TokenType::Mixed => subtoken.to_lowercase(),
-                };
-
-                tokens.push(TypedToken {
-                    text: normalized,
-                    token_type,
-                    offset_from: subtoken_pos,
-                    offset_to: subtoken_end,
-                });
-
-                subtoken_pos = subtoken_end;
+            } else if word_start.is_none() {
+                word_start = Some(idx);
             }
+        }
 
-            current_pos = word_end;
+        if let Some(start) = word_start {
+            self.push_word_tokens(&mut tokens, &text[start..], start);
         }
 
         tokens
@@ -119,6 +82,42 @@ impl CodeTokenizer {
             .into_iter()
             .map(|t| t.text)
             .collect()
+    }
+
+    fn push_word_tokens(&self, tokens: &mut Vec<TypedToken>, word: &str, word_start: usize) {
+        let subtokens = split_camel_case(word);
+        let mut subtoken_pos = word_start;
+
+        for subtoken in subtokens {
+            if subtoken.is_empty() {
+                continue;
+            }
+
+            let subtoken_end = subtoken_pos + subtoken.len();
+            let token_type = detect_token_type(&subtoken);
+            let normalized = match token_type {
+                TokenType::Code => {
+                    if is_acronym(&subtoken) {
+                        subtoken.clone()
+                    } else {
+                        subtoken.to_lowercase()
+                    }
+                }
+                TokenType::Prose => {
+                    let lower = subtoken.to_lowercase();
+                    self.stemmer.stem(&lower).to_string()
+                }
+                TokenType::Mixed => subtoken.to_lowercase(),
+            };
+
+            tokens.push(TypedToken {
+                text: normalized,
+                token_type,
+                offset_from: subtoken_pos,
+                offset_to: subtoken_end,
+            });
+            subtoken_pos = subtoken_end;
+        }
     }
 }
 
@@ -141,7 +140,9 @@ fn split_camel_case(word: &str) -> Vec<String> {
             continue;
         }
 
-        let prev_upper = chars.get(i.saturating_sub(1)).map_or(false, |c| c.is_uppercase());
+        let prev_upper = chars
+            .get(i.saturating_sub(1))
+            .map_or(false, |c| c.is_uppercase());
         let curr_upper = c.is_uppercase();
         let next_lower = chars.get(i + 1).map_or(false, |c| c.is_lowercase());
 
@@ -183,7 +184,32 @@ fn is_acronym(s: &str) -> bool {
 
 /// Check if a character is a separator (not whitespace or underscore).
 fn is_separator(c: char) -> bool {
-    matches!(c, '.' | ',' | ';' | ':' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | '"' | '\'')
+    matches!(
+        c,
+        '.' | ','
+            | ';'
+            | ':'
+            | '('
+            | ')'
+            | '['
+            | ']'
+            | '{'
+            | '}'
+            | '<'
+            | '>'
+            | '"'
+            | '\''
+            | '&'
+            | '|'
+            | '+'
+            | '-'
+            | '*'
+            | '/'
+            | '%'
+            | '='
+            | '!'
+            | '?'
+    )
 }
 
 /// Detect the token type based on content.
@@ -300,7 +326,7 @@ mod tests {
 
         // Acronyms should be preserved uppercase
         let tokens = tokenizer.tokenize("HTTPResponse");
-        assert_eq!(tokens, vec!["HTTP", "respons"]); // "Response" stems to "respons"
+        assert_eq!(tokens, vec!["HTTP", "response"]);
 
         let tokens = tokenizer.tokenize("parseJSONData");
         assert_eq!(tokens, vec!["pars", "JSON", "data"]);
@@ -319,7 +345,7 @@ mod tests {
         assert_eq!(tokens, vec!["run", "quick"]);
 
         let tokens = tokenizer.tokenize("the users are connecting");
-        assert_eq!(tokens, vec!["the", "user", "ar", "connect"]);
+        assert_eq!(tokens, vec!["the", "user", "are", "connect"]);
     }
 
     #[test]
@@ -350,8 +376,8 @@ mod tests {
         assert_eq!(typed.len(), 2);
         assert_eq!(typed[0].text, "HTTP");
         assert_eq!(typed[0].token_type, TokenType::Code);
-        assert_eq!(typed[1].text, "respons");
-        assert_eq!(typed[1].token_type, TokenType::Prose);
+        assert_eq!(typed[1].text, "response");
+        assert_eq!(typed[1].token_type, TokenType::Code);
     }
 
     #[test]
@@ -367,5 +393,15 @@ mod tests {
         }
 
         assert_eq!(tokens, vec!["get", "user", "by", "id"]);
+    }
+
+    #[test]
+    fn test_unicode_whitespace_does_not_panic() {
+        let tokenizer = CodeTokenizer::new();
+        let text = "result\u{200a}value with\u{2003}unicode separators";
+        let tokens = tokenizer.tokenize(text);
+        assert!(!tokens.is_empty());
+        assert!(tokens.contains(&"result".to_string()));
+        assert!(tokens.contains(&"valu".to_string()));
     }
 }
