@@ -16,7 +16,7 @@ struct Args {
     #[arg(long, default_value = "target/debug/memd")]
     memd_path: String,
 
-    /// Suite to run (all, sanity, mcp, persistence, retrieval, hybrid, scifact, true-semantic, nfcorpus, codesearchnet, tiered, structural, compaction, benchmark)
+    /// Suite to run (all, sanity, mcp, persistence, retrieval, hybrid, scifact, true-semantic, nfcorpus, codesearchnet, tiered, structural, compaction, benchmark, benchmark-regression)
     #[arg(long, default_value = "all")]
     suite: String,
 
@@ -42,9 +42,10 @@ struct Args {
 
     /// Override dataset file path for dataset-backed suites
     ///
-    /// Supported for single-suite runs (e.g. `--suite retrieval` or `--suite benchmark`).
-    #[arg(long)]
-    dataset_path: Option<String>,
+    /// Use the flag once for single-suite runs (e.g. `--suite retrieval`) and
+    /// repeat it for multi-dataset benchmark runs (`--suite benchmark`).
+    #[arg(long = "dataset-path")]
+    dataset_path: Vec<String>,
 
     /// Bootstrap iterations used by the benchmark protocol suite.
     #[arg(long, default_value_t = 1000)]
@@ -77,17 +78,44 @@ struct Args {
     /// Optional max documents to index (benchmark suite only).
     #[arg(long)]
     max_documents: Option<usize>,
+
+    /// Baseline benchmark report JSON for regression gating.
+    #[arg(long)]
+    baseline_report: Option<String>,
+
+    /// Candidate benchmark report JSON for regression gating.
+    #[arg(long)]
+    candidate_report: Option<String>,
+
+    /// Significance alpha for regression gating.
+    #[arg(long, default_value_t = 0.05)]
+    significance_alpha: f64,
+
+    /// Minimum absolute Cohen's d for practical-significance gating.
+    #[arg(long, default_value_t = 0.1)]
+    min_effect_size: f64,
+
+    /// Optional regression gate report path.
+    #[arg(long)]
+    regression_report_json: Option<String>,
 }
 
 fn main() -> ExitCode {
     let args = Args::parse();
 
-    if args.dataset_path.is_some() && args.suite == "all" {
+    if !args.dataset_path.is_empty() && args.suite == "all" {
         eprintln!("--dataset-path is only supported with a specific --suite, not --suite all");
         return ExitCode::FAILURE;
     }
 
-    if let Some(path) = args.dataset_path.as_deref() {
+    if args.dataset_path.len() > 1
+        && !matches!(args.suite.as_str(), "benchmark" | "benchmark-protocol")
+    {
+        eprintln!("Multiple --dataset-path values are only supported with --suite benchmark");
+        return ExitCode::FAILURE;
+    }
+
+    if let Some(path) = args.dataset_path.first() {
         std::env::set_var("MEMD_EVAL_DATASET_PATH", path);
     }
 
@@ -181,12 +209,16 @@ fn main() -> ExitCode {
             suites::compaction::run_compaction_tests(&memd_binary, embedding_model)
         }
         "benchmark" | "benchmark-protocol" => {
-            let Some(dataset_path) = args.dataset_path.as_deref() else {
+            if args.dataset_path.is_empty() {
                 eprintln!("--dataset-path is required for --suite benchmark");
                 return ExitCode::FAILURE;
-            };
+            }
             let config = suites::benchmark_protocol::BenchmarkConfig {
-                dataset_path: std::path::PathBuf::from(dataset_path),
+                dataset_paths: args
+                    .dataset_path
+                    .iter()
+                    .map(std::path::PathBuf::from)
+                    .collect(),
                 bootstrap_iterations: args.bootstrap_iterations,
                 seed: args.seed,
                 report_json: args.report_json.as_deref().map(std::path::PathBuf::from),
@@ -202,9 +234,30 @@ fn main() -> ExitCode {
                 config,
             )
         }
+        "benchmark-regression" | "regression-gate" => {
+            let Some(baseline_report) = args.baseline_report.as_deref() else {
+                eprintln!("--baseline-report is required for --suite benchmark-regression");
+                return ExitCode::FAILURE;
+            };
+            let Some(candidate_report) = args.candidate_report.as_deref() else {
+                eprintln!("--candidate-report is required for --suite benchmark-regression");
+                return ExitCode::FAILURE;
+            };
+            let config = suites::benchmark_protocol::RegressionConfig {
+                baseline_report: std::path::PathBuf::from(baseline_report),
+                candidate_report: std::path::PathBuf::from(candidate_report),
+                alpha: args.significance_alpha,
+                min_effect_size: args.min_effect_size,
+                report_json: args
+                    .regression_report_json
+                    .as_deref()
+                    .map(std::path::PathBuf::from),
+            };
+            suites::benchmark_protocol::run_regression_gate(config)
+        }
         _ => {
             eprintln!(
-                "Unknown suite: {}. Available: all, sanity, mcp, persistence, retrieval, hybrid, true-semantic, scifact, nfcorpus, codesearchnet, tiered, structural, compaction, benchmark",
+                "Unknown suite: {}. Available: all, sanity, mcp, persistence, retrieval, hybrid, true-semantic, scifact, nfcorpus, codesearchnet, tiered, structural, compaction, benchmark, benchmark-regression",
                 args.suite
             );
             return ExitCode::FAILURE;

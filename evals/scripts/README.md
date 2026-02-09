@@ -21,10 +21,20 @@ This runs the benchmark protocol suite against:
 - `evals/datasets/retrieval/beir_scidocs.json`
 - `evals/datasets/retrieval/beir_trec-covid.json`
 
-Outputs are machine-readable JSON reports per dataset plus:
+Outputs are a machine-readable cross-corpus JSON report:
 
-- `statistical_analysis.md`
-- `statistical_analysis.json`
+- `cross_corpus_<model>.json` (normalized cross-corpus report with per-dataset summaries)
+
+To guard against quality regressions across releases, compare reports with:
+
+```bash
+cargo run -p memd-evals -- --suite benchmark-regression --skip-build \
+  --baseline-report evals/results/offline/baseline.json \
+  --candidate-report evals/results/offline/candidate.json \
+  --significance-alpha 0.05 \
+  --min-effect-size 0.1 \
+  --regression-report-json evals/results/offline/regression_gate.json
+```
 
 You can keep runs fast for CI/smoke checks by setting:
 
