@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 
 use super::error::McpError;
 use crate::metrics::{IndexStats, MetricsCollector};
-use crate::store::{Store, StoreStats, TenantManager};
+use crate::store::{FeedbackEntry, RelevanceLabel, Store, StoreStats, TenantManager};
 use crate::types::{ChunkId, ChunkType, MemoryChunk, ProjectId, Source, TenantId};
 
 // ---------- Request Types ----------
@@ -143,6 +143,15 @@ pub struct CompactParams {
     pub tenant_id: String,
     #[serde(default)]
     pub force: bool,
+}
+
+/// Parameters for memory.feedback
+#[derive(Debug, Deserialize)]
+pub struct FeedbackParams {
+    pub tenant_id: String,
+    pub query: String,
+    pub chunk_id: String,
+    pub relevance: String,
 }
 
 /// Parameters for memory.consolidate_episode
@@ -383,6 +392,12 @@ pub struct AddBatchResult {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeleteResult {
     pub deleted: bool,
+}
+
+/// Result of a feedback operation
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FeedbackResult {
+    pub stored: bool,
 }
 
 /// Result of memory.consolidate_episode
@@ -710,6 +725,16 @@ fn validate_episode_id(episode_id: &str) -> Result<(), McpError> {
     Err(McpError::InvalidParams(
         "episode_id must contain only letters, digits, '_' or '-'".to_string(),
     ))
+}
+
+fn parse_relevance_label(value: &str) -> Result<RelevanceLabel, McpError> {
+    match value.to_ascii_lowercase().as_str() {
+        "relevant" | "positive" => Ok(RelevanceLabel::Relevant),
+        "irrelevant" | "negative" => Ok(RelevanceLabel::Irrelevant),
+        _ => Err(McpError::InvalidParams(
+            "invalid relevance: must be one of [relevant, irrelevant]".to_string(),
+        )),
+    }
 }
 
 fn build_citation(chunk: &MemoryChunk) -> CitationResult {
@@ -1235,6 +1260,50 @@ pub async fn handle_memory_delete<S: Store>(
     }
 
     format_mcp_response(&DeleteResult { deleted })
+}
+
+/// Handle memory.feedback tool call
+pub async fn handle_memory_feedback<S: Store>(
+    store: &S,
+    params: FeedbackParams,
+) -> Result<Value, McpError> {
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let chunk_id = validate_chunk_id(&params.chunk_id)?;
+    let query = params.query.trim();
+    if query.is_empty() {
+        return Err(McpError::InvalidParams(
+            "query must not be empty".to_string(),
+        ));
+    }
+    let relevance = parse_relevance_label(&params.relevance)?;
+
+    let chunk = store
+        .get(&tenant_id, &chunk_id)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    if chunk.is_none() {
+        return Err(McpError::InvalidParams(
+            "chunk_id not found for tenant".to_string(),
+        ));
+    }
+
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let feedback = FeedbackEntry::new(
+        tenant_id,
+        query.to_string(),
+        chunk_id,
+        relevance,
+        timestamp_ms,
+    );
+    store
+        .add_feedback(feedback)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    format_mcp_response(&FeedbackResult { stored: true })
 }
 
 /// Handle memory.stats tool call
@@ -2416,6 +2485,45 @@ mod tests {
         let get_result = handle_memory_get(&store, get_params).await.unwrap();
         let text = get_result["content"][0]["text"].as_str().unwrap();
         assert_eq!(text, "null");
+    }
+
+    #[tokio::test]
+    async fn feedback_records_relevance_event() {
+        let store = make_store();
+
+        let add_result = handle_memory_add(
+            &store,
+            None,
+            AddParams {
+                tenant_id: "test".to_string(),
+                text: "feedback target chunk".to_string(),
+                chunk_type: "doc".to_string(),
+                project_id: None,
+                episode_id: None,
+                source: None,
+                tags: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        let add_text = add_result["content"][0]["text"].as_str().unwrap();
+        let add_payload: AddResult = serde_json::from_str(add_text).unwrap();
+
+        let feedback_result = handle_memory_feedback(
+            &store,
+            FeedbackParams {
+                tenant_id: "test".to_string(),
+                query: "feedback target".to_string(),
+                chunk_id: add_payload.chunk_id,
+                relevance: "relevant".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let text = feedback_result["content"][0]["text"].as_str().unwrap();
+        let payload: FeedbackResult = serde_json::from_str(text).unwrap();
+        assert!(payload.stored);
     }
 
     #[tokio::test]

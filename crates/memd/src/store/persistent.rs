@@ -13,10 +13,11 @@ use parking_lot::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 use super::dense::DenseSearcher;
-use super::hybrid::{HybridConfig, HybridSearcher};
+use super::hybrid::{ChunkMetaForRerank, HybridConfig, HybridSearchResult, HybridSearcher};
 use super::metadata::{ChunkMetadata, MetadataStore, SqliteMetadataStore};
 use crate::compaction::{CompactionConfig, CompactionMetrics, CompactionResult, CompactionRunner};
 use crate::metrics::TieredMetrics;
+use crate::store::{apply_feedback_scores, FeedbackConfig, FeedbackEntry};
 use crate::tiered::{CacheStats, HotTierStats, TierDecision, TieredTiming};
 
 /// Combined tiered search statistics
@@ -395,6 +396,14 @@ impl PersistentStore {
                     results.push((chunk, result.final_score));
                 }
             }
+            let feedback = self.list_feedback(tenant_id, query, 512).await?;
+            let results = apply_feedback_scores(
+                results,
+                query,
+                &feedback,
+                current_time_ms(),
+                &FeedbackConfig::default(),
+            );
 
             // Extract tiered timing and decisions
             let tiered_timing = timing.tiered.clone();
@@ -852,6 +861,20 @@ impl Store for PersistentStore {
         Ok(ids)
     }
 
+    async fn add_feedback(&self, feedback: FeedbackEntry) -> Result<()> {
+        self.metadata.insert_feedback(&feedback)
+    }
+
+    async fn list_feedback(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<FeedbackEntry>> {
+        self.metadata
+            .list_feedback_for_query(tenant_id, query, limit)
+    }
+
     async fn get(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<Option<MemoryChunk>> {
         self.get_chunk(tenant_id, chunk_id).await
     }
@@ -872,7 +895,15 @@ impl Store for PersistentStore {
         query: &str,
         k: usize,
     ) -> Result<Vec<(MemoryChunk, f32)>> {
-        self.hybrid_search(tenant_id, query, k).await
+        let scored = self.hybrid_search(tenant_id, query, k).await?;
+        let feedback = self.list_feedback(tenant_id, query, 512).await?;
+        Ok(apply_feedback_scores(
+            scored,
+            query,
+            &feedback,
+            current_time_ms(),
+            &FeedbackConfig::default(),
+        ))
     }
 
     async fn delete(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<bool> {
@@ -934,6 +965,13 @@ impl Store for PersistentStore {
     fn get_compaction_metrics(&self, tenant_id: &TenantId) -> Result<CompactionMetrics> {
         PersistentStore::get_compaction_metrics(self, tenant_id)
     }
+}
+
+fn current_time_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 impl PersistentStore {
@@ -1243,12 +1281,38 @@ impl PersistentStore {
                 hybrid.search_with_timing(tenant_id, query, k, None).await?;
 
             let fetch_start = Instant::now();
-            let mut results = Vec::with_capacity(hybrid_results.len());
+            let mut chunk_by_id: HashMap<ChunkId, MemoryChunk> =
+                HashMap::with_capacity(hybrid_results.len());
+            let mut rerank_meta = Vec::with_capacity(hybrid_results.len());
+            let mut base_results: Vec<HybridSearchResult> =
+                Vec::with_capacity(hybrid_results.len());
+
             for result in hybrid_results {
                 if let Some(chunk) = self.get(tenant_id, &result.chunk_id).await? {
-                    results.push((chunk, result.final_score));
+                    rerank_meta.push(ChunkMetaForRerank {
+                        chunk_id: result.chunk_id.clone(),
+                        rrf_score: result.final_score,
+                        timestamp_created: chunk.timestamp_created,
+                        project_id: chunk.project_id.as_option().map(str::to_string),
+                        chunk_type: chunk.chunk_type,
+                        text: Some(chunk.text.clone()),
+                    });
+                    chunk_by_id.insert(result.chunk_id.clone(), chunk);
+                    base_results.push(result);
                 }
             }
+
+            let reranked =
+                hybrid.rerank_with_metadata_for_query(query, base_results, rerank_meta, None);
+            let results: Vec<(MemoryChunk, f32)> = reranked
+                .into_iter()
+                .filter_map(|result| {
+                    chunk_by_id
+                        .get(&result.chunk_id)
+                        .cloned()
+                        .map(|chunk| (chunk, result.final_score))
+                })
+                .collect();
             let fetch_time = fetch_start.elapsed();
 
             // Record query metrics (use dense time as embed time, sparse time as search time)
@@ -1589,5 +1653,73 @@ mod tests {
 
         let stats = store.stats(&tenant).await.unwrap();
         assert!(stats.total_chunks > 1);
+    }
+
+    #[tokio::test]
+    async fn feedback_adjusts_scores_in_persistent_store() {
+        let (store, _dir) = make_test_store();
+        let tenant = make_tenant();
+
+        let older = store
+            .add(make_chunk(&tenant, "alpha retrieval note"))
+            .await
+            .unwrap();
+        let newer = store
+            .add(make_chunk(&tenant, "beta retrieval note"))
+            .await
+            .unwrap();
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        store
+            .add_feedback(FeedbackEntry::new(
+                tenant.clone(),
+                "retrieval note",
+                older.clone(),
+                crate::store::RelevanceLabel::Relevant,
+                now_ms,
+            ))
+            .await
+            .unwrap();
+        store
+            .add_feedback(FeedbackEntry::new(
+                tenant.clone(),
+                "retrieval note",
+                older.clone(),
+                crate::store::RelevanceLabel::Relevant,
+                now_ms,
+            ))
+            .await
+            .unwrap();
+        store
+            .add_feedback(FeedbackEntry::new(
+                tenant.clone(),
+                "retrieval note",
+                newer.clone(),
+                crate::store::RelevanceLabel::Irrelevant,
+                now_ms,
+            ))
+            .await
+            .unwrap();
+        store
+            .add_feedback(FeedbackEntry::new(
+                tenant.clone(),
+                "retrieval note",
+                newer.clone(),
+                crate::store::RelevanceLabel::Irrelevant,
+                now_ms,
+            ))
+            .await
+            .unwrap();
+
+        let ranked = store
+            .search_with_scores(&tenant, "retrieval note", 10)
+            .await
+            .unwrap();
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].0.chunk_id, older);
     }
 }

@@ -18,8 +18,8 @@ use crate::index::{Bm25Index, SearchResult, SparseIndex};
 use crate::metrics::TieredQueryMetrics;
 use crate::retrieval::packer::{ContextPacker, PackerConfig};
 use crate::retrieval::{
-    ChunkWithMeta, FeatureReranker, FusionCandidate, FusionSource, RerankerConfig, RerankerContext,
-    RrfConfig, RrfFusion,
+    ChunkWithMeta, FusionCandidate, FusionSource, RerankerConfig, RerankerContext, RerankerEngine,
+    RerankerMode, RrfConfig, RrfFusion,
 };
 use crate::structural::{
     CallerInfo, ErrorResult, ImportInfo, QueryIntent, QueryRouter, RouteResult, SymbolLocation,
@@ -103,6 +103,7 @@ pub struct ChunkMetaForRerank {
     pub timestamp_created: i64,
     pub project_id: Option<String>,
     pub chunk_type: ChunkType,
+    pub text: Option<String>,
 }
 
 // ============================================================================
@@ -275,7 +276,7 @@ pub struct HybridSearcher {
     sparse: Option<Arc<Bm25Index>>,
     text_processor: TextProcessor,
     fusion: RrfFusion,
-    reranker: FeatureReranker,
+    reranker: RerankerEngine,
     #[allow(dead_code)]
     packer: ContextPacker,
     config: HybridConfig,
@@ -304,7 +305,7 @@ impl HybridSearcher {
         config: HybridConfig,
     ) -> Self {
         let fusion = RrfFusion::new(config.rrf.clone());
-        let reranker = FeatureReranker::new(config.reranker.clone());
+        let reranker = RerankerEngine::new(config.reranker.clone());
         let packer = ContextPacker::new(config.packer.clone());
 
         // Create shared semantic cache if tiered search is enabled
@@ -357,6 +358,11 @@ impl HybridSearcher {
         searcher.symbol_query_service = symbol_query_service;
         searcher.trace_query_service = trace_query_service;
         searcher
+    }
+
+    /// Effective reranker mode in use (after fallback handling).
+    pub fn reranker_mode(&self) -> RerankerMode {
+        self.reranker.mode()
     }
 
     /// Set the symbol query service for structural search.
@@ -748,19 +754,36 @@ impl HybridSearcher {
         chunks_meta: Vec<ChunkMetaForRerank>,
         context: Option<SearchContext>,
     ) -> Vec<HybridSearchResult> {
+        self.rerank_with_metadata_for_query("", results, chunks_meta, context)
+    }
+
+    /// Rerank results with full metadata and query context.
+    pub fn rerank_with_metadata_for_query(
+        &self,
+        query: &str,
+        results: Vec<HybridSearchResult>,
+        chunks_meta: Vec<ChunkMetaForRerank>,
+        context: Option<SearchContext>,
+    ) -> Vec<HybridSearchResult> {
         if chunks_meta.is_empty() {
             return results;
         }
 
-        // Build reranker context
-        let reranker_context = match context {
-            Some(ctx) => RerankerContext::now()
-                .with_project(ctx.current_project.unwrap_or_default())
-                .with_preferred_types(ctx.preferred_types),
+        let mut reranker_context = match context {
+            Some(ctx) => {
+                let base = RerankerContext::now().with_preferred_types(ctx.preferred_types);
+                if let Some(project) = ctx.current_project {
+                    base.with_project(project)
+                } else {
+                    base
+                }
+            }
             None => RerankerContext::now(),
         };
+        if !query.trim().is_empty() {
+            reranker_context = reranker_context.with_query(query);
+        }
 
-        // Build ChunkWithMeta for reranker
         let chunks_with_meta: Vec<ChunkWithMeta> = chunks_meta
             .into_iter()
             .map(|meta| ChunkWithMeta {
@@ -769,17 +792,15 @@ impl HybridSearcher {
                 timestamp_created: meta.timestamp_created,
                 project_id: meta.project_id,
                 chunk_type: meta.chunk_type,
+                text: meta.text,
             })
             .collect();
 
-        // Rerank
         let ranked = self.reranker.rerank(chunks_with_meta, &reranker_context);
 
-        // Map back to HybridSearchResult
         ranked
             .into_iter()
             .map(|r| {
-                // Find original result to preserve dense/sparse ranks
                 let original = results.iter().find(|orig| orig.chunk_id == r.chunk_id);
 
                 HybridSearchResult {
@@ -1398,6 +1419,7 @@ mod tests {
                 timestamp_created: now_ms - 7 * 24 * 60 * 60 * 1000, // 7 days old
                 project_id: None,
                 chunk_type: ChunkType::Doc,
+                text: None,
             },
             ChunkMetaForRerank {
                 chunk_id: chunk_id2.clone(),
@@ -1405,6 +1427,7 @@ mod tests {
                 timestamp_created: now_ms, // just created
                 project_id: Some("current_project".to_string()),
                 chunk_type: ChunkType::Code,
+                text: None,
             },
         ];
 
@@ -1418,6 +1441,79 @@ mod tests {
         // chunk2 should be boosted due to recency, project match, and type preference
         assert_eq!(reranked.len(), 2);
         // The reranker may reorder based on bonuses
+    }
+
+    #[tokio::test]
+    async fn test_rerank_with_metadata_cross_encoder_prefers_query_match() {
+        let embedder = Arc::new(MockEmbedder::new());
+        let dense_config = DenseSearchConfig {
+            persist: false,
+            ..Default::default()
+        };
+        let dense = Arc::new(DenseSearcher::with_embedder(embedder, dense_config));
+        let config = HybridConfig {
+            enable_sparse: false,
+            enable_tiered: false,
+            reranker: RerankerConfig {
+                mode: RerankerMode::CrossEncoder,
+                rrf_weight: 0.2,
+                recency_weight: 0.0,
+                recency_half_life_days: 7.0,
+                project_weight: 0.0,
+                type_weight: 0.0,
+                cross_encoder_weight: 1.0,
+            },
+            ..Default::default()
+        };
+        let searcher = HybridSearcher::new(dense, None, config);
+
+        let chunk_id1 = ChunkId::new();
+        let chunk_id2 = ChunkId::new();
+        let results = vec![
+            HybridSearchResult {
+                chunk_id: chunk_id1.clone(),
+                final_score: 0.5,
+                dense_rank: Some(1),
+                sparse_rank: None,
+            },
+            HybridSearchResult {
+                chunk_id: chunk_id2.clone(),
+                final_score: 0.5,
+                dense_rank: Some(2),
+                sparse_rank: None,
+            },
+        ];
+        let chunks_meta = vec![
+            ChunkMetaForRerank {
+                chunk_id: chunk_id1.clone(),
+                rrf_score: 0.5,
+                timestamp_created: 0,
+                project_id: None,
+                chunk_type: ChunkType::Doc,
+                text: Some("hybrid retrieval with query-aware ranking".to_string()),
+            },
+            ChunkMetaForRerank {
+                chunk_id: chunk_id2.clone(),
+                rrf_score: 0.5,
+                timestamp_created: 0,
+                project_id: None,
+                chunk_type: ChunkType::Doc,
+                text: Some("totally unrelated text".to_string()),
+            },
+        ];
+
+        let reranked = searcher.rerank_with_metadata_for_query(
+            "query aware retrieval",
+            results,
+            chunks_meta,
+            None,
+        );
+
+        assert_eq!(reranked.len(), 2);
+        #[cfg(feature = "cross-encoder-reranker")]
+        assert_eq!(reranked[0].chunk_id, chunk_id1);
+        #[cfg(not(feature = "cross-encoder-reranker"))]
+        assert_eq!(searcher.reranker_mode(), RerankerMode::Feature);
     }
 
     #[tokio::test]

@@ -60,9 +60,22 @@ cargo run -p memd-evals -- --suite benchmark --skip-build \
 
 Outputs:
 
-- One JSON report per dataset/model
-- `statistical_analysis.md`
-- `statistical_analysis.json`
+- One normalized cross-corpus JSON report per model:
+  `evals/results/offline-<timestamp>/cross_corpus_<model>.json`
+- `datasets[]` section includes per-dataset summaries and quality gate results.
+
+Equivalent direct harness invocation:
+
+```bash
+cargo run -p memd-evals -- --suite benchmark --skip-build \
+  --dataset-path evals/datasets/retrieval/beir_fiqa.json \
+  --dataset-path evals/datasets/retrieval/beir_scidocs.json \
+  --dataset-path evals/datasets/retrieval/beir_trec-covid.json \
+  --embedding-model all-minilm \
+  --bootstrap-iterations 1000 \
+  --seed 42 \
+  --report-json evals/results/offline/cross_corpus_all-minilm.json
+```
 
 ## Quality Gates
 
@@ -94,3 +107,31 @@ Each benchmark JSON report includes:
 - gate result (`quality_gate_passed`, `quality_gate_message`)
 - aggregate metric block with CIs
 - full `query_metrics` vector
+
+For multi-dataset runs, the report switches to a cross-corpus schema:
+
+- shared run config (`embedding_model`, `bootstrap_iterations`, `seed`, max limits)
+- normalization method (`macro_average_by_dataset`)
+- `datasets[]` with per-dataset summaries
+- `normalized_summary` across datasets (each dataset weighted equally)
+- cross-corpus gate result (`quality_gate_passed`, `quality_gate_message`)
+
+## Continuous Regression Gate (Statistical Significance)
+
+Use `benchmark-regression` to compare a candidate run against a stored baseline report.
+
+```bash
+cargo run -p memd-evals -- --suite benchmark-regression --skip-build \
+  --baseline-report evals/results/offline/baseline.json \
+  --candidate-report evals/results/offline/candidate.json \
+  --significance-alpha 0.05 \
+  --min-effect-size 0.1 \
+  --regression-report-json evals/results/offline/regression_gate.json
+```
+
+Gate behavior:
+
+- aligns query metrics by `query_id`
+- evaluates `recall_at_10`, `mrr`, `precision_at_10`
+- fails only when degradation is both statistically significant (`p <= alpha`) and practically meaningful (`|Cohen's d| >= min_effect_size`)
+- emits machine-readable report JSON when `--regression-report-json` is provided

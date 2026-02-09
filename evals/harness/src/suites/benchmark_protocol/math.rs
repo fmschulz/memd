@@ -3,7 +3,9 @@ use std::collections::HashSet;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use super::types::{BenchmarkConfig, BenchmarkSummary, MetricWithCi, QueryMetrics};
+use super::types::{
+    BenchmarkConfig, BenchmarkSummary, DatasetBenchmarkResult, MetricWithCi, QueryMetrics,
+};
 
 pub(super) fn calculate_recall(retrieved: &[String], relevant: &HashSet<String>) -> f64 {
     if relevant.is_empty() {
@@ -39,6 +41,23 @@ pub(super) fn summarize(
     let mrrs: Vec<f64> = metrics.iter().map(|m| m.mrr).collect();
     let precisions: Vec<f64> = metrics.iter().map(|m| m.precision_at_10).collect();
     let latencies: Vec<f64> = metrics.iter().map(|m| m.latency_ms).collect();
+    BenchmarkSummary {
+        recall: bootstrap_ci(&recalls, iterations, seed),
+        mrr: bootstrap_ci(&mrrs, iterations, seed + 1),
+        precision: bootstrap_ci(&precisions, iterations, seed + 2),
+        latency_ms: bootstrap_ci(&latencies, iterations, seed + 3),
+    }
+}
+
+pub(super) fn summarize_cross_corpus(
+    datasets: &[DatasetBenchmarkResult],
+    iterations: usize,
+    seed: u64,
+) -> BenchmarkSummary {
+    let recalls: Vec<f64> = datasets.iter().map(|d| d.summary.recall.mean).collect();
+    let mrrs: Vec<f64> = datasets.iter().map(|d| d.summary.mrr.mean).collect();
+    let precisions: Vec<f64> = datasets.iter().map(|d| d.summary.precision.mean).collect();
+    let latencies: Vec<f64> = datasets.iter().map(|d| d.summary.latency_ms.mean).collect();
     BenchmarkSummary {
         recall: bootstrap_ci(&recalls, iterations, seed),
         mrr: bootstrap_ci(&mrrs, iterations, seed + 1),
@@ -133,6 +152,40 @@ pub(super) fn evaluate_quality_gate(
 mod tests {
     use super::*;
 
+    fn metric(mean: f64) -> MetricWithCi {
+        MetricWithCi {
+            mean,
+            ci_lower: mean,
+            ci_upper: mean,
+            std_dev: 0.0,
+            n: 1,
+        }
+    }
+
+    fn dataset_result(
+        name: &str,
+        recall: f64,
+        mrr: f64,
+        precision: f64,
+        latency_ms: f64,
+    ) -> DatasetBenchmarkResult {
+        DatasetBenchmarkResult {
+            dataset_path: format!("{name}.json"),
+            dataset_description: name.to_string(),
+            dataset_version: "1.0".to_string(),
+            queries_evaluated: 1,
+            documents_indexed: 1,
+            summary: BenchmarkSummary {
+                recall: metric(recall),
+                mrr: metric(mrr),
+                precision: metric(precision),
+                latency_ms: metric(latency_ms),
+            },
+            quality_gate_passed: true,
+            quality_gate_message: String::new(),
+        }
+    }
+
     #[test]
     fn bootstrap_ci_is_seed_deterministic() {
         let values = vec![0.1, 0.2, 0.3, 0.9];
@@ -148,5 +201,37 @@ mod tests {
         let relevant = HashSet::new();
         let retrieved = vec!["a".to_string(), "b".to_string()];
         assert_eq!(calculate_recall(&retrieved, &relevant), 1.0);
+    }
+
+    #[test]
+    fn cross_corpus_summary_uses_macro_average() {
+        let datasets = vec![
+            dataset_result("small", 0.1, 0.2, 0.3, 100.0),
+            dataset_result("large", 0.9, 0.8, 0.7, 200.0),
+        ];
+
+        let summary = summarize_cross_corpus(&datasets, 200, 42);
+
+        assert!((summary.recall.mean - 0.5).abs() < 1e-9);
+        assert!((summary.mrr.mean - 0.5).abs() < 1e-9);
+        assert!((summary.precision.mean - 0.5).abs() < 1e-9);
+        assert!((summary.latency_ms.mean - 150.0).abs() < 1e-9);
+        assert_eq!(summary.recall.n, 2);
+    }
+
+    #[test]
+    fn cross_corpus_summary_is_seed_deterministic() {
+        let datasets = vec![
+            dataset_result("fiqa", 0.4, 0.3, 0.2, 120.0),
+            dataset_result("scidocs", 0.5, 0.4, 0.3, 130.0),
+            dataset_result("trec", 0.6, 0.5, 0.4, 140.0),
+        ];
+
+        let a = summarize_cross_corpus(&datasets, 100, 42);
+        let b = summarize_cross_corpus(&datasets, 100, 42);
+        assert!((a.recall.ci_lower - b.recall.ci_lower).abs() < 1e-9);
+        assert!((a.recall.ci_upper - b.recall.ci_upper).abs() < 1e-9);
+        assert!((a.mrr.ci_lower - b.mrr.ci_lower).abs() < 1e-9);
+        assert!((a.precision.ci_upper - b.precision.ci_upper).abs() < 1e-9);
     }
 }

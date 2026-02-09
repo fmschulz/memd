@@ -10,6 +10,7 @@ use rusqlite::Connection;
 
 use super::{ChunkMetadata, MetadataStore};
 use crate::error::Result;
+use crate::store::{normalize_query, FeedbackEntry, RelevanceLabel};
 use crate::types::{ChunkId, ChunkStatus, ChunkType, TenantId};
 
 /// SQLite-backed metadata store
@@ -94,7 +95,96 @@ impl SqliteMetadataStore {
             [],
         )?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id TEXT NOT NULL,
+                query TEXT NOT NULL,
+                chunk_id TEXT NOT NULL,
+                relevance INTEGER NOT NULL,
+                timestamp_ms INTEGER NOT NULL
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_feedback_tenant_query
+             ON feedback(tenant_id, query, timestamp_ms DESC)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_feedback_tenant_chunk
+             ON feedback(tenant_id, chunk_id)",
+            [],
+        )?;
+
         Ok(())
+    }
+
+    /// Insert one feedback event.
+    pub fn insert_feedback(&self, feedback: &FeedbackEntry) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO feedback (tenant_id, query, chunk_id, relevance, timestamp_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                feedback.tenant_id.as_str(),
+                normalize_query(&feedback.query),
+                feedback.chunk_id.to_string(),
+                relevance_to_int(feedback.relevance),
+                feedback.timestamp_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch feedback events for one tenant/query.
+    pub fn list_feedback_for_query(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<FeedbackEntry>> {
+        let normalized = normalize_query(query);
+        if normalized.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT query, chunk_id, relevance, timestamp_ms
+             FROM feedback
+             WHERE tenant_id = ?1 AND query = ?2
+             ORDER BY timestamp_ms DESC
+             LIMIT ?3",
+        )?;
+
+        let rows = stmt.query_map(
+            rusqlite::params![tenant_id.as_str(), normalized, limit as i64],
+            |row| {
+                let query: String = row.get(0)?;
+                let chunk_id: String = row.get(1)?;
+                let relevance: i64 = row.get(2)?;
+                let timestamp_ms: i64 = row.get(3)?;
+                Ok((query, chunk_id, relevance, timestamp_ms))
+            },
+        )?;
+
+        let mut feedback = Vec::new();
+        for row in rows {
+            let (query, chunk_id_str, relevance_raw, timestamp_ms) = row?;
+            let Ok(chunk_id) = ChunkId::parse(&chunk_id_str) else {
+                continue;
+            };
+            let relevance = int_to_relevance(relevance_raw);
+            feedback.push(FeedbackEntry {
+                tenant_id: tenant_id.clone(),
+                query,
+                chunk_id,
+                relevance,
+                timestamp_ms,
+            });
+        }
+        Ok(feedback)
     }
 
     /// Convert a database row to ChunkMetadata
@@ -154,6 +244,21 @@ impl SqliteMetadataStore {
             hash,
             source_uri,
         })
+    }
+}
+
+fn relevance_to_int(relevance: RelevanceLabel) -> i64 {
+    match relevance {
+        RelevanceLabel::Relevant => 1,
+        RelevanceLabel::Irrelevant => -1,
+    }
+}
+
+fn int_to_relevance(value: i64) -> RelevanceLabel {
+    if value < 0 {
+        RelevanceLabel::Irrelevant
+    } else {
+        RelevanceLabel::Relevant
     }
 }
 
@@ -532,5 +637,30 @@ mod tests {
             .pragma_query_value(None, "journal_mode", |row| row.get(0))
             .unwrap();
         assert_eq!(journal_mode.to_lowercase(), "wal");
+    }
+
+    #[test]
+    fn feedback_insert_and_query_roundtrip() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let store = SqliteMetadataStore::open(&db_path).unwrap();
+        let tenant = TenantId::new("tenant_feedback").unwrap();
+        let chunk_id = ChunkId::new();
+        let feedback = FeedbackEntry::new(
+            tenant.clone(),
+            "Find parse config",
+            chunk_id.clone(),
+            RelevanceLabel::Relevant,
+            123456789,
+        );
+
+        store.insert_feedback(&feedback).unwrap();
+
+        let loaded = store
+            .list_feedback_for_query(&tenant, " find   parse  config ", 10)
+            .unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].chunk_id, chunk_id);
+        assert_eq!(loaded[0].relevance, RelevanceLabel::Relevant);
     }
 }

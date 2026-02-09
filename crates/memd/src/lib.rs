@@ -30,8 +30,9 @@ pub use metrics::{
     IndexStats, LatencyStats, MetricsCollector, MetricsSnapshot, QueryMetrics, Timer,
 };
 pub use retrieval::{
-    ChunkWithMeta, FeatureReranker, FusedResult, FusionCandidate, FusionSource, RankedResult,
-    RerankerConfig, RerankerContext, RrfConfig, RrfFusion,
+    ChunkWithMeta, CrossEncoderReranker, FeatureReranker, FusedResult, FusionCandidate,
+    FusionSource, RankedResult, RerankerConfig, RerankerContext, RerankerEngine, RerankerMode,
+    RrfConfig, RrfFusion,
 };
 pub use store::{
     MemoryStore, PersistentStore, PersistentStoreConfig, Store, StoreStats, TenantManager,
