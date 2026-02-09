@@ -10,6 +10,7 @@ Use this matrix to validate:
 - eval harness behavior (`memd-evals`)
 - MCP end-to-end behavior for add/search/metrics/compact
 - retrieval quality suites
+- offline retrieval benchmark protocol outputs and gates
 
 ## Prerequisites
 
@@ -36,6 +37,16 @@ Expected:
 - `memd`: unit + integration tests pass
 - `memd-evals`: harness tests pass
 
+Deterministic gate details:
+
+- `cargo test -p memd` is the primary reliability gate.
+- External model-download tests in Candle embedder are ignored by default.
+- Only run ignored tests in network-enabled environments:
+
+```bash
+cargo test -p memd -- --ignored
+```
+
 ## 2. MCP conformance suite
 
 ```bash
@@ -48,9 +59,10 @@ This suite validates MCP protocol/tool behavior including:
 - memory add/search/get/delete/stats/add_batch
 - metrics/compact dispatch and payload shape
 - invalid JSON / unknown method / invalid params
-- end-to-end add/search/metrics/compact in:
+- end-to-end add/add_batch/search/metrics/compact in:
 - in-memory mode
 - persistent mode
+- forced compaction path (`force=true`) in persistent mode
 
 ## 3. Retrieval and hybrid suites
 
@@ -77,13 +89,43 @@ Notes:
 - `all` runs sanity first and halts on sanity failure
 - use `--include-compaction true` if you want compaction suite included in the full run
 
-## 5. Property/fuzz-style tests currently in-tree
+## 5. Offline benchmark protocol (Phase 6)
+
+Single dataset:
+
+```bash
+cargo run -p memd-evals -- --suite benchmark --skip-build \
+  --dataset-path evals/datasets/retrieval/beir_fiqa.json \
+  --bootstrap-iterations 1000 \
+  --seed 42 \
+  --report-json evals/results/offline/beir_fiqa_all-minilm.json
+```
+
+All challenging datasets:
+
+```bash
+./evals/scripts/run_offline_retrieval_benchmark.sh --model all-minilm --seed 42
+```
+
+Protocol reference:
+
+- `evals/BENCHMARK_PROTOCOL.md`
+
+## 6. Property/fuzz-style tests currently in-tree
 
 `memd` includes `proptest` coverage for key invariants:
 
 - `validate_search_k` bounds and rejection cases
 - `time_range` ordering/ISO validation paths
 - add-time split invariants (`split_for_add`)
+- split tag offsets (`char_start`/`char_end`) and chunk metadata consistency
+
+Handler tests also cover:
+
+- enforced `memory.search` filters (`project_id`, `types`, `time_range`)
+- provenance-first citation payloads in search results
+- repair-loop recovery for punctuation/noise query variants
+- adaptive retrieval depth helper behavior
 
 Run via:
 
@@ -91,7 +133,7 @@ Run via:
 cargo test -p memd
 ```
 
-## 6. Manual MCP smoke test
+## 7. Manual MCP smoke test
 
 ```bash
 printf '%s\n' \
@@ -101,14 +143,14 @@ printf '%s\n' \
   | ./target/release/memd --mode mcp --in-memory --data-dir /tmp/memd-smoke
 ```
 
-## 7. Common failures
+## 8. Common failures
 
 - `invalid 'k': must be between 1 and 100`
 - `invalid filters.time_range.from` or `.to`
 - `tenant_id` validation failures (must be alnum/underscore)
 - filesystem permission failures in persistent mode if `--data-dir` is unwritable
 
-## 8. Release gate
+## 9. Release gate
 
 Minimum gate before tagging/push:
 
@@ -116,4 +158,10 @@ Minimum gate before tagging/push:
 cargo test -p memd
 cargo test -p memd-evals
 RUST_LOG=error cargo run -p memd-evals -- --suite mcp --skip-build
+cargo run -p memd-evals -- --suite benchmark --skip-build \
+  --dataset-path evals/datasets/retrieval/code_pairs.json \
+  --bootstrap-iterations 200 \
+  --seed 42 \
+  --threshold-recall 0.8 \
+  --threshold-mrr 0.6
 ```

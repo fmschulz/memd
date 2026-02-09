@@ -33,6 +33,12 @@ pub fn split_for_add(chunk: MemoryChunk) -> Vec<MemoryChunk> {
                 .tags
                 .push(format!("total_chunks:{}", total_chunks));
             sub_chunk
+                .tags
+                .push(format!("char_start:{}", text_chunk.start_char));
+            sub_chunk
+                .tags
+                .push(format!("char_end:{}", text_chunk.end_char));
+            sub_chunk
         })
         .collect()
 }
@@ -58,6 +64,8 @@ mod tests {
             prop_assert_eq!(chunks[0].text.as_str(), chunk.text.as_str());
             prop_assert!(chunks[0].tags.iter().all(|t| !t.starts_with("chunk_index:")));
             prop_assert!(chunks[0].tags.iter().all(|t| !t.starts_with("total_chunks:")));
+            prop_assert!(chunks[0].tags.iter().all(|t| !t.starts_with("char_start:")));
+            prop_assert!(chunks[0].tags.iter().all(|t| !t.starts_with("char_end:")));
         }
     }
 
@@ -80,6 +88,8 @@ mod tests {
                     let has_index_tag = chunk.tags.contains(&format!("chunk_index:{}", idx));
                     prop_assert!(has_index_tag);
                     prop_assert!(chunk.tags.contains(&total_tag));
+                    prop_assert!(chunk.tags.iter().any(|t| t.starts_with("char_start:")));
+                    prop_assert!(chunk.tags.iter().any(|t| t.starts_with("char_end:")));
                 }
             }
         }

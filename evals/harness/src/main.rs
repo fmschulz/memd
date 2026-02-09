@@ -16,7 +16,7 @@ struct Args {
     #[arg(long, default_value = "target/debug/memd")]
     memd_path: String,
 
-    /// Suite to run (all, sanity, mcp, persistence, retrieval, hybrid, scifact, true-semantic, nfcorpus, codesearchnet, tiered, structural, compaction)
+    /// Suite to run (all, sanity, mcp, persistence, retrieval, hybrid, scifact, true-semantic, nfcorpus, codesearchnet, tiered, structural, compaction, benchmark)
     #[arg(long, default_value = "all")]
     suite: String,
 
@@ -42,9 +42,41 @@ struct Args {
 
     /// Override dataset file path for dataset-backed suites
     ///
-    /// Supported for single-suite runs (e.g. `--suite retrieval`).
+    /// Supported for single-suite runs (e.g. `--suite retrieval` or `--suite benchmark`).
     #[arg(long)]
     dataset_path: Option<String>,
+
+    /// Bootstrap iterations used by the benchmark protocol suite.
+    #[arg(long, default_value_t = 1000)]
+    bootstrap_iterations: usize,
+
+    /// Random seed used by the benchmark protocol suite.
+    #[arg(long, default_value_t = 42)]
+    seed: u64,
+
+    /// Write benchmark protocol report as JSON.
+    #[arg(long)]
+    report_json: Option<String>,
+
+    /// Optional minimum Recall@10 quality gate (benchmark suite only).
+    #[arg(long)]
+    threshold_recall: Option<f64>,
+
+    /// Optional minimum MRR quality gate (benchmark suite only).
+    #[arg(long)]
+    threshold_mrr: Option<f64>,
+
+    /// Optional minimum Precision@10 quality gate (benchmark suite only).
+    #[arg(long)]
+    threshold_precision: Option<f64>,
+
+    /// Optional max queries to evaluate (benchmark suite only).
+    #[arg(long)]
+    max_queries: Option<usize>,
+
+    /// Optional max documents to index (benchmark suite only).
+    #[arg(long)]
+    max_documents: Option<usize>,
 }
 
 fn main() -> ExitCode {
@@ -148,9 +180,31 @@ fn main() -> ExitCode {
         "compaction" | "f" => {
             suites::compaction::run_compaction_tests(&memd_binary, embedding_model)
         }
+        "benchmark" | "benchmark-protocol" => {
+            let Some(dataset_path) = args.dataset_path.as_deref() else {
+                eprintln!("--dataset-path is required for --suite benchmark");
+                return ExitCode::FAILURE;
+            };
+            let config = suites::benchmark_protocol::BenchmarkConfig {
+                dataset_path: std::path::PathBuf::from(dataset_path),
+                bootstrap_iterations: args.bootstrap_iterations,
+                seed: args.seed,
+                report_json: args.report_json.as_deref().map(std::path::PathBuf::from),
+                threshold_recall: args.threshold_recall,
+                threshold_mrr: args.threshold_mrr,
+                threshold_precision: args.threshold_precision,
+                max_queries: args.max_queries,
+                max_documents: args.max_documents,
+            };
+            suites::benchmark_protocol::run_benchmark_protocol(
+                &memd_binary,
+                embedding_model,
+                config,
+            )
+        }
         _ => {
             eprintln!(
-                "Unknown suite: {}. Available: all, sanity, mcp, persistence, retrieval, hybrid, true-semantic, scifact, nfcorpus, codesearchnet, tiered, structural, compaction",
+                "Unknown suite: {}. Available: all, sanity, mcp, persistence, retrieval, hybrid, true-semantic, scifact, nfcorpus, codesearchnet, tiered, structural, compaction, benchmark",
                 args.suite
             );
             return ExitCode::FAILURE;

@@ -10,7 +10,9 @@
 //! - **Suite D**: Tiered search (tiered)
 //! - **Suite E**: Structural queries (structural)
 //! - **Suite F**: Compaction (compaction)
+//! - **Suite P6**: Offline benchmark protocol (benchmark)
 
+pub mod benchmark_protocol;
 pub mod codesearchnet;
 pub mod compaction;
 pub mod hybrid;
