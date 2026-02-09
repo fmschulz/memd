@@ -6,7 +6,7 @@ Local MCP memory daemon for coding agents. `memd` stores and retrieves tenant-is
 
 - Runs as an MCP server on stdio (`--mode mcp`, default)
 - Supports persistent storage (WAL + segments + metadata) or in-memory mode (`--in-memory`)
-- Exposes 14 MCP tools (memory, structural, debug, metrics, compaction)
+- Exposes 15 MCP tools (memory, structural, debug, metrics, compaction, episode consolidation)
 - Supports hybrid retrieval in persistent mode (dense + sparse + reranking)
 - Applies tenant isolation on all read/write operations
 
@@ -83,7 +83,7 @@ Tool results are MCP content blocks containing JSON text:
 }
 ```
 
-## Tool Inventory (14)
+## Tool Inventory (15)
 
 Memory:
 
@@ -95,6 +95,7 @@ Memory:
 - `memory.stats`
 - `memory.metrics`
 - `memory.compact`
+- `memory.consolidate_episode`
 
 Structural:
 
@@ -133,6 +134,7 @@ Accepted aliases at handler level:
 For long text (`> 1000` chars), `memory.add` and `memory.add_batch` use shared split logic across in-memory and persistent stores.
 
 - Additional chunks are stored with tags `chunk_index:<n>` and `total_chunks:<m>`
+- Split chunks also include `char_start:<n>` and `char_end:<n>` tags for citation span offsets
 - Return value remains one `chunk_id` per input chunk (the first stored chunk ID)
 
 ### Search Filters
@@ -141,7 +143,22 @@ Current state:
 
 - `k` and `time_range` are validated
 - `debug_tiers` returns extra tier timing/source metadata
-- `project_id` and `filters.types` are accepted by schema/params, but result filtering is not yet enforced in `memory.search`
+- `project_id` is enforced as a search result filter
+- `filters.types` is enforced as a search result filter
+- `filters.time_range` is enforced on `timestamp_created`
+- `filters.episode_id` is enforced through episode tags (`episode:<id>`)
+- Search responses include `citation` metadata (content hash, provenance, and chunk span offsets when available)
+- Search responses include `episode_id` when present on the stored chunk
+- Search uses adaptive candidate depth (`fetch_k`) for complex/filtered queries
+- If initial retrieval returns no results, a deterministic repair pass normalizes query punctuation/spacing and retries
+- `repair_info` in search responses reports whether a repair attempt was made and whether it recovered results
+
+### Episodic Memory
+
+- `memory.add` and `memory.add_batch` accept optional `episode_id`
+- Episode IDs are stored as tags (`episode:<id>`) for cross-store compatibility
+- `memory.consolidate_episode` creates a `summary` chunk from episode content
+- `memory.consolidate_episode` can optionally remove source chunks (`retain_source_chunks=false`)
 
 ### Metrics and Compaction
 
@@ -151,7 +168,7 @@ Current state:
 - `include_recent` defaults `true`
 - `include_tiered` defaults `true`
 - `memory.compact`:
-- persistent store: runs thresholded or forced compaction
+- persistent store: runs thresholded compaction or forced compaction via trait-dispatched backend implementation
 - in-memory store: returns `status: skipped`
 
 ## Quick Integration
@@ -191,6 +208,16 @@ cargo test -p memd-evals
 RUST_LOG=error cargo run -p memd-evals -- --suite mcp --skip-build
 ```
 
+Deterministic baseline:
+
+- `cargo test -p memd` is the required green gate for local/CI correctness.
+- Network/model-download tests are explicitly ignored by default (Candle embedder tests).
+- Run ignored tests only when network access and model downloads are expected:
+
+```bash
+cargo test -p memd -- --ignored
+```
+
 Additional eval suites:
 
 ```bash
@@ -198,6 +225,14 @@ RUST_LOG=error cargo run -p memd-evals -- --suite hybrid --skip-build
 RUST_LOG=error cargo run -p memd-evals -- --suite retrieval --skip-build
 RUST_LOG=error cargo run -p memd-evals -- --suite true-semantic --skip-build
 ```
+
+Offline benchmark protocol (Phase 6):
+
+```bash
+./evals/scripts/run_offline_retrieval_benchmark.sh --model all-minilm --seed 42
+```
+
+Protocol details are documented in `evals/BENCHMARK_PROTOCOL.md`.
 
 ## Notes on Datasets
 

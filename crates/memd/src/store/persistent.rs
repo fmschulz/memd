@@ -883,6 +883,26 @@ impl Store for PersistentStore {
         self.get_stats(tenant_id).await
     }
 
+    async fn list_chunks(
+        &self,
+        tenant_id: &TenantId,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<MemoryChunk>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let metadata_rows = self.metadata.list(tenant_id, limit, offset)?;
+        let mut chunks = Vec::with_capacity(metadata_rows.len());
+        for meta in metadata_rows {
+            if let Some(chunk) = self.get_chunk(tenant_id, &meta.chunk_id).await? {
+                chunks.push(chunk);
+            }
+        }
+        Ok(chunks)
+    }
+
     async fn search_with_tier_info(
         &self,
         tenant_id: &TenantId,
@@ -901,6 +921,18 @@ impl Store for PersistentStore {
 
     fn get_index_stats(&self, tenant_id: Option<&TenantId>) -> HashMap<String, IndexStats> {
         PersistentStore::get_index_stats(self, tenant_id)
+    }
+
+    fn run_compaction(&self, tenant_id: &TenantId) -> Result<CompactionResult> {
+        PersistentStore::run_compaction(self, tenant_id)
+    }
+
+    fn run_compaction_if_needed(&self, tenant_id: &TenantId) -> Result<Option<CompactionResult>> {
+        PersistentStore::run_compaction_if_needed(self, tenant_id)
+    }
+
+    fn get_compaction_metrics(&self, tenant_id: &TenantId) -> Result<CompactionMetrics> {
+        PersistentStore::get_compaction_metrics(self, tenant_id)
     }
 }
 

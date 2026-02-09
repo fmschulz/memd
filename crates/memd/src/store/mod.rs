@@ -77,6 +77,27 @@ pub trait Store: Send + Sync {
         Ok(chunks.into_iter().map(|c| (c, 1.0)).collect())
     }
 
+    /// List chunks for a tenant with pagination semantics.
+    ///
+    /// Default implementation uses `search` with an empty query and applies
+    /// offset slicing. Backends with metadata indexes should override this.
+    async fn list_chunks(
+        &self,
+        tenant_id: &TenantId,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<MemoryChunk>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let fetch = limit.saturating_add(offset);
+        let mut chunks = self.search(tenant_id, "", fetch).await?;
+        if offset >= chunks.len() {
+            return Ok(Vec::new());
+        }
+        Ok(chunks.drain(offset..).take(limit).collect())
+    }
+
     /// Soft delete a chunk
     ///
     /// Returns true if the chunk was found and deleted, false if not found.

@@ -69,6 +69,10 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                                 },
                                 "description": "Filter by chunk types"
                             },
+                            "episode_id": {
+                                "type": "string",
+                                "description": "Filter by episode identifier"
+                            },
                             "time_range": {
                                 "type": "object",
                                 "properties": {
@@ -113,6 +117,10 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "project_id": {
                         "type": "string",
                         "description": "Optional project identifier"
+                    },
+                    "episode_id": {
+                        "type": "string",
+                        "description": "Optional episode identifier for session grouping"
                     },
                     "source": {
                         "type": "object",
@@ -184,6 +192,10 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                                 "project_id": {
                                     "type": "string",
                                     "description": "Optional project identifier"
+                                },
+                                "episode_id": {
+                                    "type": "string",
+                                    "description": "Optional episode identifier"
                                 },
                                 "source": {
                                     "type": "object",
@@ -488,6 +500,36 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                 "required": ["tenant_id"]
             }),
         ),
+        // MEMORY-09: memory.consolidate_episode
+        ToolDefinition::new(
+            "memory.consolidate_episode",
+            "Create a summary chunk for one episode and optionally delete source chunks.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier"
+                    },
+                    "episode_id": {
+                        "type": "string",
+                        "description": "Episode identifier to consolidate"
+                    },
+                    "max_chunks": {
+                        "type": "integer",
+                        "description": "Maximum episode chunks to include in summary",
+                        "default": 50,
+                        "minimum": 1
+                    },
+                    "retain_source_chunks": {
+                        "type": "boolean",
+                        "description": "Keep source chunks after summary creation (default: true)",
+                        "default": true
+                    }
+                },
+                "required": ["tenant_id", "episode_id"]
+            }),
+        ),
     ]
 });
 
@@ -516,6 +558,7 @@ pub fn tool_names() -> Vec<&'static str> {
         "memory.stats",
         "memory.metrics",
         "memory.compact",
+        "memory.consolidate_episode",
         "code.find_definition",
         "code.find_references",
         "code.find_callers",
@@ -530,9 +573,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn get_all_tools_returns_fourteen() {
+    fn get_all_tools_returns_fifteen() {
         let tools = get_all_tools();
-        assert_eq!(tools.len(), 14);
+        assert_eq!(tools.len(), 15);
     }
 
     #[test]
@@ -545,6 +588,7 @@ mod tests {
         assert!(names.contains(&"memory.get"));
         assert!(names.contains(&"memory.delete"));
         assert!(names.contains(&"memory.stats"));
+        assert!(names.contains(&"memory.consolidate_episode"));
     }
 
     #[test]
@@ -625,10 +669,11 @@ mod tests {
     #[test]
     fn tool_names_list() {
         let names = tool_names();
-        assert_eq!(names.len(), 14);
+        assert_eq!(names.len(), 15);
         assert!(names.contains(&"memory.search"));
         assert!(names.contains(&"memory.metrics"));
         assert!(names.contains(&"memory.compact"));
+        assert!(names.contains(&"memory.consolidate_episode"));
         assert!(names.contains(&"code.find_definition"));
         assert!(names.contains(&"code.find_references"));
         assert!(names.contains(&"code.find_callers"));

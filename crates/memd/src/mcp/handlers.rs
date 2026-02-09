@@ -3,7 +3,7 @@
 //! Bridges MCP tool calls to store operations.
 //! Each handler validates parameters, calls the store, and formats the response.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -42,6 +42,8 @@ pub struct SearchFilters {
     #[serde(default)]
     pub types: Option<Vec<String>>,
     #[serde(default)]
+    pub episode_id: Option<String>,
+    #[serde(default)]
     pub time_range: Option<TimeRange>,
 }
 
@@ -61,6 +63,8 @@ pub struct AddParams {
     pub chunk_type: String,
     #[serde(default)]
     pub project_id: Option<String>,
+    #[serde(default)]
+    pub episode_id: Option<String>,
     #[serde(default)]
     pub source: Option<SourceParams>,
     #[serde(default)]
@@ -86,6 +90,8 @@ pub struct BatchChunkParams {
     pub chunk_type: String,
     #[serde(default)]
     pub project_id: Option<String>,
+    #[serde(default)]
+    pub episode_id: Option<String>,
     #[serde(default)]
     pub source: Option<SourceParams>,
     #[serde(default)]
@@ -137,6 +143,21 @@ pub struct CompactParams {
     pub tenant_id: String,
     #[serde(default)]
     pub force: bool,
+}
+
+/// Parameters for memory.consolidate_episode
+#[derive(Debug, Deserialize)]
+pub struct ConsolidateEpisodeParams {
+    pub tenant_id: String,
+    pub episode_id: String,
+    #[serde(default = "default_episode_limit")]
+    pub max_chunks: usize,
+    #[serde(default = "default_true")]
+    pub retain_source_chunks: bool,
+}
+
+fn default_episode_limit() -> usize {
+    50
 }
 
 fn default_true() -> bool {
@@ -236,6 +257,9 @@ pub struct SearchResult {
     /// Tier debug info (only present when debug_tiers=true)
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub tier_info: Option<TierDebugInfo>,
+    /// Repair-loop diagnostics when a fallback query rewrite was attempted
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub repair_info: Option<RepairInfo>,
 }
 
 /// Debug information about tier performance
@@ -255,6 +279,16 @@ pub struct TierDebugInfo {
     pub warm_tier_ms: u64,
 }
 
+/// Diagnostics for query repair behavior.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepairInfo {
+    pub attempted: bool,
+    pub repaired: bool,
+    pub original_query: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub repaired_query: Option<String>,
+}
+
 /// Single chunk in search results
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChunkResult {
@@ -266,6 +300,11 @@ pub struct ChunkResult {
     pub timestamp_created: i64,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub episode_id: Option<String>,
+    /// Provenance-first citation details for this result
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub citation: Option<CitationResult>,
     /// Which tier this result came from (only present when debug_tiers=true)
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub source_tier: Option<String>,
@@ -301,6 +340,33 @@ impl From<&Source> for SourceResult {
     }
 }
 
+/// Citation metadata for a search result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CitationResult {
+    pub citation_id: String,
+    pub content_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source_repo: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source_tool_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source_tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub chunk_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub total_chunks: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub char_start: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub char_end: Option<usize>,
+}
+
 /// Result of an add operation
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AddResult {
@@ -317,6 +383,14 @@ pub struct AddBatchResult {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeleteResult {
     pub deleted: bool,
+}
+
+/// Result of memory.consolidate_episode
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ConsolidateEpisodeResult {
+    pub summary_chunk_id: String,
+    pub source_chunk_count: usize,
+    pub retained_source_chunks: bool,
 }
 
 /// Result of a stats operation
@@ -490,9 +564,11 @@ fn validate_search_k(k: usize) -> Result<(), McpError> {
     ))
 }
 
-fn validate_search_time_range(filters: Option<&SearchFilters>) -> Result<(), McpError> {
+fn validate_search_time_range(
+    filters: Option<&SearchFilters>,
+) -> Result<(Option<i64>, Option<i64>), McpError> {
     let Some(time_range) = filters.and_then(|f| f.time_range.as_ref()) else {
-        return Ok(());
+        return Ok((None, None));
     };
 
     let from_ms = time_range
@@ -523,7 +599,200 @@ fn validate_search_time_range(filters: Option<&SearchFilters>) -> Result<(), Mcp
         }
     }
 
-    Ok(())
+    Ok((from_ms, to_ms))
+}
+
+#[derive(Debug, Default)]
+struct ParsedSearchFilters {
+    chunk_types: Option<HashSet<ChunkType>>,
+    episode_id: Option<String>,
+    from_ms: Option<i64>,
+    to_ms: Option<i64>,
+}
+
+fn parse_search_filters(filters: Option<&SearchFilters>) -> Result<ParsedSearchFilters, McpError> {
+    let (from_ms, to_ms) = validate_search_time_range(filters)?;
+
+    let chunk_types = filters
+        .and_then(|f| f.types.as_ref())
+        .map(|types| {
+            types
+                .iter()
+                .map(|t| parse_chunk_type(t))
+                .collect::<Result<HashSet<_>, _>>()
+        })
+        .transpose()?;
+
+    Ok(ParsedSearchFilters {
+        chunk_types,
+        episode_id: filters.and_then(|f| f.episode_id.clone()),
+        from_ms,
+        to_ms,
+    })
+}
+
+fn apply_search_filters(
+    scored_chunks: Vec<(MemoryChunk, f32)>,
+    project_id: Option<&str>,
+    filters: &ParsedSearchFilters,
+    k: usize,
+) -> Vec<(MemoryChunk, f32)> {
+    scored_chunks
+        .into_iter()
+        .filter(|(chunk, _)| {
+            if let Some(project_id) = project_id {
+                if chunk.project_id.as_option() != Some(project_id) {
+                    return false;
+                }
+            }
+
+            if let Some(types) = filters.chunk_types.as_ref() {
+                if !types.contains(&chunk.chunk_type) {
+                    return false;
+                }
+            }
+
+            if let Some(episode_id) = filters.episode_id.as_deref() {
+                let expected_tag = format!("episode:{}", episode_id);
+                if !chunk.tags.iter().any(|tag| tag == &expected_tag) {
+                    return false;
+                }
+            }
+
+            if let Some(from_ms) = filters.from_ms {
+                if chunk.timestamp_created < from_ms {
+                    return false;
+                }
+            }
+
+            if let Some(to_ms) = filters.to_ms {
+                if chunk.timestamp_created > to_ms {
+                    return false;
+                }
+            }
+
+            true
+        })
+        .take(k)
+        .collect()
+}
+
+fn parse_tag_usize(tags: &[String], prefix: &str) -> Option<usize> {
+    tags.iter().find_map(|tag| {
+        tag.strip_prefix(prefix)
+            .and_then(|value| value.parse().ok())
+    })
+}
+
+fn extract_episode_id(tags: &[String]) -> Option<String> {
+    tags.iter()
+        .find_map(|tag| tag.strip_prefix("episode:").map(|value| value.to_string()))
+}
+
+fn make_episode_tag(episode_id: &str) -> String {
+    format!("episode:{}", episode_id)
+}
+
+fn validate_episode_id(episode_id: &str) -> Result<(), McpError> {
+    if episode_id.is_empty() {
+        return Err(McpError::InvalidParams(
+            "episode_id must not be empty".to_string(),
+        ));
+    }
+
+    if episode_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Ok(());
+    }
+
+    Err(McpError::InvalidParams(
+        "episode_id must contain only letters, digits, '_' or '-'".to_string(),
+    ))
+}
+
+fn build_citation(chunk: &MemoryChunk) -> CitationResult {
+    let hash_prefix = chunk.hash.get(..12).unwrap_or(&chunk.hash);
+    CitationResult {
+        citation_id: format!("{}:{}", chunk.chunk_id, hash_prefix),
+        content_hash: chunk.hash.clone(),
+        source_uri: chunk.source.uri.clone(),
+        source_repo: chunk.source.repo.clone(),
+        source_commit: chunk.source.commit.clone(),
+        source_path: chunk.source.path.clone(),
+        source_tool_name: chunk.source.tool_name.clone(),
+        source_tool_call_id: chunk.source.tool_call_id.clone(),
+        chunk_index: parse_tag_usize(&chunk.tags, "chunk_index:"),
+        total_chunks: parse_tag_usize(&chunk.tags, "total_chunks:"),
+        char_start: parse_tag_usize(&chunk.tags, "char_start:"),
+        char_end: parse_tag_usize(&chunk.tags, "char_end:"),
+    }
+}
+
+fn has_active_search_filters(project_id: Option<&str>, filters: &ParsedSearchFilters) -> bool {
+    project_id.is_some()
+        || filters.chunk_types.is_some()
+        || filters.episode_id.is_some()
+        || filters.from_ms.is_some()
+        || filters.to_ms.is_some()
+}
+
+fn adaptive_fetch_k(k: usize, query: &str, has_filters: bool) -> usize {
+    if has_filters {
+        return 100;
+    }
+
+    let token_count = query.split_whitespace().count();
+    let is_complex = token_count >= 6 || query.len() >= 80;
+    if is_complex {
+        return (k.saturating_mul(2)).clamp(1, 100);
+    }
+
+    k
+}
+
+fn normalize_query_for_repair(query: &str) -> Option<String> {
+    let normalized = query
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let original = query.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized == original.to_lowercase() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn build_episode_summary_text(episode_id: &str, chunks: &[MemoryChunk]) -> String {
+    let mut lines = Vec::with_capacity(chunks.len() + 1);
+    lines.push(format!(
+        "Episode {} summary ({} chunks)",
+        episode_id,
+        chunks.len()
+    ));
+
+    for chunk in chunks {
+        let snippet = chunk
+            .text
+            .replace('\n', " ")
+            .chars()
+            .take(180)
+            .collect::<String>();
+        lines.push(format!("- [{}] {}", chunk.chunk_type, snippet));
+    }
+
+    lines.join("\n")
 }
 
 /// Parse a chunk type string into ChunkType enum
@@ -582,6 +851,40 @@ fn format_mcp_response<T: Serialize>(result: &T) -> Result<Value, McpError> {
     }))
 }
 
+async fn collect_episode_chunks<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    episode_id: &str,
+    max_chunks: usize,
+) -> Result<Vec<MemoryChunk>, McpError> {
+    let page_size = 200usize;
+    let mut offset = 0usize;
+    let mut episode_chunks = Vec::new();
+
+    loop {
+        let page = store
+            .list_chunks(tenant_id, page_size, offset)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        if page.is_empty() {
+            break;
+        }
+
+        for chunk in page {
+            if extract_episode_id(&chunk.tags).as_deref() == Some(episode_id) {
+                episode_chunks.push(chunk);
+                if episode_chunks.len() >= max_chunks {
+                    return Ok(episode_chunks);
+                }
+            }
+        }
+
+        offset = offset.saturating_add(page_size);
+    }
+
+    Ok(episode_chunks)
+}
+
 // ---------- Handler Functions ----------
 
 /// Handle memory.search tool call
@@ -591,13 +894,17 @@ pub async fn handle_memory_search<S: Store>(
 ) -> Result<Value, McpError> {
     let tenant_id = validate_tenant_id(&params.tenant_id)?;
     validate_search_k(params.k)?;
-    validate_search_time_range(params.filters.as_ref())?;
+    let parsed_filters = parse_search_filters(params.filters.as_ref())?;
     let debug_tiers = params.debug_tiers.unwrap_or(false);
+    let project_id_filter = params.project_id.as_deref();
+    let has_filters = has_active_search_filters(project_id_filter, &parsed_filters);
+    let fetch_k = adaptive_fetch_k(params.k, &params.query, has_filters);
 
     info!(
         tenant_id = %tenant_id,
         query = %params.query,
         k = params.k,
+        fetch_k = fetch_k,
         debug_tiers = debug_tiers,
         "memory.search"
     );
@@ -605,9 +912,40 @@ pub async fn handle_memory_search<S: Store>(
     // Use search_with_tier_info if debug_tiers is requested
     if debug_tiers {
         let (scored_chunks, timing) = store
-            .search_with_tier_info(&tenant_id, &params.query, params.k)
+            .search_with_tier_info(&tenant_id, &params.query, fetch_k)
             .await
             .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+        let mut scored_chunks =
+            apply_search_filters(scored_chunks, project_id_filter, &parsed_filters, params.k);
+        let mut timing = timing;
+        let mut repair_info = None;
+
+        if scored_chunks.is_empty() && !params.query.is_empty() {
+            if let Some(repaired_query) = normalize_query_for_repair(&params.query) {
+                let (repair_scored, repair_timing) = store
+                    .search_with_tier_info(&tenant_id, &repaired_query, fetch_k)
+                    .await
+                    .map_err(|e| McpError::ToolError(e.to_string()))?;
+                let repaired_filtered = apply_search_filters(
+                    repair_scored,
+                    project_id_filter,
+                    &parsed_filters,
+                    params.k,
+                );
+                let repaired = !repaired_filtered.is_empty();
+                if repaired {
+                    scored_chunks = repaired_filtered;
+                    timing = repair_timing;
+                }
+                repair_info = Some(RepairInfo {
+                    attempted: true,
+                    repaired,
+                    original_query: params.query.clone(),
+                    repaired_query: Some(repaired_query),
+                });
+            }
+        }
 
         debug!(
             results_count = scored_chunks.len(),
@@ -654,18 +992,48 @@ pub async fn handle_memory_search<S: Store>(
                 source: SourceResult::from(&chunk.source),
                 timestamp_created: chunk.timestamp_created,
                 tags: chunk.tags.clone(),
+                episode_id: extract_episode_id(&chunk.tags),
+                citation: Some(build_citation(chunk)),
                 source_tier: default_tier.clone(),
             })
             .collect();
 
-        return format_mcp_response(&SearchResult { results, tier_info });
+        return format_mcp_response(&SearchResult {
+            results,
+            tier_info,
+            repair_info,
+        });
     }
 
     // Standard path without tier info
     let scored_chunks = store
-        .search_with_scores(&tenant_id, &params.query, params.k)
+        .search_with_scores(&tenant_id, &params.query, fetch_k)
         .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let mut scored_chunks =
+        apply_search_filters(scored_chunks, project_id_filter, &parsed_filters, params.k);
+    let mut repair_info = None;
+
+    if scored_chunks.is_empty() && !params.query.is_empty() {
+        if let Some(repaired_query) = normalize_query_for_repair(&params.query) {
+            let repair_scored = store
+                .search_with_scores(&tenant_id, &repaired_query, fetch_k)
+                .await
+                .map_err(|e| McpError::ToolError(e.to_string()))?;
+            let repaired_filtered =
+                apply_search_filters(repair_scored, project_id_filter, &parsed_filters, params.k);
+            let repaired = !repaired_filtered.is_empty();
+            if repaired {
+                scored_chunks = repaired_filtered;
+            }
+            repair_info = Some(RepairInfo {
+                attempted: true,
+                repaired,
+                original_query: params.query.clone(),
+                repaired_query: Some(repaired_query),
+            });
+        }
+    }
 
     debug!(results_count = scored_chunks.len(), "search completed");
 
@@ -679,6 +1047,8 @@ pub async fn handle_memory_search<S: Store>(
             source: SourceResult::from(&chunk.source),
             timestamp_created: chunk.timestamp_created,
             tags: chunk.tags.clone(),
+            episode_id: extract_episode_id(&chunk.tags),
+            citation: Some(build_citation(chunk)),
             source_tier: None,
         })
         .collect();
@@ -686,6 +1056,7 @@ pub async fn handle_memory_search<S: Store>(
     format_mcp_response(&SearchResult {
         results,
         tier_info: None,
+        repair_info,
     })
 }
 
@@ -718,10 +1089,19 @@ pub async fn handle_memory_add<S: Store>(
         chunk = chunk.with_project(ProjectId::new(Some(project_id.clone())));
     }
 
+    if let Some(episode_id) = &params.episode_id {
+        validate_episode_id(episode_id)?;
+        let mut tags = chunk.tags.clone();
+        tags.push(make_episode_tag(episode_id));
+        chunk = chunk.with_tags(tags);
+    }
+
     chunk = chunk.with_source(params_to_source(params.source));
 
     if !params.tags.is_empty() {
-        chunk = chunk.with_tags(params.tags);
+        let mut tags = chunk.tags.clone();
+        tags.extend(params.tags);
+        chunk = chunk.with_tags(tags);
     }
 
     let chunk_id = store
@@ -766,10 +1146,19 @@ pub async fn handle_memory_add_batch<S: Store>(
             chunk = chunk.with_project(ProjectId::new(Some(project_id.clone())));
         }
 
+        if let Some(episode_id) = &chunk_params.episode_id {
+            validate_episode_id(episode_id)?;
+            let mut tags = chunk.tags.clone();
+            tags.push(make_episode_tag(episode_id));
+            chunk = chunk.with_tags(tags);
+        }
+
         chunk = chunk.with_source(params_to_source(chunk_params.source));
 
         if !chunk_params.tags.is_empty() {
-            chunk = chunk.with_tags(chunk_params.tags);
+            let mut tags = chunk.tags.clone();
+            tags.extend(chunk_params.tags);
+            chunk = chunk.with_tags(tags);
         }
 
         chunks.push(chunk);
@@ -1030,6 +1419,64 @@ pub async fn handle_memory_compact<S: Store>(
         }
         Err(e) => Err(McpError::ToolError(e.to_string())),
     }
+}
+
+/// Handle memory.consolidate_episode tool call
+pub async fn handle_memory_consolidate_episode<S: Store>(
+    store: &S,
+    params: ConsolidateEpisodeParams,
+) -> Result<Value, McpError> {
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    validate_episode_id(&params.episode_id)?;
+
+    if params.max_chunks == 0 {
+        return Err(McpError::InvalidParams(
+            "max_chunks must be greater than 0".to_string(),
+        ));
+    }
+
+    let mut episode_chunks =
+        collect_episode_chunks(store, &tenant_id, &params.episode_id, params.max_chunks).await?;
+    if episode_chunks.is_empty() {
+        return Err(McpError::ToolError(format!(
+            "no chunks found for episode '{}'",
+            params.episode_id
+        )));
+    }
+
+    episode_chunks.sort_by_key(|chunk| chunk.timestamp_created);
+    let summary_text = build_episode_summary_text(&params.episode_id, &episode_chunks);
+    let tags = vec![
+        make_episode_tag(&params.episode_id),
+        "episode_summary:true".to_string(),
+        format!("episode_source_chunks:{}", episode_chunks.len()),
+    ];
+
+    let summary_chunk = MemoryChunk::new(tenant_id.clone(), summary_text, ChunkType::Summary)
+        .with_tags(tags)
+        .with_source(Source::from_tool(
+            "memory.consolidate_episode",
+            Option::<String>::None,
+        ));
+    let summary_chunk_id = store
+        .add(summary_chunk)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    if !params.retain_source_chunks {
+        for chunk in &episode_chunks {
+            let _ = store
+                .delete(&tenant_id, &chunk.chunk_id)
+                .await
+                .map_err(|e| McpError::ToolError(e.to_string()))?;
+        }
+    }
+
+    format_mcp_response(&ConsolidateEpisodeResult {
+        summary_chunk_id: summary_chunk_id.to_string(),
+        source_chunk_count: episode_chunks.len(),
+        retained_source_chunks: params.retain_source_chunks,
+    })
 }
 
 // ---------- Structural Query Handlers ----------
@@ -1435,11 +1882,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn adaptive_fetch_k_expands_for_complex_queries() {
+        let query = "this is a very long and complex search query with many tokens";
+        assert_eq!(adaptive_fetch_k(10, query, false), 20);
+        assert_eq!(adaptive_fetch_k(10, query, true), 100);
+        assert_eq!(adaptive_fetch_k(10, "short query", false), 10);
+    }
+
+    #[test]
+    fn normalize_query_for_repair_rewrites_noise() {
+        let repaired = normalize_query_for_repair("Alpha!unique?marker").unwrap();
+        assert_eq!(repaired, "alpha unique marker");
+        assert!(normalize_query_for_repair("clean query").is_none());
+    }
+
     proptest! {
         #[test]
         fn validate_search_time_range_order_property(day_a in 1u8..=28, day_b in 1u8..=28) {
             let filters = SearchFilters {
                 types: None,
+                episode_id: None,
                 time_range: Some(TimeRange {
                     from: Some(format!("2026-01-{day_a:02}T00:00:00Z")),
                     to: Some(format!("2026-01-{day_b:02}T23:59:59Z")),
@@ -1460,6 +1923,7 @@ mod tests {
         fn validate_search_time_range_rejects_invalid_iso(invalid in "[A-Za-z]{1,16}") {
             let filters = SearchFilters {
                 types: None,
+                episode_id: None,
                 time_range: Some(TimeRange {
                     from: Some(invalid),
                     to: Some("2026-01-01T00:00:00Z".to_string()),
@@ -1481,6 +1945,7 @@ mod tests {
             text: "hello world".to_string(),
             chunk_type: "doc".to_string(),
             project_id: None,
+            episode_id: None,
             source: None,
             tags: vec![],
         };
@@ -1508,6 +1973,341 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_filters_by_project_id() {
+        let store = make_store();
+
+        handle_memory_add(
+            &store,
+            None,
+            AddParams {
+                tenant_id: "test".to_string(),
+                text: "project a chunk".to_string(),
+                chunk_type: "doc".to_string(),
+                project_id: Some("project_a".to_string()),
+                episode_id: None,
+                source: None,
+                tags: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+        handle_memory_add(
+            &store,
+            None,
+            AddParams {
+                tenant_id: "test".to_string(),
+                text: "project b chunk".to_string(),
+                chunk_type: "doc".to_string(),
+                project_id: Some("project_b".to_string()),
+                episode_id: None,
+                source: None,
+                tags: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = handle_memory_search(
+            &store,
+            SearchParams {
+                tenant_id: "test".to_string(),
+                query: "chunk".to_string(),
+                project_id: Some("project_a".to_string()),
+                k: 10,
+                filters: None,
+                debug_tiers: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let search_response: SearchResult = serde_json::from_str(text).unwrap();
+        assert_eq!(search_response.results.len(), 1);
+        assert_eq!(search_response.results[0].text, "project a chunk");
+    }
+
+    #[tokio::test]
+    async fn search_filters_by_types() {
+        let store = make_store();
+
+        for (text, chunk_type) in [
+            ("doc chunk", "doc"),
+            ("code chunk", "code"),
+            ("trace chunk", "trace"),
+        ] {
+            handle_memory_add(
+                &store,
+                None,
+                AddParams {
+                    tenant_id: "test".to_string(),
+                    text: text.to_string(),
+                    chunk_type: chunk_type.to_string(),
+                    project_id: None,
+                    episode_id: None,
+                    source: None,
+                    tags: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let result = handle_memory_search(
+            &store,
+            SearchParams {
+                tenant_id: "test".to_string(),
+                query: "chunk".to_string(),
+                project_id: None,
+                k: 10,
+                filters: Some(SearchFilters {
+                    types: Some(vec!["code".to_string(), "doc".to_string()]),
+                    episode_id: None,
+                    time_range: None,
+                }),
+                debug_tiers: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let search_response: SearchResult = serde_json::from_str(text).unwrap();
+        assert_eq!(search_response.results.len(), 2);
+        assert!(search_response
+            .results
+            .iter()
+            .all(|r| matches!(r.chunk_type.as_str(), "doc" | "code")));
+    }
+
+    #[tokio::test]
+    async fn search_filters_by_time_range() {
+        let store = make_store();
+        let tenant_id = TenantId::new("test").unwrap();
+
+        let mut old_chunk = MemoryChunk::new(tenant_id.clone(), "old chunk", ChunkType::Doc);
+        old_chunk.timestamp_created =
+            crate::structural::parse_iso_datetime("2026-01-01T00:00:00Z").unwrap();
+        store.add(old_chunk).await.unwrap();
+
+        let mut middle_chunk = MemoryChunk::new(tenant_id.clone(), "middle chunk", ChunkType::Doc);
+        middle_chunk.timestamp_created =
+            crate::structural::parse_iso_datetime("2026-01-15T12:00:00Z").unwrap();
+        store.add(middle_chunk).await.unwrap();
+
+        let mut new_chunk = MemoryChunk::new(tenant_id, "new chunk", ChunkType::Doc);
+        new_chunk.timestamp_created =
+            crate::structural::parse_iso_datetime("2026-02-01T00:00:00Z").unwrap();
+        store.add(new_chunk).await.unwrap();
+
+        let result = handle_memory_search(
+            &store,
+            SearchParams {
+                tenant_id: "test".to_string(),
+                query: "chunk".to_string(),
+                project_id: None,
+                k: 10,
+                filters: Some(SearchFilters {
+                    types: None,
+                    episode_id: None,
+                    time_range: Some(TimeRange {
+                        from: Some("2026-01-10T00:00:00Z".to_string()),
+                        to: Some("2026-01-20T23:59:59Z".to_string()),
+                    }),
+                }),
+                debug_tiers: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let search_response: SearchResult = serde_json::from_str(text).unwrap();
+        assert_eq!(search_response.results.len(), 1);
+        assert_eq!(search_response.results[0].text, "middle chunk");
+    }
+
+    #[tokio::test]
+    async fn search_filters_by_episode_id() {
+        let store = make_store();
+
+        handle_memory_add(
+            &store,
+            None,
+            AddParams {
+                tenant_id: "test".to_string(),
+                text: "episode alpha".to_string(),
+                chunk_type: "doc".to_string(),
+                project_id: None,
+                episode_id: Some("ep1".to_string()),
+                source: None,
+                tags: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+        handle_memory_add(
+            &store,
+            None,
+            AddParams {
+                tenant_id: "test".to_string(),
+                text: "episode beta".to_string(),
+                chunk_type: "doc".to_string(),
+                project_id: None,
+                episode_id: Some("ep2".to_string()),
+                source: None,
+                tags: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = handle_memory_search(
+            &store,
+            SearchParams {
+                tenant_id: "test".to_string(),
+                query: "episode".to_string(),
+                project_id: None,
+                k: 10,
+                filters: Some(SearchFilters {
+                    types: None,
+                    episode_id: Some("ep1".to_string()),
+                    time_range: None,
+                }),
+                debug_tiers: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let search_response: SearchResult = serde_json::from_str(text).unwrap();
+        assert_eq!(search_response.results.len(), 1);
+        assert_eq!(
+            search_response.results[0].episode_id.as_deref(),
+            Some("ep1")
+        );
+    }
+
+    #[tokio::test]
+    async fn search_returns_citation_with_provenance_and_offsets() {
+        let store = make_store();
+
+        let long_text = format!(
+            "alpha_unique_marker {}",
+            "lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(80)
+        );
+
+        handle_memory_add(
+            &store,
+            None,
+            AddParams {
+                tenant_id: "test".to_string(),
+                text: long_text,
+                chunk_type: "doc".to_string(),
+                project_id: None,
+                episode_id: None,
+                source: Some(SourceParams {
+                    uri: Some("file:///tmp/test_doc.md".to_string()),
+                    repo: Some("acme/repo".to_string()),
+                    commit: Some("abc123".to_string()),
+                    path: Some("docs/test_doc.md".to_string()),
+                    tool_name: Some("ingest".to_string()),
+                    tool_call_id: Some("call-1".to_string()),
+                }),
+                tags: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = handle_memory_search(
+            &store,
+            SearchParams {
+                tenant_id: "test".to_string(),
+                query: "alpha_unique_marker".to_string(),
+                project_id: None,
+                k: 10,
+                filters: None,
+                debug_tiers: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let search_response: SearchResult = serde_json::from_str(text).unwrap();
+        assert!(!search_response.results.is_empty());
+
+        let citation = search_response.results[0]
+            .citation
+            .as_ref()
+            .expect("citation should be present");
+
+        assert!(!citation.citation_id.is_empty());
+        assert!(!citation.content_hash.is_empty());
+        assert_eq!(citation.source_path.as_deref(), Some("docs/test_doc.md"));
+        assert_eq!(citation.source_tool_name.as_deref(), Some("ingest"));
+        assert!(citation.chunk_index.is_some());
+        assert!(citation.total_chunks.is_some());
+        assert!(citation.char_start.is_some());
+        assert!(citation.char_end.is_some());
+    }
+
+    #[tokio::test]
+    async fn search_repair_loop_recovers_result() {
+        let store = make_store();
+
+        handle_memory_add(
+            &store,
+            None,
+            AddParams {
+                tenant_id: "test".to_string(),
+                text: "alpha unique marker".to_string(),
+                chunk_type: "doc".to_string(),
+                project_id: None,
+                episode_id: None,
+                source: None,
+                tags: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = handle_memory_search(
+            &store,
+            SearchParams {
+                tenant_id: "test".to_string(),
+                query: "alpha!unique?marker".to_string(),
+                project_id: None,
+                k: 5,
+                filters: None,
+                debug_tiers: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let search_response: SearchResult = serde_json::from_str(text).unwrap();
+        assert_eq!(search_response.results.len(), 1);
+        assert_eq!(search_response.results[0].text, "alpha unique marker");
+
+        let repair_info = search_response
+            .repair_info
+            .as_ref()
+            .expect("repair_info should be present");
+        assert!(repair_info.attempted);
+        assert!(repair_info.repaired);
+        assert_eq!(
+            repair_info.repaired_query.as_deref(),
+            Some("alpha unique marker")
+        );
+    }
+
+    #[tokio::test]
     async fn add_with_all_fields() {
         let store = make_store();
 
@@ -1516,6 +2316,7 @@ mod tests {
             text: "function hello() {}".to_string(),
             chunk_type: "code".to_string(),
             project_id: Some("my_project".to_string()),
+            episode_id: None,
             source: Some(SourceParams {
                 path: Some("src/main.rs".to_string()),
                 repo: Some("my-repo".to_string()),
@@ -1555,6 +2356,7 @@ mod tests {
                     text: "chunk 1".to_string(),
                     chunk_type: "doc".to_string(),
                     project_id: None,
+                    episode_id: None,
                     source: None,
                     tags: vec![],
                 },
@@ -1562,6 +2364,7 @@ mod tests {
                     text: "chunk 2".to_string(),
                     chunk_type: "code".to_string(),
                     project_id: None,
+                    episode_id: None,
                     source: None,
                     tags: vec![],
                 },
@@ -1584,6 +2387,7 @@ mod tests {
             text: "to be deleted".to_string(),
             chunk_type: "doc".to_string(),
             project_id: None,
+            episode_id: None,
             source: None,
             tags: vec![],
         };
@@ -1625,6 +2429,7 @@ mod tests {
                 text: format!("doc {}", i),
                 chunk_type: "doc".to_string(),
                 project_id: None,
+                episode_id: None,
                 source: None,
                 tags: vec![],
             };
@@ -1671,6 +2476,7 @@ mod tests {
             text: "hello".to_string(),
             chunk_type: "invalid_type".to_string(),
             project_id: None,
+            episode_id: None,
             source: None,
             tags: vec![],
         };
@@ -1704,6 +2510,7 @@ mod tests {
             text: "secret data".to_string(),
             chunk_type: "doc".to_string(),
             project_id: None,
+            episode_id: None,
             source: None,
             tags: vec![],
         };
@@ -1736,6 +2543,7 @@ mod tests {
             text: "debug tier test".to_string(),
             chunk_type: "doc".to_string(),
             project_id: None,
+            episode_id: None,
             source: None,
             tags: vec![],
         };
