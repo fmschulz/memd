@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Local memory daemon for AI agents - MCP server with hybrid retrieval"
 
+[features]
+default = []
+cross-encoder-reranker = []
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

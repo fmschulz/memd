@@ -254,6 +254,34 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                 "required": ["tenant_id", "chunk_id"]
             }),
         ),
+        // FEEDBACK-01: memory.feedback
+        ToolDefinition::new(
+            "memory.feedback",
+            "Record relevance feedback for a retrieved chunk so future ranking can adapt",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier for data isolation"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Query text the feedback applies to"
+                    },
+                    "chunk_id": {
+                        "type": "string",
+                        "description": "UUID of the chunk that was judged"
+                    },
+                    "relevance": {
+                        "type": "string",
+                        "enum": ["relevant", "irrelevant"],
+                        "description": "Relevance judgment for this query/chunk pair"
+                    }
+                },
+                "required": ["tenant_id", "query", "chunk_id", "relevance"]
+            }),
+        ),
         // MCP-07: memory.stats
         ToolDefinition::new(
             "memory.stats",
@@ -555,6 +583,7 @@ pub fn tool_names() -> Vec<&'static str> {
         "memory.add_batch",
         "memory.get",
         "memory.delete",
+        "memory.feedback",
         "memory.stats",
         "memory.metrics",
         "memory.compact",
@@ -573,9 +602,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn get_all_tools_returns_fifteen() {
+    fn get_all_tools_returns_sixteen() {
         let tools = get_all_tools();
-        assert_eq!(tools.len(), 15);
+        assert_eq!(tools.len(), 16);
     }
 
     #[test]
@@ -587,6 +616,7 @@ mod tests {
         assert!(names.contains(&"memory.add_batch"));
         assert!(names.contains(&"memory.get"));
         assert!(names.contains(&"memory.delete"));
+        assert!(names.contains(&"memory.feedback"));
         assert!(names.contains(&"memory.stats"));
         assert!(names.contains(&"memory.consolidate_episode"));
     }
@@ -669,9 +699,10 @@ mod tests {
     #[test]
     fn tool_names_list() {
         let names = tool_names();
-        assert_eq!(names.len(), 15);
+        assert_eq!(names.len(), 16);
         assert!(names.contains(&"memory.search"));
         assert!(names.contains(&"memory.metrics"));
+        assert!(names.contains(&"memory.feedback"));
         assert!(names.contains(&"memory.compact"));
         assert!(names.contains(&"memory.consolidate_episode"));
         assert!(names.contains(&"code.find_definition"));

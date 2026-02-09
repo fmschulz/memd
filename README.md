@@ -6,7 +6,7 @@ Local MCP memory daemon for coding agents. `memd` stores and retrieves tenant-is
 
 - Runs as an MCP server on stdio (`--mode mcp`, default)
 - Supports persistent storage (WAL + segments + metadata) or in-memory mode (`--in-memory`)
-- Exposes 15 MCP tools (memory, structural, debug, metrics, compaction, episode consolidation)
+- Exposes 16 MCP tools (memory, structural, debug, metrics, compaction, episode consolidation, feedback)
 - Supports hybrid retrieval in persistent mode (dense + sparse + reranking)
 - Applies tenant isolation on all read/write operations
 
@@ -83,7 +83,7 @@ Tool results are MCP content blocks containing JSON text:
 }
 ```
 
-## Tool Inventory (15)
+## Tool Inventory (16)
 
 Memory:
 
@@ -92,6 +92,7 @@ Memory:
 - `memory.add_batch`
 - `memory.get`
 - `memory.delete`
+- `memory.feedback`
 - `memory.stats`
 - `memory.metrics`
 - `memory.compact`
@@ -153,6 +154,29 @@ Current state:
 - If initial retrieval returns no results, a deterministic repair pass normalizes query punctuation/spacing and retries
 - `repair_info` in search responses reports whether a repair attempt was made and whether it recovered results
 
+### Relevance Feedback Loop
+
+- `memory.feedback` records query/chunk judgments (`relevant` or `irrelevant`)
+- Feedback is stored per tenant and query-normalized for stable matching
+- Retrieval applies bounded score adjustments using:
+  - exponential decay on older feedback
+  - minimum sample requirement before any adjustment
+  - capped max boost/penalty per chunk to avoid instability
+- Feedback adjustments apply in both in-memory and persistent stores
+
+### Reranker Modes
+
+`memd` now supports two reranker strategies in the hybrid retrieval pipeline:
+
+- `feature` (default): uses RRF + recency/project/type boosts
+- `cross_encoder`: adds query-document interaction scoring before final ranking
+
+Implementation details:
+
+- Effective strategy is selected via `HybridConfig.reranker.mode` (`Feature` or `CrossEncoder`)
+- Cross-encoder path is compiled behind cargo feature `cross-encoder-reranker`
+- If `CrossEncoder` is requested without that cargo feature, `memd` deterministically falls back to `feature` mode
+
 ### Episodic Memory
 
 - `memory.add` and `memory.add_batch` accept optional `episode_id`
@@ -164,12 +188,12 @@ Current state:
 
 - `memory.metrics` returns `timestamp`, `index`, `latency`, `recent_queries`, `tiered`
 - Optional params:
-- `tenant_id` filters index metrics
-- `include_recent` defaults `true`
-- `include_tiered` defaults `true`
+  - `tenant_id` filters index metrics
+  - `include_recent` defaults `true`
+  - `include_tiered` defaults `true`
 - `memory.compact`:
-- persistent store: runs thresholded compaction or forced compaction via trait-dispatched backend implementation
-- in-memory store: returns `status: skipped`
+  - persistent store: runs thresholded compaction or forced compaction via trait-dispatched backend implementation
+  - in-memory store: returns `status: skipped`
 
 ## Quick Integration
 
@@ -206,6 +230,8 @@ Core checks:
 cargo test -p memd
 cargo test -p memd-evals
 RUST_LOG=error cargo run -p memd-evals -- --suite mcp --skip-build
+# Validate cross-encoder reranker path
+cargo test -p memd --features cross-encoder-reranker
 ```
 
 Deterministic baseline:
@@ -230,6 +256,18 @@ Offline benchmark protocol (Phase 6):
 
 ```bash
 ./evals/scripts/run_offline_retrieval_benchmark.sh --model all-minilm --seed 42
+```
+
+Continuous quality regression gate (paired significance test):
+
+```bash
+# Baseline and candidate are benchmark JSON reports from --suite benchmark
+cargo run -p memd-evals -- --suite benchmark-regression --skip-build \
+  --baseline-report evals/results/offline/baseline.json \
+  --candidate-report evals/results/offline/candidate.json \
+  --significance-alpha 0.05 \
+  --min-effect-size 0.1 \
+  --regression-report-json evals/results/offline/regression_gate.json
 ```
 
 Protocol details are documented in `evals/BENCHMARK_PROTOCOL.md`.

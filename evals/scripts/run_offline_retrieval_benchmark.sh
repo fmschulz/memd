@@ -91,31 +91,28 @@ echo
 cargo build -p memd-evals >/dev/null
 cargo build -p memd >/dev/null
 
+report_path="$OUTPUT_DIR/cross_corpus_${MODEL}.json"
+cmd=(
+  cargo run -p memd-evals -- --suite benchmark --skip-build
+  --memd-path target/debug/memd
+  --embedding-model "$MODEL"
+  --bootstrap-iterations "$BOOTSTRAP_ITERATIONS"
+  --seed "$SEED"
+  --report-json "$report_path"
+)
+
 for dataset in "${DATASETS[@]}"; do
-  dataset_name="$(basename "$dataset" .json)"
-  report_path="$OUTPUT_DIR/${dataset_name}_${MODEL}.json"
-
-  cmd=(
-    cargo run -p memd-evals -- --suite benchmark --skip-build
-    --memd-path target/debug/memd
-    --dataset-path "$dataset"
-    --embedding-model "$MODEL"
-    --bootstrap-iterations "$BOOTSTRAP_ITERATIONS"
-    --seed "$SEED"
-    --report-json "$report_path"
-  )
-
-  if [[ -n "$MAX_QUERIES" ]]; then
-    cmd+=(--max-queries "$MAX_QUERIES")
-  fi
-  if [[ -n "$MAX_DOCUMENTS" ]]; then
-    cmd+=(--max-documents "$MAX_DOCUMENTS")
-  fi
-
-  echo "Running: $dataset_name"
-  "${cmd[@]}"
-  echo
+  cmd+=(--dataset-path "$dataset")
 done
 
-python3 evals/scripts/analyze_benchmark_results.py "$OUTPUT_DIR"
-echo "Benchmark reports ready: $OUTPUT_DIR"
+if [[ -n "$MAX_QUERIES" ]]; then
+  cmd+=(--max-queries "$MAX_QUERIES")
+fi
+if [[ -n "$MAX_DOCUMENTS" ]]; then
+  cmd+=(--max-documents "$MAX_DOCUMENTS")
+fi
+
+echo "Running multi-dataset benchmark with shared deterministic options..."
+"${cmd[@]}"
+echo
+echo "Cross-corpus report ready: $report_path"
