@@ -8,8 +8,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+use std::time::Duration;
 
 use parking_lot::{Mutex, RwLock};
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use super::dense::DenseSearcher;
@@ -60,6 +63,12 @@ pub struct PersistentStoreConfig {
     pub hybrid_config: Option<HybridConfig>,
     /// Embedding model to use for dense search
     pub embedding_model: EmbeddingModel,
+    /// Enable async/background indexing of newly added chunks
+    pub enable_async_indexing: bool,
+    /// Max pending chunks processed per async indexer tick
+    pub async_index_batch_size: usize,
+    /// Poll interval for async indexer in milliseconds
+    pub async_index_poll_ms: u64,
 }
 
 impl Default for PersistentStoreConfig {
@@ -73,6 +82,9 @@ impl Default for PersistentStoreConfig {
             enable_tiered_search: true,
             hybrid_config: None,
             embedding_model: EmbeddingModel::default(),
+            enable_async_indexing: false,
+            async_index_batch_size: 128,
+            async_index_poll_ms: 250,
         }
     }
 }
@@ -94,6 +106,8 @@ pub struct PersistentStore {
     metrics: Arc<MetricsCollector>,
     /// Compaction runner (None if compaction disabled)
     compaction_runner: Option<CompactionRunner>,
+    /// Optional async index worker handle
+    async_indexer: Option<AsyncIndexerHandle>,
 }
 
 /// Per-tenant storage state
@@ -115,6 +129,17 @@ struct TenantStore {
 struct ActiveSegment {
     writer: SegmentWriter,
     chunk_count: u32,
+}
+
+struct PendingChunkAdd {
+    chunk: MemoryChunk,
+    chunk_id: ChunkId,
+    payload: Vec<u8>,
+}
+
+struct AsyncIndexerHandle {
+    shutdown_tx: watch::Sender<bool>,
+    task: JoinHandle<()>,
 }
 
 impl PersistentStore {
@@ -198,12 +223,21 @@ impl PersistentStore {
             hybrid_searcher,
             metrics: Arc::new(MetricsCollector::default()),
             compaction_runner,
+            async_indexer: None,
         };
 
         // Recover existing tenants
         store.discover_and_recover_tenants()?;
 
+        let async_indexer = store.start_async_indexer_if_enabled();
+        let mut store = store;
+        store.async_indexer = async_indexer;
+
         Ok(store)
+    }
+
+    pub fn async_indexing_enabled(&self) -> bool {
+        self.async_indexer.is_some()
     }
 
     /// Get reference to metrics collector
@@ -214,6 +248,43 @@ impl PersistentStore {
     /// Get shared metrics collector
     pub fn metrics_arc(&self) -> Arc<MetricsCollector> {
         Arc::clone(&self.metrics)
+    }
+
+    fn start_async_indexer_if_enabled(&self) -> Option<AsyncIndexerHandle> {
+        if !self.config.enable_async_indexing {
+            return None;
+        }
+
+        let handle = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => handle,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "async indexing requested but no Tokio runtime found; falling back to sync indexing"
+                );
+                return None;
+            }
+        };
+
+        let poll_ms = self.config.async_index_poll_ms.max(1);
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let task = handle.spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(poll_ms));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        // Phase 2 scaffold: loop is intentionally inert until worker wiring is added.
+                    }
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        Some(AsyncIndexerHandle { shutdown_tx, task })
     }
 
     /// Get index statistics per tenant
@@ -507,6 +578,11 @@ impl PersistentStore {
 
 impl Drop for PersistentStore {
     fn drop(&mut self) {
+        if let Some(indexer) = self.async_indexer.take() {
+            let _ = indexer.shutdown_tx.send(true);
+            indexer.task.abort();
+        }
+
         // Best-effort finalization on drop
         if let Err(e) = self.shutdown() {
             warn!(error = %e, "error during PersistentStore drop");
@@ -823,42 +899,15 @@ impl Drop for TenantStore {
 #[async_trait::async_trait]
 impl Store for PersistentStore {
     async fn add(&self, chunk: MemoryChunk) -> Result<ChunkId> {
-        let tenant_id_str = chunk.tenant_id.to_string();
-        info!(text_len = chunk.text.len(), "[PERSISTENT_ADD] called");
-        debug!(tenant_id = %tenant_id_str, "[ADD] step 1: getting tenant");
-        let _tenant = self.get_or_create_tenant(&tenant_id_str)?;
-
-        let mut chunks = super::split_for_add(chunk);
-        if chunks.len() == 1 {
-            return self
-                .add_single_chunk(
-                    chunks
-                        .pop()
-                        .ok_or_else(|| MemdError::StorageError("no chunk to add".into()))?,
-                )
-                .await;
-        }
-
-        info!(chunk_count = chunks.len(), "[CHUNKING] splitting document");
-
-        let mut chunk_ids = Vec::with_capacity(chunks.len());
-        for chunk in chunks {
-            chunk_ids.push(self.add_single_chunk(chunk).await?);
-        }
-
-        chunk_ids
+        self.add_chunks_internal(vec![chunk])
+            .await?
             .into_iter()
             .next()
             .ok_or_else(|| MemdError::StorageError("no chunk id produced".into()))
     }
 
     async fn add_batch(&self, chunks: Vec<MemoryChunk>) -> Result<Vec<ChunkId>> {
-        let mut ids = Vec::with_capacity(chunks.len());
-        for chunk in chunks {
-            let id = self.add(chunk).await?;
-            ids.push(id);
-        }
-        Ok(ids)
+        self.add_chunks_internal(chunks).await
     }
 
     async fn add_feedback(&self, feedback: FeedbackEntry) -> Result<()> {
@@ -975,154 +1024,169 @@ fn current_time_ms() -> i64 {
 }
 
 impl PersistentStore {
-    /// Add a single chunk without automatic chunking
-    async fn add_single_chunk(&self, mut chunk: MemoryChunk) -> Result<ChunkId> {
-        let tenant_id_str = chunk.tenant_id.to_string();
-        debug!(tenant_id = %tenant_id_str, "[ADD] step 1: getting tenant");
-        let tenant = self.get_or_create_tenant(&tenant_id_str)?;
-
-        // Generate chunk ID
-        let chunk_id = ChunkId::new();
-        chunk.chunk_id = chunk_id.clone();
-        debug!(chunk_id = %chunk_id, "[ADD] step 2: generated chunk_id");
-
-        // Compute hash
-        chunk.hash = {
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(chunk.text.as_bytes());
-            format!("{:x}", hasher.finalize())
-        };
-
-        let timestamp = chunk.timestamp_created;
-
-        // Serialize chunk for storage
-        let payload = serde_json::to_vec(&chunk)
-            .map_err(|e| MemdError::StorageError(format!("serialize chunk: {}", e)))?;
-        debug!(
-            payload_len = payload.len(),
-            "[ADD] step 3: serialized payload"
-        );
-
-        // Write to WAL first (durability)
-        debug!("[ADD] step 4: acquiring WAL lock");
-        {
-            let mut wal = tenant.wal.lock();
-            debug!("[ADD] step 4b: acquired WAL lock, writing");
-            wal.append_add(
-                &tenant_id_str,
-                &chunk_id.to_string(),
-                timestamp,
-                payload.clone(),
-            )?;
+    fn expand_chunks_for_add(
+        &self,
+        chunks: Vec<MemoryChunk>,
+    ) -> Result<(Vec<MemoryChunk>, Vec<usize>)> {
+        if chunks.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
         }
-        debug!("[ADD] step 4c: WAL write complete");
 
-        // Write to segment
-        debug!("[ADD] step 5: creating active segment");
-        tenant.get_or_create_active_segment(self.config.segment_max_chunks)?;
-        let (segment_id, ordinal) = {
-            debug!("[ADD] step 5b: acquiring segment lock");
-            let mut active = tenant.active_segment.lock();
-            debug!("[ADD] step 5c: acquired segment lock");
-            let seg = active
-                .as_mut()
-                .ok_or_else(|| MemdError::StorageError("no active segment".into()))?;
-            let ordinal = seg.writer.append_chunk(&payload)?;
-            seg.chunk_count += 1;
-            (seg.writer.id(), ordinal)
-        };
-        debug!(segment_id, ordinal, "[ADD] step 5d: segment write complete");
+        let mut expanded = Vec::new();
+        let mut primary_positions = Vec::with_capacity(chunks.len());
+        for chunk in chunks {
+            let parts = super::split_for_add(chunk);
+            if parts.is_empty() {
+                return Err(MemdError::StorageError(
+                    "split_for_add produced no chunks".into(),
+                ));
+            }
+            primary_positions.push(expanded.len());
+            expanded.extend(parts);
+        }
+        Ok((expanded, primary_positions))
+    }
 
-        // Write to metadata
-        debug!("[ADD] step 6: writing metadata");
-        let metadata = ChunkMetadata {
-            chunk_id: chunk_id.clone(),
-            tenant_id: chunk.tenant_id.clone(),
-            project_id: chunk.project_id.as_option().map(|s| s.to_string()),
-            segment_id,
-            ordinal,
-            chunk_type: chunk.chunk_type,
-            status: chunk.status,
-            timestamp_created: chunk.timestamp_created,
-            hash: chunk.hash.clone(),
-            source_uri: chunk.source.uri.clone(),
-        };
-        self.metadata.insert(&metadata)?;
-        debug!("[ADD] step 6b: metadata write complete");
-
-        // Index in hybrid searcher (handles both dense and sparse)
-        debug!("[ADD] step 7: starting hybrid indexing");
-        warn!(
-            "[DEBUG] Indexing path check: hybrid_searcher={}, dense_searcher={}",
-            self.hybrid_searcher.is_some(),
-            self.dense_searcher.is_some()
-        );
-        if let Some(ref hybrid) = self.hybrid_searcher {
-            debug!("[ADD] step 7b: calling hybrid.index_chunk");
-            warn!(
-                "[DEBUG] About to call hybrid.index_chunk for tenant={}, chunk_id={}, text_len={}",
-                chunk.tenant_id,
+    fn prepare_pending_chunks(&self, chunks: Vec<MemoryChunk>) -> Result<Vec<PendingChunkAdd>> {
+        let mut pending = Vec::with_capacity(chunks.len());
+        for mut chunk in chunks {
+            let chunk_id = ChunkId::new();
+            chunk.chunk_id = chunk_id.clone();
+            chunk.hash = {
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(chunk.text.as_bytes());
+                format!("{:x}", hasher.finalize())
+            };
+            let payload = serde_json::to_vec(&chunk)
+                .map_err(|e| MemdError::StorageError(format!("serialize chunk: {}", e)))?;
+            pending.push(PendingChunkAdd {
+                chunk,
                 chunk_id,
-                chunk.text.len()
-            );
-            if let Err(e) = hybrid
-                .index_chunk(&chunk.tenant_id, &chunk_id, &chunk.text)
-                .await
-            {
-                warn!(
-                    chunk_id = %chunk_id,
-                    error = %e,
-                    "❌ [DEBUG] ERROR in hybrid.index_chunk - THIS IS WHY INDEXING FAILED"
-                );
-                // Don't fail the add - search will fall back to text matching
-            } else {
-                warn!(
-                    "[DEBUG] ✅ hybrid.index_chunk succeeded for chunk_id={}",
-                    chunk_id
-                );
-            }
-            debug!("[ADD] step 7c: hybrid indexing complete");
-        } else if let Some(ref searcher) = self.dense_searcher {
-            debug!("[ADD] step 7d: falling back to dense-only");
-            warn!(
-                "[DEBUG] About to call dense_searcher.index_chunk for tenant={}, chunk_id={}",
-                chunk.tenant_id, chunk_id
-            );
-            // Fallback to dense-only if hybrid not available
-            if let Err(e) = searcher
-                .index_chunk(&chunk.tenant_id, &chunk_id, &chunk.text)
-                .await
-            {
-                warn!(
-                    chunk_id = %chunk_id,
-                    error = %e,
-                    "❌ [DEBUG] ERROR in dense_searcher.index_chunk - THIS IS WHY INDEXING FAILED"
-                );
-            } else {
-                warn!(
-                    "[DEBUG] ✅ dense_searcher.index_chunk succeeded for chunk_id={}",
-                    chunk_id
-                );
-            }
-        } else {
-            warn!("⚠️ [DEBUG] CRITICAL: Neither hybrid_searcher nor dense_searcher exists - NO INDEXING HAPPENING!");
+                payload,
+            });
+        }
+        Ok(pending)
+    }
+
+    fn checkpoint_after_batch(
+        &self,
+        tenant: &TenantStore,
+        tenant_id: &str,
+        writes: u32,
+    ) -> Result<()> {
+        let interval = self.config.wal_checkpoint_interval;
+        if interval == 0 || writes == 0 {
+            return Ok(());
         }
 
-        // Check if we need checkpoint
-        debug!("[ADD] step 8: checkpoint check");
-        {
+        let checkpoints = {
             let mut count = tenant.writes_since_checkpoint.lock();
-            *count += 1;
-            if *count >= self.config.wal_checkpoint_interval {
-                let mut wal = tenant.wal.lock();
-                wal.append_checkpoint(&tenant_id_str, timestamp)?;
-                *count = 0;
-            }
+            *count += writes;
+            let checkpoints = *count / interval;
+            *count %= interval;
+            checkpoints
+        };
+        if checkpoints == 0 {
+            return Ok(());
         }
 
-        info!(tenant_id = %tenant_id_str, chunk_id = %chunk_id, segment_id, ordinal, "[ADD] step 9: COMPLETE - chunk added");
-        Ok(chunk_id)
+        let timestamp = current_time_ms();
+        let mut wal = tenant.wal.lock();
+        for _ in 0..checkpoints {
+            wal.append_checkpoint(tenant_id, timestamp)?;
+        }
+        Ok(())
+    }
+
+    async fn add_chunks_internal(&self, chunks: Vec<MemoryChunk>) -> Result<Vec<ChunkId>> {
+        if chunks.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let (expanded_chunks, primary_positions) = self.expand_chunks_for_add(chunks)?;
+        let pending = self.prepare_pending_chunks(expanded_chunks)?;
+
+        let mut tenant_groups: HashMap<String, Vec<usize>> = HashMap::new();
+        for (idx, row) in pending.iter().enumerate() {
+            tenant_groups
+                .entry(row.chunk.tenant_id.to_string())
+                .or_default()
+                .push(idx);
+        }
+
+        for (tenant_id_str, indices) in tenant_groups {
+            let tenant = self.get_or_create_tenant(&tenant_id_str)?;
+            let tenant_id = pending[indices[0]].chunk.tenant_id.clone();
+
+            let wal_rows: Vec<(String, i64, Vec<u8>)> = indices
+                .iter()
+                .map(|&idx| {
+                    (
+                        pending[idx].chunk_id.to_string(),
+                        pending[idx].chunk.timestamp_created,
+                        pending[idx].payload.clone(),
+                    )
+                })
+                .collect();
+            {
+                let mut wal = tenant.wal.lock();
+                wal.append_add_batch(&tenant_id_str, &wal_rows)?;
+            }
+
+            let mut metadata_rows = Vec::with_capacity(indices.len());
+            let mut index_rows = Vec::with_capacity(indices.len());
+            for idx in &indices {
+                let row = &pending[*idx];
+                tenant.get_or_create_active_segment(self.config.segment_max_chunks)?;
+                let (segment_id, ordinal) = {
+                    let mut active = tenant.active_segment.lock();
+                    let seg = active
+                        .as_mut()
+                        .ok_or_else(|| MemdError::StorageError("no active segment".into()))?;
+                    let ordinal = seg.writer.append_chunk(&row.payload)?;
+                    seg.chunk_count += 1;
+                    (seg.writer.id(), ordinal)
+                };
+
+                metadata_rows.push(ChunkMetadata {
+                    chunk_id: row.chunk_id.clone(),
+                    tenant_id: row.chunk.tenant_id.clone(),
+                    project_id: row.chunk.project_id.as_option().map(|s| s.to_string()),
+                    segment_id,
+                    ordinal,
+                    chunk_type: row.chunk.chunk_type,
+                    status: row.chunk.status,
+                    timestamp_created: row.chunk.timestamp_created,
+                    hash: row.chunk.hash.clone(),
+                    source_uri: row.chunk.source.uri.clone(),
+                });
+                index_rows.push((row.chunk_id.clone(), row.chunk.text.clone()));
+            }
+            self.metadata.insert_many(&metadata_rows)?;
+
+            if let Some(ref hybrid) = self.hybrid_searcher {
+                if let Err(e) = hybrid.index_batch(&tenant_id, &index_rows).await {
+                    warn!(tenant_id = %tenant_id, error = %e, "hybrid index batch failed");
+                }
+            } else if let Some(ref searcher) = self.dense_searcher {
+                if let Err(e) = searcher.index_batch(&tenant_id, &index_rows).await {
+                    warn!(tenant_id = %tenant_id, error = %e, "dense index batch failed");
+                }
+            }
+
+            self.checkpoint_after_batch(&tenant, &tenant_id_str, indices.len() as u32)?;
+        }
+
+        let expanded_ids: Vec<ChunkId> = pending.iter().map(|row| row.chunk_id.clone()).collect();
+        let mut primary_ids = Vec::with_capacity(primary_positions.len());
+        for pos in primary_positions {
+            let chunk_id = expanded_ids
+                .get(pos)
+                .ok_or_else(|| MemdError::StorageError("missing primary chunk id".into()))?;
+            primary_ids.push(chunk_id.clone());
+        }
+        Ok(primary_ids)
     }
 }
 
@@ -1489,6 +1553,28 @@ mod tests {
         let sentence =
             "This is a long test sentence that should trigger document chunking behavior. ";
         sentence.repeat(40)
+    }
+
+    #[test]
+    fn default_config_disables_async_indexing() {
+        let config = PersistentStoreConfig::default();
+        assert!(!config.enable_async_indexing);
+        assert!(config.async_index_batch_size > 0);
+        assert!(config.async_index_poll_ms > 0);
+    }
+
+    #[tokio::test]
+    async fn async_indexer_scaffold_is_created_when_enabled() {
+        let dir = tempdir().unwrap();
+        let config = PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            enable_async_indexing: true,
+            ..Default::default()
+        };
+        let store = PersistentStore::open(config).unwrap();
+        assert!(store.async_indexing_enabled());
     }
 
     #[tokio::test]
