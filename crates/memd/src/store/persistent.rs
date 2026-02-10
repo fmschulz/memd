@@ -11,7 +11,7 @@ use std::time::Instant;
 use std::time::Duration;
 
 use parking_lot::{Mutex, RwLock};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -139,7 +139,14 @@ struct PendingChunkAdd {
 
 struct AsyncIndexerHandle {
     shutdown_tx: watch::Sender<bool>,
+    job_tx: mpsc::UnboundedSender<IndexJob>,
     task: JoinHandle<()>,
+}
+
+struct IndexJob {
+    tenant_id: TenantId,
+    chunk_ids: Vec<ChunkId>,
+    index_rows: Vec<(ChunkId, String)>,
 }
 
 impl PersistentStore {
@@ -267,13 +274,32 @@ impl PersistentStore {
         };
 
         let poll_ms = self.config.async_index_poll_ms.max(1);
+        let batch_size = self.config.async_index_batch_size.max(1);
+        let metadata = Arc::clone(&self.metadata);
+        let hybrid_searcher = self.hybrid_searcher.clone();
+        let dense_searcher = self.dense_searcher.clone();
+
+        let (job_tx, mut job_rx) = mpsc::unbounded_channel::<IndexJob>();
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task = handle.spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(poll_ms));
             loop {
                 tokio::select! {
+                    maybe_job = job_rx.recv() => {
+                        let Some(job) = maybe_job else {
+                            break;
+                        };
+                        run_async_index_job(
+                            metadata.as_ref(),
+                            hybrid_searcher.as_ref(),
+                            dense_searcher.as_ref(),
+                            batch_size,
+                            job,
+                        )
+                        .await;
+                    }
                     _ = interval.tick() => {
-                        // Phase 2 scaffold: loop is intentionally inert until worker wiring is added.
+                        // Keep loop responsive to shutdown even when idle.
                     }
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
@@ -284,7 +310,11 @@ impl PersistentStore {
             }
         });
 
-        Some(AsyncIndexerHandle { shutdown_tx, task })
+        Some(AsyncIndexerHandle {
+            shutdown_tx,
+            job_tx,
+            task,
+        })
     }
 
     /// Get index statistics per tenant
@@ -1023,6 +1053,68 @@ fn current_time_ms() -> i64 {
         .unwrap_or(0)
 }
 
+fn mark_index_failed_many(
+    metadata: &SqliteMetadataStore,
+    tenant_id: &TenantId,
+    chunk_ids: &[ChunkId],
+    error_message: &str,
+) {
+    for chunk_id in chunk_ids {
+        if let Err(mark_err) =
+            metadata.mark_index_failed(tenant_id, chunk_id, error_message, current_time_ms())
+        {
+            warn!(
+                tenant_id = %tenant_id,
+                chunk_id = %chunk_id,
+                error = %mark_err,
+                "failed to record index failure state"
+            );
+        }
+    }
+}
+
+async fn run_async_index_job(
+    metadata: &SqliteMetadataStore,
+    hybrid_searcher: Option<&Arc<HybridSearcher>>,
+    dense_searcher: Option<&Arc<DenseSearcher>>,
+    batch_size: usize,
+    job: IndexJob,
+) {
+    let mut index_error: Option<String> = None;
+    for rows in job.index_rows.chunks(batch_size.max(1)) {
+        let result = if let Some(hybrid) = hybrid_searcher {
+            hybrid.index_batch(&job.tenant_id, rows).await
+        } else if let Some(searcher) = dense_searcher {
+            searcher.index_batch(&job.tenant_id, rows).await
+        } else {
+            Ok(())
+        };
+
+        if let Err(e) = result {
+            index_error = Some(e.to_string());
+            break;
+        }
+    }
+
+    if let Some(error_message) = index_error {
+        warn!(
+            tenant_id = %job.tenant_id,
+            error = %error_message,
+            "async index job failed"
+        );
+        mark_index_failed_many(metadata, &job.tenant_id, &job.chunk_ids, &error_message);
+        return;
+    }
+
+    if let Err(e) = metadata.mark_indexed(&job.tenant_id, &job.chunk_ids, current_time_ms()) {
+        warn!(
+            tenant_id = %job.tenant_id,
+            error = %e,
+            "failed to mark chunks indexed"
+        );
+    }
+}
+
 impl PersistentStore {
     fn expand_chunks_for_add(
         &self,
@@ -1169,7 +1261,34 @@ impl PersistentStore {
             self.metadata
                 .mark_index_pending(&tenant_id, &chunk_ids_for_state, current_time_ms())?;
 
-            if !self.async_indexing_enabled() {
+            if self.async_indexing_enabled() {
+                if let Some(indexer) = self.async_indexer.as_ref() {
+                    let job = IndexJob {
+                        tenant_id: tenant_id.clone(),
+                        chunk_ids: chunk_ids_for_state.clone(),
+                        index_rows,
+                    };
+                    if indexer.job_tx.send(job).is_err() {
+                        let error_message = "async indexer queue is closed";
+                        warn!(tenant_id = %tenant_id, error = error_message, "failed to enqueue async index job");
+                        mark_index_failed_many(
+                            self.metadata.as_ref(),
+                            &tenant_id,
+                            &chunk_ids_for_state,
+                            error_message,
+                        );
+                    }
+                } else {
+                    let error_message = "async indexing enabled but worker unavailable";
+                    warn!(tenant_id = %tenant_id, error = error_message, "cannot enqueue async index job");
+                    mark_index_failed_many(
+                        self.metadata.as_ref(),
+                        &tenant_id,
+                        &chunk_ids_for_state,
+                        error_message,
+                    );
+                }
+            } else {
                 let index_result = if let Some(ref hybrid) = self.hybrid_searcher {
                     hybrid.index_batch(&tenant_id, &index_rows).await
                 } else if let Some(ref searcher) = self.dense_searcher {
@@ -1188,21 +1307,12 @@ impl PersistentStore {
                     }
                     Err(e) => {
                         warn!(tenant_id = %tenant_id, error = %e, "sync index batch failed");
-                        for chunk_id in &chunk_ids_for_state {
-                            if let Err(mark_err) = self.metadata.mark_index_failed(
-                                &tenant_id,
-                                chunk_id,
-                                &e.to_string(),
-                                current_time_ms(),
-                            ) {
-                                warn!(
-                                    tenant_id = %tenant_id,
-                                    chunk_id = %chunk_id,
-                                    error = %mark_err,
-                                    "failed to record index failure state"
-                                );
-                            }
-                        }
+                        mark_index_failed_many(
+                            self.metadata.as_ref(),
+                            &tenant_id,
+                            &chunk_ids_for_state,
+                            &e.to_string(),
+                        );
                     }
                 }
             }
@@ -1636,7 +1746,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn add_marks_pending_when_async_indexing_enabled() {
+    async fn add_async_eventually_marks_indexed() {
         let dir = tempdir().unwrap();
         let tenant = make_tenant();
         let config = PersistentStoreConfig {
@@ -1652,10 +1762,26 @@ mod tests {
 
         store.add(make_chunk(&tenant, "pending state check")).await.unwrap();
 
-        let (pending, indexed, failed) = store.metadata.count_by_index_state(&tenant).unwrap();
-        assert_eq!(pending, 1);
-        assert_eq!(indexed, 0);
-        assert_eq!(failed, 0);
+        // Async worker runs out-of-band; allow a short settle window.
+        let mut saw_pending = false;
+        let mut saw_indexed = false;
+        for _ in 0..20 {
+            let (pending, indexed, failed) = store.metadata.count_by_index_state(&tenant).unwrap();
+            assert_eq!(failed, 0);
+            if pending > 0 {
+                saw_pending = true;
+            }
+            if indexed > 0 {
+                saw_indexed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            saw_pending || saw_indexed,
+            "chunk should appear in pending or indexed states"
+        );
+        assert!(saw_indexed, "async worker should eventually mark chunk indexed");
     }
 
     #[tokio::test]
