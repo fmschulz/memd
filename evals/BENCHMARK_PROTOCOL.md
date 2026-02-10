@@ -13,6 +13,7 @@ Primary challenging datasets:
 - `evals/datasets/retrieval/beir_fiqa.json`
 - `evals/datasets/retrieval/beir_scidocs.json`
 - `evals/datasets/retrieval/beir_trec-covid.json`
+- `LongMemEval` (`s`/`m` cleaned splits via `evals/scripts/run_longmemeval_benchmark.sh`)
 
 Smoke dataset for fast gates:
 
@@ -38,12 +39,29 @@ Aggregate:
 - Bootstrap iterations are explicit (`--bootstrap-iterations`, default `1000`).
 - Optional caps (`--max-queries`, `--max-documents`) make CI/manual runs bounded and reproducible.
 
+## Runtime Throughput Knobs
+
+For indexing-heavy runs (especially LongMemEval), these env vars are supported:
+
+- `MEMD_EVAL_INGEST_BATCH_SIZE`: harness-side size for each `memory.add_batch` call.
+  default: `32`.
+- `MEMD_EMBED_BATCH_SIZE`: memd dense embed batch size used by Candle embedder.
+  default: `32`.
+
+Example:
+
+```bash
+MEMD_EVAL_INGEST_BATCH_SIZE=128 MEMD_EMBED_BATCH_SIZE=64 \
+  cargo run -p memd-evals -- --suite benchmark --skip-build ...
+```
+
 ## Command (single dataset)
 
 ```bash
 cargo run -p memd-evals -- --suite benchmark --skip-build \
   --dataset-path evals/datasets/retrieval/beir_fiqa.json \
   --embedding-model all-minilm \
+  --system-variant hybrid-feature \
   --bootstrap-iterations 1000 \
   --seed 42 \
   --report-json evals/results/offline/beir_fiqa_all-minilm.json
@@ -54,6 +72,7 @@ cargo run -p memd-evals -- --suite benchmark --skip-build \
 ```bash
 ./evals/scripts/run_offline_retrieval_benchmark.sh \
   --model all-minilm \
+  --system-variant hybrid-feature \
   --bootstrap-iterations 1000 \
   --seed 42
 ```
@@ -72,10 +91,31 @@ cargo run -p memd-evals -- --suite benchmark --skip-build \
   --dataset-path evals/datasets/retrieval/beir_scidocs.json \
   --dataset-path evals/datasets/retrieval/beir_trec-covid.json \
   --embedding-model all-minilm \
+  --system-variant hybrid-feature \
   --bootstrap-iterations 1000 \
   --seed 42 \
   --report-json evals/results/offline/cross_corpus_all-minilm.json
 ```
+
+## Baseline Matrix Runner
+
+Use this runner to compare strong retrieval variants on the same datasets:
+
+```bash
+./evals/scripts/run_variant_matrix_benchmark.sh \
+  --model all-minilm \
+  --with-longmemeval-s \
+  --max-queries 200 \
+  --max-sessions-per-query 40 \
+  --seed 42
+```
+
+Variants covered by default:
+
+- `hybrid-feature`
+- `hybrid-cross-encoder`
+- `dense-only`
+- `bm25-only`
 
 ## Quality Gates
 
@@ -97,6 +137,34 @@ cargo run -p memd-evals -- --suite benchmark --skip-build \
   --threshold-mrr 0.6
 ```
 
+## LongMemEval Setup (Public Long-Term Memory Corpus)
+
+The benchmark harness now accepts LongMemEval raw JSON directly and converts it
+to session-level retrieval format at load time.
+
+Run:
+
+```bash
+./evals/scripts/run_longmemeval_benchmark.sh \
+  --split s \
+  --model all-minilm \
+  --max-queries 200 \
+  --max-sessions-per-query 40 \
+  --bootstrap-iterations 1000 \
+  --seed 42
+```
+
+Notes:
+
+- `--split s` (about 265 MB) is the recommended default for routine offline benchmarks.
+- `--split m` (about 2.5 GB) is intended for large-scale/nightly evidence runs.
+- Abstention questions are excluded by default to match LongMemEval retrieval conventions.
+- Use `--include-abstention` only when explicitly measuring abstention retrieval behavior.
+- You may also run directly via harness with:
+  - `--dataset-path /path/to/longmemeval_s_cleaned.json`
+  - optional `--max-sessions-per-query <n>`
+  - optional `--include-abstention`
+
 ## Report Schema
 
 Each benchmark JSON report includes:
@@ -111,6 +179,7 @@ Each benchmark JSON report includes:
 For multi-dataset runs, the report switches to a cross-corpus schema:
 
 - shared run config (`embedding_model`, `bootstrap_iterations`, `seed`, max limits)
+- system variant (`system_variant`)
 - normalization method (`macro_average_by_dataset`)
 - `datasets[]` with per-dataset summaries
 - `normalized_summary` across datasets (each dataset weighted equally)
@@ -128,6 +197,10 @@ cargo run -p memd-evals -- --suite benchmark-regression --skip-build \
   --min-effect-size 0.1 \
   --regression-report-json evals/results/offline/regression_gate.json
 ```
+
+CI/release smoke baseline report is pinned at:
+
+- `evals/baselines/code_pairs_hybrid_feature_baseline.json`
 
 Gate behavior:
 

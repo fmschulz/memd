@@ -4,6 +4,7 @@
 //! keyword-based retrieval. Uses CodeTokenizer for code-aware tokenization.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use tantivy::collector::TopDocs;
@@ -78,6 +79,8 @@ pub struct Bm25Index {
     sentence_field: Field,
     /// Field for indexed text
     text_field: Field,
+    /// Whether writes are pending commit.
+    dirty: AtomicBool,
 }
 
 impl Bm25Index {
@@ -149,7 +152,22 @@ impl Bm25Index {
             chunk_field,
             sentence_field,
             text_field,
+            dirty: AtomicBool::new(false),
         })
+    }
+
+    /// Commit pending writes if needed.
+    fn commit_if_dirty(&self) -> Result<()> {
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|e| MemdError::StorageError(format!("lock writer: {}", e)))?;
+        if self.dirty.swap(false, Ordering::AcqRel) {
+            writer
+                .commit()
+                .map_err(|e| MemdError::StorageError(format!("commit: {}", e)))?;
+        }
+        Ok(())
     }
 
     /// Commit pending changes to make them searchable.
@@ -157,14 +175,7 @@ impl Bm25Index {
     /// Called automatically after batch operations, but can be called
     /// manually to force visibility of recent writes.
     pub fn commit(&self) -> Result<()> {
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|e| MemdError::StorageError(format!("lock writer: {}", e)))?;
-        writer
-            .commit()
-            .map_err(|e| MemdError::StorageError(format!("commit: {}", e)))?;
-        Ok(())
+        self.commit_if_dirty()
     }
 
     /// Get total number of documents in the index.
@@ -177,6 +188,8 @@ impl Bm25Index {
     ///
     /// Used by compaction to check if segment merge is needed.
     pub fn segment_count(&self) -> Result<usize> {
+        self.commit_if_dirty()?;
+
         // Reload to see recent changes
         self.reader
             .reload()
@@ -195,27 +208,33 @@ impl Default for Bm25Index {
 
 impl SparseIndex for Bm25Index {
     fn insert(&self, tenant_id: &TenantId, chunk_id: &ChunkId, sentences: &[String]) -> Result<()> {
-        let mut writer = self
+        self.insert_batch(&[(tenant_id.clone(), chunk_id.clone(), sentences.to_vec())])
+    }
+
+    fn insert_batch(&self, items: &[(TenantId, ChunkId, Vec<String>)]) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        let writer = self
             .writer
             .lock()
             .map_err(|e| MemdError::StorageError(format!("lock writer: {}", e)))?;
 
-        for (idx, sentence) in sentences.iter().enumerate() {
-            let doc = doc!(
-                self.tenant_field => tenant_id.as_str(),
-                self.chunk_field => chunk_id.to_string(),
-                self.sentence_field => idx as u64,
-                self.text_field => sentence.clone(),
-            );
-            writer
-                .add_document(doc)
-                .map_err(|e| MemdError::StorageError(format!("add document: {}", e)))?;
+        for (tenant_id, chunk_id, sentences) in items {
+            for (idx, sentence) in sentences.iter().enumerate() {
+                let doc = doc!(
+                    self.tenant_field => tenant_id.as_str(),
+                    self.chunk_field => chunk_id.to_string(),
+                    self.sentence_field => idx as u64,
+                    self.text_field => sentence.clone(),
+                );
+                writer
+                    .add_document(doc)
+                    .map_err(|e| MemdError::StorageError(format!("add document: {}", e)))?;
+            }
         }
-
-        // Commit after batch
-        writer
-            .commit()
-            .map_err(|e| MemdError::StorageError(format!("commit: {}", e)))?;
+        self.dirty.store(true, Ordering::Release);
 
         Ok(())
     }
@@ -226,6 +245,8 @@ impl SparseIndex for Bm25Index {
         query: &str,
         k: usize,
     ) -> Result<Vec<SparseSearchResult>> {
+        self.commit_if_dirty()?;
+
         // Reload to see recent commits (BEFORE getting searcher)
         self.reader
             .reload()
@@ -282,7 +303,9 @@ impl SparseIndex for Bm25Index {
     }
 
     fn delete(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<bool> {
-        let mut writer = self
+        self.commit_if_dirty()?;
+
+        let writer = self
             .writer
             .lock()
             .map_err(|e| MemdError::StorageError(format!("lock writer: {}", e)))?;
@@ -305,6 +328,9 @@ impl SparseIndex for Bm25Index {
         ]);
 
         // Get count before delete to determine if anything was deleted
+        self.reader
+            .reload()
+            .map_err(|e| MemdError::StorageError(format!("reload reader: {}", e)))?;
         let searcher = self.reader.searcher();
         let count_before = searcher
             .search(&delete_query, &tantivy::collector::Count)
@@ -313,14 +339,14 @@ impl SparseIndex for Bm25Index {
         writer
             .delete_query(Box::new(delete_query))
             .map_err(|e| MemdError::StorageError(format!("delete query: {}", e)))?;
-        writer
-            .commit()
-            .map_err(|e| MemdError::StorageError(format!("commit: {}", e)))?;
+        self.dirty.store(true, Ordering::Release);
 
         Ok(count_before > 0)
     }
 
     fn doc_count(&self, tenant_id: &TenantId) -> Result<u64> {
+        self.commit_if_dirty()?;
+
         // Reload to see recent commits
         self.reader
             .reload()
@@ -369,6 +395,39 @@ mod tests {
         // Search for parsed data
         let results = index.search(&tenant, "parsed data", 10).unwrap();
         assert!(!results.is_empty(), "should find 'parsed data'");
+    }
+
+    #[test]
+    fn test_insert_batch_and_search() {
+        let index = Bm25Index::new().unwrap();
+        let tenant = create_test_tenant();
+        let chunk_a = ChunkId::new();
+        let chunk_b = ChunkId::new();
+
+        let items = vec![
+            (
+                tenant.clone(),
+                chunk_a.clone(),
+                vec!["alpha parser".to_string(), "json utility".to_string()],
+            ),
+            (
+                tenant.clone(),
+                chunk_b.clone(),
+                vec!["beta formatter".to_string()],
+            ),
+        ];
+        index.insert_batch(&items).unwrap();
+
+        let results = index.search(&tenant, "alpha", 10).unwrap();
+        assert!(!results.is_empty(), "should find batch-inserted chunk");
+        assert_eq!(results[0].chunk_id, chunk_a);
+
+        let results = index.search(&tenant, "formatter", 10).unwrap();
+        assert!(
+            !results.is_empty(),
+            "should find second batch-inserted chunk"
+        );
+        assert_eq!(results[0].chunk_id, chunk_b);
     }
 
     #[test]
@@ -428,8 +487,7 @@ mod tests {
         let deleted = index.delete(&tenant, &chunk_id).unwrap();
         assert!(deleted, "should return true for successful delete");
 
-        // Verify it's gone (need to reload)
-        index.reader.reload().unwrap();
+        // Verify it's gone.
         let results = index.search(&tenant, "deletable", 10).unwrap();
         assert!(results.is_empty(), "should not find after delete");
     }
