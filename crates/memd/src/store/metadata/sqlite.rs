@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use rusqlite::Connection;
 
-use super::{ChunkMetadata, MetadataStore};
+use super::{ChunkMetadata, IndexState, MetadataStore};
 use crate::error::Result;
 use crate::store::{normalize_query, FeedbackEntry, RelevanceLabel};
 use crate::types::{ChunkId, ChunkStatus, ChunkType, TenantId};
@@ -69,10 +69,17 @@ impl SqliteMetadataStore {
                 timestamp_created INTEGER NOT NULL,
                 hash TEXT NOT NULL,
                 source_uri TEXT,
+                index_state TEXT NOT NULL DEFAULT 'indexed',
+                index_attempts INTEGER NOT NULL DEFAULT 0,
+                index_last_error TEXT,
+                indexed_at_ms INTEGER,
+                index_updated_at_ms INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(segment_id, ordinal)
             )",
             [],
         )?;
+
+        Self::ensure_index_columns(&conn)?;
 
         // Critical: tenant_id index for isolation queries
         conn.execute(
@@ -117,6 +124,60 @@ impl SqliteMetadataStore {
             [],
         )?;
 
+        Ok(())
+    }
+
+    fn ensure_index_columns(conn: &Connection) -> Result<()> {
+        let mut stmt = conn.prepare("PRAGMA table_info(chunks)")?;
+        let rows = stmt.query_map([], |row| row.get::<usize, String>(1))?;
+        let mut column_names = std::collections::HashSet::new();
+        for name in rows {
+            column_names.insert(name?);
+        }
+
+        Self::ensure_index_column(
+            conn,
+            &column_names,
+            "index_state",
+            "ALTER TABLE chunks ADD COLUMN index_state TEXT NOT NULL DEFAULT 'indexed'",
+        )?;
+        Self::ensure_index_column(
+            conn,
+            &column_names,
+            "index_attempts",
+            "ALTER TABLE chunks ADD COLUMN index_attempts INTEGER NOT NULL DEFAULT 0",
+        )?;
+        Self::ensure_index_column(
+            conn,
+            &column_names,
+            "index_last_error",
+            "ALTER TABLE chunks ADD COLUMN index_last_error TEXT",
+        )?;
+        Self::ensure_index_column(
+            conn,
+            &column_names,
+            "indexed_at_ms",
+            "ALTER TABLE chunks ADD COLUMN indexed_at_ms INTEGER",
+        )?;
+        Self::ensure_index_column(
+            conn,
+            &column_names,
+            "index_updated_at_ms",
+            "ALTER TABLE chunks ADD COLUMN index_updated_at_ms INTEGER NOT NULL DEFAULT 0",
+        )?;
+
+        Ok(())
+    }
+
+    fn ensure_index_column(
+        conn: &Connection,
+        column_names: &std::collections::HashSet<String>,
+        column_name: &str,
+        alter_sql: &str,
+    ) -> Result<()> {
+        if !column_names.contains(column_name) {
+            conn.execute(alter_sql, [])?;
+        }
         Ok(())
     }
 
@@ -264,29 +325,41 @@ fn int_to_relevance(value: i64) -> RelevanceLabel {
 
 impl MetadataStore for SqliteMetadataStore {
     fn insert(&self, metadata: &ChunkMetadata) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        self.insert_many(std::slice::from_ref(metadata))
+    }
 
-        // Use INSERT OR REPLACE to handle crash recovery scenarios where
-        // metadata exists but segment data was lost
-        conn.execute(
-            "INSERT OR REPLACE INTO chunks (
-                chunk_id, tenant_id, project_id, segment_id, ordinal,
-                chunk_type, status, timestamp_created, hash, source_uri
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            rusqlite::params![
-                metadata.chunk_id.to_string(),
-                metadata.tenant_id.as_str(),
-                metadata.project_id.as_deref(),
-                metadata.segment_id as i64,
-                metadata.ordinal as i32,
-                metadata.chunk_type.to_string(),
-                metadata.status.to_string(),
-                metadata.timestamp_created,
-                &metadata.hash,
-                metadata.source_uri.as_deref(),
-            ],
-        )?;
+    fn insert_many(&self, metadata: &[ChunkMetadata]) -> Result<()> {
+        if metadata.is_empty() {
+            return Ok(());
+        }
 
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO chunks (
+                    chunk_id, tenant_id, project_id, segment_id, ordinal,
+                    chunk_type, status, timestamp_created, hash, source_uri
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            )?;
+            for row in metadata {
+                stmt.execute(rusqlite::params![
+                    row.chunk_id.to_string(),
+                    row.tenant_id.as_str(),
+                    row.project_id.as_deref(),
+                    row.segment_id as i64,
+                    row.ordinal as i32,
+                    row.chunk_type.to_string(),
+                    row.status.to_string(),
+                    row.timestamp_created,
+                    &row.hash,
+                    row.source_uri.as_deref(),
+                ])?;
+            }
+        }
+
+        tx.commit()?;
         Ok(())
     }
 
@@ -429,11 +502,167 @@ impl MetadataStore for SqliteMetadataStore {
 
         Ok(chunk_ids)
     }
+
+    fn mark_index_pending(
+        &self,
+        tenant_id: &TenantId,
+        chunk_ids: &[ChunkId],
+        now_ms: i64,
+    ) -> Result<()> {
+        if chunk_ids.is_empty() {
+            return Ok(());
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE chunks
+                 SET index_state = ?3,
+                     index_attempts = 0,
+                     index_last_error = NULL,
+                     indexed_at_ms = NULL,
+                     index_updated_at_ms = ?4
+                 WHERE tenant_id = ?1 AND chunk_id = ?2",
+            )?;
+            for chunk_id in chunk_ids {
+                stmt.execute(rusqlite::params![
+                    tenant_id.as_str(),
+                    chunk_id.to_string(),
+                    IndexState::Pending.as_str(),
+                    now_ms,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn mark_indexed(&self, tenant_id: &TenantId, chunk_ids: &[ChunkId], now_ms: i64) -> Result<()> {
+        if chunk_ids.is_empty() {
+            return Ok(());
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE chunks
+                 SET index_state = ?3,
+                     index_last_error = NULL,
+                     indexed_at_ms = ?4,
+                     index_updated_at_ms = ?4
+                 WHERE tenant_id = ?1 AND chunk_id = ?2",
+            )?;
+            for chunk_id in chunk_ids {
+                stmt.execute(rusqlite::params![
+                    tenant_id.as_str(),
+                    chunk_id.to_string(),
+                    IndexState::Indexed.as_str(),
+                    now_ms,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn mark_index_failed(
+        &self,
+        tenant_id: &TenantId,
+        chunk_id: &ChunkId,
+        error: &str,
+        now_ms: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE chunks
+             SET index_state = ?3,
+                 index_attempts = index_attempts + 1,
+                 index_last_error = ?4,
+                 index_updated_at_ms = ?5
+             WHERE tenant_id = ?1 AND chunk_id = ?2",
+            rusqlite::params![
+                tenant_id.as_str(),
+                chunk_id.to_string(),
+                IndexState::Failed.as_str(),
+                error,
+                now_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn list_pending_index_chunk_ids(
+        &self,
+        tenant_id: &TenantId,
+        limit: usize,
+    ) -> Result<Vec<ChunkId>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT chunk_id
+             FROM chunks
+             WHERE tenant_id = ?1 AND status != 'deleted' AND index_state = ?2
+             ORDER BY timestamp_created ASC
+             LIMIT ?3",
+        )?;
+
+        let rows = stmt.query_map(
+            rusqlite::params![
+                tenant_id.as_str(),
+                IndexState::Pending.as_str(),
+                limit as i64
+            ],
+            |row| row.get::<usize, String>(0),
+        )?;
+
+        let mut chunk_ids = Vec::new();
+        for row in rows {
+            if let Ok(chunk_id) = ChunkId::parse(&row?) {
+                chunk_ids.push(chunk_id);
+            }
+        }
+        Ok(chunk_ids)
+    }
+
+    fn count_by_index_state(&self, tenant_id: &TenantId) -> Result<(usize, usize, usize)> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT index_state, COUNT(*) as cnt
+             FROM chunks
+             WHERE tenant_id = ?1 AND status != 'deleted'
+             GROUP BY index_state",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![tenant_id.as_str()], |row| {
+            let state: String = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            Ok((state, count as usize))
+        })?;
+
+        let mut pending = 0usize;
+        let mut indexed = 0usize;
+        let mut failed = 0usize;
+        for row in rows {
+            let (state, count) = row?;
+            if state == IndexState::Pending.as_str() {
+                pending = count;
+            } else if state == IndexState::Indexed.as_str() {
+                indexed = count;
+            } else if state == IndexState::Failed.as_str() {
+                failed = count;
+            }
+        }
+        Ok((pending, indexed, failed))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
     use tempfile::tempdir;
 
     fn create_test_metadata(tenant: &str, chunk_id: &ChunkId) -> ChunkMetadata {
@@ -470,6 +699,41 @@ mod tests {
         assert_eq!(retrieved.chunk_id, chunk_id);
         assert_eq!(retrieved.tenant_id, tenant_id);
         assert_eq!(retrieved.hash, "abc123");
+    }
+
+    #[test]
+    fn insert_many_round_trip() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let store = SqliteMetadataStore::open(&db_path).unwrap();
+        let tenant_id = TenantId::new("tenant_batch").unwrap();
+
+        let mut rows = Vec::new();
+        for i in 0..3u32 {
+            let chunk_id = ChunkId::new();
+            let mut row = create_test_metadata("tenant_batch", &chunk_id);
+            row.segment_id = 100 + i as u64;
+            row.ordinal = i;
+            row.timestamp_created = 2000 + i as i64;
+            rows.push(row);
+        }
+
+        store.insert_many(&rows).unwrap();
+
+        let listed = store.list(&tenant_id, 10, 0).unwrap();
+        assert_eq!(listed.len(), 3);
+    }
+
+    #[test]
+    fn insert_many_empty_is_noop() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let store = SqliteMetadataStore::open(&db_path).unwrap();
+        let tenant_id = TenantId::new("tenant_empty").unwrap();
+
+        store.insert_many(&[]).unwrap();
+        let listed = store.list(&tenant_id, 10, 0).unwrap();
+        assert!(listed.is_empty());
     }
 
     #[test]
@@ -662,5 +926,82 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].chunk_id, chunk_id);
         assert_eq!(loaded[0].relevance, RelevanceLabel::Relevant);
+    }
+
+    #[test]
+    fn index_state_roundtrip_and_counts() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let store = SqliteMetadataStore::open(&db_path).unwrap();
+
+        let tenant_id = TenantId::new("tenant_index").unwrap();
+        let chunk_id = ChunkId::new();
+        let metadata = create_test_metadata("tenant_index", &chunk_id);
+        store.insert(&metadata).unwrap();
+
+        let (pending, indexed, failed) = store.count_by_index_state(&tenant_id).unwrap();
+        assert_eq!((pending, indexed, failed), (0, 1, 0));
+
+        store
+            .mark_index_pending(&tenant_id, std::slice::from_ref(&chunk_id), 101)
+            .unwrap();
+        let pending_ids = store.list_pending_index_chunk_ids(&tenant_id, 10).unwrap();
+        assert_eq!(pending_ids, vec![chunk_id.clone()]);
+        let (pending, indexed, failed) = store.count_by_index_state(&tenant_id).unwrap();
+        assert_eq!((pending, indexed, failed), (1, 0, 0));
+
+        store
+            .mark_index_failed(&tenant_id, &chunk_id, "boom", 102)
+            .unwrap();
+        let (pending, indexed, failed) = store.count_by_index_state(&tenant_id).unwrap();
+        assert_eq!((pending, indexed, failed), (0, 0, 1));
+
+        store
+            .mark_indexed(&tenant_id, std::slice::from_ref(&chunk_id), 103)
+            .unwrap();
+        let (pending, indexed, failed) = store.count_by_index_state(&tenant_id).unwrap();
+        assert_eq!((pending, indexed, failed), (0, 1, 0));
+    }
+
+    #[test]
+    fn open_migrates_legacy_chunks_schema_with_index_columns() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("legacy.db");
+
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE chunks (
+                chunk_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                project_id TEXT,
+                segment_id INTEGER NOT NULL,
+                ordinal INTEGER NOT NULL,
+                chunk_type TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'final',
+                timestamp_created INTEGER NOT NULL,
+                hash TEXT NOT NULL,
+                source_uri TEXT,
+                UNIQUE(segment_id, ordinal)
+            )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = SqliteMetadataStore::open(&db_path).unwrap();
+        let conn = store.conn.lock().unwrap();
+        let mut stmt = conn.prepare("PRAGMA table_info(chunks)").unwrap();
+        let rows = stmt
+            .query_map([], |row| row.get::<usize, String>(1))
+            .unwrap();
+        let mut names = std::collections::HashSet::new();
+        for row in rows {
+            names.insert(row.unwrap());
+        }
+        assert!(names.contains("index_state"));
+        assert!(names.contains("index_attempts"));
+        assert!(names.contains("index_last_error"));
+        assert!(names.contains("indexed_at_ms"));
+        assert!(names.contains("index_updated_at_ms"));
     }
 }
