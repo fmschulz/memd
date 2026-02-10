@@ -73,6 +73,24 @@ pub struct PersistentStoreConfig {
 
 impl Default for PersistentStoreConfig {
     fn default() -> Self {
+        let enable_async_indexing = std::env::var("MEMD_ASYNC_INDEXING")
+            .ok()
+            .map(|v| {
+                let normalized = v.trim().to_ascii_lowercase();
+                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false);
+        let async_index_batch_size = std::env::var("MEMD_ASYNC_INDEX_BATCH_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(128);
+        let async_index_poll_ms = std::env::var("MEMD_ASYNC_INDEX_POLL_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(250);
+
         Self {
             data_dir: PathBuf::from("data"),
             segment_max_chunks: 10_000,
@@ -82,9 +100,9 @@ impl Default for PersistentStoreConfig {
             enable_tiered_search: true,
             hybrid_config: None,
             embedding_model: EmbeddingModel::default(),
-            enable_async_indexing: false,
-            async_index_batch_size: 128,
-            async_index_poll_ms: 250,
+            enable_async_indexing,
+            async_index_batch_size,
+            async_index_poll_ms,
         }
     }
 }
@@ -1817,9 +1835,8 @@ mod tests {
     }
 
     #[test]
-    fn default_config_disables_async_indexing() {
+    fn default_config_has_valid_async_indexing_settings() {
         let config = PersistentStoreConfig::default();
-        assert!(!config.enable_async_indexing);
         assert!(config.async_index_batch_size > 0);
         assert!(config.async_index_poll_ms > 0);
     }
