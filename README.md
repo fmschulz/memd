@@ -169,13 +169,38 @@ Current state:
 `memd` now supports two reranker strategies in the hybrid retrieval pipeline:
 
 - `feature` (default): uses RRF + recency/project/type boosts
-- `cross_encoder`: adds query-document interaction scoring before final ranking
+- `cross_encoder`: uses a learned ONNX cross-encoder (`Xenova/ms-marco-MiniLM-L-6-v2`)
+  to score query-document pairs before final ranking
 
 Implementation details:
 
 - Effective strategy is selected via `HybridConfig.reranker.mode` (`Feature` or `CrossEncoder`)
 - Cross-encoder path is compiled behind cargo feature `cross-encoder-reranker`
-- If `CrossEncoder` is requested without that cargo feature, `memd` deterministically falls back to `feature` mode
+- If `CrossEncoder` is requested but ONNX scorer initialization fails, `memd` deterministically falls back to `feature` mode
+- Optional path overrides:
+  - `MEMD_CROSS_ENCODER_MODEL_PATH`
+  - `MEMD_CROSS_ENCODER_TOKENIZER_PATH`
+  - `MEMD_CROSS_ENCODER_CACHE_DIR`
+
+### Search Variants
+
+Persistent mode supports explicit retrieval variants via `--search-variant`:
+
+- `hybrid-feature` (default)
+- `hybrid-cross-encoder`
+- `dense-only`
+- `bm25-only` (hybrid path with `dense_k=0`)
+
+### Indexing Throughput Controls
+
+- BM25 commits are deferred on write-heavy paths and flushed on read/explicit
+  commit boundaries.
+- Dense embed batch size can be tuned at runtime:
+  `MEMD_EMBED_BATCH_SIZE=<N>`
+  default is `32`.
+- Eval harness ingest batch size can be tuned at runtime:
+  `MEMD_EVAL_INGEST_BATCH_SIZE=<N>`
+  default is `32`.
 
 ### Episodic Memory
 
@@ -230,8 +255,10 @@ Core checks:
 cargo test -p memd
 cargo test -p memd-evals
 RUST_LOG=error cargo run -p memd-evals -- --suite mcp --skip-build
-# Validate cross-encoder reranker path
-cargo test -p memd --features cross-encoder-reranker
+# Build binary with learned cross-encoder path enabled
+cargo build -p memd --features cross-encoder-reranker
+# Validate reranker behavior under feature gate
+cargo test -p memd --features cross-encoder-reranker cross_encoder_interaction_prefers_token_and_phrase_matches
 ```
 
 Deterministic baseline:
@@ -242,6 +269,15 @@ Deterministic baseline:
 
 ```bash
 cargo test -p memd -- --ignored
+
+# Tuned medium-slice benchmark (indexing-heavy LongMemEval subset)
+MEMD_EVAL_INGEST_BATCH_SIZE=128 MEMD_EMBED_BATCH_SIZE=64 \
+  target/debug/memd-evals --suite benchmark --skip-build \
+  --dataset-path evals/datasets/retrieval/longmemeval/longmemeval_s_subset300_compact.json \
+  --system-variant hybrid-feature \
+  --max-queries 3 --max-sessions-per-query 3 --max-session-chars 800 \
+  --bootstrap-iterations 100 \
+  --report-json evals/results/phase_bench/phase6_validation_q3s3_tuned_parallel.json
 ```
 
 Additional eval suites:
@@ -255,7 +291,31 @@ RUST_LOG=error cargo run -p memd-evals -- --suite true-semantic --skip-build
 Offline benchmark protocol (Phase 6):
 
 ```bash
-./evals/scripts/run_offline_retrieval_benchmark.sh --model all-minilm --seed 42
+./evals/scripts/run_offline_retrieval_benchmark.sh \
+  --model all-minilm \
+  --system-variant hybrid-feature \
+  --seed 42
+```
+
+Variant matrix benchmark (strong baselines + cross-encoder):
+
+```bash
+./evals/scripts/run_variant_matrix_benchmark.sh \
+  --model all-minilm \
+  --with-longmemeval-s \
+  --max-queries 200 \
+  --max-sessions-per-query 40 \
+  --seed 42
+```
+
+LongMemEval public-corpus benchmark (converted on-the-fly in harness):
+
+```bash
+./evals/scripts/run_longmemeval_benchmark.sh \
+  --split s \
+  --model all-minilm \
+  --max-queries 200 \
+  --max-sessions-per-query 40
 ```
 
 Continuous quality regression gate (paired significance test):
@@ -281,3 +341,4 @@ Large retrieval datasets under `evals/datasets/retrieval/` are intended for loca
 - `QUICKSTART.md` for end-to-end command examples
 - `TESTING.md` for test matrix and release verification commands
 - `docs/` for implementation notes and review artifacts
+- `docs/cutting-edge-roadmap.md` for the scaled public-corpus + learned reranker plan
