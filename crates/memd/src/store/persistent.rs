@@ -93,7 +93,7 @@ impl Default for PersistentStoreConfig {
 pub struct PersistentStore {
     config: PersistentStoreConfig,
     /// Per-tenant state
-    tenants: RwLock<HashMap<String, Arc<TenantStore>>>,
+    tenants: Arc<RwLock<HashMap<String, Arc<TenantStore>>>>,
     /// Global metadata store
     metadata: Arc<SqliteMetadataStore>,
     /// Dense vector search (optional)
@@ -223,7 +223,7 @@ impl PersistentStore {
 
         let store = Self {
             config,
-            tenants: RwLock::new(HashMap::new()),
+            tenants: Arc::new(RwLock::new(HashMap::new())),
             metadata,
             dense_searcher,
             sparse_index,
@@ -278,6 +278,7 @@ impl PersistentStore {
         let metadata = Arc::clone(&self.metadata);
         let hybrid_searcher = self.hybrid_searcher.clone();
         let dense_searcher = self.dense_searcher.clone();
+        let tenants = Arc::clone(&self.tenants);
 
         let (job_tx, mut job_rx) = mpsc::unbounded_channel::<IndexJob>();
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -299,7 +300,14 @@ impl PersistentStore {
                         .await;
                     }
                     _ = interval.tick() => {
-                        // Keep loop responsive to shutdown even when idle.
+                        sweep_pending_index_jobs(
+                            metadata.as_ref(),
+                            tenants.as_ref(),
+                            hybrid_searcher.as_ref(),
+                            dense_searcher.as_ref(),
+                            batch_size,
+                        )
+                        .await;
                     }
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
@@ -1115,6 +1123,117 @@ async fn run_async_index_job(
     }
 }
 
+fn load_chunk_text_for_index(
+    tenants: &RwLock<HashMap<String, Arc<TenantStore>>>,
+    metadata: &SqliteMetadataStore,
+    tenant_id: &TenantId,
+    chunk_id: &ChunkId,
+) -> Result<Option<String>> {
+    let meta = metadata.get(tenant_id, chunk_id)?;
+    let meta = match meta {
+        Some(m) if m.status != ChunkStatus::Deleted => m,
+        _ => return Ok(None),
+    };
+
+    let tenant_str = tenant_id.to_string();
+    let tenant = match tenants.read().get(&tenant_str) {
+        Some(t) => Arc::clone(t),
+        None => return Ok(None),
+    };
+
+    if let Some(bytes) = tenant.read_from_active_segment(meta.segment_id, meta.ordinal)? {
+        let chunk: MemoryChunk = serde_json::from_slice(&bytes)
+            .map_err(|e| MemdError::StorageError(format!("deserialize chunk: {}", e)))?;
+        return Ok(Some(chunk.text));
+    }
+
+    let segments = tenant.segments.read();
+    let Some(reader) = segments.get(&meta.segment_id) else {
+        return Ok(None);
+    };
+
+    let payload = reader.read_chunk(meta.ordinal)?;
+    let Some(bytes) = payload else {
+        return Ok(None);
+    };
+
+    let chunk: MemoryChunk = serde_json::from_slice(&bytes)
+        .map_err(|e| MemdError::StorageError(format!("deserialize chunk: {}", e)))?;
+    Ok(Some(chunk.text))
+}
+
+async fn sweep_pending_index_jobs(
+    metadata: &SqliteMetadataStore,
+    tenants: &RwLock<HashMap<String, Arc<TenantStore>>>,
+    hybrid_searcher: Option<&Arc<HybridSearcher>>,
+    dense_searcher: Option<&Arc<DenseSearcher>>,
+    batch_size: usize,
+) {
+    let tenant_ids: Vec<String> = tenants.read().keys().cloned().collect();
+    for tenant_id_str in tenant_ids {
+        let tenant_id = match TenantId::new(&tenant_id_str) {
+            Ok(id) => id,
+            Err(e) => {
+                warn!(tenant_id = %tenant_id_str, error = %e, "invalid tenant id during pending-index sweep");
+                continue;
+            }
+        };
+
+        let pending_ids = match metadata.list_pending_index_chunk_ids(&tenant_id, batch_size) {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!(tenant_id = %tenant_id, error = %e, "failed to list pending index chunks");
+                continue;
+            }
+        };
+        if pending_ids.is_empty() {
+            continue;
+        }
+
+        let mut chunk_ids = Vec::with_capacity(pending_ids.len());
+        let mut index_rows = Vec::with_capacity(pending_ids.len());
+        for chunk_id in pending_ids {
+            match load_chunk_text_for_index(tenants, metadata, &tenant_id, &chunk_id) {
+                Ok(Some(text)) => {
+                    chunk_ids.push(chunk_id.clone());
+                    index_rows.push((chunk_id, text));
+                }
+                Ok(None) => {
+                    mark_index_failed_many(
+                        metadata,
+                        &tenant_id,
+                        std::slice::from_ref(&chunk_id),
+                        "pending chunk not found during index sweep",
+                    );
+                }
+                Err(e) => {
+                    mark_index_failed_many(
+                        metadata,
+                        &tenant_id,
+                        std::slice::from_ref(&chunk_id),
+                        &e.to_string(),
+                    );
+                }
+            }
+        }
+
+        if !chunk_ids.is_empty() {
+            run_async_index_job(
+                metadata,
+                hybrid_searcher,
+                dense_searcher,
+                batch_size,
+                IndexJob {
+                    tenant_id: tenant_id.clone(),
+                    chunk_ids,
+                    index_rows,
+                },
+            )
+            .await;
+        }
+    }
+}
+
 impl PersistentStore {
     fn expand_chunks_for_add(
         &self,
@@ -1782,6 +1901,54 @@ mod tests {
             "chunk should appear in pending or indexed states"
         );
         assert!(saw_indexed, "async worker should eventually mark chunk indexed");
+    }
+
+    #[tokio::test]
+    async fn pending_chunks_are_recovered_by_worker_sweep() {
+        let dir = tempdir().unwrap();
+        let tenant = make_tenant();
+        let config = PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            segment_max_chunks: 100,
+            wal_checkpoint_interval: 10,
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            enable_async_indexing: true,
+            async_index_poll_ms: 25,
+            ..Default::default()
+        };
+        let store = PersistentStore::open(config).unwrap();
+        let chunk_id = store
+            .add(make_chunk(&tenant, "sweep pending recovery"))
+            .await
+            .unwrap();
+
+        // Wait until initial async indexing completes.
+        for _ in 0..20 {
+            let (_, indexed, failed) = store.metadata.count_by_index_state(&tenant).unwrap();
+            assert_eq!(failed, 0);
+            if indexed > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        store
+            .metadata
+            .mark_index_pending(&tenant, std::slice::from_ref(&chunk_id), current_time_ms())
+            .unwrap();
+
+        let mut recovered = false;
+        for _ in 0..25 {
+            let (pending, indexed, failed) = store.metadata.count_by_index_state(&tenant).unwrap();
+            assert_eq!(failed, 0);
+            if pending == 0 && indexed > 0 {
+                recovered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(recovered, "worker sweep should re-index pending chunks");
     }
 
     #[tokio::test]
