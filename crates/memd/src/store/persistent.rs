@@ -1164,14 +1164,46 @@ impl PersistentStore {
                 index_rows.push((row.chunk_id.clone(), row.chunk.text.clone()));
             }
             self.metadata.insert_many(&metadata_rows)?;
+            let chunk_ids_for_state: Vec<ChunkId> =
+                metadata_rows.iter().map(|row| row.chunk_id.clone()).collect();
+            self.metadata
+                .mark_index_pending(&tenant_id, &chunk_ids_for_state, current_time_ms())?;
 
-            if let Some(ref hybrid) = self.hybrid_searcher {
-                if let Err(e) = hybrid.index_batch(&tenant_id, &index_rows).await {
-                    warn!(tenant_id = %tenant_id, error = %e, "hybrid index batch failed");
-                }
-            } else if let Some(ref searcher) = self.dense_searcher {
-                if let Err(e) = searcher.index_batch(&tenant_id, &index_rows).await {
-                    warn!(tenant_id = %tenant_id, error = %e, "dense index batch failed");
+            if !self.async_indexing_enabled() {
+                let index_result = if let Some(ref hybrid) = self.hybrid_searcher {
+                    hybrid.index_batch(&tenant_id, &index_rows).await
+                } else if let Some(ref searcher) = self.dense_searcher {
+                    searcher.index_batch(&tenant_id, &index_rows).await
+                } else {
+                    Ok(())
+                };
+
+                match index_result {
+                    Ok(()) => {
+                        self.metadata.mark_indexed(
+                            &tenant_id,
+                            &chunk_ids_for_state,
+                            current_time_ms(),
+                        )?;
+                    }
+                    Err(e) => {
+                        warn!(tenant_id = %tenant_id, error = %e, "sync index batch failed");
+                        for chunk_id in &chunk_ids_for_state {
+                            if let Err(mark_err) = self.metadata.mark_index_failed(
+                                &tenant_id,
+                                chunk_id,
+                                &e.to_string(),
+                                current_time_ms(),
+                            ) {
+                                warn!(
+                                    tenant_id = %tenant_id,
+                                    chunk_id = %chunk_id,
+                                    error = %mark_err,
+                                    "failed to record index failure state"
+                                );
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1588,6 +1620,42 @@ mod tests {
 
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().text, "hello persistent");
+    }
+
+    #[tokio::test]
+    async fn add_marks_indexed_when_async_indexing_disabled() {
+        let (store, _dir) = make_test_store();
+        let tenant = make_tenant();
+
+        store.add(make_chunk(&tenant, "indexed state check")).await.unwrap();
+
+        let (pending, indexed, failed) = store.metadata.count_by_index_state(&tenant).unwrap();
+        assert_eq!(pending, 0);
+        assert_eq!(indexed, 1);
+        assert_eq!(failed, 0);
+    }
+
+    #[tokio::test]
+    async fn add_marks_pending_when_async_indexing_enabled() {
+        let dir = tempdir().unwrap();
+        let tenant = make_tenant();
+        let config = PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            segment_max_chunks: 100,
+            wal_checkpoint_interval: 10,
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            enable_async_indexing: true,
+            ..Default::default()
+        };
+        let store = PersistentStore::open(config).unwrap();
+
+        store.add(make_chunk(&tenant, "pending state check")).await.unwrap();
+
+        let (pending, indexed, failed) = store.metadata.count_by_index_state(&tenant).unwrap();
+        assert_eq!(pending, 1);
+        assert_eq!(indexed, 0);
+        assert_eq!(failed, 0);
     }
 
     #[tokio::test]
