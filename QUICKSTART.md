@@ -271,13 +271,53 @@ Add an MCP server entry (path may vary by installation):
 }
 ```
 
-## 10. Validate locally
+## 10. Initialize guardrails (recommended)
+
+```bash
+./target/release/memd --mode cli init --tenant-id quickstart_tenant
+```
+
+This creates repository guardrail files and MCP snippets, and by default updates:
+
+- `~/.codex/mcp_config.json`
+- `~/.config/claude/mcp_settings.json`
+
+Scope options:
+
+```bash
+# Default local scope (read/write current tenant only)
+./target/release/memd init --tenant-id quickstart_tenant --scope local
+
+# Global read scope (read all discovered tenants, write current tenant only)
+./target/release/memd init --tenant-id quickstart_tenant --scope global
+
+# Explicit allowlist read scope
+./target/release/memd init --tenant-id quickstart_tenant --scope allowlist --allow-tenants shared_arch,shared_debug
+```
+
+## 11. Validate locally
 
 ```bash
 cargo test -p memd
 cargo test -p memd-evals
 RUST_LOG=error cargo run -p memd-evals -- --suite mcp --skip-build
 ```
+
+## 12. Export memory for human review
+
+Use the CLI export command to inspect what `memd` has stored for a tenant:
+
+```bash
+./target/release/memd --mode cli export \
+  --tenant-id quickstart_tenant \
+  --format markdown \
+  --output memd-export.md
+```
+
+Other formats:
+
+- `--format json`
+- `--format jsonl`
 
 Optional quality/eval suites:
 
@@ -293,7 +333,7 @@ Offline benchmark protocol:
 ./evals/scripts/run_offline_retrieval_benchmark.sh --model all-minilm --seed 42
 ```
 
-## 11. Troubleshooting
+## 13. Troubleshooting
 
 - `invalid 'k': must be between 1 and 100`: adjust `k`
 - `invalid filters.time_range.*`: use ISO 8601 timestamps
