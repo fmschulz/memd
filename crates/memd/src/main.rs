@@ -6,8 +6,10 @@ use tracing::info;
 
 use memd::cli::{run_cli, CliCommand};
 use memd::embeddings::EmbeddingModel;
+use memd::store::HybridConfig;
 use memd::{
-    init_logging, load_config, MemoryStore, PersistentStore, PersistentStoreConfig, TenantManager,
+    init_logging, load_config, MemoryStore, PersistentStore, PersistentStoreConfig, RerankerMode,
+    TenantManager,
 };
 
 /// Run mode for memd
@@ -35,6 +37,19 @@ impl From<ModelChoice> for EmbeddingModel {
             ModelChoice::Qwen3 => EmbeddingModel::Qwen3Embedding0_6B,
         }
     }
+}
+
+/// Retrieval strategy for persistent mode.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SearchVariant {
+    /// Dense+sparse hybrid with feature reranker (default).
+    HybridFeature,
+    /// Dense+sparse hybrid with cross-encoder reranker.
+    HybridCrossEncoder,
+    /// Dense-only retrieval path.
+    DenseOnly,
+    /// BM25 baseline via hybrid search with dense_k=0.
+    Bm25Only,
 }
 
 /// memd - Local memory daemon for AI agents
@@ -67,6 +82,10 @@ struct Args {
     #[arg(long, value_enum, default_value = "all-minilm")]
     embedding_model: ModelChoice,
 
+    /// Retrieval strategy variant for persistent mode
+    #[arg(long, value_enum, default_value = "hybrid-feature")]
+    search_variant: SearchVariant,
+
     /// CLI subcommand (only used in cli mode)
     #[command(subcommand)]
     command: Option<CliCommand>,
@@ -89,19 +108,26 @@ async fn main() {
         .or_else(|| config.data_dir_expanded().ok())
         .unwrap_or_else(|| PathBuf::from("data"));
 
+    // If a subcommand is provided, treat it as CLI mode even when mode flag is omitted.
+    let mode = if args.command.is_some() {
+        Mode::Cli
+    } else {
+        args.mode
+    };
+
     // Initialize logging
     let log_level = if args.verbose {
         "debug"
     } else {
         &config.log_level
     };
-    let log_format = match args.mode {
+    let log_format = match mode {
         Mode::Mcp => "json",
         Mode::Cli => "pretty",
     };
     init_logging(log_format, log_level);
 
-    match args.mode {
+    match mode {
         Mode::Mcp => {
             info!(
                 version = env!("CARGO_PKG_VERSION"),
@@ -126,11 +152,12 @@ async fn main() {
                 }
             } else {
                 info!(data_dir = %data_dir.display(), embedding_model = ?args.embedding_model, "using persistent store");
-                let store_config = PersistentStoreConfig {
+                let mut store_config = PersistentStoreConfig {
                     data_dir: data_dir.clone(),
                     embedding_model: args.embedding_model.into(),
                     ..Default::default()
                 };
+                apply_search_variant(args.search_variant, &mut store_config);
                 match PersistentStore::open(store_config) {
                     Ok(store) => {
                         let metrics = store.metrics_arc();
@@ -153,6 +180,15 @@ async fn main() {
                 // Create tenant manager
                 let tenant_manager = Some(TenantManager::new(data_dir.clone()));
 
+                if !cmd.requires_store() {
+                    let store = MemoryStore::new();
+                    if let Err(e) = run_cli(&store, tenant_manager.as_ref(), cmd).await {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
+                    }
+                    return;
+                }
+
                 // Run CLI with appropriate store type
                 if args.in_memory {
                     info!("using in-memory store");
@@ -163,11 +199,12 @@ async fn main() {
                     }
                 } else {
                     info!(data_dir = %data_dir.display(), embedding_model = ?args.embedding_model, "using persistent store");
-                    let store_config = PersistentStoreConfig {
+                    let mut store_config = PersistentStoreConfig {
                         data_dir: data_dir.clone(),
                         embedding_model: args.embedding_model.into(),
                         ..Default::default()
                     };
+                    apply_search_variant(args.search_variant, &mut store_config);
                     match PersistentStore::open(store_config) {
                         Ok(store) => {
                             if let Err(e) = run_cli(&store, tenant_manager.as_ref(), cmd).await {
@@ -185,6 +222,41 @@ async fn main() {
                 eprintln!("error: CLI mode requires a subcommand. Use --help for usage.");
                 std::process::exit(1);
             }
+        }
+    }
+}
+
+fn apply_search_variant(search_variant: SearchVariant, config: &mut PersistentStoreConfig) {
+    match search_variant {
+        SearchVariant::HybridFeature => {
+            config.enable_dense_search = true;
+            config.enable_hybrid_search = true;
+            let mut hybrid = HybridConfig::default();
+            hybrid.reranker.mode = RerankerMode::Feature;
+            config.hybrid_config = Some(hybrid);
+        }
+        SearchVariant::HybridCrossEncoder => {
+            config.enable_dense_search = true;
+            config.enable_hybrid_search = true;
+            let mut hybrid = HybridConfig::default();
+            hybrid.reranker.mode = RerankerMode::CrossEncoder;
+            config.hybrid_config = Some(hybrid);
+        }
+        SearchVariant::DenseOnly => {
+            config.enable_dense_search = true;
+            config.enable_hybrid_search = false;
+            config.hybrid_config = None;
+        }
+        SearchVariant::Bm25Only => {
+            config.enable_dense_search = true;
+            config.enable_hybrid_search = true;
+            config.enable_tiered_search = false;
+            let mut hybrid = HybridConfig::default();
+            hybrid.dense_k = 0;
+            hybrid.sparse_k = 200;
+            hybrid.enable_sparse = true;
+            hybrid.reranker.mode = RerankerMode::Feature;
+            config.hybrid_config = Some(hybrid);
         }
     }
 }
