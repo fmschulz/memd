@@ -197,6 +197,6 @@ After running benchmarks:
 
 ## See Also
 
-- [Benchmark Datasets](/home/fschulz/dev/software/memd/evals/BENCHMARK_DATASETS.md)
-- [Eval Harness](/home/fschulz/dev/software/memd/evals/harness/)
-- [Test Suites](/home/fschulz/dev/software/memd/evals/harness/src/suites/)
+- [Benchmark Datasets](../evals/BENCHMARK_DATASETS.md)
+- [Eval Harness](../evals/harness/)
+- [Test Suites](../evals/harness/src/suites/)
