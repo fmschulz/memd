@@ -11,6 +11,7 @@
 //! - **Suite E**: Structural queries (structural)
 //! - **Suite F**: Compaction (compaction)
 //! - **Suite P6**: Offline benchmark protocol (benchmark)
+//! - **Suite P6R**: Benchmark regression significance gate (benchmark-regression)
 
 pub mod benchmark_protocol;
 pub mod codesearchnet;

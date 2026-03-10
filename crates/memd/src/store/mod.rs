@@ -4,6 +4,7 @@
 //! The in-memory store is used as a baseline before persistent storage.
 
 pub mod dense;
+pub mod feedback;
 pub mod hybrid;
 pub mod memory;
 pub mod metadata;
@@ -23,6 +24,9 @@ use crate::error::{MemdError, Result};
 use crate::metrics::IndexStats;
 use crate::tiered::TieredTiming;
 use crate::types::{ChunkId, MemoryChunk, TenantId};
+pub use feedback::{
+    apply_feedback_scores, normalize_query, FeedbackConfig, FeedbackEntry, RelevanceLabel,
+};
 
 /// Statistics for a tenant's store
 #[derive(Debug, Clone, Default)]
@@ -49,6 +53,21 @@ pub trait Store: Send + Sync {
     ///
     /// Returns the chunk_ids of all stored chunks.
     async fn add_batch(&self, chunks: Vec<MemoryChunk>) -> Result<Vec<ChunkId>>;
+
+    /// Record relevance feedback for retrieval quality adaptation.
+    async fn add_feedback(&self, _feedback: FeedbackEntry) -> Result<()> {
+        Ok(())
+    }
+
+    /// List feedback events for a query (implementation may cap internally).
+    async fn list_feedback(
+        &self,
+        _tenant_id: &TenantId,
+        _query: &str,
+        _limit: usize,
+    ) -> Result<Vec<FeedbackEntry>> {
+        Ok(Vec::new())
+    }
 
     /// Get chunk by ID (respects tenant isolation)
     ///

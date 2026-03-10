@@ -179,7 +179,7 @@ impl HnswIndex {
     pub fn insert_batch(&self, items: &[(ChunkId, Vec<f32>)]) -> Result<()> {
         let mut mapping = self.mapping.write();
         let mut cache = self.embedding_cache.write();
-        let hnsw = self.hnsw.write();
+        let mut to_insert = Vec::with_capacity(items.len());
 
         for (chunk_id, embedding) in items {
             if embedding.len() != self.config.dimension {
@@ -195,7 +195,22 @@ impl HnswIndex {
 
             let internal_id = mapping.insert(chunk_id);
             cache.insert(internal_id, embedding)?;
-            hnsw.insert_slice((embedding, internal_id));
+            to_insert.push((embedding.as_slice(), internal_id));
+        }
+        drop(cache);
+        drop(mapping);
+
+        let hnsw = self.hnsw.write();
+        let threshold = std::thread::available_parallelism()
+            .map(|n| std::cmp::max(64, n.get().saturating_mul(8)))
+            .unwrap_or(64);
+
+        if to_insert.len() >= threshold {
+            hnsw.parallel_insert_slice(&to_insert);
+        } else {
+            for item in to_insert {
+                hnsw.insert_slice(item);
+            }
         }
 
         Ok(())
@@ -524,7 +539,10 @@ mod tests {
 
         assert!(exact.is_some(), "results should include exact match");
         assert!(similar.is_some(), "results should include nearest neighbor");
-        assert!(unrelated.is_none(), "results should exclude unrelated vector");
+        assert!(
+            unrelated.is_none(),
+            "results should exclude unrelated vector"
+        );
         assert!(exact.unwrap().score > 0.99);
         assert!(similar.unwrap().score > 0.9);
     }

@@ -11,6 +11,7 @@ For reproducible retrieval-quality benchmarking against labeled corpora, use:
 ```bash
 ./evals/scripts/run_offline_retrieval_benchmark.sh \
   --model all-minilm \
+  --system-variant hybrid-feature \
   --bootstrap-iterations 1000 \
   --seed 42
 ```
@@ -21,10 +22,57 @@ This runs the benchmark protocol suite against:
 - `evals/datasets/retrieval/beir_scidocs.json`
 - `evals/datasets/retrieval/beir_trec-covid.json`
 
-Outputs are machine-readable JSON reports per dataset plus:
+Outputs are a machine-readable cross-corpus JSON report:
 
-- `statistical_analysis.md`
-- `statistical_analysis.json`
+- `cross_corpus_<model>_<system_variant>.json` (normalized cross-corpus report with per-dataset summaries)
+
+To guard against quality regressions across releases, compare reports with:
+
+```bash
+cargo run -p memd-evals -- --suite benchmark-regression --skip-build \
+  --baseline-report evals/results/offline/baseline.json \
+  --candidate-report evals/results/offline/candidate.json \
+  --significance-alpha 0.05 \
+  --min-effect-size 0.1 \
+  --regression-report-json evals/results/offline/regression_gate.json
+```
+
+### LongMemEval (public corpus) benchmark
+
+```bash
+# Optional throughput tuning for indexing-heavy runs:
+# MEMD_EVAL_INGEST_BATCH_SIZE controls harness add_batch size (default 32)
+# MEMD_EMBED_BATCH_SIZE controls memd dense embed batch size (default 32)
+MEMD_EVAL_INGEST_BATCH_SIZE=128 MEMD_EMBED_BATCH_SIZE=64 \
+./evals/scripts/run_longmemeval_benchmark.sh \
+  --split s \
+  --model all-minilm \
+  --system-variant hybrid-feature \
+  --max-queries 200 \
+  --max-sessions-per-query 40
+```
+
+This downloads LongMemEval (if needed), runs the benchmark harness, and writes:
+
+- `longmemeval_<split>_<model>_<system_variant>.json`
+
+### Variant matrix benchmark (recommended for baseline comparisons)
+
+```bash
+./evals/scripts/run_variant_matrix_benchmark.sh \
+  --model all-minilm \
+  --with-longmemeval-s \
+  --max-queries 200 \
+  --max-sessions-per-query 40 \
+  --seed 42
+```
+
+Default variants:
+
+- `hybrid-feature`
+- `hybrid-cross-encoder`
+- `dense-only`
+- `bm25-only`
 
 You can keep runs fast for CI/smoke checks by setting:
 

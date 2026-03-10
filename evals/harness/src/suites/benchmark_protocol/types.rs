@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
 pub struct BenchmarkConfig {
-    pub dataset_path: PathBuf,
+    pub dataset_paths: Vec<PathBuf>,
     pub bootstrap_iterations: usize,
     pub seed: u64,
     pub report_json: Option<PathBuf>,
@@ -40,7 +40,7 @@ pub(super) struct Document {
     pub(super) doc_type: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct QueryMetrics {
     pub(super) query_id: String,
     pub(super) recall_at_10: f64,
@@ -49,7 +49,7 @@ pub(super) struct QueryMetrics {
     pub(super) latency_ms: f64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct MetricWithCi {
     pub(super) mean: f64,
     pub(super) ci_lower: f64,
@@ -58,7 +58,7 @@ pub(super) struct MetricWithCi {
     pub(super) n: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct BenchmarkSummary {
     pub(super) recall: MetricWithCi,
     pub(super) mrr: MetricWithCi,
@@ -66,7 +66,7 @@ pub(super) struct BenchmarkSummary {
     pub(super) latency_ms: MetricWithCi,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(super) struct BenchmarkReport {
     pub(super) generated_unix_seconds: u64,
     pub(super) dataset_path: String,
@@ -84,7 +84,35 @@ pub(super) struct BenchmarkReport {
     pub(super) query_metrics: Vec<QueryMetrics>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct DatasetBenchmarkResult {
+    pub(super) dataset_path: String,
+    pub(super) dataset_description: String,
+    pub(super) dataset_version: String,
+    pub(super) queries_evaluated: usize,
+    pub(super) documents_indexed: usize,
+    pub(super) summary: BenchmarkSummary,
+    pub(super) quality_gate_passed: bool,
+    pub(super) quality_gate_message: String,
+}
+
 #[derive(Debug, Serialize)]
+pub(super) struct CrossCorpusReport {
+    pub(super) generated_unix_seconds: u64,
+    pub(super) embedding_model: String,
+    pub(super) bootstrap_iterations: usize,
+    pub(super) seed: u64,
+    pub(super) max_queries: Option<usize>,
+    pub(super) max_documents: Option<usize>,
+    pub(super) normalization: String,
+    pub(super) thresholds: Thresholds,
+    pub(super) datasets: Vec<DatasetBenchmarkResult>,
+    pub(super) normalized_summary: BenchmarkSummary,
+    pub(super) quality_gate_passed: bool,
+    pub(super) quality_gate_message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub(super) struct Thresholds {
     pub(super) recall: Option<f64>,
     pub(super) mrr: Option<f64>,

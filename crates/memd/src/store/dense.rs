@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use parking_lot::RwLock;
 
 use crate::compaction::hnsw_rebuild::{HnswRebuilder, RebuildResult};
-use crate::embeddings::{CandleEmbedder, Embedder};
+use crate::embeddings::{CandleEmbedder, Embedder, EmbeddingConfig};
 use crate::error::{MemdError, Result};
 use crate::index::{HnswConfig, HnswIndex};
 use crate::metrics::IndexStats;
@@ -47,6 +47,14 @@ impl Default for DenseSearchConfig {
     }
 }
 
+fn embedding_batch_size() -> usize {
+    std::env::var("MEMD_EMBED_BATCH_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|size| *size > 0)
+        .unwrap_or(EmbeddingConfig::default().batch_size)
+}
+
 /// Dense search coordinator for a tenant
 pub struct DenseSearcher {
     /// Embedding model (shared across tenants)
@@ -62,7 +70,9 @@ pub struct DenseSearcher {
 impl DenseSearcher {
     /// Create a new dense searcher with Candle embedder
     pub fn new(config: DenseSearchConfig) -> Result<Self> {
-        let embedder = Arc::new(CandleEmbedder::new()?);
+        let mut embedding_config = EmbeddingConfig::default();
+        embedding_config.batch_size = embedding_batch_size();
+        let embedder = Arc::new(CandleEmbedder::with_config(embedding_config)?);
 
         // Update HNSW config dimension to match model
         let mut updated_config = config.clone();

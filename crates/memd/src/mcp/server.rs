@@ -14,10 +14,11 @@ use super::handlers::{
     handle_find_callers, handle_find_definition, handle_find_errors, handle_find_imports,
     handle_find_references, handle_find_tool_calls, handle_memory_add, handle_memory_add_batch,
     handle_memory_compact, handle_memory_consolidate_episode, handle_memory_delete,
-    handle_memory_get, handle_memory_metrics, handle_memory_search, handle_memory_stats,
-    AddBatchParams, AddParams, CompactParams, ConsolidateEpisodeParams, DeleteParams,
-    FindCallersParams, FindDefinitionParams, FindErrorsParams, FindImportsParams,
-    FindReferencesParams, FindToolCallsParams, GetParams, MetricsParams, SearchParams, StatsParams,
+    handle_memory_feedback, handle_memory_get, handle_memory_metrics, handle_memory_search,
+    handle_memory_stats, AddBatchParams, AddParams, CompactParams, ConsolidateEpisodeParams,
+    DeleteParams, FeedbackParams, FindCallersParams, FindDefinitionParams, FindErrorsParams,
+    FindImportsParams, FindReferencesParams, FindToolCallsParams, GetParams, MetricsParams,
+    SearchParams, StatsParams,
 };
 use super::protocol::{Request, Response};
 use super::tools::get_all_tools;
@@ -296,6 +297,12 @@ impl<S: Store> McpServer<S> {
                 })?;
                 handle_memory_delete(&*self.store, params).await
             }
+            "memory.feedback" => {
+                let params: FeedbackParams = serde_json::from_value(arguments).map_err(|e| {
+                    McpError::InvalidParams(format!("invalid feedback params: {}", e))
+                })?;
+                handle_memory_feedback(&*self.store, params).await
+            }
             "memory.stats" => {
                 let params: StatsParams = serde_json::from_value(arguments)
                     .map_err(|e| McpError::InvalidParams(format!("invalid stats params: {}", e)))?;
@@ -551,6 +558,21 @@ mod tests {
         assert!(results
             .iter()
             .any(|result| result["chunk_id"].as_str() == Some(chunk_id.as_str())));
+
+        let feedback_result = server
+            .handle_tools_call(Some(json!({
+                "name": "memory.feedback",
+                "arguments": {
+                    "tenant_id": tenant_id,
+                    "query": "end to end",
+                    "chunk_id": chunk_id,
+                    "relevance": "relevant"
+                }
+            })))
+            .await
+            .expect("memory.feedback should succeed");
+        let feedback_payload = parse_tool_payload(&feedback_result);
+        assert_eq!(feedback_payload["stored"], true);
 
         let metrics_result = server
             .handle_tools_call(Some(json!({

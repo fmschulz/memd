@@ -10,7 +10,9 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
-use super::{split_for_add, Store, StoreStats};
+use super::{
+    apply_feedback_scores, split_for_add, FeedbackConfig, FeedbackEntry, Store, StoreStats,
+};
 use crate::error::Result;
 use crate::types::{ChunkId, ChunkStatus, MemoryChunk, TenantId};
 
@@ -21,6 +23,8 @@ use crate::types::{ChunkId, ChunkStatus, MemoryChunk, TenantId};
 pub struct MemoryStore {
     /// Map of tenant_id -> (chunk_id -> chunk)
     chunks: RwLock<HashMap<String, HashMap<String, MemoryChunk>>>,
+    /// Per-tenant relevance feedback log.
+    feedback: RwLock<HashMap<String, Vec<FeedbackEntry>>>,
 }
 
 impl MemoryStore {
@@ -28,6 +32,7 @@ impl MemoryStore {
     pub fn new() -> Self {
         Self {
             chunks: RwLock::new(HashMap::new()),
+            feedback: RwLock::new(HashMap::new()),
         }
     }
 
@@ -106,6 +111,32 @@ impl Store for MemoryStore {
         Ok(ids)
     }
 
+    async fn add_feedback(&self, feedback: FeedbackEntry) -> Result<()> {
+        let tenant = feedback.tenant_id.to_string();
+        let mut store = self.feedback.write().unwrap();
+        store.entry(tenant).or_default().push(feedback);
+        Ok(())
+    }
+
+    async fn list_feedback(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<FeedbackEntry>> {
+        let tenant = tenant_id.to_string();
+        let normalized = super::normalize_query(query);
+        let store = self.feedback.read().unwrap();
+        let entries = store.get(&tenant).cloned().unwrap_or_default();
+        let mut filtered: Vec<FeedbackEntry> = entries
+            .into_iter()
+            .filter(|entry| super::normalize_query(&entry.query) == normalized)
+            .collect();
+        filtered.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
+        filtered.truncate(limit);
+        Ok(filtered)
+    }
+
     async fn get(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<Option<MemoryChunk>> {
         let tenant_str = tenant_id.to_string();
         let chunk_id_str = chunk_id.to_string();
@@ -171,6 +202,25 @@ impl Store for MemoryStore {
         );
 
         Ok(results)
+    }
+
+    async fn search_with_scores(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        k: usize,
+    ) -> Result<Vec<(MemoryChunk, f32)>> {
+        let chunks = self.search(tenant_id, query, k).await?;
+        let scored: Vec<(MemoryChunk, f32)> =
+            chunks.into_iter().map(|chunk| (chunk, 1.0)).collect();
+        let feedback = self.list_feedback(tenant_id, query, 512).await?;
+        Ok(apply_feedback_scores(
+            scored,
+            query,
+            &feedback,
+            current_time_ms(),
+            &FeedbackConfig::default(),
+        ))
     }
 
     async fn delete(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<bool> {
@@ -277,6 +327,13 @@ impl Store for MemoryStore {
 
         Ok(chunks.into_iter().skip(offset).take(limit).collect())
     }
+}
+
+fn current_time_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -518,6 +575,74 @@ mod tests {
 
         let stats = store.stats(&tenant).await.unwrap();
         assert!(stats.total_chunks > 1);
+    }
+
+    #[tokio::test]
+    async fn feedback_adjusts_search_scores() {
+        let store = MemoryStore::new();
+        let tenant = make_tenant();
+
+        let alpha = store
+            .add(make_chunk(&tenant, "alpha parser notes", ChunkType::Doc))
+            .await
+            .unwrap();
+        let beta = store
+            .add(make_chunk(&tenant, "beta parser notes", ChunkType::Doc))
+            .await
+            .unwrap();
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        store
+            .add_feedback(FeedbackEntry::new(
+                tenant.clone(),
+                "parser notes",
+                alpha.clone(),
+                crate::store::RelevanceLabel::Relevant,
+                now_ms,
+            ))
+            .await
+            .unwrap();
+        store
+            .add_feedback(FeedbackEntry::new(
+                tenant.clone(),
+                "parser notes",
+                alpha.clone(),
+                crate::store::RelevanceLabel::Relevant,
+                now_ms,
+            ))
+            .await
+            .unwrap();
+        store
+            .add_feedback(FeedbackEntry::new(
+                tenant.clone(),
+                "parser notes",
+                beta.clone(),
+                crate::store::RelevanceLabel::Irrelevant,
+                now_ms,
+            ))
+            .await
+            .unwrap();
+        store
+            .add_feedback(FeedbackEntry::new(
+                tenant.clone(),
+                "parser notes",
+                beta.clone(),
+                crate::store::RelevanceLabel::Irrelevant,
+                now_ms,
+            ))
+            .await
+            .unwrap();
+
+        let ranked = store
+            .search_with_scores(&tenant, "parser notes", 10)
+            .await
+            .unwrap();
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].0.chunk_id, alpha);
     }
 
     #[tokio::test]

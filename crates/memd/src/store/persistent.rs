@@ -8,15 +8,19 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+use std::time::Duration;
 
 use parking_lot::{Mutex, RwLock};
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use super::dense::DenseSearcher;
-use super::hybrid::{HybridConfig, HybridSearcher};
+use super::hybrid::{ChunkMetaForRerank, HybridConfig, HybridSearchResult, HybridSearcher};
 use super::metadata::{ChunkMetadata, MetadataStore, SqliteMetadataStore};
 use crate::compaction::{CompactionConfig, CompactionMetrics, CompactionResult, CompactionRunner};
 use crate::metrics::TieredMetrics;
+use crate::store::{apply_feedback_scores, FeedbackConfig, FeedbackEntry};
 use crate::tiered::{CacheStats, HotTierStats, TierDecision, TieredTiming};
 
 /// Combined tiered search statistics
@@ -59,10 +63,34 @@ pub struct PersistentStoreConfig {
     pub hybrid_config: Option<HybridConfig>,
     /// Embedding model to use for dense search
     pub embedding_model: EmbeddingModel,
+    /// Enable async/background indexing of newly added chunks
+    pub enable_async_indexing: bool,
+    /// Max pending chunks processed per async indexer tick
+    pub async_index_batch_size: usize,
+    /// Poll interval for async indexer in milliseconds
+    pub async_index_poll_ms: u64,
 }
 
 impl Default for PersistentStoreConfig {
     fn default() -> Self {
+        let enable_async_indexing = std::env::var("MEMD_ASYNC_INDEXING")
+            .ok()
+            .map(|v| {
+                let normalized = v.trim().to_ascii_lowercase();
+                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false);
+        let async_index_batch_size = std::env::var("MEMD_ASYNC_INDEX_BATCH_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(128);
+        let async_index_poll_ms = std::env::var("MEMD_ASYNC_INDEX_POLL_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(250);
+
         Self {
             data_dir: PathBuf::from("data"),
             segment_max_chunks: 10_000,
@@ -72,6 +100,9 @@ impl Default for PersistentStoreConfig {
             enable_tiered_search: true,
             hybrid_config: None,
             embedding_model: EmbeddingModel::default(),
+            enable_async_indexing,
+            async_index_batch_size,
+            async_index_poll_ms,
         }
     }
 }
@@ -80,7 +111,7 @@ impl Default for PersistentStoreConfig {
 pub struct PersistentStore {
     config: PersistentStoreConfig,
     /// Per-tenant state
-    tenants: RwLock<HashMap<String, Arc<TenantStore>>>,
+    tenants: Arc<RwLock<HashMap<String, Arc<TenantStore>>>>,
     /// Global metadata store
     metadata: Arc<SqliteMetadataStore>,
     /// Dense vector search (optional)
@@ -93,6 +124,8 @@ pub struct PersistentStore {
     metrics: Arc<MetricsCollector>,
     /// Compaction runner (None if compaction disabled)
     compaction_runner: Option<CompactionRunner>,
+    /// Optional async index worker handle
+    async_indexer: Option<AsyncIndexerHandle>,
 }
 
 /// Per-tenant storage state
@@ -114,6 +147,24 @@ struct TenantStore {
 struct ActiveSegment {
     writer: SegmentWriter,
     chunk_count: u32,
+}
+
+struct PendingChunkAdd {
+    chunk: MemoryChunk,
+    chunk_id: ChunkId,
+    payload: Vec<u8>,
+}
+
+struct AsyncIndexerHandle {
+    shutdown_tx: watch::Sender<bool>,
+    job_tx: mpsc::UnboundedSender<IndexJob>,
+    task: JoinHandle<()>,
+}
+
+struct IndexJob {
+    tenant_id: TenantId,
+    chunk_ids: Vec<ChunkId>,
+    index_rows: Vec<(ChunkId, String)>,
 }
 
 impl PersistentStore {
@@ -190,19 +241,28 @@ impl PersistentStore {
 
         let store = Self {
             config,
-            tenants: RwLock::new(HashMap::new()),
+            tenants: Arc::new(RwLock::new(HashMap::new())),
             metadata,
             dense_searcher,
             sparse_index,
             hybrid_searcher,
             metrics: Arc::new(MetricsCollector::default()),
             compaction_runner,
+            async_indexer: None,
         };
 
         // Recover existing tenants
         store.discover_and_recover_tenants()?;
 
+        let async_indexer = store.start_async_indexer_if_enabled();
+        let mut store = store;
+        store.async_indexer = async_indexer;
+
         Ok(store)
+    }
+
+    pub fn async_indexing_enabled(&self) -> bool {
+        self.async_indexer.is_some()
     }
 
     /// Get reference to metrics collector
@@ -213,6 +273,74 @@ impl PersistentStore {
     /// Get shared metrics collector
     pub fn metrics_arc(&self) -> Arc<MetricsCollector> {
         Arc::clone(&self.metrics)
+    }
+
+    fn start_async_indexer_if_enabled(&self) -> Option<AsyncIndexerHandle> {
+        if !self.config.enable_async_indexing {
+            return None;
+        }
+
+        let handle = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => handle,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "async indexing requested but no Tokio runtime found; falling back to sync indexing"
+                );
+                return None;
+            }
+        };
+
+        let poll_ms = self.config.async_index_poll_ms.max(1);
+        let batch_size = self.config.async_index_batch_size.max(1);
+        let metadata = Arc::clone(&self.metadata);
+        let hybrid_searcher = self.hybrid_searcher.clone();
+        let dense_searcher = self.dense_searcher.clone();
+        let tenants = Arc::clone(&self.tenants);
+
+        let (job_tx, mut job_rx) = mpsc::unbounded_channel::<IndexJob>();
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let task = handle.spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(poll_ms));
+            loop {
+                tokio::select! {
+                    maybe_job = job_rx.recv() => {
+                        let Some(job) = maybe_job else {
+                            break;
+                        };
+                        run_async_index_job(
+                            metadata.as_ref(),
+                            hybrid_searcher.as_ref(),
+                            dense_searcher.as_ref(),
+                            batch_size,
+                            job,
+                        )
+                        .await;
+                    }
+                    _ = interval.tick() => {
+                        sweep_pending_index_jobs(
+                            metadata.as_ref(),
+                            tenants.as_ref(),
+                            hybrid_searcher.as_ref(),
+                            dense_searcher.as_ref(),
+                            batch_size,
+                        )
+                        .await;
+                    }
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        Some(AsyncIndexerHandle {
+            shutdown_tx,
+            job_tx,
+            task,
+        })
     }
 
     /// Get index statistics per tenant
@@ -395,6 +523,14 @@ impl PersistentStore {
                     results.push((chunk, result.final_score));
                 }
             }
+            let feedback = self.list_feedback(tenant_id, query, 512).await?;
+            let results = apply_feedback_scores(
+                results,
+                query,
+                &feedback,
+                current_time_ms(),
+                &FeedbackConfig::default(),
+            );
 
             // Extract tiered timing and decisions
             let tiered_timing = timing.tiered.clone();
@@ -498,6 +634,11 @@ impl PersistentStore {
 
 impl Drop for PersistentStore {
     fn drop(&mut self) {
+        if let Some(indexer) = self.async_indexer.take() {
+            let _ = indexer.shutdown_tx.send(true);
+            indexer.task.abort();
+        }
+
         // Best-effort finalization on drop
         if let Err(e) = self.shutdown() {
             warn!(error = %e, "error during PersistentStore drop");
@@ -814,42 +955,29 @@ impl Drop for TenantStore {
 #[async_trait::async_trait]
 impl Store for PersistentStore {
     async fn add(&self, chunk: MemoryChunk) -> Result<ChunkId> {
-        let tenant_id_str = chunk.tenant_id.to_string();
-        info!(text_len = chunk.text.len(), "[PERSISTENT_ADD] called");
-        debug!(tenant_id = %tenant_id_str, "[ADD] step 1: getting tenant");
-        let _tenant = self.get_or_create_tenant(&tenant_id_str)?;
-
-        let mut chunks = super::split_for_add(chunk);
-        if chunks.len() == 1 {
-            return self
-                .add_single_chunk(
-                    chunks
-                        .pop()
-                        .ok_or_else(|| MemdError::StorageError("no chunk to add".into()))?,
-                )
-                .await;
-        }
-
-        info!(chunk_count = chunks.len(), "[CHUNKING] splitting document");
-
-        let mut chunk_ids = Vec::with_capacity(chunks.len());
-        for chunk in chunks {
-            chunk_ids.push(self.add_single_chunk(chunk).await?);
-        }
-
-        chunk_ids
+        self.add_chunks_internal(vec![chunk])
+            .await?
             .into_iter()
             .next()
             .ok_or_else(|| MemdError::StorageError("no chunk id produced".into()))
     }
 
     async fn add_batch(&self, chunks: Vec<MemoryChunk>) -> Result<Vec<ChunkId>> {
-        let mut ids = Vec::with_capacity(chunks.len());
-        for chunk in chunks {
-            let id = self.add(chunk).await?;
-            ids.push(id);
-        }
-        Ok(ids)
+        self.add_chunks_internal(chunks).await
+    }
+
+    async fn add_feedback(&self, feedback: FeedbackEntry) -> Result<()> {
+        self.metadata.insert_feedback(&feedback)
+    }
+
+    async fn list_feedback(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<FeedbackEntry>> {
+        self.metadata
+            .list_feedback_for_query(tenant_id, query, limit)
     }
 
     async fn get(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<Option<MemoryChunk>> {
@@ -872,7 +1000,15 @@ impl Store for PersistentStore {
         query: &str,
         k: usize,
     ) -> Result<Vec<(MemoryChunk, f32)>> {
-        self.hybrid_search(tenant_id, query, k).await
+        let scored = self.hybrid_search(tenant_id, query, k).await?;
+        let feedback = self.list_feedback(tenant_id, query, 512).await?;
+        Ok(apply_feedback_scores(
+            scored,
+            query,
+            &feedback,
+            current_time_ms(),
+            &FeedbackConfig::default(),
+        ))
     }
 
     async fn delete(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<bool> {
@@ -936,155 +1072,400 @@ impl Store for PersistentStore {
     }
 }
 
-impl PersistentStore {
-    /// Add a single chunk without automatic chunking
-    async fn add_single_chunk(&self, mut chunk: MemoryChunk) -> Result<ChunkId> {
-        let tenant_id_str = chunk.tenant_id.to_string();
-        debug!(tenant_id = %tenant_id_str, "[ADD] step 1: getting tenant");
-        let tenant = self.get_or_create_tenant(&tenant_id_str)?;
+fn current_time_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 
-        // Generate chunk ID
-        let chunk_id = ChunkId::new();
-        chunk.chunk_id = chunk_id.clone();
-        debug!(chunk_id = %chunk_id, "[ADD] step 2: generated chunk_id");
-
-        // Compute hash
-        chunk.hash = {
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(chunk.text.as_bytes());
-            format!("{:x}", hasher.finalize())
-        };
-
-        let timestamp = chunk.timestamp_created;
-
-        // Serialize chunk for storage
-        let payload = serde_json::to_vec(&chunk)
-            .map_err(|e| MemdError::StorageError(format!("serialize chunk: {}", e)))?;
-        debug!(
-            payload_len = payload.len(),
-            "[ADD] step 3: serialized payload"
-        );
-
-        // Write to WAL first (durability)
-        debug!("[ADD] step 4: acquiring WAL lock");
+fn mark_index_failed_many(
+    metadata: &SqliteMetadataStore,
+    tenant_id: &TenantId,
+    chunk_ids: &[ChunkId],
+    error_message: &str,
+) {
+    for chunk_id in chunk_ids {
+        if let Err(mark_err) =
+            metadata.mark_index_failed(tenant_id, chunk_id, error_message, current_time_ms())
         {
-            let mut wal = tenant.wal.lock();
-            debug!("[ADD] step 4b: acquired WAL lock, writing");
-            wal.append_add(
-                &tenant_id_str,
-                &chunk_id.to_string(),
-                timestamp,
-                payload.clone(),
-            )?;
+            warn!(
+                tenant_id = %tenant_id,
+                chunk_id = %chunk_id,
+                error = %mark_err,
+                "failed to record index failure state"
+            );
         }
-        debug!("[ADD] step 4c: WAL write complete");
+    }
+}
 
-        // Write to segment
-        debug!("[ADD] step 5: creating active segment");
-        tenant.get_or_create_active_segment(self.config.segment_max_chunks)?;
-        let (segment_id, ordinal) = {
-            debug!("[ADD] step 5b: acquiring segment lock");
-            let mut active = tenant.active_segment.lock();
-            debug!("[ADD] step 5c: acquired segment lock");
-            let seg = active
-                .as_mut()
-                .ok_or_else(|| MemdError::StorageError("no active segment".into()))?;
-            let ordinal = seg.writer.append_chunk(&payload)?;
-            seg.chunk_count += 1;
-            (seg.writer.id(), ordinal)
-        };
-        debug!(segment_id, ordinal, "[ADD] step 5d: segment write complete");
-
-        // Write to metadata
-        debug!("[ADD] step 6: writing metadata");
-        let metadata = ChunkMetadata {
-            chunk_id: chunk_id.clone(),
-            tenant_id: chunk.tenant_id.clone(),
-            project_id: chunk.project_id.as_option().map(|s| s.to_string()),
-            segment_id,
-            ordinal,
-            chunk_type: chunk.chunk_type,
-            status: chunk.status,
-            timestamp_created: chunk.timestamp_created,
-            hash: chunk.hash.clone(),
-            source_uri: chunk.source.uri.clone(),
-        };
-        self.metadata.insert(&metadata)?;
-        debug!("[ADD] step 6b: metadata write complete");
-
-        // Index in hybrid searcher (handles both dense and sparse)
-        debug!("[ADD] step 7: starting hybrid indexing");
-        warn!(
-            "[DEBUG] Indexing path check: hybrid_searcher={}, dense_searcher={}",
-            self.hybrid_searcher.is_some(),
-            self.dense_searcher.is_some()
-        );
-        if let Some(ref hybrid) = self.hybrid_searcher {
-            debug!("[ADD] step 7b: calling hybrid.index_chunk");
-            warn!(
-                "[DEBUG] About to call hybrid.index_chunk for tenant={}, chunk_id={}, text_len={}",
-                chunk.tenant_id,
-                chunk_id,
-                chunk.text.len()
-            );
-            if let Err(e) = hybrid
-                .index_chunk(&chunk.tenant_id, &chunk_id, &chunk.text)
-                .await
-            {
-                warn!(
-                    chunk_id = %chunk_id,
-                    error = %e,
-                    "❌ [DEBUG] ERROR in hybrid.index_chunk - THIS IS WHY INDEXING FAILED"
-                );
-                // Don't fail the add - search will fall back to text matching
-            } else {
-                warn!(
-                    "[DEBUG] ✅ hybrid.index_chunk succeeded for chunk_id={}",
-                    chunk_id
-                );
-            }
-            debug!("[ADD] step 7c: hybrid indexing complete");
-        } else if let Some(ref searcher) = self.dense_searcher {
-            debug!("[ADD] step 7d: falling back to dense-only");
-            warn!(
-                "[DEBUG] About to call dense_searcher.index_chunk for tenant={}, chunk_id={}",
-                chunk.tenant_id, chunk_id
-            );
-            // Fallback to dense-only if hybrid not available
-            if let Err(e) = searcher
-                .index_chunk(&chunk.tenant_id, &chunk_id, &chunk.text)
-                .await
-            {
-                warn!(
-                    chunk_id = %chunk_id,
-                    error = %e,
-                    "❌ [DEBUG] ERROR in dense_searcher.index_chunk - THIS IS WHY INDEXING FAILED"
-                );
-            } else {
-                warn!(
-                    "[DEBUG] ✅ dense_searcher.index_chunk succeeded for chunk_id={}",
-                    chunk_id
-                );
-            }
+async fn run_async_index_job(
+    metadata: &SqliteMetadataStore,
+    hybrid_searcher: Option<&Arc<HybridSearcher>>,
+    dense_searcher: Option<&Arc<DenseSearcher>>,
+    batch_size: usize,
+    job: IndexJob,
+) {
+    let mut index_error: Option<String> = None;
+    for rows in job.index_rows.chunks(batch_size.max(1)) {
+        let result = if let Some(hybrid) = hybrid_searcher {
+            hybrid.index_batch(&job.tenant_id, rows).await
+        } else if let Some(searcher) = dense_searcher {
+            searcher.index_batch(&job.tenant_id, rows).await
         } else {
-            warn!("⚠️ [DEBUG] CRITICAL: Neither hybrid_searcher nor dense_searcher exists - NO INDEXING HAPPENING!");
+            Ok(())
+        };
+
+        if let Err(e) = result {
+            index_error = Some(e.to_string());
+            break;
+        }
+    }
+
+    if let Some(error_message) = index_error {
+        warn!(
+            tenant_id = %job.tenant_id,
+            error = %error_message,
+            "async index job failed"
+        );
+        mark_index_failed_many(metadata, &job.tenant_id, &job.chunk_ids, &error_message);
+        return;
+    }
+
+    if let Err(e) = metadata.mark_indexed(&job.tenant_id, &job.chunk_ids, current_time_ms()) {
+        warn!(
+            tenant_id = %job.tenant_id,
+            error = %e,
+            "failed to mark chunks indexed"
+        );
+    }
+}
+
+fn load_chunk_text_for_index(
+    tenants: &RwLock<HashMap<String, Arc<TenantStore>>>,
+    metadata: &SqliteMetadataStore,
+    tenant_id: &TenantId,
+    chunk_id: &ChunkId,
+) -> Result<Option<String>> {
+    let meta = metadata.get(tenant_id, chunk_id)?;
+    let meta = match meta {
+        Some(m) if m.status != ChunkStatus::Deleted => m,
+        _ => return Ok(None),
+    };
+
+    let tenant_str = tenant_id.to_string();
+    let tenant = match tenants.read().get(&tenant_str) {
+        Some(t) => Arc::clone(t),
+        None => return Ok(None),
+    };
+
+    if let Some(bytes) = tenant.read_from_active_segment(meta.segment_id, meta.ordinal)? {
+        let chunk: MemoryChunk = serde_json::from_slice(&bytes)
+            .map_err(|e| MemdError::StorageError(format!("deserialize chunk: {}", e)))?;
+        return Ok(Some(chunk.text));
+    }
+
+    let segments = tenant.segments.read();
+    let Some(reader) = segments.get(&meta.segment_id) else {
+        return Ok(None);
+    };
+
+    let payload = reader.read_chunk(meta.ordinal)?;
+    let Some(bytes) = payload else {
+        return Ok(None);
+    };
+
+    let chunk: MemoryChunk = serde_json::from_slice(&bytes)
+        .map_err(|e| MemdError::StorageError(format!("deserialize chunk: {}", e)))?;
+    Ok(Some(chunk.text))
+}
+
+async fn sweep_pending_index_jobs(
+    metadata: &SqliteMetadataStore,
+    tenants: &RwLock<HashMap<String, Arc<TenantStore>>>,
+    hybrid_searcher: Option<&Arc<HybridSearcher>>,
+    dense_searcher: Option<&Arc<DenseSearcher>>,
+    batch_size: usize,
+) {
+    let tenant_ids: Vec<String> = tenants.read().keys().cloned().collect();
+    for tenant_id_str in tenant_ids {
+        let tenant_id = match TenantId::new(&tenant_id_str) {
+            Ok(id) => id,
+            Err(e) => {
+                warn!(tenant_id = %tenant_id_str, error = %e, "invalid tenant id during pending-index sweep");
+                continue;
+            }
+        };
+
+        let pending_ids = match metadata.list_pending_index_chunk_ids(&tenant_id, batch_size) {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!(tenant_id = %tenant_id, error = %e, "failed to list pending index chunks");
+                continue;
+            }
+        };
+        if pending_ids.is_empty() {
+            continue;
         }
 
-        // Check if we need checkpoint
-        debug!("[ADD] step 8: checkpoint check");
-        {
-            let mut count = tenant.writes_since_checkpoint.lock();
-            *count += 1;
-            if *count >= self.config.wal_checkpoint_interval {
-                let mut wal = tenant.wal.lock();
-                wal.append_checkpoint(&tenant_id_str, timestamp)?;
-                *count = 0;
+        let mut chunk_ids = Vec::with_capacity(pending_ids.len());
+        let mut index_rows = Vec::with_capacity(pending_ids.len());
+        for chunk_id in pending_ids {
+            match load_chunk_text_for_index(tenants, metadata, &tenant_id, &chunk_id) {
+                Ok(Some(text)) => {
+                    chunk_ids.push(chunk_id.clone());
+                    index_rows.push((chunk_id, text));
+                }
+                Ok(None) => {
+                    mark_index_failed_many(
+                        metadata,
+                        &tenant_id,
+                        std::slice::from_ref(&chunk_id),
+                        "pending chunk not found during index sweep",
+                    );
+                }
+                Err(e) => {
+                    mark_index_failed_many(
+                        metadata,
+                        &tenant_id,
+                        std::slice::from_ref(&chunk_id),
+                        &e.to_string(),
+                    );
+                }
             }
         }
 
-        info!(tenant_id = %tenant_id_str, chunk_id = %chunk_id, segment_id, ordinal, "[ADD] step 9: COMPLETE - chunk added");
-        Ok(chunk_id)
+        if !chunk_ids.is_empty() {
+            run_async_index_job(
+                metadata,
+                hybrid_searcher,
+                dense_searcher,
+                batch_size,
+                IndexJob {
+                    tenant_id: tenant_id.clone(),
+                    chunk_ids,
+                    index_rows,
+                },
+            )
+            .await;
+        }
+    }
+}
+
+impl PersistentStore {
+    fn expand_chunks_for_add(
+        &self,
+        chunks: Vec<MemoryChunk>,
+    ) -> Result<(Vec<MemoryChunk>, Vec<usize>)> {
+        if chunks.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let mut expanded = Vec::new();
+        let mut primary_positions = Vec::with_capacity(chunks.len());
+        for chunk in chunks {
+            let parts = super::split_for_add(chunk);
+            if parts.is_empty() {
+                return Err(MemdError::StorageError(
+                    "split_for_add produced no chunks".into(),
+                ));
+            }
+            primary_positions.push(expanded.len());
+            expanded.extend(parts);
+        }
+        Ok((expanded, primary_positions))
+    }
+
+    fn prepare_pending_chunks(&self, chunks: Vec<MemoryChunk>) -> Result<Vec<PendingChunkAdd>> {
+        let mut pending = Vec::with_capacity(chunks.len());
+        for mut chunk in chunks {
+            let chunk_id = ChunkId::new();
+            chunk.chunk_id = chunk_id.clone();
+            chunk.hash = {
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(chunk.text.as_bytes());
+                format!("{:x}", hasher.finalize())
+            };
+            let payload = serde_json::to_vec(&chunk)
+                .map_err(|e| MemdError::StorageError(format!("serialize chunk: {}", e)))?;
+            pending.push(PendingChunkAdd {
+                chunk,
+                chunk_id,
+                payload,
+            });
+        }
+        Ok(pending)
+    }
+
+    fn checkpoint_after_batch(
+        &self,
+        tenant: &TenantStore,
+        tenant_id: &str,
+        writes: u32,
+    ) -> Result<()> {
+        let interval = self.config.wal_checkpoint_interval;
+        if interval == 0 || writes == 0 {
+            return Ok(());
+        }
+
+        let checkpoints = {
+            let mut count = tenant.writes_since_checkpoint.lock();
+            *count += writes;
+            let checkpoints = *count / interval;
+            *count %= interval;
+            checkpoints
+        };
+        if checkpoints == 0 {
+            return Ok(());
+        }
+
+        let timestamp = current_time_ms();
+        let mut wal = tenant.wal.lock();
+        for _ in 0..checkpoints {
+            wal.append_checkpoint(tenant_id, timestamp)?;
+        }
+        Ok(())
+    }
+
+    async fn add_chunks_internal(&self, chunks: Vec<MemoryChunk>) -> Result<Vec<ChunkId>> {
+        if chunks.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let (expanded_chunks, primary_positions) = self.expand_chunks_for_add(chunks)?;
+        let pending = self.prepare_pending_chunks(expanded_chunks)?;
+
+        let mut tenant_groups: HashMap<String, Vec<usize>> = HashMap::new();
+        for (idx, row) in pending.iter().enumerate() {
+            tenant_groups
+                .entry(row.chunk.tenant_id.to_string())
+                .or_default()
+                .push(idx);
+        }
+
+        for (tenant_id_str, indices) in tenant_groups {
+            let tenant = self.get_or_create_tenant(&tenant_id_str)?;
+            let tenant_id = pending[indices[0]].chunk.tenant_id.clone();
+
+            let wal_rows: Vec<(String, i64, Vec<u8>)> = indices
+                .iter()
+                .map(|&idx| {
+                    (
+                        pending[idx].chunk_id.to_string(),
+                        pending[idx].chunk.timestamp_created,
+                        pending[idx].payload.clone(),
+                    )
+                })
+                .collect();
+            {
+                let mut wal = tenant.wal.lock();
+                wal.append_add_batch(&tenant_id_str, &wal_rows)?;
+            }
+
+            let mut metadata_rows = Vec::with_capacity(indices.len());
+            let mut index_rows = Vec::with_capacity(indices.len());
+            for idx in &indices {
+                let row = &pending[*idx];
+                tenant.get_or_create_active_segment(self.config.segment_max_chunks)?;
+                let (segment_id, ordinal) = {
+                    let mut active = tenant.active_segment.lock();
+                    let seg = active
+                        .as_mut()
+                        .ok_or_else(|| MemdError::StorageError("no active segment".into()))?;
+                    let ordinal = seg.writer.append_chunk(&row.payload)?;
+                    seg.chunk_count += 1;
+                    (seg.writer.id(), ordinal)
+                };
+
+                metadata_rows.push(ChunkMetadata {
+                    chunk_id: row.chunk_id.clone(),
+                    tenant_id: row.chunk.tenant_id.clone(),
+                    project_id: row.chunk.project_id.as_option().map(|s| s.to_string()),
+                    segment_id,
+                    ordinal,
+                    chunk_type: row.chunk.chunk_type,
+                    status: row.chunk.status,
+                    timestamp_created: row.chunk.timestamp_created,
+                    hash: row.chunk.hash.clone(),
+                    source_uri: row.chunk.source.uri.clone(),
+                });
+                index_rows.push((row.chunk_id.clone(), row.chunk.text.clone()));
+            }
+            self.metadata.insert_many(&metadata_rows)?;
+            let chunk_ids_for_state: Vec<ChunkId> =
+                metadata_rows.iter().map(|row| row.chunk_id.clone()).collect();
+            self.metadata
+                .mark_index_pending(&tenant_id, &chunk_ids_for_state, current_time_ms())?;
+
+            if self.async_indexing_enabled() {
+                if let Some(indexer) = self.async_indexer.as_ref() {
+                    let job = IndexJob {
+                        tenant_id: tenant_id.clone(),
+                        chunk_ids: chunk_ids_for_state.clone(),
+                        index_rows,
+                    };
+                    if indexer.job_tx.send(job).is_err() {
+                        let error_message = "async indexer queue is closed";
+                        warn!(tenant_id = %tenant_id, error = error_message, "failed to enqueue async index job");
+                        mark_index_failed_many(
+                            self.metadata.as_ref(),
+                            &tenant_id,
+                            &chunk_ids_for_state,
+                            error_message,
+                        );
+                    }
+                } else {
+                    let error_message = "async indexing enabled but worker unavailable";
+                    warn!(tenant_id = %tenant_id, error = error_message, "cannot enqueue async index job");
+                    mark_index_failed_many(
+                        self.metadata.as_ref(),
+                        &tenant_id,
+                        &chunk_ids_for_state,
+                        error_message,
+                    );
+                }
+            } else {
+                let index_result = if let Some(ref hybrid) = self.hybrid_searcher {
+                    hybrid.index_batch(&tenant_id, &index_rows).await
+                } else if let Some(ref searcher) = self.dense_searcher {
+                    searcher.index_batch(&tenant_id, &index_rows).await
+                } else {
+                    Ok(())
+                };
+
+                match index_result {
+                    Ok(()) => {
+                        self.metadata.mark_indexed(
+                            &tenant_id,
+                            &chunk_ids_for_state,
+                            current_time_ms(),
+                        )?;
+                    }
+                    Err(e) => {
+                        warn!(tenant_id = %tenant_id, error = %e, "sync index batch failed");
+                        mark_index_failed_many(
+                            self.metadata.as_ref(),
+                            &tenant_id,
+                            &chunk_ids_for_state,
+                            &e.to_string(),
+                        );
+                    }
+                }
+            }
+
+            self.checkpoint_after_batch(&tenant, &tenant_id_str, indices.len() as u32)?;
+        }
+
+        let expanded_ids: Vec<ChunkId> = pending.iter().map(|row| row.chunk_id.clone()).collect();
+        let mut primary_ids = Vec::with_capacity(primary_positions.len());
+        for pos in primary_positions {
+            let chunk_id = expanded_ids
+                .get(pos)
+                .ok_or_else(|| MemdError::StorageError("missing primary chunk id".into()))?;
+            primary_ids.push(chunk_id.clone());
+        }
+        Ok(primary_ids)
     }
 }
 
@@ -1243,12 +1624,38 @@ impl PersistentStore {
                 hybrid.search_with_timing(tenant_id, query, k, None).await?;
 
             let fetch_start = Instant::now();
-            let mut results = Vec::with_capacity(hybrid_results.len());
+            let mut chunk_by_id: HashMap<ChunkId, MemoryChunk> =
+                HashMap::with_capacity(hybrid_results.len());
+            let mut rerank_meta = Vec::with_capacity(hybrid_results.len());
+            let mut base_results: Vec<HybridSearchResult> =
+                Vec::with_capacity(hybrid_results.len());
+
             for result in hybrid_results {
                 if let Some(chunk) = self.get(tenant_id, &result.chunk_id).await? {
-                    results.push((chunk, result.final_score));
+                    rerank_meta.push(ChunkMetaForRerank {
+                        chunk_id: result.chunk_id.clone(),
+                        rrf_score: result.final_score,
+                        timestamp_created: chunk.timestamp_created,
+                        project_id: chunk.project_id.as_option().map(str::to_string),
+                        chunk_type: chunk.chunk_type,
+                        text: Some(chunk.text.clone()),
+                    });
+                    chunk_by_id.insert(result.chunk_id.clone(), chunk);
+                    base_results.push(result);
                 }
             }
+
+            let reranked =
+                hybrid.rerank_with_metadata_for_query(query, base_results, rerank_meta, None);
+            let results: Vec<(MemoryChunk, f32)> = reranked
+                .into_iter()
+                .filter_map(|result| {
+                    chunk_by_id
+                        .get(&result.chunk_id)
+                        .cloned()
+                        .map(|chunk| (chunk, result.final_score))
+                })
+                .collect();
             let fetch_time = fetch_start.elapsed();
 
             // Record query metrics (use dense time as embed time, sparse time as search time)
@@ -1427,6 +1834,27 @@ mod tests {
         sentence.repeat(40)
     }
 
+    #[test]
+    fn default_config_has_valid_async_indexing_settings() {
+        let config = PersistentStoreConfig::default();
+        assert!(config.async_index_batch_size > 0);
+        assert!(config.async_index_poll_ms > 0);
+    }
+
+    #[tokio::test]
+    async fn async_indexer_scaffold_is_created_when_enabled() {
+        let dir = tempdir().unwrap();
+        let config = PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            enable_async_indexing: true,
+            ..Default::default()
+        };
+        let store = PersistentStore::open(config).unwrap();
+        assert!(store.async_indexing_enabled());
+    }
+
     #[tokio::test]
     async fn add_and_get() {
         let (store, _dir) = make_test_store();
@@ -1438,6 +1866,106 @@ mod tests {
 
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().text, "hello persistent");
+    }
+
+    #[tokio::test]
+    async fn add_marks_indexed_when_async_indexing_disabled() {
+        let (store, _dir) = make_test_store();
+        let tenant = make_tenant();
+
+        store.add(make_chunk(&tenant, "indexed state check")).await.unwrap();
+
+        let (pending, indexed, failed) = store.metadata.count_by_index_state(&tenant).unwrap();
+        assert_eq!(pending, 0);
+        assert_eq!(indexed, 1);
+        assert_eq!(failed, 0);
+    }
+
+    #[tokio::test]
+    async fn add_async_eventually_marks_indexed() {
+        let dir = tempdir().unwrap();
+        let tenant = make_tenant();
+        let config = PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            segment_max_chunks: 100,
+            wal_checkpoint_interval: 10,
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            enable_async_indexing: true,
+            ..Default::default()
+        };
+        let store = PersistentStore::open(config).unwrap();
+
+        store.add(make_chunk(&tenant, "pending state check")).await.unwrap();
+
+        // Async worker runs out-of-band; allow a short settle window.
+        let mut saw_pending = false;
+        let mut saw_indexed = false;
+        for _ in 0..20 {
+            let (pending, indexed, failed) = store.metadata.count_by_index_state(&tenant).unwrap();
+            assert_eq!(failed, 0);
+            if pending > 0 {
+                saw_pending = true;
+            }
+            if indexed > 0 {
+                saw_indexed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            saw_pending || saw_indexed,
+            "chunk should appear in pending or indexed states"
+        );
+        assert!(saw_indexed, "async worker should eventually mark chunk indexed");
+    }
+
+    #[tokio::test]
+    async fn pending_chunks_are_recovered_by_worker_sweep() {
+        let dir = tempdir().unwrap();
+        let tenant = make_tenant();
+        let config = PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            segment_max_chunks: 100,
+            wal_checkpoint_interval: 10,
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            enable_async_indexing: true,
+            async_index_poll_ms: 25,
+            ..Default::default()
+        };
+        let store = PersistentStore::open(config).unwrap();
+        let chunk_id = store
+            .add(make_chunk(&tenant, "sweep pending recovery"))
+            .await
+            .unwrap();
+
+        // Wait until initial async indexing completes.
+        for _ in 0..20 {
+            let (_, indexed, failed) = store.metadata.count_by_index_state(&tenant).unwrap();
+            assert_eq!(failed, 0);
+            if indexed > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        store
+            .metadata
+            .mark_index_pending(&tenant, std::slice::from_ref(&chunk_id), current_time_ms())
+            .unwrap();
+
+        let mut recovered = false;
+        for _ in 0..25 {
+            let (pending, indexed, failed) = store.metadata.count_by_index_state(&tenant).unwrap();
+            assert_eq!(failed, 0);
+            if pending == 0 && indexed > 0 {
+                recovered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(recovered, "worker sweep should re-index pending chunks");
     }
 
     #[tokio::test]
@@ -1589,5 +2117,73 @@ mod tests {
 
         let stats = store.stats(&tenant).await.unwrap();
         assert!(stats.total_chunks > 1);
+    }
+
+    #[tokio::test]
+    async fn feedback_adjusts_scores_in_persistent_store() {
+        let (store, _dir) = make_test_store();
+        let tenant = make_tenant();
+
+        let older = store
+            .add(make_chunk(&tenant, "alpha retrieval note"))
+            .await
+            .unwrap();
+        let newer = store
+            .add(make_chunk(&tenant, "beta retrieval note"))
+            .await
+            .unwrap();
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        store
+            .add_feedback(FeedbackEntry::new(
+                tenant.clone(),
+                "retrieval note",
+                older.clone(),
+                crate::store::RelevanceLabel::Relevant,
+                now_ms,
+            ))
+            .await
+            .unwrap();
+        store
+            .add_feedback(FeedbackEntry::new(
+                tenant.clone(),
+                "retrieval note",
+                older.clone(),
+                crate::store::RelevanceLabel::Relevant,
+                now_ms,
+            ))
+            .await
+            .unwrap();
+        store
+            .add_feedback(FeedbackEntry::new(
+                tenant.clone(),
+                "retrieval note",
+                newer.clone(),
+                crate::store::RelevanceLabel::Irrelevant,
+                now_ms,
+            ))
+            .await
+            .unwrap();
+        store
+            .add_feedback(FeedbackEntry::new(
+                tenant.clone(),
+                "retrieval note",
+                newer.clone(),
+                crate::store::RelevanceLabel::Irrelevant,
+                now_ms,
+            ))
+            .await
+            .unwrap();
+
+        let ranked = store
+            .search_with_scores(&tenant, "retrieval note", 10)
+            .await
+            .unwrap();
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].0.chunk_id, older);
     }
 }
