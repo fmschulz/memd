@@ -14,6 +14,21 @@ Smoke dataset:
 
 - `evals/bench/datasets/retrieval/code_pairs.json`
 
+Only `code_pairs.json` is tracked in git. The larger BEIR-format JSON exports are intentionally not tracked at branch tip.
+
+Fetch the mirrored datasets with:
+
+```bash
+./evals/bench/scripts/fetch_offline_benchmark_datasets.sh
+```
+
+Current mirror coverage:
+
+- `beir_fiqa.json`
+- `beir_scidocs.json`
+
+`beir_trec-covid.json` is not mirrored by that helper because the converted JSON is too large for the normal repository workflow. If you have a local converted copy, place it at the path above and pass it explicitly through `--dataset-path`.
+
 ## Metrics
 
 - `Recall@10`

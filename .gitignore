@@ -60,6 +60,8 @@ TESTING.md
 /evals/results/
 /evals/datasets/beir/
 /evals/datasets/codesearchnet/
+/evals/bench/datasets/retrieval/beir_fiqa.json
+/evals/bench/datasets/retrieval/beir_scidocs.json
 /evals/bench/datasets/retrieval/beir_trec-covid.json
 /evals/BENCHMARK_*.md
 /evals/CODEX_*.md
@@ -69,3 +71,7 @@ TESTING.md
 /evals/osgrep-comparison/
 /evals/scripts/
 test-install.sh
+
+# Large generated benchmark payloads (rebuild locally when needed)
+/docs/scientific-task-memory/benchmark-results/task_memory_benchmark_data/
+/docs/scientific-task-memory/benchmark-results/task_memory_benchmark.log
