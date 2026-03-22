@@ -13,6 +13,14 @@ These scripts run directly with local `cargo` and Python. Docker is not required
 
 ## Offline retrieval benchmark
 
+Fetch the mirrored large datasets first when you want more than the smoke benchmark:
+
+```bash
+./evals/bench/scripts/fetch_offline_benchmark_datasets.sh
+```
+
+If you skip that step, the offline benchmark script will still run on the tracked `code_pairs.json` smoke dataset only.
+
 ```bash
 ./evals/bench/scripts/run_offline_retrieval_benchmark.sh \
   --model all-minilm \

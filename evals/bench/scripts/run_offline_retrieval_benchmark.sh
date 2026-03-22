@@ -80,10 +80,20 @@ mkdir -p "$OUTPUT_DIR"
 cd "$PROJECT_ROOT"
 
 declare -a DATASETS=(
+  "evals/bench/datasets/retrieval/code_pairs.json"
+)
+
+declare -a OPTIONAL_DATASETS=(
   "evals/bench/datasets/retrieval/beir_fiqa.json"
   "evals/bench/datasets/retrieval/beir_scidocs.json"
   "evals/bench/datasets/retrieval/beir_trec-covid.json"
 )
+
+for dataset in "${OPTIONAL_DATASETS[@]}"; do
+  if [[ -f "$dataset" ]]; then
+    DATASETS+=("$dataset")
+  fi
+done
 
 echo "== Offline Retrieval Benchmark Protocol =="
 echo "Model: $MODEL"
@@ -93,7 +103,27 @@ echo "Bootstrap iterations: $BOOTSTRAP_ITERATIONS"
 echo "Seed: $SEED"
 [[ -n "$MAX_QUERIES" ]] && echo "Max queries: $MAX_QUERIES"
 [[ -n "$MAX_DOCUMENTS" ]] && echo "Max documents: $MAX_DOCUMENTS"
+echo "Datasets:"
+for dataset in "${DATASETS[@]}"; do
+  echo "  - $dataset"
+done
+for dataset in "${OPTIONAL_DATASETS[@]}"; do
+  if [[ ! -f "$dataset" ]]; then
+    echo "  - $dataset (missing, skipped)"
+  fi
+done
 echo
+
+if [[ ! -f "evals/bench/datasets/retrieval/code_pairs.json" ]]; then
+  echo "Missing required smoke dataset: evals/bench/datasets/retrieval/code_pairs.json" >&2
+  exit 1
+fi
+
+if [[ "${#DATASETS[@]}" -eq 1 ]]; then
+  echo "Only the smoke dataset is available."
+  echo "Run ./evals/bench/scripts/fetch_offline_benchmark_datasets.sh for mirrored larger datasets."
+  echo
+fi
 
 cargo build -p memd-evals >/dev/null
 if [[ "$SYSTEM_VARIANT" == "hybrid-cross-encoder" ]]; then
