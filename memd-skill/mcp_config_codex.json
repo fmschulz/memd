@@ -1,9 +1,0 @@
-{
-  "servers": {
-    "memd": {
-      "command": "memd",
-      "args": [],
-      "env": {}
-    }
-  }
-}

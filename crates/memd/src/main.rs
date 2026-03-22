@@ -21,6 +21,15 @@ enum Mode {
     Cli,
 }
 
+/// Server transport for MCP mode.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum TransportChoice {
+    /// JSON-RPC over stdio (client launches subprocess)
+    Stdio,
+    /// Streamable HTTP on a long-lived local daemon
+    Http,
+}
+
 /// Embedding model choice
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ModelChoice {
@@ -70,6 +79,18 @@ struct Args {
     #[arg(long)]
     data_dir: Option<PathBuf>,
 
+    /// Override the MCP server transport
+    #[arg(long, value_enum)]
+    transport: Option<TransportChoice>,
+
+    /// Bind address for HTTP transport, e.g. 127.0.0.1:8787
+    #[arg(long)]
+    http_bind: Option<String>,
+
+    /// HTTP endpoint path for streamable HTTP transport
+    #[arg(long)]
+    http_path: Option<String>,
+
     /// Use in-memory storage instead of persistent storage (for testing)
     #[arg(long, default_value = "false")]
     in_memory: bool,
@@ -115,6 +136,26 @@ async fn main() {
         args.mode
     };
 
+    // Apply server overrides after loading config and resolving data_dir.
+    let mut config = config;
+    if let Some(transport) = args.transport {
+        config.server.transport = match transport {
+            TransportChoice::Stdio => "stdio".to_string(),
+            TransportChoice::Http => "http".to_string(),
+        };
+    }
+    if let Some(bind) = args.http_bind.clone() {
+        config.server.bind = bind;
+    }
+    if let Some(path) = args.http_path.clone() {
+        config.server.path = path;
+    }
+    config.data_dir = data_dir.clone();
+    if let Err(e) = config.validate() {
+        eprintln!("error: invalid configuration: {}", e);
+        std::process::exit(1);
+    }
+
     // Initialize logging
     let log_level = if args.verbose {
         "debug"
@@ -129,26 +170,42 @@ async fn main() {
 
     match mode {
         Mode::Mcp => {
+            let server_transport = config.server.transport.clone();
+            let http_bind = config.server.bind.clone();
+            let http_path = config.server.path.clone();
+
             info!(
                 version = env!("CARGO_PKG_VERSION"),
                 config_path = ?args.config,
                 data_dir = %data_dir.display(),
+                transport = %server_transport,
+                http_bind = %http_bind,
+                http_path = %http_path,
                 in_memory = args.in_memory,
                 "memd starting"
             );
-
-            // Update config with computed data_dir for TenantManager
-            let mut config = config;
-            config.data_dir = data_dir.clone();
 
             // Run server with appropriate store type
             if args.in_memory {
                 info!("using in-memory store");
                 let store = Arc::new(MemoryStore::new());
-                let mut server = memd::mcp::McpServer::new(config, store);
-                if let Err(e) = server.run().await {
-                    eprintln!("error: MCP server error: {}", e);
-                    std::process::exit(1);
+                match server_transport.as_str() {
+                    "http" => {
+                        let server = memd::mcp::McpServer::new(config.clone(), store);
+                        if let Err(e) =
+                            memd::mcp::run_http_server(server, &http_bind, &http_path).await
+                        {
+                            eprintln!("error: HTTP MCP server error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                    _ => {
+                        let mut server = memd::mcp::McpServer::new(config.clone(), store);
+                        if let Err(e) = server.run().await {
+                            eprintln!("error: MCP server error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
                 }
             } else {
                 info!(data_dir = %data_dir.display(), embedding_model = ?args.embedding_model, "using persistent store");
@@ -162,10 +219,25 @@ async fn main() {
                     Ok(store) => {
                         let metrics = store.metrics_arc();
                         let store = Arc::new(store);
-                        let mut server = memd::mcp::McpServer::with_metrics(config, store, metrics);
-                        if let Err(e) = server.run().await {
-                            eprintln!("error: MCP server error: {}", e);
-                            std::process::exit(1);
+                        match server_transport.as_str() {
+                            "http" => {
+                                let server =
+                                    memd::mcp::McpServer::with_metrics(config.clone(), store, metrics);
+                                if let Err(e) =
+                                    memd::mcp::run_http_server(server, &http_bind, &http_path).await
+                                {
+                                    eprintln!("error: HTTP MCP server error: {}", e);
+                                    std::process::exit(1);
+                                }
+                            }
+                            _ => {
+                                let mut server =
+                                    memd::mcp::McpServer::with_metrics(config.clone(), store, metrics);
+                                if let Err(e) = server.run().await {
+                                    eprintln!("error: MCP server error: {}", e);
+                                    std::process::exit(1);
+                                }
+                            }
                         }
                     }
                     Err(e) => {

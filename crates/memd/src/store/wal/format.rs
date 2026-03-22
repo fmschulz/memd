@@ -9,6 +9,8 @@ use std::io::{self, Read, Write};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use serde::{Deserialize, Serialize};
 
+use crate::task_memory::TaskArtifact;
+
 /// Magic bytes identifying a WAL file: "MWAL"
 pub const WAL_MAGIC: &[u8; 4] = b"MWAL";
 
@@ -25,6 +27,8 @@ pub enum WalRecordType {
     Delete = 2,
     /// Checkpoint marker - segment flush complete
     Checkpoint = 3,
+    /// Rebuild canonical task side tables and artifact links
+    TaskArtifact = 4,
 }
 
 impl WalRecordType {
@@ -34,9 +38,18 @@ impl WalRecordType {
             1 => Some(WalRecordType::Add),
             2 => Some(WalRecordType::Delete),
             3 => Some(WalRecordType::Checkpoint),
+            4 => Some(WalRecordType::TaskArtifact),
             _ => None,
         }
     }
+}
+
+/// WAL payload for one canonical task artifact bundle.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TaskArtifactWalPayload {
+    pub artifact: TaskArtifact,
+    pub projection_chunk_ids: Vec<String>,
+    pub projection_kinds: Vec<String>,
 }
 
 /// WAL record containing operation data
@@ -87,6 +100,22 @@ impl WalRecord {
             chunk_id: String::new(),
             timestamp,
             payload: Vec::new(),
+        }
+    }
+
+    /// Create a new TaskArtifact record.
+    pub fn task_artifact(
+        tenant_id: String,
+        artifact_id: String,
+        timestamp: i64,
+        payload: Vec<u8>,
+    ) -> Self {
+        Self {
+            record_type: WalRecordType::TaskArtifact,
+            tenant_id,
+            chunk_id: artifact_id,
+            timestamp,
+            payload,
         }
     }
 
@@ -244,14 +273,15 @@ impl WalRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::TenantId;
 
     #[test]
     fn wal_record_type_from_u8() {
         assert_eq!(WalRecordType::from_u8(1), Some(WalRecordType::Add));
         assert_eq!(WalRecordType::from_u8(2), Some(WalRecordType::Delete));
         assert_eq!(WalRecordType::from_u8(3), Some(WalRecordType::Checkpoint));
+        assert_eq!(WalRecordType::from_u8(4), Some(WalRecordType::TaskArtifact));
         assert_eq!(WalRecordType::from_u8(0), None);
-        assert_eq!(WalRecordType::from_u8(4), None);
         assert_eq!(WalRecordType::from_u8(255), None);
     }
 
@@ -304,6 +334,31 @@ mod tests {
         assert_eq!(decoded, record);
         assert!(decoded.chunk_id.is_empty());
         assert!(decoded.payload.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_task_artifact_record() {
+        let artifact = TaskArtifact::new_task_start(TenantId::new("tenant_1").unwrap());
+        let payload = TaskArtifactWalPayload {
+            artifact: artifact.clone(),
+            projection_chunk_ids: vec!["chunk-1".to_string()],
+            projection_kinds: vec!["task_goal".to_string()],
+        };
+        let record = WalRecord::task_artifact(
+            "tenant_1".to_string(),
+            artifact.artifact_id.clone(),
+            artifact.timestamp_created,
+            serde_json::to_vec(&payload).unwrap(),
+        );
+
+        let encoded = record.encode_to_bytes();
+        assert_eq!(encoded[4], WalRecordType::TaskArtifact as u8);
+
+        let (decoded, _) = WalRecord::decode_from_bytes(&encoded).unwrap();
+        assert_eq!(decoded.record_type, WalRecordType::TaskArtifact);
+        let decoded_payload: TaskArtifactWalPayload =
+            serde_json::from_slice(&decoded.payload).unwrap();
+        assert_eq!(decoded_payload, payload);
     }
 
     #[test]

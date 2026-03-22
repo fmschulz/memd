@@ -1,0 +1,148 @@
+run_id: memd-docs-2026-03-21
+workflow_summary: "Repository-grounded documentation run for memd, a local MCP server for shared agent memory, task-oriented knowledge artifacts, structural code retrieval, and hybrid search."
+workflow:
+  engine: other
+  engine_version: NOT CAPTURED
+  pipeline:
+    name: memd
+    version: 0.1.0
+    repo_url: https://github.com/fmschulz/memd.git
+    commit_sha: 3b1fbabbff4e968ffc57992b127097e2d0dd0b2c
+    launch_command: cargo build --release && ./target/release/memd --mode mcp
+  execution:
+    workdir: /home/fschulz/dev/software/memd
+inputs:
+  - name: workspace metadata
+    uri: file://Cargo.toml
+    notes: Workspace version, edition, dependency set
+  - name: crate metadata
+    uri: file://crates/memd/Cargo.toml
+    notes: memd package metadata and feature flags
+  - name: top-level user documentation
+    uri: file://README.md
+  - name: quickstart guide
+    uri: file://QUICKSTART.md
+  - name: MCP tool definitions
+    uri: file://crates/memd/src/mcp/tools.rs
+  - name: persistent store implementation
+    uri: file://crates/memd/src/store/persistent.rs
+  - name: dense retrieval implementation
+    uri: file://crates/memd/src/store/dense.rs
+  - name: hybrid retrieval implementation
+    uri: file://crates/memd/src/store/hybrid.rs
+  - name: task memory schema
+    uri: file://crates/memd/src/task_memory/mod.rs
+  - name: task schema documentation
+    uri: file://docs/scientific-task-memory/schema/README.md
+  - name: offline retrieval benchmark protocol
+    uri: file://evals/BENCHMARK_PROTOCOL.md
+  - name: task memory benchmark results
+    uri: file://docs/scientific-task-memory/benchmark-results/task_memory_benchmark_results.md
+software:
+  tools:
+    - name: cargo
+      version: 1.92.0 (344c4567c 2025-10-21)
+      source: local toolchain
+    - name: rustc
+      version: 1.92.0 (ded5c06cf 2025-12-08)
+      source: local toolchain
+    - name: python3
+      version: 3.11.14
+      source: local toolchain
+steps:
+  - step_id: "1"
+    name: Repository evidence audit
+    purpose: Record the repository state, branch, commit, toolchain versions, and source artifacts used to ground the documentation.
+    tool: bash
+    command: git rev-parse HEAD && git branch --show-current && cargo --version && rustc --version && python3 --version
+    status: VERIFIED_IN_SESSION
+    outputs:
+      - branch name
+      - commit SHA
+      - toolchain versions
+  - step_id: "2"
+    name: Release build entrypoint
+    purpose: Produce the standalone memd binary used for persistent or in-memory MCP service deployment.
+    tool: cargo
+    tool_version: 1.92.0 (344c4567c 2025-10-21)
+    command: cargo build --release
+    status: DOCUMENTED_FROM_REPO
+    outputs:
+      - target/release/memd
+    notes: Command is documented in README.md and QUICKSTART.md.
+  - step_id: "3"
+    name: MCP server startup
+    purpose: Start memd as a stdio MCP server for agent clients.
+    tool: memd
+    tool_version: 0.1.0
+    command: ./target/release/memd --mode mcp
+    status: DOCUMENTED_FROM_REPO
+    outputs:
+      - stdio MCP server
+    notes: Persistent mode uses ~/.memd/data by default; in-memory mode is available for disposable runs.
+  - step_id: "4"
+    name: Protocol smoke initialization
+    purpose: Verify that the MCP server starts and advertises its tool surface.
+    tool: memd
+    tool_version: 0.1.0
+    command: "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"quickstart\",\"version\":\"0.1.0\"}}}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}' | ./target/release/memd --mode mcp --in-memory --data-dir /tmp/memd-quickstart"
+    status: DOCUMENTED_FROM_REPO
+    outputs:
+      - initialize response
+      - tools/list response
+  - step_id: "5"
+    name: Optional ONNX reranker validation
+    purpose: Verify that the feature-gated ONNX cross-encoder scorer can initialize and score a relevant pair above a distractor.
+    tool: cargo
+    tool_version: 1.92.0 (344c4567c 2025-10-21)
+    command: cargo test -p memd --features cross-encoder-reranker smoke_real_onnx_scores_relevant_pair_higher -- --ignored --nocapture
+    status: VERIFIED_IN_SESSION
+    outputs:
+      - passing ONNX smoke test
+  - step_id: "6"
+    name: Offline retrieval benchmark harness
+    purpose: Evaluate hybrid retrieval variants on kept BEIR-style datasets and smoke datasets using deterministic bootstrap confidence intervals.
+    tool: cargo
+    tool_version: 1.92.0 (344c4567c 2025-10-21)
+    command: "./evals/bench/scripts/run_offline_retrieval_benchmark.sh --model all-minilm --system-variant hybrid-feature --bootstrap-iterations 1000 --seed 42"
+    status: DOCUMENTED_FROM_REPO
+    outputs:
+      - evals/bench/results/offline-*/cross_corpus_all-minilm_hybrid-feature.json
+  - step_id: "7"
+    name: Task memory benchmark harness
+    purpose: Compare generic memory chunk retrieval with the structured task-artifact retrieval path on the checked-in scientific task memory corpus.
+    tool: python3
+    tool_version: 3.11.14
+    command: python3 evals/bench/tools/task_memory_benchmark.py --memd-path target/debug/memd --corpus docs/scientific-task-memory/benchmark-results/task_memory_benchmark_corpus.json --workers 1 --ops-per-worker 1
+    status: DOCUMENTED_FROM_REPO
+    outputs:
+      - docs/scientific-task-memory/benchmark-results/task_memory_benchmark_results.json
+      - docs/scientific-task-memory/benchmark-results/task_memory_benchmark_results.md
+qc_steps:
+  - Commands, version metadata, and software scope were cross-checked against repository artifacts before drafting.
+  - Task-memory benchmark numbers were taken only from checked-in benchmark result files.
+  - ONNX claims were limited to the feature-gated cross-encoder path and checked against code and a real ignored smoke test.
+outputs:
+  - METHODS.md
+  - MANUSCRIPT.md
+  - run_manifest.yaml
+limitations: This manifest documents a repository evidence synthesis run rather than a single Nextflow, Snakemake, or CWL execution. Release-build and benchmark entrypoints are documented from checked-in commands and results, but not all workflows were rerun end-to-end during this documentation pass.
+evidence:
+  - Cargo.toml
+  - crates/memd/Cargo.toml
+  - README.md
+  - QUICKSTART.md
+  - configs/default.toml
+  - crates/memd/src/lib.rs
+  - crates/memd/src/main.rs
+  - crates/memd/src/mcp/tools.rs
+  - crates/memd/src/store/persistent.rs
+  - crates/memd/src/store/dense.rs
+  - crates/memd/src/store/hybrid.rs
+  - crates/memd/src/index/bm25.rs
+  - crates/memd/src/index/hnsw.rs
+  - crates/memd/src/task_memory/mod.rs
+  - docs/scientific-task-memory/schema/README.md
+  - docs/scientific-task-memory/benchmark-results/README.md
+  - docs/scientific-task-memory/benchmark-results/task_memory_benchmark_results.md
+  - evals/BENCHMARK_PROTOCOL.md

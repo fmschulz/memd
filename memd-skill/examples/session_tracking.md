@@ -1,153 +1,219 @@
-# Session Context Tracking Example
+# Task Lifecycle Across Sessions
 
-Track work across multiple coding sessions using memd memory.
+This example shows how one agent can start work and another agent can later recover the full task history from `memd`.
 
 ## Scenario
 
-You're working on implementing user authentication across multiple sessions. memd helps you maintain context between sessions.
+Tenant: `ecommerce-api`
 
-## Session 1: Initial Planning
+Goal: implement and validate JWT authentication.
 
-```markdown
-User: "Start working on JWT authentication for the API"
+The important part is not just storing random notes. The important part is that every agent emits the same artifact types, so later agents can recover:
 
-Agent: I'll record this in memory and begin planning.
+- the motivation
+- the hypothesis
+- the parameters used in runs
+- what already failed
+- what evidence supported the decision
 
-<memory.add>
+## Session 1: Start the Task
+
+```json
 {
-  "tenant_id": "ecommerce-api",
-  "text": "Starting work on JWT authentication feature. Requirements: RS256 signing, 1-hour access tokens, 7-day refresh tokens, role-based claims",
-  "chunk_type": "planning",
-  "tags": ["auth", "jwt", "in-progress", "session-1"]
-}
-
-Agent: Created implementation plan...
-```
-
-## Session 2: Implementation Begins
-
-```markdown
-User: "Continue the auth work from yesterday"
-
-Agent: Let me search memory for context.
-
-<memory.search>
-{
-  "tenant_id": "ecommerce-api",
-  "query": "authentication work status",
-  "k": 5
-}
-
-Result: "Starting work on JWT authentication feature. Requirements: RS256 signing..."
-
-Agent: Found context from previous session. I'll continue implementing the JWT service.
-
-<memory.add>
-{
-  "tenant_id": "ecommerce-api",
-  "text": "Implemented JwtService in src/auth/jwt.rs with token generation using RS256. Created key pair in config/keys/. Added tests for token creation and validation.",
-  "chunk_type": "code",
-  "tags": ["auth", "jwt", "implemented", "session-2"]
+  "name": "task.start",
+  "arguments": {
+    "tenant_id": "ecommerce-api",
+    "project_id": "auth",
+    "goal": "Implement JWT authentication with key rotation support",
+    "motivation": "The API needs stateless auth and auditability across services",
+    "hypothesis": "RS256 with short-lived access tokens and refresh tokens will satisfy security and operability requirements",
+    "scientific_question": "Which JWT design gives acceptable security without excessive operational burden?",
+    "dataset_refs": [
+      {"name": "auth_requirements", "version": "2026-03"}
+    ],
+    "expected_outputs": [
+      "jwt service implementation",
+      "validation summary",
+      "deployment notes"
+    ]
+  }
 }
 ```
 
-## Session 3: Bug Fix
+## Session 1: Record a Meaningful Checkpoint
 
-```markdown
-User: "Getting token expiration errors"
-
-Agent: Let me search for JWT implementation details.
-
-<memory.search>
+```json
 {
-  "tenant_id": "ecommerce-api",
-  "query": "JWT token implementation details",
-  "k": 3
-}
-
-Result: "Implemented JwtService in src/auth/jwt.rs with token generation using RS256..."
-
-<code.find_definition>
-{
-  "tenant_id": "ecommerce-api",
-  "symbol_name": "JwtService"
-}
-
-Agent: Found the bug - token expiration check was using UTC but server timezone was EST.
-
-<memory.add>
-{
-  "tenant_id": "ecommerce-api",
-  "text": "Bug fix: JWT expiration validation was comparing UTC timestamps with EST server time. Fixed by normalizing all timestamps to UTC in jwt.rs:145",
-  "chunk_type": "bug-fix",
-  "tags": ["auth", "jwt", "bug-fix", "expiration", "session-3"]
+  "name": "task.progress",
+  "arguments": {
+    "tenant_id": "ecommerce-api",
+    "task_id": "<task_id>",
+    "project_id": "auth",
+    "summary": "Mapped the current auth middleware and identified token issuance touchpoints",
+    "blockers": [
+      "Key storage strategy is still undecided"
+    ],
+    "failed_attempts": [
+      "A symmetric-key design would complicate service-to-service trust boundaries"
+    ],
+    "next_step": "Prototype RS256 issuance and validation flow"
+  }
 }
 ```
 
-## Session 4: Code Review
+## Session 1: Record a Run
 
-```markdown
-User: "Review the authentication implementation"
+Before the substantive run:
 
-Agent: Let me gather all auth-related work from memory.
-
-<memory.search>
+```json
 {
-  "tenant_id": "ecommerce-api",
-  "query": "JWT authentication implementation",
-  "k": 10
-}
-
-Results:
-1. "Starting work on JWT authentication feature. Requirements: RS256..."
-2. "Implemented JwtService in src/auth/jwt.rs..."
-3. "Bug fix: JWT expiration validation..."
-
-Agent: Based on memory, I can see:
-- Initial requirements met (RS256, token durations, role claims)
-- Bug discovered and fixed related to timezone handling
-- All implementation in src/auth/jwt.rs
-
-Let me review the code...
-```
-
-## Session 5: Documentation
-
-```markdown
-User: "Document the authentication system"
-
-Agent: I'll gather all decisions and implementation details from memory.
-
-<memory.search>
-{
-  "tenant_id": "ecommerce-api",
-  "query": "authentication architecture decisions implementation",
-  "k": 15
-}
-
-Agent: Created comprehensive documentation from memory context.
-
-<memory.add>
-{
-  "tenant_id": "ecommerce-api",
-  "text": "Completed: JWT authentication system documented in docs/auth.md. Covers architecture, token flows, key rotation, timezone handling bug fix, and usage examples.",
-  "chunk_type": "documentation",
-  "tags": ["auth", "jwt", "completed", "documented", "session-5"]
+  "name": "task.run_start",
+  "arguments": {
+    "tenant_id": "ecommerce-api",
+    "task_id": "<task_id>",
+    "project_id": "auth",
+    "tool_name": "cargo-test",
+    "command": "cargo test auth::jwt -- --nocapture",
+    "why_chosen": "Need fast feedback on token issuance and expiration behavior",
+    "parameters": {
+      "module": "auth::jwt"
+    },
+    "inputs": [
+      "src/auth/jwt.rs",
+      "tests/auth_jwt.rs"
+    ],
+    "summary": "Validate initial JWT implementation"
+  }
 }
 ```
 
-## Benefits Demonstrated
+After the run:
 
-1. **Context Continuity** - Each session starts with full context from previous work
-2. **Decision Tracking** - All architectural choices persisted and searchable
-3. **Bug History** - Past issues and fixes are discoverable
-4. **Progress Visibility** - Can see implementation status at any time
-5. **Documentation Source** - Memory serves as source material for docs
+```json
+{
+  "name": "task.run_finish",
+  "arguments": {
+    "tenant_id": "ecommerce-api",
+    "task_id": "<task_id>",
+    "project_id": "auth",
+    "status": "completed",
+    "tool_name": "cargo-test",
+    "command": "cargo test auth::jwt -- --nocapture",
+    "outputs": [
+      "7 tests passed",
+      "1 expiration edge case failed"
+    ],
+    "metrics": {
+      "tests_passed": 7,
+      "tests_failed": 1
+    },
+    "notes": "The timezone normalization edge case still fails",
+    "validation": [
+      "Token signing works",
+      "Expiration handling still needs normalization fixes"
+    ]
+  }
+}
+```
 
-## Best Practices
+## Session 1: Record Evidence
 
-1. **Tag by Session** - Helps track chronological progress
-2. **Tag by Status** - Use "in-progress", "completed", "blocked"
-3. **Tag by Type** - "planning", "code", "bug-fix", "documentation"
-4. **Semantic Queries** - Ask questions, don't just search keywords
-5. **Cross-Reference** - Use code navigation tools alongside memory search
+```json
+{
+  "name": "task.add_evidence",
+  "arguments": {
+    "tenant_id": "ecommerce-api",
+    "task_id": "<task_id>",
+    "project_id": "auth",
+    "summary": "The expiration failure only appears when local timezone offsets are mixed with UTC claims",
+    "evidence_kind": "test_failure",
+    "supports_claim": true,
+    "metric_name": "failed_case_count",
+    "metric_value": 1
+  }
+}
+```
+
+## Session 2: Another Agent Resumes Work
+
+The new agent should search first, then inspect the canonical history.
+
+```json
+{
+  "name": "task.search",
+  "arguments": {
+    "tenant_id": "ecommerce-api",
+    "query": "JWT timezone expiration failure",
+    "k": 10,
+    "filters": {
+      "project_id": "auth"
+    }
+  }
+}
+```
+
+Then:
+
+```json
+{
+  "name": "task.get",
+  "arguments": {
+    "tenant_id": "ecommerce-api",
+    "task_id": "<task_id>"
+  }
+}
+```
+
+That second agent can now recover:
+
+- why JWT was chosen
+- what was already tested
+- which edge case failed
+- what evidence supports the bug hypothesis
+- what next step was planned
+
+## Session 2: Finish the Task
+
+```json
+{
+  "name": "task.finish",
+  "arguments": {
+    "tenant_id": "ecommerce-api",
+    "task_id": "<task_id>",
+    "project_id": "auth",
+    "what_worked": [
+      "RS256 token issuance and validation passed",
+      "UTC normalization fixed expiration handling"
+    ],
+    "what_failed": [
+      "The initial implementation mixed local server time and UTC claims"
+    ],
+    "validation": [
+      "All auth::jwt tests passed after normalization",
+      "Refresh flow remained backward compatible"
+    ],
+    "uncertainty": [
+      "Operational key rotation still needs a production rollout checklist"
+    ],
+    "followups": [
+      "Document key rotation procedures",
+      "Add integration tests for multi-service validation"
+    ],
+    "confidence": 0.88
+  }
+}
+```
+
+## Why This Pattern Works
+
+This pattern enforces consistent reporting. Different agents can use the same tenant and still recover a shared, structured picture of:
+
+- intent
+- rationale
+- runs
+- parameters
+- evidence
+- failures
+- outcomes
+
+That is the whole point of the knowledge artifact schema.

@@ -216,6 +216,500 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                 "required": ["tenant_id", "chunks"]
             }),
         ),
+        ToolDefinition::new(
+            "task.start",
+            "Start a scientific/task memory record and store retrieval projections",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier for data isolation"
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional project identifier"
+                    },
+                    "parent_task_id": {
+                        "type": "string",
+                        "description": "Optional parent task identifier"
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Optional agent identifier"
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional session identifier"
+                    },
+                    "goal": {
+                        "type": "string",
+                        "description": "Primary task goal"
+                    },
+                    "motivation": {
+                        "type": "string",
+                        "description": "Why this task matters"
+                    },
+                    "hypothesis": {
+                        "type": "string",
+                        "description": "Working hypothesis to evaluate"
+                    },
+                    "scientific_question": {
+                        "type": "string",
+                        "description": "Scientific or technical question the task should answer"
+                    },
+                    "dataset_refs": {
+                        "type": "array",
+                        "description": "Datasets relevant to the task",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "version": {"type": "string"},
+                                "description": {"type": "string"}
+                            },
+                            "required": ["name"]
+                        }
+                    },
+                    "entity_refs": {
+                        "type": "array",
+                        "description": "Referenced entities relevant to the task",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "entity_type": {"type": "string"},
+                                "role": {"type": "string"}
+                            },
+                            "required": ["name", "entity_type"]
+                        }
+                    },
+                    "expected_outputs": {
+                        "type": "array",
+                        "description": "Expected outputs before substantive work starts",
+                        "items": {"type": "string"}
+                    },
+                    "provenance": {
+                        "type": "object",
+                        "description": "Optional provenance for the task artifact",
+                        "properties": {
+                            "uri": {"type": "string"},
+                            "repo": {"type": "string"},
+                            "commit": {"type": "string"},
+                            "path": {"type": "string"},
+                            "tool_name": {"type": "string"},
+                            "tool_version": {"type": "string"},
+                            "tool_call_id": {"type": "string"}
+                        }
+                    }
+                },
+                "required": [
+                    "tenant_id",
+                    "goal",
+                    "motivation",
+                    "hypothesis",
+                    "scientific_question",
+                    "dataset_refs",
+                    "expected_outputs"
+                ]
+            }),
+        ),
+        ToolDefinition::new(
+            "task.finish",
+            "Finish a scientific/task record and store worked, failed, and validation projections",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier for data isolation"
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Identifier of the task being finished"
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional project identifier"
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Optional agent identifier"
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional session identifier"
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "Final task status, defaults to completed"
+                    },
+                    "goal": {
+                        "type": "string",
+                        "description": "Optional goal restatement for the final artifact"
+                    },
+                    "scientific_question": {
+                        "type": "string",
+                        "description": "Optional scientific question restatement"
+                    },
+                    "dataset_refs": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "version": {"type": "string"},
+                                "description": {"type": "string"}
+                            },
+                            "required": ["name"]
+                        }
+                    },
+                    "entity_refs": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "entity_type": {"type": "string"},
+                                "role": {"type": "string"}
+                            },
+                            "required": ["name", "entity_type"]
+                        }
+                    },
+                    "what_worked": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Important approaches or outcomes that worked"
+                    },
+                    "what_failed": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Important failed attempts or blockers"
+                    },
+                    "validation": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Validation statements or checks"
+                    },
+                    "uncertainty": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Remaining uncertainty"
+                    },
+                    "followups": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Recommended follow-up steps"
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1,
+                        "description": "Confidence score between 0 and 1"
+                    },
+                    "provenance": {
+                        "type": "object",
+                        "properties": {
+                            "uri": {"type": "string"},
+                            "repo": {"type": "string"},
+                            "commit": {"type": "string"},
+                            "path": {"type": "string"},
+                            "tool_name": {"type": "string"},
+                            "tool_version": {"type": "string"},
+                            "tool_call_id": {"type": "string"}
+                        }
+                    }
+                },
+                "required": [
+                    "tenant_id",
+                    "task_id",
+                    "what_worked",
+                    "what_failed",
+                    "validation",
+                    "uncertainty",
+                    "followups",
+                    "confidence"
+                ]
+            }),
+        ),
+        ToolDefinition::new(
+            "task.progress",
+            "Record a meaningful scientific/task checkpoint with blockers, failed attempts, and next steps",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "session_id": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "blockers": {"type": "array", "items": {"type": "string"}},
+                    "failed_attempts": {"type": "array", "items": {"type": "string"}},
+                    "next_step": {"type": "string"},
+                    "dataset_refs": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "version": {"type": "string"},
+                                "description": {"type": "string"}
+                            },
+                            "required": ["name"]
+                        }
+                    },
+                    "entity_refs": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "entity_type": {"type": "string"},
+                                "role": {"type": "string"}
+                            },
+                            "required": ["name", "entity_type"]
+                        }
+                    },
+                    "provenance": {
+                        "type": "object",
+                        "properties": {
+                            "uri": {"type": "string"},
+                            "repo": {"type": "string"},
+                            "commit": {"type": "string"},
+                            "path": {"type": "string"},
+                            "tool_name": {"type": "string"},
+                            "tool_version": {"type": "string"},
+                            "tool_call_id": {"type": "string"}
+                        }
+                    }
+                },
+                "required": ["tenant_id", "task_id", "summary", "next_step"]
+            }),
+        ),
+        ToolDefinition::new(
+            "task.run_start",
+            "Record the start of a substantive tool or workflow run with parameters, inputs, and why it was chosen",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "session_id": {"type": "string"},
+                    "tool_name": {"type": "string"},
+                    "tool_version": {"type": "string"},
+                    "command": {"type": "string"},
+                    "why_chosen": {"type": "string"},
+                    "parameters": {"type": "object"},
+                    "inputs": {"type": "array", "items": {"type": "string"}},
+                    "summary": {"type": "string"},
+                    "dataset_refs": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "version": {"type": "string"},
+                                "description": {"type": "string"}
+                            },
+                            "required": ["name"]
+                        }
+                    },
+                    "entity_refs": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "entity_type": {"type": "string"},
+                                "role": {"type": "string"}
+                            },
+                            "required": ["name", "entity_type"]
+                        }
+                    },
+                    "provenance": {
+                        "type": "object",
+                        "properties": {
+                            "uri": {"type": "string"},
+                            "repo": {"type": "string"},
+                            "commit": {"type": "string"},
+                            "path": {"type": "string"},
+                            "tool_name": {"type": "string"},
+                            "tool_version": {"type": "string"},
+                            "tool_call_id": {"type": "string"}
+                        }
+                    }
+                },
+                "required": ["tenant_id", "task_id", "tool_name", "command", "why_chosen", "parameters", "inputs"]
+            }),
+        ),
+        ToolDefinition::new(
+            "task.run_finish",
+            "Record the completion of a substantive run with status, outputs, metrics, and notes",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "session_id": {"type": "string"},
+                    "status": {"type": "string"},
+                    "tool_name": {"type": "string"},
+                    "tool_version": {"type": "string"},
+                    "command": {"type": "string"},
+                    "outputs": {"type": "array", "items": {"type": "string"}},
+                    "metrics": {"type": "object"},
+                    "notes": {"type": "string"},
+                    "validation": {"type": "array", "items": {"type": "string"}},
+                    "dataset_refs": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "version": {"type": "string"},
+                                "description": {"type": "string"}
+                            },
+                            "required": ["name"]
+                        }
+                    },
+                    "entity_refs": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "entity_type": {"type": "string"},
+                                "role": {"type": "string"}
+                            },
+                            "required": ["name", "entity_type"]
+                        }
+                    },
+                    "provenance": {
+                        "type": "object",
+                        "properties": {
+                            "uri": {"type": "string"},
+                            "repo": {"type": "string"},
+                            "commit": {"type": "string"},
+                            "path": {"type": "string"},
+                            "tool_name": {"type": "string"},
+                            "tool_version": {"type": "string"},
+                            "tool_call_id": {"type": "string"}
+                        }
+                    }
+                },
+                "required": ["tenant_id", "task_id", "status", "outputs", "notes"]
+            }),
+        ),
+        ToolDefinition::new(
+            "task.add_evidence",
+            "Record concrete evidence for a task, including evidence kind and optional metrics",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "session_id": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "evidence_kind": {"type": "string"},
+                    "supports_claim": {"type": "boolean"},
+                    "metric_name": {"type": "string"},
+                    "metric_value": {},
+                    "metrics": {"type": "object"},
+                    "dataset_refs": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "version": {"type": "string"},
+                                "description": {"type": "string"}
+                            },
+                            "required": ["name"]
+                        }
+                    },
+                    "entity_refs": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "entity_type": {"type": "string"},
+                                "role": {"type": "string"}
+                            },
+                            "required": ["name", "entity_type"]
+                        }
+                    },
+                    "provenance": {
+                        "type": "object",
+                        "properties": {
+                            "uri": {"type": "string"},
+                            "repo": {"type": "string"},
+                            "commit": {"type": "string"},
+                            "path": {"type": "string"},
+                            "tool_name": {"type": "string"},
+                            "tool_version": {"type": "string"},
+                            "tool_call_id": {"type": "string"}
+                        }
+                    }
+                },
+                "required": ["tenant_id", "task_id", "summary", "evidence_kind", "supports_claim"]
+            }),
+        ),
+        ToolDefinition::new(
+            "task.get",
+            "Get the canonical artifact history for a task",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "task_id": {"type": "string"}
+                },
+                "required": ["tenant_id", "task_id"]
+            }),
+        ),
+        ToolDefinition::new(
+            "task.search",
+            "Search task-oriented retrieval projections using exact task filters and lexical ranking within the filtered candidate set",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "query": {"type": "string", "default": ""},
+                    "k": {
+                        "type": "integer",
+                        "default": 20,
+                        "minimum": 1,
+                        "maximum": 100
+                    },
+                    "filters": {
+                        "type": "object",
+                        "properties": {
+                            "task_id": {"type": "string"},
+                            "artifact_kind": {
+                                "type": "string",
+                                "enum": ["task_start", "task_progress", "run_start", "run_finish", "evidence", "task_finish"]
+                            },
+                            "status": {"type": "string"},
+                            "dataset_name": {"type": "string"},
+                            "dataset_version": {"type": "string"},
+                            "entity_name": {"type": "string"},
+                            "entity_type": {"type": "string"},
+                            "tool_name": {"type": "string"},
+                            "project_id": {"type": "string"},
+                            "agent_id": {"type": "string"},
+                            "session_id": {"type": "string"}
+                        }
+                    }
+                },
+                "required": ["tenant_id"]
+            }),
+        ),
         // MCP-05: memory.get
         ToolDefinition::new(
             "memory.get",
@@ -558,12 +1052,188 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                 "required": ["tenant_id", "episode_id"]
             }),
         ),
+        // CONTEXT-01: context.list_subsystems
+        ToolDefinition::new(
+            "context.list_subsystems",
+            "List known context subsystems discovered from tags (ctx:subsystem:<key>).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier"
+                    },
+                    "prefix": {
+                        "type": "string",
+                        "description": "Optional subsystem key prefix filter"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of subsystem entries",
+                        "default": 50,
+                        "minimum": 1,
+                        "maximum": 500
+                    }
+                },
+                "required": ["tenant_id"]
+            }),
+        ),
+        // CONTEXT-02: context.get_files_for_subsystem
+        ToolDefinition::new(
+            "context.get_files_for_subsystem",
+            "List files linked to a subsystem via ctx:file:<path> tags or chunk source paths.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier"
+                    },
+                    "subsystem_key": {
+                        "type": "string",
+                        "description": "Subsystem key (from ctx:subsystem:<key>)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of files to return",
+                        "default": 50,
+                        "minimum": 1,
+                        "maximum": 2000
+                    }
+                },
+                "required": ["tenant_id", "subsystem_key"]
+            }),
+        ),
+        // CONTEXT-03: context.search_context_documents
+        ToolDefinition::new(
+            "context.search_context_documents",
+            "Search codified context documents (docs/plans/decisions/summaries) using retrieval and context tags.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Context search query"
+                    },
+                    "k": {
+                        "type": "integer",
+                        "description": "Maximum results",
+                        "default": 20,
+                        "minimum": 1,
+                        "maximum": 100
+                    },
+                    "subsystem_key": {
+                        "type": "string",
+                        "description": "Optional subsystem filter"
+                    },
+                    "tier": {
+                        "type": "string",
+                        "enum": ["hot", "cold"],
+                        "description": "Optional context tier filter"
+                    }
+                },
+                "required": ["tenant_id", "query"]
+            }),
+        ),
+        // CONTEXT-04: context.find_relevant_context
+        ToolDefinition::new(
+            "context.find_relevant_context",
+            "Find context for a task; optionally prepends hot-context chunks before regular retrieval results.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier"
+                    },
+                    "task": {
+                        "type": "string",
+                        "description": "Task description used for retrieval"
+                    },
+                    "k": {
+                        "type": "integer",
+                        "description": "Maximum combined results",
+                        "default": 20,
+                        "minimum": 1,
+                        "maximum": 100
+                    },
+                    "subsystem_keys": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional subsystem filters"
+                    },
+                    "include_hot": {
+                        "type": "boolean",
+                        "description": "Prepend hot-context entries before regular retrieval",
+                        "default": true
+                    }
+                },
+                "required": ["tenant_id", "task"]
+            }),
+        ),
+        // CONTEXT-05: context.suggest_agent
+        ToolDefinition::new(
+            "context.suggest_agent",
+            "Suggest specialist agents using ctx:agent and ctx:trigger tags against task text and changed files.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier"
+                    },
+                    "task": {
+                        "type": "string",
+                        "description": "Task description"
+                    },
+                    "changed_files": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional changed file paths for trigger matching"
+                    },
+                    "k": {
+                        "type": "integer",
+                        "description": "Maximum number of suggestions",
+                        "default": 3,
+                        "minimum": 1,
+                        "maximum": 100
+                    }
+                },
+                "required": ["tenant_id", "task"]
+            }),
+        ),
+        // CONTEXT-06: context.get_hot_context
+        ToolDefinition::new(
+            "context.get_hot_context",
+            "Return recent chunks tagged as hot context (ctx:tier:hot).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier"
+                    },
+                    "k": {
+                        "type": "integer",
+                        "description": "Maximum results",
+                        "default": 20,
+                        "minimum": 1,
+                        "maximum": 100
+                    }
+                },
+                "required": ["tenant_id"]
+            }),
+        ),
     ]
 });
 
 /// Get all available tool definitions
 ///
-/// Returns all 6 memory tools with their schemas.
+/// Returns all MCP tool definitions with their schemas.
 pub fn get_all_tools() -> Vec<ToolDefinition> {
     MEMORY_TOOLS.clone()
 }
@@ -581,6 +1251,14 @@ pub fn tool_names() -> Vec<&'static str> {
         "memory.search",
         "memory.add",
         "memory.add_batch",
+        "task.start",
+        "task.progress",
+        "task.run_start",
+        "task.run_finish",
+        "task.add_evidence",
+        "task.finish",
+        "task.get",
+        "task.search",
         "memory.get",
         "memory.delete",
         "memory.feedback",
@@ -588,6 +1266,12 @@ pub fn tool_names() -> Vec<&'static str> {
         "memory.metrics",
         "memory.compact",
         "memory.consolidate_episode",
+        "context.list_subsystems",
+        "context.get_files_for_subsystem",
+        "context.search_context_documents",
+        "context.find_relevant_context",
+        "context.suggest_agent",
+        "context.get_hot_context",
         "code.find_definition",
         "code.find_references",
         "code.find_callers",
@@ -602,9 +1286,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn get_all_tools_returns_sixteen() {
+    fn get_all_tools_returns_thirty() {
         let tools = get_all_tools();
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 30);
     }
 
     #[test]
@@ -614,6 +1298,14 @@ mod tests {
         assert!(names.contains(&"memory.search"));
         assert!(names.contains(&"memory.add"));
         assert!(names.contains(&"memory.add_batch"));
+        assert!(names.contains(&"task.start"));
+        assert!(names.contains(&"task.progress"));
+        assert!(names.contains(&"task.run_start"));
+        assert!(names.contains(&"task.run_finish"));
+        assert!(names.contains(&"task.add_evidence"));
+        assert!(names.contains(&"task.finish"));
+        assert!(names.contains(&"task.get"));
+        assert!(names.contains(&"task.search"));
         assert!(names.contains(&"memory.get"));
         assert!(names.contains(&"memory.delete"));
         assert!(names.contains(&"memory.feedback"));
@@ -697,14 +1389,99 @@ mod tests {
     }
 
     #[test]
+    fn task_start_schema_has_required_fields() {
+        let tool = get_tool("task.start").unwrap();
+        let required = tool
+            .input_schema
+            .get("required")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required_strs.contains(&"tenant_id"));
+        assert!(required_strs.contains(&"goal"));
+        assert!(required_strs.contains(&"motivation"));
+        assert!(required_strs.contains(&"hypothesis"));
+        assert!(required_strs.contains(&"scientific_question"));
+        assert!(required_strs.contains(&"dataset_refs"));
+        assert!(required_strs.contains(&"expected_outputs"));
+    }
+
+    #[test]
+    fn task_finish_schema_has_required_fields() {
+        let tool = get_tool("task.finish").unwrap();
+        let required = tool
+            .input_schema
+            .get("required")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required_strs.contains(&"tenant_id"));
+        assert!(required_strs.contains(&"task_id"));
+        assert!(required_strs.contains(&"what_worked"));
+        assert!(required_strs.contains(&"what_failed"));
+        assert!(required_strs.contains(&"validation"));
+        assert!(required_strs.contains(&"uncertainty"));
+        assert!(required_strs.contains(&"followups"));
+        assert!(required_strs.contains(&"confidence"));
+    }
+
+    #[test]
+    fn task_get_schema_has_required_fields() {
+        let tool = get_tool("task.get").unwrap();
+        let required = tool
+            .input_schema
+            .get("required")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required_strs.contains(&"tenant_id"));
+        assert!(required_strs.contains(&"task_id"));
+    }
+
+    #[test]
+    fn task_search_schema_has_tenant_required() {
+        let tool = get_tool("task.search").unwrap();
+        let required = tool
+            .input_schema
+            .get("required")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required_strs.contains(&"tenant_id"));
+        assert!(tool
+            .input_schema
+            .get("properties")
+            .and_then(|props| props.get("filters"))
+            .is_some());
+    }
+
+    #[test]
     fn tool_names_list() {
         let names = tool_names();
-        assert_eq!(names.len(), 16);
+        assert_eq!(names.len(), 30);
         assert!(names.contains(&"memory.search"));
         assert!(names.contains(&"memory.metrics"));
         assert!(names.contains(&"memory.feedback"));
         assert!(names.contains(&"memory.compact"));
         assert!(names.contains(&"memory.consolidate_episode"));
+        assert!(names.contains(&"task.start"));
+        assert!(names.contains(&"task.progress"));
+        assert!(names.contains(&"task.run_start"));
+        assert!(names.contains(&"task.run_finish"));
+        assert!(names.contains(&"task.add_evidence"));
+        assert!(names.contains(&"task.finish"));
+        assert!(names.contains(&"task.get"));
+        assert!(names.contains(&"task.search"));
+        assert!(names.contains(&"context.list_subsystems"));
+        assert!(names.contains(&"context.get_files_for_subsystem"));
+        assert!(names.contains(&"context.search_context_documents"));
+        assert!(names.contains(&"context.find_relevant_context"));
+        assert!(names.contains(&"context.suggest_agent"));
+        assert!(names.contains(&"context.get_hot_context"));
         assert!(names.contains(&"code.find_definition"));
         assert!(names.contains(&"code.find_references"));
         assert!(names.contains(&"code.find_callers"));
@@ -799,5 +1576,33 @@ mod tests {
         assert!(props.get("time_to").is_some());
         assert!(props.get("limit").is_some());
         assert!(props.get("include_frames").is_some());
+    }
+
+    #[test]
+    fn context_tools_are_registered() {
+        for name in [
+            "context.list_subsystems",
+            "context.get_files_for_subsystem",
+            "context.search_context_documents",
+            "context.find_relevant_context",
+            "context.suggest_agent",
+            "context.get_hot_context",
+        ] {
+            assert!(get_tool(name).is_some(), "missing tool {name}");
+        }
+    }
+
+    #[test]
+    fn context_suggest_agent_schema_has_required_fields() {
+        let tool = get_tool("context.suggest_agent").unwrap();
+        let required = tool
+            .input_schema
+            .get("required")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required_strs.contains(&"tenant_id"));
+        assert!(required_strs.contains(&"task"));
     }
 }

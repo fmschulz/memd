@@ -1048,7 +1048,7 @@ mod tests {
         }
 
         // Check demotions - should find chunk has low score
-        let decisions = searcher.check_demotions(None);
+        let _decisions = searcher.check_demotions(None);
 
         // Note: The chunk might not be demoted if access tracker doesn't track it
         // since we never searched for it. This test validates the mechanism works.

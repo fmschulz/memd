@@ -168,13 +168,17 @@ pub enum CliCommand {
         #[arg(long, default_value = ".")]
         project_dir: PathBuf,
 
-        /// memd command for generated MCP configs
+        /// Legacy stdio memd command retained for backward compatibility
         #[arg(long, default_value = "memd")]
         memd_command: String,
 
-        /// Optional data directory for generated MCP server args
+        /// Optional data directory used for tenant scope discovery and docs
         #[arg(long)]
         memd_data_dir: Option<PathBuf>,
+
+        /// URL for the shared local memd HTTP daemon
+        #[arg(long, default_value = "http://127.0.0.1:8787/mcp")]
+        memd_url: String,
 
         /// Update Codex MCP config file
         #[arg(long, default_value_t = true, action = ArgAction::Set)]
@@ -391,13 +395,14 @@ pub async fn run_cli<S: Store>(
             scope,
             allow_tenants,
             project_dir,
-            memd_command,
+            memd_command: _memd_command,
             memd_data_dir,
             install_codex,
             install_claude,
             codex_config_path,
             claude_config_path,
             write_agent_files,
+            memd_url,
         } => {
             let tenant = TenantId::new(&tenant_id)?;
             let project_dir = absolutize_project_dir(&project_dir)?;
@@ -411,14 +416,13 @@ pub async fn run_cli<S: Store>(
                 allow_tenants.as_deref(),
                 &effective_data_dir,
             )?;
-            let mcp_args = build_mcp_args(memd_data_dir.as_deref());
-            let claude_snippet = build_claude_snippet(&memd_command, &mcp_args);
-            let codex_snippet = build_codex_snippet(&memd_command, &mcp_args);
+            let claude_snippet = build_claude_snippet(&memd_url);
+            let codex_snippet = build_codex_snippet(&memd_url);
             let guardrail_block = render_guardrail_block(&scope_config);
 
             let guardrail_path = memd_dir.join("memory_guardrails.md");
             let claude_snippet_path = memd_dir.join("mcp_config_claude.json");
-            let codex_snippet_path = memd_dir.join("mcp_config_codex.json");
+            let codex_snippet_path = memd_dir.join("mcp_config_codex.toml");
             let tenant_scope_path = memd_dir.join("tenant_scope.json");
 
             std::fs::write(&guardrail_path, &guardrail_block)?;
@@ -428,7 +432,7 @@ pub async fn run_cli<S: Store>(
             )?;
             std::fs::write(
                 &codex_snippet_path,
-                format!("{}\n", serde_json::to_string_pretty(&codex_snippet)?),
+                format!("{}\n", toml::to_string_pretty(&codex_snippet)?),
             )?;
             std::fs::write(
                 &tenant_scope_path,
@@ -454,7 +458,7 @@ pub async fn run_cli<S: Store>(
                 } else {
                     default_codex_config_path()?
                 };
-                upsert_codex_config(&target, &memd_command, &mcp_args)?;
+                upsert_codex_config(&target, &memd_url)?;
                 installed_codex_path = Some(target);
             }
 
@@ -465,7 +469,7 @@ pub async fn run_cli<S: Store>(
                 } else {
                     default_claude_config_path()?
                 };
-                upsert_claude_config(&target, &memd_command, &mcp_args)?;
+                upsert_claude_config(&target, &memd_url)?;
                 installed_claude_path = Some(target);
             }
 
@@ -644,7 +648,11 @@ fn export_format_name(format: ExportFormat) -> &'static str {
     }
 }
 
-fn render_export(chunks: &[MemoryChunk], tenant: &TenantId, format: ExportFormat) -> Result<String> {
+fn render_export(
+    chunks: &[MemoryChunk],
+    tenant: &TenantId,
+    format: ExportFormat,
+) -> Result<String> {
     match format {
         ExportFormat::Markdown => Ok(render_markdown_export(chunks, tenant)),
         ExportFormat::Json => Ok(serde_json::to_string_pretty(chunks)?),
@@ -659,34 +667,27 @@ fn render_export(chunks: &[MemoryChunk], tenant: &TenantId, format: ExportFormat
     }
 }
 
-fn build_mcp_args(memd_data_dir: Option<&Path>) -> Vec<String> {
-    let mut args = vec!["--mode".to_string(), "mcp".to_string()];
-    if let Some(path) = memd_data_dir {
-        args.push("--data-dir".to_string());
-        args.push(path.display().to_string());
-    }
-    args
-}
-
-fn build_claude_snippet(memd_command: &str, mcp_args: &[String]) -> Value {
+fn build_claude_snippet(memd_url: &str) -> Value {
     json!({
         "mcpServers": {
             "memd": {
-                "command": memd_command,
-                "args": mcp_args
+                "type": "http",
+                "url": memd_url
             }
         }
     })
 }
 
-fn build_codex_snippet(memd_command: &str, mcp_args: &[String]) -> Value {
-    json!({
-        "memd": {
-            "command": memd_command,
-            "type": "stdio",
-            "args": mcp_args
-        }
-    })
+fn build_codex_snippet(memd_url: &str) -> toml::Value {
+    let mut memd_table = toml::map::Map::new();
+    memd_table.insert("url".to_string(), toml::Value::String(memd_url.to_string()));
+
+    let mut mcp_servers = toml::map::Map::new();
+    mcp_servers.insert("memd".to_string(), toml::Value::Table(memd_table));
+
+    let mut root = toml::map::Map::new();
+    root.insert("mcp_servers".to_string(), toml::Value::Table(mcp_servers));
+    toml::Value::Table(root)
 }
 
 fn render_guardrail_block(scope_config: &TenantScopeConfig) -> String {
@@ -710,7 +711,9 @@ fn render_guardrail_block(scope_config: &TenantScopeConfig) -> String {
         "- Effective read tenants: `{}`\n",
         scope_config.read_tenants.join(", ")
     ));
-    out.push_str("- Hard rule: do not send a final answer without memory retrieval + memory write.\n\n");
+    out.push_str(
+        "- Hard rule: do not send a final answer without memory retrieval + memory write.\n\n",
+    );
     out.push_str("### Mandatory Per-Task Protocol\n\n");
     out.push_str("1. Retrieve first:\n");
     out.push_str("   - For each tenant in the effective read set, call `context.find_relevant_context` or `memory.search`.\n");
@@ -720,9 +723,13 @@ fn render_guardrail_block(scope_config: &TenantScopeConfig) -> String {
     }
     out.push_str("2. Implement using retrieved context.\n");
     out.push_str("3. Persist before final response:\n");
-    out.push_str("   - Write only to the required write tenant using `memory.add` or `memory.add_batch`.\n");
+    out.push_str(
+        "   - Write only to the required write tenant using `memory.add` or `memory.add_batch`.\n",
+    );
     out.push_str("4. If memd is unavailable:\n");
-    out.push_str("   - Explicitly report memory persistence failure and stop before final answer.\n\n");
+    out.push_str(
+        "   - Explicitly report memory persistence failure and stop before final answer.\n\n",
+    );
     out.push_str("### Suggested Memory Write Template\n\n");
     out.push_str("Use `chunk_type: \"summary\"` and tags such as:\n");
     out.push_str("- `ctx:doc`\n");
@@ -794,30 +801,50 @@ fn write_json(path: &Path, value: &Value) -> Result<()> {
     Ok(())
 }
 
+fn read_or_init_toml(path: &Path) -> Result<toml::Value> {
+    if !path.exists() {
+        return Ok(toml::Value::Table(toml::map::Map::new()));
+    }
+    let raw = std::fs::read_to_string(path)?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(toml::Value::Table(toml::map::Map::new()));
+    }
+    Ok(toml::from_str(trimmed)?)
+}
+
+fn write_toml(path: &Path, value: &toml::Value) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _ = backup_existing(path)?;
+    std::fs::write(path, format!("{}\n", toml::to_string_pretty(value)?))?;
+    Ok(())
+}
+
 fn default_codex_config_path() -> Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| {
         crate::error::MemdError::StorageError("cannot resolve home directory".to_string())
     })?;
-    Ok(home.join(".codex").join("mcp_config.json"))
+    Ok(home.join(".codex").join("config.toml"))
 }
 
 fn default_claude_config_path() -> Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| {
         crate::error::MemdError::StorageError("cannot resolve home directory".to_string())
     })?;
-    Ok(home
-        .join(".config")
-        .join("claude")
-        .join("mcp_settings.json"))
+    Ok(home.join(".claude.json"))
 }
 
-fn upsert_claude_config(path: &Path, memd_command: &str, mcp_args: &[String]) -> Result<()> {
+fn upsert_claude_config(path: &Path, memd_url: &str) -> Result<()> {
     let mut root = read_or_init_json(path)?;
     if !root.is_object() {
         root = json!({});
     }
     let root_obj = root.as_object_mut().expect("root object");
-    let mcp_servers = root_obj.entry("mcpServers".to_string()).or_insert(json!({}));
+    let mcp_servers = root_obj
+        .entry("mcpServers".to_string())
+        .or_insert(json!({}));
     if !mcp_servers.is_object() {
         *mcp_servers = json!({});
     }
@@ -825,38 +852,33 @@ fn upsert_claude_config(path: &Path, memd_command: &str, mcp_args: &[String]) ->
     servers_obj.insert(
         "memd".to_string(),
         json!({
-            "command": memd_command,
-            "args": mcp_args
+            "type": "http",
+            "url": memd_url
         }),
     );
     write_json(path, &root)
 }
 
-fn upsert_codex_config(path: &Path, memd_command: &str, mcp_args: &[String]) -> Result<()> {
-    let mut root = read_or_init_json(path)?;
-    if !root.is_object() {
-        root = json!({});
-    }
-    let root_obj = root.as_object_mut().expect("root object");
-    let entry = json!({
-        "command": memd_command,
-        "type": "stdio",
-        "args": mcp_args
-    });
-
-    if let Some(servers) = root_obj.get_mut("servers") {
-        if !servers.is_object() {
-            *servers = json!({});
-        }
-        servers
-            .as_object_mut()
-            .expect("servers object")
-            .insert("memd".to_string(), entry);
-    } else {
-        root_obj.insert("memd".to_string(), entry);
+fn upsert_codex_config(path: &Path, memd_url: &str) -> Result<()> {
+    let mut root = read_or_init_toml(path)?;
+    if !root.is_table() {
+        root = toml::Value::Table(toml::map::Map::new());
     }
 
-    write_json(path, &root)
+    let root_table = root.as_table_mut().expect("root table");
+    let mcp_servers = root_table
+        .entry("mcp_servers".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    if !mcp_servers.is_table() {
+        *mcp_servers = toml::Value::Table(toml::map::Map::new());
+    }
+
+    let servers_table = mcp_servers.as_table_mut().expect("mcp_servers table");
+    let mut memd_table = toml::map::Map::new();
+    memd_table.insert("url".to_string(), toml::Value::String(memd_url.to_string()));
+    servers_table.insert("memd".to_string(), toml::Value::Table(memd_table));
+
+    write_toml(path, &root)
 }
 
 fn render_markdown_export(chunks: &[MemoryChunk], tenant: &TenantId) -> String {
@@ -869,7 +891,10 @@ fn render_markdown_export(chunks: &[MemoryChunk], tenant: &TenantId) -> String {
         out.push_str(&format!("## {}\n\n", chunk.chunk_id));
         out.push_str(&format!("- type: `{}`\n", chunk.chunk_type));
         out.push_str(&format!("- project_id: `{}`\n", chunk.project_id));
-        out.push_str(&format!("- timestamp_created_ms: `{}`\n", chunk.timestamp_created));
+        out.push_str(&format!(
+            "- timestamp_created_ms: `{}`\n",
+            chunk.timestamp_created
+        ));
         if let Some(path) = &chunk.source.path {
             out.push_str(&format!("- source_path: `{}`\n", path));
         }
@@ -994,6 +1019,7 @@ mod tests {
                 project_dir: project_dir.clone(),
                 memd_command: "memd".to_string(),
                 memd_data_dir: Some(PathBuf::from("/tmp/memd-data")),
+                memd_url: "http://127.0.0.1:8787/mcp".to_string(),
                 install_codex: true,
                 install_claude: true,
                 codex_config_path: Some(codex_path.clone()),
@@ -1004,7 +1030,8 @@ mod tests {
         .await
         .unwrap();
 
-        let guardrails = std::fs::read_to_string(project_dir.join(".memd/memory_guardrails.md")).unwrap();
+        let guardrails =
+            std::fs::read_to_string(project_dir.join(".memd/memory_guardrails.md")).unwrap();
         assert!(guardrails.contains("demo_tenant"));
         assert!(guardrails.contains("context.find_relevant_context"));
         assert!(guardrails.contains("memory.add"));
@@ -1020,15 +1047,23 @@ mod tests {
         let agents = std::fs::read_to_string(project_dir.join("AGENTS.md")).unwrap();
         assert!(agents.contains("memd-guardrails:start"));
 
-        let claude_cfg: Value = serde_json::from_str(&std::fs::read_to_string(&claude_path).unwrap()).unwrap();
+        let claude_cfg: Value =
+            serde_json::from_str(&std::fs::read_to_string(&claude_path).unwrap()).unwrap();
         assert_eq!(
-            claude_cfg["mcpServers"]["memd"]["command"].as_str(),
-            Some("memd")
+            claude_cfg["mcpServers"]["memd"]["type"].as_str(),
+            Some("http")
+        );
+        assert_eq!(
+            claude_cfg["mcpServers"]["memd"]["url"].as_str(),
+            Some("http://127.0.0.1:8787/mcp")
         );
 
-        let codex_cfg: Value = serde_json::from_str(&std::fs::read_to_string(&codex_path).unwrap()).unwrap();
-        assert_eq!(codex_cfg["memd"]["command"].as_str(), Some("memd"));
-        assert_eq!(codex_cfg["memd"]["type"].as_str(), Some("stdio"));
+        let codex_cfg: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&codex_path).unwrap()).unwrap();
+        assert_eq!(
+            codex_cfg["mcp_servers"]["memd"]["url"].as_str(),
+            Some("http://127.0.0.1:8787/mcp")
+        );
     }
 
     #[tokio::test]
@@ -1049,6 +1084,7 @@ mod tests {
                     project_dir: project_dir.clone(),
                     memd_command: "memd".to_string(),
                     memd_data_dir: None,
+                    memd_url: "http://127.0.0.1:8787/mcp".to_string(),
                     install_codex: false,
                     install_claude: false,
                     codex_config_path: None,
@@ -1083,6 +1119,7 @@ mod tests {
                 project_dir: project_dir.clone(),
                 memd_command: "memd".to_string(),
                 memd_data_dir: None,
+                memd_url: "http://127.0.0.1:8787/mcp".to_string(),
                 install_codex: false,
                 install_claude: false,
                 codex_config_path: None,
@@ -1125,6 +1162,7 @@ mod tests {
                 project_dir: project_dir.clone(),
                 memd_command: "memd".to_string(),
                 memd_data_dir: Some(data_dir.clone()),
+                memd_url: "http://127.0.0.1:8787/mcp".to_string(),
                 install_codex: false,
                 install_claude: false,
                 codex_config_path: None,

@@ -79,6 +79,27 @@ struct Args {
     #[arg(long)]
     max_documents: Option<usize>,
 
+    /// Retrieval system variant to run (`hybrid-feature`, `hybrid-cross-encoder`,
+    /// `dense-only`, `bm25-only`).
+    #[arg(long, default_value = "hybrid-feature")]
+    system_variant: String,
+
+    /// Include abstention questions for LongMemEval-formatted datasets.
+    ///
+    /// Default is false to match LongMemEval retrieval evaluation conventions.
+    #[arg(long, default_value_t = false)]
+    include_abstention: bool,
+
+    /// Optional cap of haystack sessions retained per query when loading
+    /// LongMemEval-formatted datasets.
+    #[arg(long)]
+    max_sessions_per_query: Option<usize>,
+
+    /// Optional cap of characters retained from each LongMemEval session
+    /// document during conversion.
+    #[arg(long)]
+    max_session_chars: Option<usize>,
+
     /// Baseline benchmark report JSON for regression gating.
     #[arg(long)]
     baseline_report: Option<String>,
@@ -219,6 +240,7 @@ fn main() -> ExitCode {
                     .iter()
                     .map(std::path::PathBuf::from)
                     .collect(),
+                system_variant: args.system_variant,
                 bootstrap_iterations: args.bootstrap_iterations,
                 seed: args.seed,
                 report_json: args.report_json.as_deref().map(std::path::PathBuf::from),
@@ -227,6 +249,9 @@ fn main() -> ExitCode {
                 threshold_precision: args.threshold_precision,
                 max_queries: args.max_queries,
                 max_documents: args.max_documents,
+                include_abstention: args.include_abstention,
+                max_sessions_per_query: args.max_sessions_per_query,
+                max_session_chars: args.max_session_chars,
             };
             suites::benchmark_protocol::run_benchmark_protocol(
                 &memd_binary,

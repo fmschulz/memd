@@ -216,7 +216,6 @@ mod tests {
         let rebuilder = HnswRebuilder::new();
         let (_, result) = rebuilder.rebuild_clean(&source, &deleted, &config).unwrap();
 
-        // Duration should be non-negative
-        assert!(result.duration.as_nanos() >= 0);
+        let _duration = result.duration;
     }
 }

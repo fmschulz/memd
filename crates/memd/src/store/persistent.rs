@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
 use std::time::Duration;
+use std::time::Instant;
 
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::{mpsc, watch};
@@ -21,6 +21,9 @@ use super::metadata::{ChunkMetadata, MetadataStore, SqliteMetadataStore};
 use crate::compaction::{CompactionConfig, CompactionMetrics, CompactionResult, CompactionRunner};
 use crate::metrics::TieredMetrics;
 use crate::store::{apply_feedback_scores, FeedbackConfig, FeedbackEntry};
+use crate::task_memory::{
+    TaskArtifact, TaskArtifactWriteResult, TaskProjection, TaskSearchFilters,
+};
 use crate::tiered::{CacheStats, HotTierStats, TierDecision, TieredTiming};
 
 /// Combined tiered search statistics
@@ -36,12 +39,13 @@ pub struct TieredStats {
     pub tiered_metrics: TieredMetrics,
 }
 use super::segment::{SegmentReader, SegmentWriter};
-use super::wal::{WalReader, WalRecordType, WalWriter};
-use super::{Store, StoreStats};
+use super::wal::{TaskArtifactWalPayload, WalReader, WalRecord, WalRecordType, WalWriter};
+use super::{rank_candidate_chunks, score_candidate_chunk, Store, StoreStats};
 use crate::embeddings::EmbeddingModel;
 use crate::error::{MemdError, Result};
 use crate::index::Bm25Index;
 use crate::metrics::{IndexStats, MetricsCollector, QueryMetrics, TieredQueryMetrics};
+use crate::retrieval::RerankerMode;
 use crate::types::{ChunkId, ChunkStatus, MemoryChunk, TenantId};
 
 /// Configuration for persistent store
@@ -737,6 +741,7 @@ impl TenantStore {
 
         let mut adds = 0;
         let mut deletes = 0;
+        let mut task_artifacts = 0;
         let mut skipped = 0;
 
         for record in &records {
@@ -838,6 +843,21 @@ impl TenantStore {
                         skipped += 1;
                     }
                 }
+                WalRecordType::TaskArtifact => {
+                    let payload: TaskArtifactWalPayload = serde_json::from_slice(&record.payload)
+                        .map_err(|e| {
+                        MemdError::StorageError(format!(
+                            "deserialize WAL task artifact payload: {}",
+                            e
+                        ))
+                    })?;
+                    metadata.insert_task_artifact_bundle(
+                        &payload.artifact,
+                        &payload.projection_chunk_ids,
+                        &payload.projection_kinds,
+                    )?;
+                    task_artifacts += 1;
+                }
                 WalRecordType::Checkpoint => {
                     // Checkpoint records are filtered out by records_for_recovery()
                     // but handle gracefully if encountered
@@ -848,6 +868,7 @@ impl TenantStore {
         info!(
             adds,
             deletes,
+            task_artifacts,
             skipped,
             tenant = %self.tenant_id,
             "WAL recovery complete"
@@ -968,6 +989,282 @@ impl Store for PersistentStore {
 
     async fn add_feedback(&self, feedback: FeedbackEntry) -> Result<()> {
         self.metadata.insert_feedback(&feedback)
+    }
+
+    async fn add_task_artifact(
+        &self,
+        artifact: TaskArtifact,
+        projections: Vec<TaskProjection>,
+    ) -> Result<TaskArtifactWriteResult> {
+        let projection_kinds = projections
+            .iter()
+            .map(|projection| projection.kind.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        if projections.is_empty() {
+            return Err(MemdError::StorageError(
+                "task artifact requires at least one projection".into(),
+            ));
+        }
+
+        let tenant_id = artifact.tenant_id.clone();
+        let tenant_id_str = tenant_id.to_string();
+        let projection_chunks = projections
+            .into_iter()
+            .map(|projection| projection.chunk)
+            .collect::<Vec<_>>();
+        if projection_chunks
+            .iter()
+            .any(|chunk| chunk.tenant_id != tenant_id)
+        {
+            return Err(MemdError::StorageError(
+                "task projections must belong to the same tenant as the artifact".into(),
+            ));
+        }
+
+        let (expanded_chunks, primary_positions) = self.expand_chunks_for_add(projection_chunks)?;
+        let pending = self.prepare_pending_chunks(expanded_chunks)?;
+        let tenant = self.get_or_create_tenant(&tenant_id_str)?;
+
+        let expanded_ids: Vec<ChunkId> = pending.iter().map(|row| row.chunk_id.clone()).collect();
+        let mut projection_chunk_ids = Vec::with_capacity(primary_positions.len());
+        for pos in &primary_positions {
+            let chunk_id = expanded_ids.get(*pos).ok_or_else(|| {
+                MemdError::StorageError("missing primary projection chunk id".into())
+            })?;
+            projection_chunk_ids.push(chunk_id.to_string());
+        }
+
+        let task_wal_payload = serde_json::to_vec(&TaskArtifactWalPayload {
+            artifact: artifact.clone(),
+            projection_chunk_ids: projection_chunk_ids.clone(),
+            projection_kinds: projection_kinds.clone(),
+        })
+        .map_err(|e| {
+            MemdError::StorageError(format!("serialize task artifact WAL payload: {}", e))
+        })?;
+
+        let mut wal_records = pending
+            .iter()
+            .map(|row| {
+                WalRecord::add(
+                    tenant_id_str.clone(),
+                    row.chunk_id.to_string(),
+                    row.chunk.timestamp_created,
+                    row.payload.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        wal_records.push(WalRecord::task_artifact(
+            tenant_id_str.clone(),
+            artifact.artifact_id.clone(),
+            artifact.timestamp_created,
+            task_wal_payload,
+        ));
+        {
+            let mut wal = tenant.wal.lock();
+            wal.append_batch(&wal_records)?;
+        }
+
+        let mut metadata_rows = Vec::with_capacity(pending.len());
+        let mut index_rows = Vec::with_capacity(pending.len());
+        for row in &pending {
+            tenant.get_or_create_active_segment(self.config.segment_max_chunks)?;
+            let (segment_id, ordinal) = {
+                let mut active = tenant.active_segment.lock();
+                let seg = active
+                    .as_mut()
+                    .ok_or_else(|| MemdError::StorageError("no active segment".into()))?;
+                let ordinal = seg.writer.append_chunk(&row.payload)?;
+                seg.chunk_count += 1;
+                (seg.writer.id(), ordinal)
+            };
+
+            metadata_rows.push(ChunkMetadata {
+                chunk_id: row.chunk_id.clone(),
+                tenant_id: row.chunk.tenant_id.clone(),
+                project_id: row.chunk.project_id.as_option().map(|s| s.to_string()),
+                segment_id,
+                ordinal,
+                chunk_type: row.chunk.chunk_type,
+                status: row.chunk.status,
+                timestamp_created: row.chunk.timestamp_created,
+                hash: row.chunk.hash.clone(),
+                source_uri: row.chunk.source.uri.clone(),
+            });
+            index_rows.push((row.chunk_id.clone(), row.chunk.text.clone()));
+        }
+        self.metadata.insert_many(&metadata_rows)?;
+        let chunk_ids_for_state: Vec<ChunkId> = metadata_rows
+            .iter()
+            .map(|row| row.chunk_id.clone())
+            .collect();
+        self.metadata
+            .mark_index_pending(&tenant_id, &chunk_ids_for_state, current_time_ms())?;
+        self.metadata.insert_task_artifact_bundle(
+            &artifact,
+            &projection_chunk_ids,
+            &projection_kinds,
+        )?;
+
+        if self.async_indexing_enabled() {
+            if let Some(indexer) = self.async_indexer.as_ref() {
+                let job = IndexJob {
+                    tenant_id: tenant_id.clone(),
+                    chunk_ids: chunk_ids_for_state.clone(),
+                    index_rows,
+                };
+                if indexer.job_tx.send(job).is_err() {
+                    let error_message = "async indexer queue is closed";
+                    warn!(tenant_id = %tenant_id, error = error_message, "failed to enqueue async index job");
+                    mark_index_failed_many(
+                        self.metadata.as_ref(),
+                        &tenant_id,
+                        &chunk_ids_for_state,
+                        error_message,
+                    );
+                }
+            } else {
+                let error_message = "async indexing enabled but worker unavailable";
+                warn!(tenant_id = %tenant_id, error = error_message, "cannot enqueue async index job");
+                mark_index_failed_many(
+                    self.metadata.as_ref(),
+                    &tenant_id,
+                    &chunk_ids_for_state,
+                    error_message,
+                );
+            }
+        } else {
+            let index_result = if let Some(ref hybrid) = self.hybrid_searcher {
+                hybrid.index_batch(&tenant_id, &index_rows).await
+            } else if let Some(ref searcher) = self.dense_searcher {
+                searcher.index_batch(&tenant_id, &index_rows).await
+            } else {
+                Ok(())
+            };
+
+            match index_result {
+                Ok(()) => {
+                    self.metadata.mark_indexed(
+                        &tenant_id,
+                        &chunk_ids_for_state,
+                        current_time_ms(),
+                    )?;
+                }
+                Err(e) => {
+                    warn!(tenant_id = %tenant_id, error = %e, "sync index batch failed");
+                    mark_index_failed_many(
+                        self.metadata.as_ref(),
+                        &tenant_id,
+                        &chunk_ids_for_state,
+                        &e.to_string(),
+                    );
+                }
+            }
+        }
+
+        self.checkpoint_after_batch(&tenant, &tenant_id_str, (pending.len() + 1) as u32)?;
+
+        Ok(TaskArtifactWriteResult {
+            task_id: artifact.task_id.clone(),
+            artifact_id: artifact.artifact_id.clone(),
+            projection_chunk_ids,
+        })
+    }
+
+    async fn get_task_artifact(
+        &self,
+        tenant_id: &TenantId,
+        artifact_id: &str,
+    ) -> Result<Option<TaskArtifact>> {
+        self.metadata.get_task_artifact(tenant_id, artifact_id)
+    }
+
+    async fn list_task_artifacts(
+        &self,
+        tenant_id: &TenantId,
+        task_id: &str,
+    ) -> Result<Vec<TaskArtifact>> {
+        self.metadata.list_task_artifacts(tenant_id, task_id)
+    }
+
+    async fn search_task_projection_chunk_ids(
+        &self,
+        tenant_id: &TenantId,
+        filters: &TaskSearchFilters,
+        limit: usize,
+    ) -> Result<Vec<ChunkId>> {
+        self.metadata
+            .search_task_projection_chunk_ids(tenant_id, filters, limit)
+    }
+
+    async fn rerank_chunks_for_query(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        chunk_ids: &[ChunkId],
+        k: usize,
+    ) -> Result<Vec<(MemoryChunk, f32)>> {
+        if chunk_ids.is_empty() || k == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut chunks = Vec::with_capacity(chunk_ids.len());
+        for chunk_id in chunk_ids {
+            if let Some(chunk) = self.get(tenant_id, chunk_id).await? {
+                chunks.push(chunk);
+            }
+        }
+
+        let Some(hybrid) = self.hybrid_searcher.as_ref() else {
+            return Ok(rank_candidate_chunks(chunks, query, k));
+        };
+
+        let use_cross_encoder = hybrid.reranker_mode() == RerankerMode::CrossEncoder;
+        let mut base_results = Vec::with_capacity(chunks.len());
+        let mut rerank_meta = Vec::with_capacity(chunks.len());
+        let mut chunk_by_id = HashMap::with_capacity(chunks.len());
+
+        for chunk in chunks {
+            let base_score = score_candidate_chunk(query, &chunk);
+            if !query.trim().is_empty() && !use_cross_encoder && base_score <= 0.0 {
+                continue;
+            }
+
+            base_results.push(HybridSearchResult {
+                chunk_id: chunk.chunk_id.clone(),
+                final_score: base_score,
+                dense_rank: None,
+                sparse_rank: None,
+            });
+            rerank_meta.push(ChunkMetaForRerank {
+                chunk_id: chunk.chunk_id.clone(),
+                rrf_score: base_score,
+                timestamp_created: chunk.timestamp_created,
+                project_id: chunk.project_id.as_option().map(str::to_string),
+                chunk_type: chunk.chunk_type,
+                text: Some(chunk.text.clone()),
+            });
+            chunk_by_id.insert(chunk.chunk_id.clone(), chunk);
+        }
+
+        if base_results.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let reranked =
+            hybrid.rerank_with_metadata_for_query(query, base_results, rerank_meta, None);
+        let mut results = reranked
+            .into_iter()
+            .filter_map(|result| {
+                chunk_by_id
+                    .get(&result.chunk_id)
+                    .cloned()
+                    .map(|chunk| (chunk, result.final_score))
+            })
+            .collect::<Vec<_>>();
+        results.truncate(k);
+        Ok(results)
     }
 
     async fn list_feedback(
@@ -1393,10 +1690,15 @@ impl PersistentStore {
                 index_rows.push((row.chunk_id.clone(), row.chunk.text.clone()));
             }
             self.metadata.insert_many(&metadata_rows)?;
-            let chunk_ids_for_state: Vec<ChunkId> =
-                metadata_rows.iter().map(|row| row.chunk_id.clone()).collect();
-            self.metadata
-                .mark_index_pending(&tenant_id, &chunk_ids_for_state, current_time_ms())?;
+            let chunk_ids_for_state: Vec<ChunkId> = metadata_rows
+                .iter()
+                .map(|row| row.chunk_id.clone())
+                .collect();
+            self.metadata.mark_index_pending(
+                &tenant_id,
+                &chunk_ids_for_state,
+                current_time_ms(),
+            )?;
 
             if self.async_indexing_enabled() {
                 if let Some(indexer) = self.async_indexer.as_ref() {
@@ -1803,7 +2105,15 @@ impl PersistentStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ChunkType;
+    use crate::embeddings::MockEmbedder;
+    use crate::retrieval::{RerankerConfig, RerankerMode};
+    use crate::store::dense::{DenseSearchConfig, DenseSearcher};
+    use crate::store::hybrid::{HybridConfig, HybridSearcher};
+    use crate::store::Store;
+    use crate::task_memory::{build_task_projections, TaskArtifact, TaskSearchFilters};
+    use crate::types::{ChunkType, ProjectId};
+    use rusqlite::Connection;
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     fn make_test_store() -> (PersistentStore, tempfile::TempDir) {
@@ -1873,7 +2183,10 @@ mod tests {
         let (store, _dir) = make_test_store();
         let tenant = make_tenant();
 
-        store.add(make_chunk(&tenant, "indexed state check")).await.unwrap();
+        store
+            .add(make_chunk(&tenant, "indexed state check"))
+            .await
+            .unwrap();
 
         let (pending, indexed, failed) = store.metadata.count_by_index_state(&tenant).unwrap();
         assert_eq!(pending, 0);
@@ -1896,7 +2209,10 @@ mod tests {
         };
         let store = PersistentStore::open(config).unwrap();
 
-        store.add(make_chunk(&tenant, "pending state check")).await.unwrap();
+        store
+            .add(make_chunk(&tenant, "pending state check"))
+            .await
+            .unwrap();
 
         // Async worker runs out-of-band; allow a short settle window.
         let mut saw_pending = false;
@@ -1917,7 +2233,10 @@ mod tests {
             saw_pending || saw_indexed,
             "chunk should appear in pending or indexed states"
         );
-        assert!(saw_indexed, "async worker should eventually mark chunk indexed");
+        assert!(
+            saw_indexed,
+            "async worker should eventually mark chunk indexed"
+        );
     }
 
     #[tokio::test]
@@ -2089,6 +2408,139 @@ mod tests {
             assert!(retrieved.is_some());
             assert_eq!(retrieved.unwrap().text, "crash test data");
         }
+    }
+
+    #[tokio::test]
+    async fn wal_recovery_rebuilds_task_side_tables() {
+        let dir = tempdir().unwrap();
+        let tenant = make_tenant();
+        let metadata_path = dir.path().join("metadata.db");
+        let task_id;
+        let artifact_id;
+
+        {
+            let config = PersistentStoreConfig {
+                data_dir: dir.path().to_path_buf(),
+                segment_max_chunks: 100,
+                wal_checkpoint_interval: 10,
+                enable_dense_search: false,
+                enable_hybrid_search: false,
+                ..Default::default()
+            };
+            let store = PersistentStore::open(config).unwrap();
+
+            let mut artifact = TaskArtifact::new_task_start(tenant.clone());
+            artifact.project_id = ProjectId::new(Some("project_alpha".to_string()));
+            artifact.goal = Some("Map the perturbation-responsive genes".to_string());
+            artifact.dataset_refs = vec![crate::task_memory::DatasetRef {
+                name: "rna_seq".to_string(),
+                version: Some("v1".to_string()),
+                description: None,
+            }];
+            task_id = artifact.task_id.clone();
+            artifact_id = artifact.artifact_id.clone();
+
+            store
+                .add_task_artifact(artifact.clone(), build_task_projections(&artifact))
+                .await
+                .unwrap();
+
+            let conn = Connection::open(&metadata_path).unwrap();
+            conn.execute("DELETE FROM artifact_links", []).unwrap();
+            conn.execute("DELETE FROM task_datasets", []).unwrap();
+            conn.execute("DELETE FROM task_entities", []).unwrap();
+            conn.execute("DELETE FROM task_events", []).unwrap();
+            conn.execute("DELETE FROM tasks", []).unwrap();
+            conn.execute("DELETE FROM task_artifacts", []).unwrap();
+            drop(conn);
+
+            std::mem::forget(store);
+        }
+
+        {
+            let config = PersistentStoreConfig {
+                data_dir: dir.path().to_path_buf(),
+                segment_max_chunks: 100,
+                wal_checkpoint_interval: 10,
+                enable_dense_search: false,
+                enable_hybrid_search: false,
+                ..Default::default()
+            };
+            let store = PersistentStore::open(config).unwrap();
+
+            let recovered = store
+                .get_task_artifact(&tenant, &artifact_id)
+                .await
+                .unwrap();
+            assert!(recovered.is_some());
+
+            let artifacts = store.list_task_artifacts(&tenant, &task_id).await.unwrap();
+            assert_eq!(artifacts.len(), 1);
+
+            let chunk_ids = store
+                .search_task_projection_chunk_ids(
+                    &tenant,
+                    &TaskSearchFilters {
+                        task_id: Some(task_id.clone()),
+                        ..Default::default()
+                    },
+                    10,
+                )
+                .await
+                .unwrap();
+            assert!(!chunk_ids.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn rerank_chunks_for_query_uses_hybrid_reranker_for_candidate_set() {
+        let (mut store, _dir) = make_test_store();
+        let tenant = make_tenant();
+        let now_ms = current_time_ms();
+
+        let mut older = make_chunk(&tenant, "alpha beta exact lexical match");
+        older.timestamp_created = now_ms - 30 * 24 * 60 * 60 * 1000;
+        let older_id = store.add(older).await.unwrap();
+
+        let mut newer = make_chunk(&tenant, "alpha parameter note");
+        newer.timestamp_created = now_ms;
+        let newer_id = store.add(newer).await.unwrap();
+
+        let embedder = Arc::new(MockEmbedder::new());
+        let dense = Arc::new(DenseSearcher::with_embedder(
+            embedder,
+            DenseSearchConfig {
+                persist: false,
+                ..Default::default()
+            },
+        ));
+        let hybrid = HybridSearcher::new(
+            dense,
+            None,
+            HybridConfig {
+                enable_sparse: false,
+                enable_tiered: false,
+                reranker: RerankerConfig {
+                    mode: RerankerMode::Feature,
+                    rrf_weight: 0.0,
+                    recency_weight: 1.0,
+                    recency_half_life_days: 7.0,
+                    project_weight: 0.0,
+                    type_weight: 0.0,
+                    cross_encoder_weight: 0.0,
+                },
+                ..Default::default()
+            },
+        );
+        store.hybrid_searcher = Some(Arc::new(hybrid));
+
+        let ranked = store
+            .rerank_chunks_for_query(&tenant, "alpha beta", &[older_id, newer_id.clone()], 2)
+            .await
+            .unwrap();
+
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].0.chunk_id, newer_id);
     }
 
     #[tokio::test]

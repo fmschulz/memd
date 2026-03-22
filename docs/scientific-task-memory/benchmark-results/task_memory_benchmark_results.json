@@ -1,0 +1,2302 @@
+{
+  "generated_at": "2026-03-21T23:20:30Z",
+  "corpus_path": "docs/scientific-task-memory/benchmark-results/task_memory_benchmark_corpus.json",
+  "corpus_description": "Phase 5 benchmark corpus for memd task-oriented knowledge artifacts with confusable sibling tasks",
+  "corpus_version": "2026-03-21.v2",
+  "corpus_notes": {
+    "purpose": "Compare memd chunk-native baseline search against memd task-memory search on the same underlying task knowledge.",
+    "hardening": "Sibling tasks share project scopes, tools, datasets, and overlapping vocabulary so project-scoped systems cannot separate cases trivially.",
+    "systems": [
+      "memd_chunk_baseline",
+      "memd_task_memory"
+    ]
+  },
+  "corpus_case_count": 8,
+  "corpus_query_count": 23,
+  "corpus_projects": [
+    {
+      "project_id": "phase5_auth_reliability",
+      "case_ids": [
+        "jwt_timezone_fix",
+        "jwt_refresh_grace_window"
+      ],
+      "datasets": [
+        "auth_logs@2026-03-21"
+      ],
+      "tools": [
+        "cargo-test"
+      ]
+    },
+    {
+      "project_id": "phase5_regulator_screening",
+      "case_ids": [
+        "mmseqs_marker_search",
+        "mmseqs_sigma_factor_search"
+      ],
+      "datasets": [
+        "screen_counts@v3"
+      ],
+      "tools": [
+        "mmseqs"
+      ]
+    },
+    {
+      "project_id": "phase5_event_bus_selection",
+      "case_ids": [
+        "kafka_queue_selection",
+        "nats_jetstream_selection"
+      ],
+      "datasets": [
+        "platform_requirements@adr-input-v2"
+      ],
+      "tools": [
+        "benchmark-runner"
+      ]
+    },
+    {
+      "project_id": "phase5_repo_indexing",
+      "case_ids": [
+        "codebase_indexing",
+        "frontend_route_indexing"
+      ],
+      "datasets": [
+        "repository_snapshot@HEAD"
+      ],
+      "tools": [
+        "index-codebase.sh"
+      ]
+    }
+  ],
+  "top_k": 5,
+  "workers": 4,
+  "ops_per_worker": 2,
+  "embedding_model": "all-minilm",
+  "system_variant": "hybrid-feature",
+  "systems": {
+    "memd_chunk_baseline": {
+      "mode": "memory.search over flattened chunk-native benchmark artifacts",
+      "seed_total_ms": 65574.2897910095,
+      "index_ready_wait_ms": 0.30337300268001854,
+      "documents_seeded": 56,
+      "search_quality": {
+        "queries": 23,
+        "hit1": 0.0,
+        "hit3": 0.0,
+        "mrr": 0.0,
+        "avg_search_ms": 145.416479826014,
+        "p50_search_ms": 123.75038700702135,
+        "p95_search_ms": 256.87455698789563,
+        "details": [
+          {
+            "query_id": "q_task_goal_jwt",
+            "query_type": "task_lifecycle",
+            "query_text": "why were token validation failures being investigated",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "task_goal",
+            "rank": null,
+            "latency_ms": 160.92260299774352
+          },
+          {
+            "query_id": "q_failed_jwt",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the JWT auth implementation",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": null,
+            "latency_ms": 110.32320199592505
+          },
+          {
+            "query_id": "q_paraphrase_jwt_skew",
+            "query_type": "failed_attempt",
+            "query_text": "where in auth did local offset handling leak into UTC token claims",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": null,
+            "latency_ms": 131.32511099684052
+          },
+          {
+            "query_id": "q_failed_refresh_window",
+            "query_type": "failed_attempt",
+            "query_text": "what caused freshly rotated refresh tokens to still be rejected",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "failed",
+            "rank": null,
+            "latency_ms": 123.39903401152696
+          },
+          {
+            "query_id": "q_why_refresh_runner",
+            "query_type": "why_chosen",
+            "query_text": "why were cargo tests used for the refresh grace window probe",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 125.93315899721347
+          },
+          {
+            "query_id": "q_evidence_refresh",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence showed rotated_at should drive the refresh grace period",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "evidence",
+            "rank": null,
+            "latency_ms": 252.4296230112668
+          },
+          {
+            "query_id": "q_params_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity parameter was used in the mmseqs search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 123.96477200672962
+          },
+          {
+            "query_id": "q_why_mmseqs",
+            "query_type": "why_chosen",
+            "query_text": "why was mmseqs chosen for candidate regulator search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 123.26201499672607
+          },
+          {
+            "query_id": "q_evidence_mmseqs",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence supported the top regulator hit",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "evidence",
+            "rank": null,
+            "latency_ms": 98.0940089939395
+          },
+          {
+            "query_id": "q_paraphrase_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which regulator scan used moderate mmseqs sensitivity instead of the noisy blast setup",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 157.43924499838613
+          },
+          {
+            "query_id": "q_params_sigma",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity setting was used for the secondary sigma factor search",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 123.75038700702135
+          },
+          {
+            "query_id": "q_evidence_sigma",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence kept the secondary sigma factor hit above threshold",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "evidence",
+            "rank": null,
+            "latency_ms": 109.5703109895112
+          },
+          {
+            "query_id": "q_failed_kafka",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the Kafka evaluation prototype",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "failed",
+            "rank": null,
+            "latency_ms": 106.85822900268249
+          },
+          {
+            "query_id": "q_why_kafka_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for queue selection",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 219.53601800487377
+          },
+          {
+            "query_id": "q_evidence_kafka",
+            "query_type": "evidence_lookup",
+            "query_text": "which queue exceeded throughput requirements",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "evidence",
+            "rank": null,
+            "latency_ms": 91.7527040001005
+          },
+          {
+            "query_id": "q_decision_nats",
+            "query_type": "decision_basis",
+            "query_text": "which bus won because operator burden stayed lower and p99 latency stayed tighter",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "evidence",
+            "rank": null,
+            "latency_ms": 156.27488600148354
+          },
+          {
+            "query_id": "q_failed_nats_proto",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the first kafka-first control-plane prototype",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "failed",
+            "rank": null,
+            "latency_ms": 256.87455698789563
+          },
+          {
+            "query_id": "q_why_nats_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for the control-plane event bus comparison",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 285.48253000190016
+          },
+          {
+            "query_id": "q_progress_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for documentation",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": null,
+            "latency_ms": 100.07748399220873
+          },
+          {
+            "query_id": "q_validation_indexing",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the code indexing workflow",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "validation",
+            "rank": null,
+            "latency_ms": 104.23266100406181
+          },
+          {
+            "query_id": "q_paraphrase_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what still made architecture docs retrieval noisy after the main repo index",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": null,
+            "latency_ms": 141.4398729975801
+          },
+          {
+            "query_id": "q_progress_frontend",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for frontend route lookups",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "task_summary",
+            "rank": null,
+            "latency_ms": 120.09208000381477
+          },
+          {
+            "query_id": "q_validation_frontend",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the frontend route indexing workflow",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "validation",
+            "rank": null,
+            "latency_ms": 121.54454299889039
+          }
+        ],
+        "per_type": {
+          "task_lifecycle": {
+            "hit1": 0.0,
+            "hit3": 0.0,
+            "mrr": 0.0
+          },
+          "failed_attempt": {
+            "hit1": 0.0,
+            "hit3": 0.0,
+            "mrr": 0.0
+          },
+          "why_chosen": {
+            "hit1": 0.0,
+            "hit3": 0.0,
+            "mrr": 0.0
+          },
+          "evidence_lookup": {
+            "hit1": 0.0,
+            "hit3": 0.0,
+            "mrr": 0.0
+          },
+          "parameter_lookup": {
+            "hit1": 0.0,
+            "hit3": 0.0,
+            "mrr": 0.0
+          },
+          "decision_basis": {
+            "hit1": 0.0,
+            "hit3": 0.0,
+            "mrr": 0.0
+          }
+        }
+      },
+      "freshness": {
+        "found": true,
+        "rank": 1,
+        "search_ms": 119.70273399492726
+      },
+      "concurrency": {
+        "total_ops": 8,
+        "successes": 8,
+        "errors": [],
+        "success_rate": 1.0,
+        "ops_per_sec": 5.2004624435726265,
+        "total_ms": 1538.3247330028098
+      }
+    },
+    "memd_task_memory": {
+      "mode": "task.* lifecycle writes plus task.search over exact-filtered task artifacts",
+      "seed_total_ms": 106875.92110599508,
+      "index_ready_wait_ms": 0.35123400448355824,
+      "documents_seeded": 144,
+      "task_ids": {
+        "jwt_timezone_fix": "019d12a5-7cd2-79e2-bf71-968d82999de6",
+        "jwt_refresh_grace_window": "019d12a5-b11c-7313-a9bb-e58b2dd2da6a",
+        "mmseqs_marker_search": "019d12a5-e897-7f73-9950-3ef0cdaadc34",
+        "mmseqs_sigma_factor_search": "019d12a6-17bd-74c3-87d5-d78c38f18e5d",
+        "kafka_queue_selection": "019d12a6-4b49-7751-8a6c-bef7044382b0",
+        "nats_jetstream_selection": "019d12a6-800d-7103-940b-8f18ea35aa09",
+        "codebase_indexing": "019d12a6-b9bb-7601-824a-cab162eb3ded",
+        "frontend_route_indexing": "019d12a6-e8fb-7c73-b41b-a41f4ed90316"
+      },
+      "search_quality": {
+        "queries": 23,
+        "hit1": 0.6521739130434783,
+        "hit3": 0.9565217391304348,
+        "mrr": 0.8152173913043478,
+        "avg_search_ms": 2.9229540447451416,
+        "p50_search_ms": 2.3214740067487583,
+        "p95_search_ms": 5.747824005084112,
+        "details": [
+          {
+            "query_id": "q_task_goal_jwt",
+            "query_type": "task_lifecycle",
+            "query_text": "why were token validation failures being investigated",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "task_goal",
+            "rank": 2,
+            "latency_ms": 2.882622997276485
+          },
+          {
+            "query_id": "q_failed_jwt",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the JWT auth implementation",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 2,
+            "latency_ms": 5.056267997133546
+          },
+          {
+            "query_id": "q_paraphrase_jwt_skew",
+            "query_type": "failed_attempt",
+            "query_text": "where in auth did local offset handling leak into UTC token claims",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 6.0582000005524606
+          },
+          {
+            "query_id": "q_failed_refresh_window",
+            "query_type": "failed_attempt",
+            "query_text": "what caused freshly rotated refresh tokens to still be rejected",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "failed",
+            "rank": 4,
+            "latency_ms": 5.747824005084112
+          },
+          {
+            "query_id": "q_why_refresh_runner",
+            "query_type": "why_chosen",
+            "query_text": "why were cargo tests used for the refresh grace window probe",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 1.1757600004784763
+          },
+          {
+            "query_id": "q_evidence_refresh",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence showed rotated_at should drive the refresh grace period",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 1.0690690105548128
+          },
+          {
+            "query_id": "q_params_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity parameter was used in the mmseqs search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 2,
+            "latency_ms": 1.013533998047933
+          },
+          {
+            "query_id": "q_why_mmseqs",
+            "query_type": "why_chosen",
+            "query_text": "why was mmseqs chosen for candidate regulator search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 0.9459070133743808
+          },
+          {
+            "query_id": "q_evidence_mmseqs",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence supported the top regulator hit",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 0.9587000095052645
+          },
+          {
+            "query_id": "q_paraphrase_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which regulator scan used moderate mmseqs sensitivity instead of the noisy blast setup",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 2,
+            "latency_ms": 1.0208879975834861
+          },
+          {
+            "query_id": "q_params_sigma",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity setting was used for the secondary sigma factor search",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 1.0719839920056984
+          },
+          {
+            "query_id": "q_evidence_sigma",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence kept the secondary sigma factor hit above threshold",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 1.0059599881060421
+          },
+          {
+            "query_id": "q_failed_kafka",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the Kafka evaluation prototype",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "failed",
+            "rank": 2,
+            "latency_ms": 4.998889999114908
+          },
+          {
+            "query_id": "q_why_kafka_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for queue selection",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "run",
+            "rank": 2,
+            "latency_ms": 0.9940169984474778
+          },
+          {
+            "query_id": "q_evidence_kafka",
+            "query_type": "evidence_lookup",
+            "query_text": "which queue exceeded throughput requirements",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 2.3214740067487583
+          },
+          {
+            "query_id": "q_decision_nats",
+            "query_type": "decision_basis",
+            "query_text": "which bus won because operator burden stayed lower and p99 latency stayed tighter",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 1.079067005775869
+          },
+          {
+            "query_id": "q_failed_nats_proto",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the first kafka-first control-plane prototype",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 5.177287006517872
+          },
+          {
+            "query_id": "q_why_nats_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for the control-plane event bus comparison",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 1.1568149930099025
+          },
+          {
+            "query_id": "q_progress_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for documentation",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 4.025602000183426
+          },
+          {
+            "query_id": "q_validation_indexing",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the code indexing workflow",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "validation",
+            "rank": 1,
+            "latency_ms": 4.952862989739515
+          },
+          {
+            "query_id": "q_paraphrase_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what still made architecture docs retrieval noisy after the main repo index",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": 2,
+            "latency_ms": 4.964906009263359
+          },
+          {
+            "query_id": "q_progress_frontend",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for frontend route lookups",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 4.379960999358445
+          },
+          {
+            "query_id": "q_validation_frontend",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the frontend route indexing workflow",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "validation",
+            "rank": 1,
+            "latency_ms": 5.170344011276029
+          }
+        ],
+        "per_type": {
+          "task_lifecycle": {
+            "hit1": 0.5,
+            "hit3": 1.0,
+            "mrr": 0.75
+          },
+          "failed_attempt": {
+            "hit1": 0.4,
+            "hit3": 0.8,
+            "mrr": 0.65
+          },
+          "why_chosen": {
+            "hit1": 0.75,
+            "hit3": 1.0,
+            "mrr": 0.875
+          },
+          "evidence_lookup": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          },
+          "parameter_lookup": {
+            "hit1": 0.3333333333333333,
+            "hit3": 1.0,
+            "mrr": 0.6666666666666666
+          },
+          "decision_basis": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          }
+        }
+      },
+      "freshness": {
+        "found": true,
+        "rank": 1,
+        "search_ms": 1.2651290016947314
+      },
+      "concurrency": {
+        "total_ops": 8,
+        "successes": 8,
+        "errors": [],
+        "success_rate": 1.0,
+        "ops_per_sec": 1.1645711019305742,
+        "total_ms": 6869.4818090007175
+      }
+    }
+  },
+  "external_live": {
+    "gpt54_live_cli": {
+      "mode": "gpt54 live CLI context search over the same seeded benchmark corpus",
+      "seed_total_ms": 40243.6170699948,
+      "search_quality": {
+        "queries": 23,
+        "hit1": 0.7391304347826086,
+        "hit3": 0.9130434782608695,
+        "mrr": 0.8260869565217391,
+        "avg_search_ms": 477.73593917372636,
+        "p50_search_ms": 478.6905400105752,
+        "p95_search_ms": 503.6503840092337,
+        "details": [
+          {
+            "query_id": "q_task_goal_jwt",
+            "query_type": "task_lifecycle",
+            "query_text": "why were token validation failures being investigated",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "task_goal",
+            "rank": 2,
+            "latency_ms": 478.10956300236285
+          },
+          {
+            "query_id": "q_failed_jwt",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the JWT auth implementation",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 502.9568440077128
+          },
+          {
+            "query_id": "q_paraphrase_jwt_skew",
+            "query_type": "failed_attempt",
+            "query_text": "where in auth did local offset handling leak into UTC token claims",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 455.0012559921015
+          },
+          {
+            "query_id": "q_failed_refresh_window",
+            "query_type": "failed_attempt",
+            "query_text": "what caused freshly rotated refresh tokens to still be rejected",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "failed",
+            "rank": null,
+            "latency_ms": 478.6905400105752
+          },
+          {
+            "query_id": "q_why_refresh_runner",
+            "query_type": "why_chosen",
+            "query_text": "why were cargo tests used for the refresh grace window probe",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 490.5046100029722
+          },
+          {
+            "query_id": "q_evidence_refresh",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence showed rotated_at should drive the refresh grace period",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 448.4966119925957
+          },
+          {
+            "query_id": "q_params_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity parameter was used in the mmseqs search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 506.9199379940983
+          },
+          {
+            "query_id": "q_why_mmseqs",
+            "query_type": "why_chosen",
+            "query_text": "why was mmseqs chosen for candidate regulator search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 479.25312200095505
+          },
+          {
+            "query_id": "q_evidence_mmseqs",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence supported the top regulator hit",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 464.2889349925099
+          },
+          {
+            "query_id": "q_paraphrase_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which regulator scan used moderate mmseqs sensitivity instead of the noisy blast setup",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 484.5858429907821
+          },
+          {
+            "query_id": "q_params_sigma",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity setting was used for the secondary sigma factor search",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 468.81150400440674
+          },
+          {
+            "query_id": "q_evidence_sigma",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence kept the secondary sigma factor hit above threshold",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 459.75271800125483
+          },
+          {
+            "query_id": "q_failed_kafka",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the Kafka evaluation prototype",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "failed",
+            "rank": 2,
+            "latency_ms": 443.95525599247776
+          },
+          {
+            "query_id": "q_why_kafka_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for queue selection",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 485.35354201158043
+          },
+          {
+            "query_id": "q_evidence_kafka",
+            "query_type": "evidence_lookup",
+            "query_text": "which queue exceeded throughput requirements",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 447.84783700015396
+          },
+          {
+            "query_id": "q_decision_nats",
+            "query_type": "decision_basis",
+            "query_text": "which bus won because operator burden stayed lower and p99 latency stayed tighter",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 470.0202480016742
+          },
+          {
+            "query_id": "q_failed_nats_proto",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the first kafka-first control-plane prototype",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 497.2008249897044
+          },
+          {
+            "query_id": "q_why_nats_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for the control-plane event bus comparison",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "run",
+            "rank": 2,
+            "latency_ms": 495.0291229906725
+          },
+          {
+            "query_id": "q_progress_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for documentation",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 497.2003639995819
+          },
+          {
+            "query_id": "q_validation_indexing",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the code indexing workflow",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "validation",
+            "rank": 1,
+            "latency_ms": 475.4347520065494
+          },
+          {
+            "query_id": "q_paraphrase_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what still made architecture docs retrieval noisy after the main repo index",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": null,
+            "latency_ms": 503.6503840092337
+          },
+          {
+            "query_id": "q_progress_frontend",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for frontend route lookups",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 496.01637800515164
+          },
+          {
+            "query_id": "q_validation_frontend",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the frontend route indexing workflow",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "validation",
+            "rank": 2,
+            "latency_ms": 458.8464069965994
+          }
+        ],
+        "per_type": {
+          "task_lifecycle": {
+            "hit1": 0.5,
+            "hit3": 0.75,
+            "mrr": 0.625
+          },
+          "failed_attempt": {
+            "hit1": 0.6,
+            "hit3": 0.8,
+            "mrr": 0.7
+          },
+          "why_chosen": {
+            "hit1": 0.75,
+            "hit3": 1.0,
+            "mrr": 0.875
+          },
+          "evidence_lookup": {
+            "hit1": 0.8333333333333334,
+            "hit3": 1.0,
+            "mrr": 0.9166666666666666
+          },
+          "parameter_lookup": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          },
+          "decision_basis": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          }
+        }
+      },
+      "freshness": {
+        "found": true,
+        "rank": 1,
+        "search_ms": 685.9943390008993
+      },
+      "concurrency": {
+        "total_ops": 8,
+        "successes": 8,
+        "errors": [],
+        "success_rate": 1.0,
+        "ops_per_sec": 2.122277157868785,
+        "total_ms": 3769.535929997801
+      },
+      "task_ids": {
+        "jwt_timezone_fix": "task_4c5af8bf1dce44aa93e1c2894a6f8585",
+        "jwt_refresh_grace_window": "task_017a985c0ce04747a0eec4b60877c01e",
+        "mmseqs_marker_search": "task_a697e7ef2523473791ebdf69208af8e8",
+        "mmseqs_sigma_factor_search": "task_fe04b60c2b1c476fad5868fa9fcaf6e3",
+        "kafka_queue_selection": "task_dd3badbb821f42498a6ef407d12fd8f0",
+        "nats_jetstream_selection": "task_c5f81bae37db46cc8a3fe4c4a0ad5cce",
+        "codebase_indexing": "task_42f4ba4a646a4a709a901d088bb636ed",
+        "frontend_route_indexing": "task_d9800e11beca473786705512373b1ccc"
+      },
+      "root": "../../genesisM/gpt54"
+    },
+    "gpt54_live_daemon": {
+      "mode": "gpt54 live daemon context search over the same seeded benchmark corpus",
+      "seed_total_ms": 35767.990643013036,
+      "search_quality": {
+        "queries": 23,
+        "hit1": 0.7391304347826086,
+        "hit3": 0.9130434782608695,
+        "mrr": 0.8260869565217391,
+        "avg_search_ms": 146.90324752249896,
+        "p50_search_ms": 146.10993099631742,
+        "p95_search_ms": 151.8331489933189,
+        "details": [
+          {
+            "query_id": "q_task_goal_jwt",
+            "query_type": "task_lifecycle",
+            "query_text": "why were token validation failures being investigated",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "task_goal",
+            "rank": 2,
+            "latency_ms": 140.91161500255112
+          },
+          {
+            "query_id": "q_failed_jwt",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the JWT auth implementation",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 142.16322801075876
+          },
+          {
+            "query_id": "q_paraphrase_jwt_skew",
+            "query_type": "failed_attempt",
+            "query_text": "where in auth did local offset handling leak into UTC token claims",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 142.11242299643345
+          },
+          {
+            "query_id": "q_failed_refresh_window",
+            "query_type": "failed_attempt",
+            "query_text": "what caused freshly rotated refresh tokens to still be rejected",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "failed",
+            "rank": null,
+            "latency_ms": 136.32941199466586
+          },
+          {
+            "query_id": "q_why_refresh_runner",
+            "query_type": "why_chosen",
+            "query_text": "why were cargo tests used for the refresh grace window probe",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 151.60942600050475
+          },
+          {
+            "query_id": "q_evidence_refresh",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence showed rotated_at should drive the refresh grace period",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 141.09694500803016
+          },
+          {
+            "query_id": "q_params_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity parameter was used in the mmseqs search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 150.73822101112455
+          },
+          {
+            "query_id": "q_why_mmseqs",
+            "query_type": "why_chosen",
+            "query_text": "why was mmseqs chosen for candidate regulator search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 150.04821799811907
+          },
+          {
+            "query_id": "q_evidence_mmseqs",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence supported the top regulator hit",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 145.4338040057337
+          },
+          {
+            "query_id": "q_paraphrase_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which regulator scan used moderate mmseqs sensitivity instead of the noisy blast setup",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 146.10993099631742
+          },
+          {
+            "query_id": "q_params_sigma",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity setting was used for the secondary sigma factor search",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 151.25197199813556
+          },
+          {
+            "query_id": "q_evidence_sigma",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence kept the secondary sigma factor hit above threshold",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 141.86961398809217
+          },
+          {
+            "query_id": "q_failed_kafka",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the Kafka evaluation prototype",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "failed",
+            "rank": 2,
+            "latency_ms": 150.38206899771467
+          },
+          {
+            "query_id": "q_why_kafka_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for queue selection",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 151.8331489933189
+          },
+          {
+            "query_id": "q_evidence_kafka",
+            "query_type": "evidence_lookup",
+            "query_text": "which queue exceeded throughput requirements",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 141.45300700329244
+          },
+          {
+            "query_id": "q_decision_nats",
+            "query_type": "decision_basis",
+            "query_text": "which bus won because operator burden stayed lower and p99 latency stayed tighter",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 147.8685019974364
+          },
+          {
+            "query_id": "q_failed_nats_proto",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the first kafka-first control-plane prototype",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 145.46404100838117
+          },
+          {
+            "query_id": "q_why_nats_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for the control-plane event bus comparison",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "run",
+            "rank": 2,
+            "latency_ms": 150.8360659936443
+          },
+          {
+            "query_id": "q_progress_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for documentation",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 149.51984099752735
+          },
+          {
+            "query_id": "q_validation_indexing",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the code indexing workflow",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "validation",
+            "rank": 1,
+            "latency_ms": 142.93118800560478
+          },
+          {
+            "query_id": "q_paraphrase_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what still made architecture docs retrieval noisy after the main repo index",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": null,
+            "latency_ms": 143.2543889968656
+          },
+          {
+            "query_id": "q_progress_frontend",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for frontend route lookups",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 166.94651800207794
+          },
+          {
+            "query_id": "q_validation_frontend",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the frontend route indexing workflow",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "validation",
+            "rank": 2,
+            "latency_ms": 148.61111401114613
+          }
+        ],
+        "per_type": {
+          "task_lifecycle": {
+            "hit1": 0.5,
+            "hit3": 0.75,
+            "mrr": 0.625
+          },
+          "failed_attempt": {
+            "hit1": 0.6,
+            "hit3": 0.8,
+            "mrr": 0.7
+          },
+          "why_chosen": {
+            "hit1": 0.75,
+            "hit3": 1.0,
+            "mrr": 0.875
+          },
+          "evidence_lookup": {
+            "hit1": 0.8333333333333334,
+            "hit3": 1.0,
+            "mrr": 0.9166666666666666
+          },
+          "parameter_lookup": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          },
+          "decision_basis": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          }
+        }
+      },
+      "freshness": {
+        "found": true,
+        "rank": 1,
+        "search_ms": 147.08072500070557
+      },
+      "concurrency": {
+        "total_ops": 8,
+        "successes": 8,
+        "errors": [],
+        "success_rate": 1.0,
+        "ops_per_sec": 2.521406364987658,
+        "total_ms": 3172.8324759897077
+      },
+      "task_ids": {
+        "jwt_timezone_fix": "task_524432cc832d42bdbcbdf921e80ed5a4",
+        "jwt_refresh_grace_window": "task_9814b77f29694060ae106f9f7b7ff5b7",
+        "mmseqs_marker_search": "task_8f1973c796984abf9ba14e1ed62da370",
+        "mmseqs_sigma_factor_search": "task_0d42ee70cdf34b1cacd2d6f130c3cf51",
+        "kafka_queue_selection": "task_e80586d0e678428b897913c4b4b2b0ae",
+        "nats_jetstream_selection": "task_46c7c6b8013a4a85a9d8e15eebbdfa70",
+        "codebase_indexing": "task_a1bb981ead844949892b546d361bf356",
+        "frontend_route_indexing": "task_23053971217d4141a9fcf41277af88c9"
+      },
+      "root": "../../genesisM/gpt54"
+    },
+    "gpt54_live_tantivy": {
+      "mode": "gpt54 live warm Tantivy service search over the same seeded benchmark corpus",
+      "seed_total_ms": 28918.142879992956,
+      "search_quality": {
+        "queries": 23,
+        "hit1": 0.7391304347826086,
+        "hit3": 0.9130434782608695,
+        "mrr": 0.8260869565217391,
+        "avg_search_ms": 21.243476172853462,
+        "p50_search_ms": 20.38523499504663,
+        "p95_search_ms": 31.615843006875366,
+        "details": [
+          {
+            "query_id": "q_task_goal_jwt",
+            "query_type": "task_lifecycle",
+            "query_text": "why were token validation failures being investigated",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "task_goal",
+            "rank": 2,
+            "latency_ms": 18.414823993225582
+          },
+          {
+            "query_id": "q_failed_jwt",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the JWT auth implementation",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 2,
+            "latency_ms": 18.706023998674937
+          },
+          {
+            "query_id": "q_paraphrase_jwt_skew",
+            "query_type": "failed_attempt",
+            "query_text": "where in auth did local offset handling leak into UTC token claims",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 16.791899004601873
+          },
+          {
+            "query_id": "q_failed_refresh_window",
+            "query_type": "failed_attempt",
+            "query_text": "what caused freshly rotated refresh tokens to still be rejected",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "failed",
+            "rank": null,
+            "latency_ms": 14.669942000182346
+          },
+          {
+            "query_id": "q_why_refresh_runner",
+            "query_type": "why_chosen",
+            "query_text": "why were cargo tests used for the refresh grace window probe",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 31.65140000055544
+          },
+          {
+            "query_id": "q_evidence_refresh",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence showed rotated_at should drive the refresh grace period",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 22.33178100141231
+          },
+          {
+            "query_id": "q_params_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity parameter was used in the mmseqs search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 30.069030995946378
+          },
+          {
+            "query_id": "q_why_mmseqs",
+            "query_type": "why_chosen",
+            "query_text": "why was mmseqs chosen for candidate regulator search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 25.08787599799689
+          },
+          {
+            "query_id": "q_evidence_mmseqs",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence supported the top regulator hit",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 23.226901001180522
+          },
+          {
+            "query_id": "q_paraphrase_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which regulator scan used moderate mmseqs sensitivity instead of the noisy blast setup",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 29.139766993466765
+          },
+          {
+            "query_id": "q_params_sigma",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity setting was used for the secondary sigma factor search",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 29.430285998387262
+          },
+          {
+            "query_id": "q_evidence_sigma",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence kept the secondary sigma factor hit above threshold",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 22.63224800117314
+          },
+          {
+            "query_id": "q_failed_kafka",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the Kafka evaluation prototype",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "failed",
+            "rank": 2,
+            "latency_ms": 20.38523499504663
+          },
+          {
+            "query_id": "q_why_kafka_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for queue selection",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 24.75170099933166
+          },
+          {
+            "query_id": "q_evidence_kafka",
+            "query_type": "evidence_lookup",
+            "query_text": "which queue exceeded throughput requirements",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 17.84677099203691
+          },
+          {
+            "query_id": "q_decision_nats",
+            "query_type": "decision_basis",
+            "query_text": "which bus won because operator burden stayed lower and p99 latency stayed tighter",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 23.729831009404734
+          },
+          {
+            "query_id": "q_failed_nats_proto",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the first kafka-first control-plane prototype",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 18.369950004853308
+          },
+          {
+            "query_id": "q_why_nats_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for the control-plane event bus comparison",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 31.615843006875366
+          },
+          {
+            "query_id": "q_progress_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for documentation",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 15.008100992417894
+          },
+          {
+            "query_id": "q_validation_indexing",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the code indexing workflow",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "validation",
+            "rank": 1,
+            "latency_ms": 16.914801992243156
+          },
+          {
+            "query_id": "q_paraphrase_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what still made architecture docs retrieval noisy after the main repo index",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": null,
+            "latency_ms": 12.613218001206405
+          },
+          {
+            "query_id": "q_progress_frontend",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for frontend route lookups",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 12.591506994795054
+          },
+          {
+            "query_id": "q_validation_frontend",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the frontend route indexing workflow",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "validation",
+            "rank": 2,
+            "latency_ms": 12.621014000615105
+          }
+        ],
+        "per_type": {
+          "task_lifecycle": {
+            "hit1": 0.5,
+            "hit3": 0.75,
+            "mrr": 0.625
+          },
+          "failed_attempt": {
+            "hit1": 0.4,
+            "hit3": 0.8,
+            "mrr": 0.6
+          },
+          "why_chosen": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          },
+          "evidence_lookup": {
+            "hit1": 0.8333333333333334,
+            "hit3": 1.0,
+            "mrr": 0.9166666666666666
+          },
+          "parameter_lookup": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          },
+          "decision_basis": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          }
+        }
+      },
+      "freshness": {
+        "found": true,
+        "rank": 1,
+        "search_ms": 18.094650004059076
+      },
+      "concurrency": {
+        "total_ops": 8,
+        "successes": 8,
+        "errors": [],
+        "success_rate": 1.0,
+        "ops_per_sec": 2.463575198463135,
+        "total_ms": 3247.3130939906696
+      },
+      "task_ids": {
+        "jwt_timezone_fix": "task_6a1cec9b519949f3acc9c94ea7245a02",
+        "jwt_refresh_grace_window": "task_06d326d789664b4aab6c4c11fb2a5ae8",
+        "mmseqs_marker_search": "task_81e4ab6a454c40a78ae08a8a09b21703",
+        "mmseqs_sigma_factor_search": "task_42d24c8acba54892a65118e5c78133ef",
+        "kafka_queue_selection": "task_2cd7e4c9cb7243498edd5ddc3e2f8b7f",
+        "nats_jetstream_selection": "task_0a7636852d5942b1b780de2ee5a597b5",
+        "codebase_indexing": "task_bed571f08a834a5c85333a6509050288",
+        "frontend_route_indexing": "task_8919583f92034d99a60511ba4d65fe1a"
+      },
+      "root": "../../genesisM/gpt54"
+    },
+    "claude_live": {
+      "mode": "claude ark live CLI artifact search on the same benchmark corpus",
+      "seed_total_ms": 10334.956876002252,
+      "search_quality": {
+        "queries": 23,
+        "hit1": 0.0,
+        "hit3": 0.0,
+        "mrr": 0.0,
+        "avg_search_ms": 397.5551720846535,
+        "p50_search_ms": 399.7050749894697,
+        "p95_search_ms": 426.91674099478405,
+        "details": [
+          {
+            "query_id": "q_task_goal_jwt",
+            "query_type": "task_lifecycle",
+            "query_text": "why were token validation failures being investigated",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "task_goal",
+            "rank": null,
+            "latency_ms": 394.568043993786
+          },
+          {
+            "query_id": "q_failed_jwt",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the JWT auth implementation",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": null,
+            "latency_ms": 366.760783988866
+          },
+          {
+            "query_id": "q_paraphrase_jwt_skew",
+            "query_type": "failed_attempt",
+            "query_text": "where in auth did local offset handling leak into UTC token claims",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": null,
+            "latency_ms": 402.0272009947803
+          },
+          {
+            "query_id": "q_failed_refresh_window",
+            "query_type": "failed_attempt",
+            "query_text": "what caused freshly rotated refresh tokens to still be rejected",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "failed",
+            "rank": null,
+            "latency_ms": 406.6703990101814
+          },
+          {
+            "query_id": "q_why_refresh_runner",
+            "query_type": "why_chosen",
+            "query_text": "why were cargo tests used for the refresh grace window probe",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 400.6578749977052
+          },
+          {
+            "query_id": "q_evidence_refresh",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence showed rotated_at should drive the refresh grace period",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "evidence",
+            "rank": null,
+            "latency_ms": 397.01112800685223
+          },
+          {
+            "query_id": "q_params_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity parameter was used in the mmseqs search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 394.63108401105274
+          },
+          {
+            "query_id": "q_why_mmseqs",
+            "query_type": "why_chosen",
+            "query_text": "why was mmseqs chosen for candidate regulator search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 428.1241120042978
+          },
+          {
+            "query_id": "q_evidence_mmseqs",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence supported the top regulator hit",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "evidence",
+            "rank": null,
+            "latency_ms": 398.671282993746
+          },
+          {
+            "query_id": "q_paraphrase_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which regulator scan used moderate mmseqs sensitivity instead of the noisy blast setup",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 407.7513289958006
+          },
+          {
+            "query_id": "q_params_sigma",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity setting was used for the secondary sigma factor search",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 368.9400589937577
+          },
+          {
+            "query_id": "q_evidence_sigma",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence kept the secondary sigma factor hit above threshold",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "evidence",
+            "rank": null,
+            "latency_ms": 409.0178409969667
+          },
+          {
+            "query_id": "q_failed_kafka",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the Kafka evaluation prototype",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "failed",
+            "rank": null,
+            "latency_ms": 399.7050749894697
+          },
+          {
+            "query_id": "q_why_kafka_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for queue selection",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 355.8256449905457
+          },
+          {
+            "query_id": "q_evidence_kafka",
+            "query_type": "evidence_lookup",
+            "query_text": "which queue exceeded throughput requirements",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "evidence",
+            "rank": null,
+            "latency_ms": 385.8022109925514
+          },
+          {
+            "query_id": "q_decision_nats",
+            "query_type": "decision_basis",
+            "query_text": "which bus won because operator burden stayed lower and p99 latency stayed tighter",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "evidence",
+            "rank": null,
+            "latency_ms": 401.8375820014626
+          },
+          {
+            "query_id": "q_failed_nats_proto",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the first kafka-first control-plane prototype",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "failed",
+            "rank": null,
+            "latency_ms": 403.9395220024744
+          },
+          {
+            "query_id": "q_why_nats_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for the control-plane event bus comparison",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 397.21083600306883
+          },
+          {
+            "query_id": "q_progress_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for documentation",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": null,
+            "latency_ms": 423.4872050001286
+          },
+          {
+            "query_id": "q_validation_indexing",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the code indexing workflow",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "validation",
+            "rank": null,
+            "latency_ms": 426.91674099478405
+          },
+          {
+            "query_id": "q_paraphrase_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what still made architecture docs retrieval noisy after the main repo index",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": null,
+            "latency_ms": 413.74797400203533
+          },
+          {
+            "query_id": "q_progress_frontend",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for frontend route lookups",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "task_summary",
+            "rank": null,
+            "latency_ms": 397.55899299052544
+          },
+          {
+            "query_id": "q_validation_frontend",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the frontend route indexing workflow",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "validation",
+            "rank": null,
+            "latency_ms": 362.9060349921929
+          }
+        ],
+        "per_type": {
+          "task_lifecycle": {
+            "hit1": 0.0,
+            "hit3": 0.0,
+            "mrr": 0.0
+          },
+          "failed_attempt": {
+            "hit1": 0.0,
+            "hit3": 0.0,
+            "mrr": 0.0
+          },
+          "why_chosen": {
+            "hit1": 0.0,
+            "hit3": 0.0,
+            "mrr": 0.0
+          },
+          "evidence_lookup": {
+            "hit1": 0.0,
+            "hit3": 0.0,
+            "mrr": 0.0
+          },
+          "parameter_lookup": {
+            "hit1": 0.0,
+            "hit3": 0.0,
+            "mrr": 0.0
+          },
+          "decision_basis": {
+            "hit1": 0.0,
+            "hit3": 0.0,
+            "mrr": 0.0
+          }
+        }
+      },
+      "freshness": {
+        "found": true,
+        "rank": 1,
+        "search_ms": 423.11110500304494
+      },
+      "concurrency": {
+        "total_ops": 8,
+        "successes": 8,
+        "errors": [],
+        "success_rate": 1.0,
+        "ops_per_sec": 3.1592887879695124,
+        "total_ms": 2532.215488012298
+      },
+      "scoring_mode": "task_level",
+      "root": "../../genesisM/claude"
+    },
+    "geminipro_live": {
+      "mode": "geminipro live CLI search on the same benchmark corpus",
+      "seed_total_ms": 121101.99773700151,
+      "search_quality": {
+        "queries": 23,
+        "hit1": 0.7391304347826086,
+        "hit3": 0.9565217391304348,
+        "mrr": 0.8420289855072464,
+        "avg_search_ms": 6192.267894436752,
+        "p50_search_ms": 6182.59418400703,
+        "p95_search_ms": 6293.020048004109,
+        "details": [
+          {
+            "query_id": "q_task_goal_jwt",
+            "query_type": "task_lifecycle",
+            "query_text": "why were token validation failures being investigated",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "task_goal",
+            "rank": 1,
+            "latency_ms": 6163.117634001537
+          },
+          {
+            "query_id": "q_failed_jwt",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the JWT auth implementation",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 6271.186187004787
+          },
+          {
+            "query_id": "q_paraphrase_jwt_skew",
+            "query_type": "failed_attempt",
+            "query_text": "where in auth did local offset handling leak into UTC token claims",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 2,
+            "latency_ms": 6151.726673007943
+          },
+          {
+            "query_id": "q_failed_refresh_window",
+            "query_type": "failed_attempt",
+            "query_text": "what caused freshly rotated refresh tokens to still be rejected",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 6250.414042006014
+          },
+          {
+            "query_id": "q_why_refresh_runner",
+            "query_type": "why_chosen",
+            "query_text": "why were cargo tests used for the refresh grace window probe",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 6134.310484994785
+          },
+          {
+            "query_id": "q_evidence_refresh",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence showed rotated_at should drive the refresh grace period",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 6182.59418400703
+          },
+          {
+            "query_id": "q_params_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity parameter was used in the mmseqs search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 5,
+            "latency_ms": 6209.505923005054
+          },
+          {
+            "query_id": "q_why_mmseqs",
+            "query_type": "why_chosen",
+            "query_text": "why was mmseqs chosen for candidate regulator search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 6129.20881100581
+          },
+          {
+            "query_id": "q_evidence_mmseqs",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence supported the top regulator hit",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 6170.975943998201
+          },
+          {
+            "query_id": "q_paraphrase_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which regulator scan used moderate mmseqs sensitivity instead of the noisy blast setup",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 6011.535539000761
+          },
+          {
+            "query_id": "q_params_sigma",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity setting was used for the secondary sigma factor search",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 6213.337898996542
+          },
+          {
+            "query_id": "q_evidence_sigma",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence kept the secondary sigma factor hit above threshold",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 6143.223114006105
+          },
+          {
+            "query_id": "q_failed_kafka",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the Kafka evaluation prototype",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "failed",
+            "rank": 3,
+            "latency_ms": 6293.020048004109
+          },
+          {
+            "query_id": "q_why_kafka_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for queue selection",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "run",
+            "rank": 3,
+            "latency_ms": 6121.957508003106
+          },
+          {
+            "query_id": "q_evidence_kafka",
+            "query_type": "evidence_lookup",
+            "query_text": "which queue exceeded throughput requirements",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "evidence",
+            "rank": 2,
+            "latency_ms": 6139.4161870121025
+          },
+          {
+            "query_id": "q_decision_nats",
+            "query_type": "decision_basis",
+            "query_text": "which bus won because operator burden stayed lower and p99 latency stayed tighter",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 6226.513239002088
+          },
+          {
+            "query_id": "q_failed_nats_proto",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the first kafka-first control-plane prototype",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 6208.181901994976
+          },
+          {
+            "query_id": "q_why_nats_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for the control-plane event bus comparison",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 6101.621014997363
+          },
+          {
+            "query_id": "q_progress_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for documentation",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": 2,
+            "latency_ms": 6256.000112000038
+          },
+          {
+            "query_id": "q_validation_indexing",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the code indexing workflow",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "validation",
+            "rank": 1,
+            "latency_ms": 6216.7669129994465
+          },
+          {
+            "query_id": "q_paraphrase_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what still made architecture docs retrieval noisy after the main repo index",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 6189.811991993338
+          },
+          {
+            "query_id": "q_progress_frontend",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for frontend route lookups",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 6509.545331005938
+          },
+          {
+            "query_id": "q_validation_frontend",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the frontend route indexing workflow",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "validation",
+            "rank": 1,
+            "latency_ms": 6128.190889998223
+          }
+        ],
+        "per_type": {
+          "task_lifecycle": {
+            "hit1": 0.75,
+            "hit3": 1.0,
+            "mrr": 0.875
+          },
+          "failed_attempt": {
+            "hit1": 0.6,
+            "hit3": 1.0,
+            "mrr": 0.7666666666666666
+          },
+          "why_chosen": {
+            "hit1": 0.75,
+            "hit3": 1.0,
+            "mrr": 0.8333333333333334
+          },
+          "evidence_lookup": {
+            "hit1": 0.8333333333333334,
+            "hit3": 1.0,
+            "mrr": 0.9166666666666666
+          },
+          "parameter_lookup": {
+            "hit1": 0.6666666666666666,
+            "hit3": 0.6666666666666666,
+            "mrr": 0.7333333333333334
+          },
+          "decision_basis": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          }
+        }
+      },
+      "freshness": {
+        "found": true,
+        "rank": 1,
+        "search_ms": 6323.856679999153
+      },
+      "concurrency": {
+        "total_ops": 8,
+        "successes": 8,
+        "errors": [],
+        "success_rate": 1.0,
+        "ops_per_sec": 0.7623587426879057,
+        "total_ms": 10493.747303000418
+      },
+      "scoring_mode": "task_level",
+      "root": "../../genesisM/geminipro"
+    },
+    "geminiultra_live": {
+      "mode": "geminiultra live CLI search on the same benchmark corpus",
+      "seed_total_ms": 132541.39084699273,
+      "search_quality": {
+        "queries": 23,
+        "hit1": 0.8695652173913043,
+        "hit3": 1.0,
+        "mrr": 0.9347826086956522,
+        "avg_search_ms": 6205.716209651892,
+        "p50_search_ms": 6194.135097000981,
+        "p95_search_ms": 6316.103694000049,
+        "details": [
+          {
+            "query_id": "q_task_goal_jwt",
+            "query_type": "task_lifecycle",
+            "query_text": "why were token validation failures being investigated",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "task_goal",
+            "rank": 1,
+            "latency_ms": 6150.504557008389
+          },
+          {
+            "query_id": "q_failed_jwt",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the JWT auth implementation",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 6189.592818001984
+          },
+          {
+            "query_id": "q_paraphrase_jwt_skew",
+            "query_type": "failed_attempt",
+            "query_text": "where in auth did local offset handling leak into UTC token claims",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 6194.135097000981
+          },
+          {
+            "query_id": "q_failed_refresh_window",
+            "query_type": "failed_attempt",
+            "query_text": "what caused freshly rotated refresh tokens to still be rejected",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 6198.859919997631
+          },
+          {
+            "query_id": "q_why_refresh_runner",
+            "query_type": "why_chosen",
+            "query_text": "why were cargo tests used for the refresh grace window probe",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 6218.975223993766
+          },
+          {
+            "query_id": "q_evidence_refresh",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence showed rotated_at should drive the refresh grace period",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 6359.702121000737
+          },
+          {
+            "query_id": "q_params_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity parameter was used in the mmseqs search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 2,
+            "latency_ms": 6196.07664400246
+          },
+          {
+            "query_id": "q_why_mmseqs",
+            "query_type": "why_chosen",
+            "query_text": "why was mmseqs chosen for candidate regulator search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 2,
+            "latency_ms": 6129.268132994184
+          },
+          {
+            "query_id": "q_evidence_mmseqs",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence supported the top regulator hit",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "evidence",
+            "rank": 2,
+            "latency_ms": 6159.938190001412
+          },
+          {
+            "query_id": "q_paraphrase_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which regulator scan used moderate mmseqs sensitivity instead of the noisy blast setup",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 6181.9208310043905
+          },
+          {
+            "query_id": "q_params_sigma",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity setting was used for the secondary sigma factor search",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 6270.640037007979
+          },
+          {
+            "query_id": "q_evidence_sigma",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence kept the secondary sigma factor hit above threshold",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 6305.280120999669
+          },
+          {
+            "query_id": "q_failed_kafka",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the Kafka evaluation prototype",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 6229.28268898977
+          },
+          {
+            "query_id": "q_why_kafka_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for queue selection",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 6297.448430996155
+          },
+          {
+            "query_id": "q_evidence_kafka",
+            "query_type": "evidence_lookup",
+            "query_text": "which queue exceeded throughput requirements",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 6179.045951997978
+          },
+          {
+            "query_id": "q_decision_nats",
+            "query_type": "decision_basis",
+            "query_text": "which bus won because operator burden stayed lower and p99 latency stayed tighter",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 6107.50209800608
+          },
+          {
+            "query_id": "q_failed_nats_proto",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the first kafka-first control-plane prototype",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 6194.905662996462
+          },
+          {
+            "query_id": "q_why_nats_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for the control-plane event bus comparison",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 6088.684153990471
+          },
+          {
+            "query_id": "q_progress_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for documentation",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 6316.103694000049
+          },
+          {
+            "query_id": "q_validation_indexing",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the code indexing workflow",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "validation",
+            "rank": 1,
+            "latency_ms": 6185.89660100406
+          },
+          {
+            "query_id": "q_paraphrase_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what still made architecture docs retrieval noisy after the main repo index",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 6218.387204993633
+          },
+          {
+            "query_id": "q_progress_frontend",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for frontend route lookups",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 6177.8941890079295
+          },
+          {
+            "query_id": "q_validation_frontend",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the frontend route indexing workflow",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "validation",
+            "rank": 1,
+            "latency_ms": 6181.428452997352
+          }
+        ],
+        "per_type": {
+          "task_lifecycle": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          },
+          "failed_attempt": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          },
+          "why_chosen": {
+            "hit1": 0.75,
+            "hit3": 1.0,
+            "mrr": 0.875
+          },
+          "evidence_lookup": {
+            "hit1": 0.8333333333333334,
+            "hit3": 1.0,
+            "mrr": 0.9166666666666666
+          },
+          "parameter_lookup": {
+            "hit1": 0.6666666666666666,
+            "hit3": 1.0,
+            "mrr": 0.8333333333333334
+          },
+          "decision_basis": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          }
+        }
+      },
+      "freshness": {
+        "found": true,
+        "rank": 1,
+        "search_ms": 6105.473880001227
+      },
+      "concurrency": {
+        "total_ops": 8,
+        "successes": 8,
+        "errors": [],
+        "success_rate": 1.0,
+        "ops_per_sec": 0.7611202713266731,
+        "total_ms": 10510.822404001374
+      },
+      "scoring_mode": "task_level",
+      "root": "../../genesisM/geminiultra"
+    }
+  },
+  "external_reference": {
+    "genesism_unified_benchmark": {
+      "gpt54": {
+        "search_backend": "Tantivy daemon by default when configured, fallback SQLite/ DuckDB",
+        "lifecycle_ms": 1943.0677160016785,
+        "hit3": 1.0,
+        "mrr": 1.0,
+        "avg_search_ms": 42.245894062716616,
+        "fresh_rank": 1,
+        "concurrency_success_rate": 1.0,
+        "concurrency_ops_per_sec": 3.020517400585363
+      },
+      "memd": {
+        "search_backend": "Warm MCP process with hybrid dense+sparse+rereanking retrieval",
+        "lifecycle_ms": 702.2050560008211,
+        "hit3": 1.0,
+        "mrr": 0.96875,
+        "avg_search_ms": 18.525169250210638,
+        "fresh_rank": 1,
+        "concurrency_success_rate": 1.0,
+        "concurrency_ops_per_sec": 8.508212576298503
+      }
+    }
+  },
+  "methodology": {
+    "notes": [
+      "The chunk baseline flattens each task case into plain memory chunks and uses memory.search.",
+      "The task-memory mode seeds the real task lifecycle and queries task.search with task-aware filters.",
+      "Freshness measures immediate retrievability after a new write.",
+      "Concurrency launches separate memd stdio processes against the same data dir to approximate concurrent CLI usage.",
+      "Quality scoring is task-level across all systems so flatter schemas can participate correctly.",
+      "The gpt54 Tantivy variant applies DuckDB-side task filters and then times direct HTTP requests against a warmed Tantivy service."
+    ]
+  }
+}

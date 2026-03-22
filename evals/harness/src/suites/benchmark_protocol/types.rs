@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone)]
 pub struct BenchmarkConfig {
     pub dataset_paths: Vec<PathBuf>,
+    pub system_variant: String,
     pub bootstrap_iterations: usize,
     pub seed: u64,
     pub report_json: Option<PathBuf>,
@@ -13,6 +14,9 @@ pub struct BenchmarkConfig {
     pub threshold_precision: Option<f64>,
     pub max_queries: Option<usize>,
     pub max_documents: Option<usize>,
+    pub include_abstention: bool,
+    pub max_sessions_per_query: Option<usize>,
+    pub max_session_chars: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,12 +70,27 @@ pub(super) struct BenchmarkSummary {
     pub(super) latency_ms: MetricWithCi,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(super) struct PhaseTiming {
+    pub(super) load_convert_ms: f64,
+    pub(super) cap_filter_ms: f64,
+    pub(super) index_ms: f64,
+    pub(super) query_ms: f64,
+    pub(super) measured_total_ms: f64,
+    pub(super) load_convert_pct: f64,
+    pub(super) cap_filter_pct: f64,
+    pub(super) index_pct: f64,
+    pub(super) query_pct: f64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct BenchmarkReport {
     pub(super) generated_unix_seconds: u64,
     pub(super) dataset_path: String,
     pub(super) dataset_description: String,
     pub(super) dataset_version: String,
+    #[serde(default = "default_system_variant")]
+    pub(super) system_variant: String,
     pub(super) embedding_model: String,
     pub(super) bootstrap_iterations: usize,
     pub(super) seed: u64,
@@ -79,6 +98,8 @@ pub(super) struct BenchmarkReport {
     pub(super) documents_indexed: usize,
     pub(super) thresholds: Thresholds,
     pub(super) summary: BenchmarkSummary,
+    #[serde(default)]
+    pub(super) phase_timing: PhaseTiming,
     pub(super) quality_gate_passed: bool,
     pub(super) quality_gate_message: String,
     pub(super) query_metrics: Vec<QueryMetrics>,
@@ -100,6 +121,7 @@ pub(super) struct DatasetBenchmarkResult {
 pub(super) struct CrossCorpusReport {
     pub(super) generated_unix_seconds: u64,
     pub(super) embedding_model: String,
+    pub(super) system_variant: String,
     pub(super) bootstrap_iterations: usize,
     pub(super) seed: u64,
     pub(super) max_queries: Option<usize>,
@@ -110,6 +132,10 @@ pub(super) struct CrossCorpusReport {
     pub(super) normalized_summary: BenchmarkSummary,
     pub(super) quality_gate_passed: bool,
     pub(super) quality_gate_message: String,
+}
+
+fn default_system_variant() -> String {
+    "hybrid-feature".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize)]

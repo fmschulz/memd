@@ -22,6 +22,9 @@ use async_trait::async_trait;
 use crate::compaction::{CompactionMetrics, CompactionResult};
 use crate::error::{MemdError, Result};
 use crate::metrics::IndexStats;
+use crate::task_memory::{
+    TaskArtifact, TaskArtifactWriteResult, TaskProjection, TaskSearchFilters,
+};
 use crate::tiered::TieredTiming;
 use crate::types::{ChunkId, MemoryChunk, TenantId};
 pub use feedback::{
@@ -39,6 +42,64 @@ pub struct StoreStats {
     pub chunk_types: HashMap<String, usize>,
 }
 
+pub(crate) fn score_candidate_chunk(query: &str, chunk: &MemoryChunk) -> f32 {
+    if query.trim().is_empty() {
+        return 1.0;
+    }
+
+    let haystack = format!("{} {}", chunk.text, chunk.tags.join(" ")).to_ascii_lowercase();
+    let terms = query
+        .split_whitespace()
+        .map(|term| term.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if terms.is_empty() {
+        return 1.0;
+    }
+
+    let mut score = 0.0f32;
+    for term in terms {
+        if haystack.contains(&term) {
+            score += 1.0;
+        }
+    }
+
+    if haystack.contains(&query.to_ascii_lowercase()) {
+        score += 1.5;
+    }
+
+    score
+}
+
+pub(crate) fn rank_candidate_chunks(
+    mut chunks: Vec<MemoryChunk>,
+    query: &str,
+    k: usize,
+) -> Vec<(MemoryChunk, f32)> {
+    let mut scored = chunks
+        .drain(..)
+        .map(|chunk| {
+            let score = score_candidate_chunk(query, &chunk);
+            (chunk, score)
+        })
+        .collect::<Vec<_>>();
+
+    scored.sort_by(|(left_chunk, left_score), (right_chunk, right_score)| {
+        right_score
+            .partial_cmp(left_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                right_chunk
+                    .timestamp_created
+                    .cmp(&left_chunk.timestamp_created)
+            })
+    });
+    if !query.trim().is_empty() {
+        scored.retain(|(_, score)| *score > 0.0);
+    }
+    scored.truncate(k);
+    scored
+}
+
 /// Store trait for memory operations
 ///
 /// Defines the interface for all storage backends (in-memory, persistent, etc.)
@@ -53,6 +114,62 @@ pub trait Store: Send + Sync {
     ///
     /// Returns the chunk_ids of all stored chunks.
     async fn add_batch(&self, chunks: Vec<MemoryChunk>) -> Result<Vec<ChunkId>>;
+
+    /// Store a canonical task artifact and its retrieval projections.
+    async fn add_task_artifact(
+        &self,
+        _artifact: TaskArtifact,
+        _projections: Vec<TaskProjection>,
+    ) -> Result<TaskArtifactWriteResult> {
+        Err(MemdError::StorageError(
+            "task artifacts not supported by this store".into(),
+        ))
+    }
+
+    /// Fetch one canonical task artifact by ID.
+    async fn get_task_artifact(
+        &self,
+        _tenant_id: &TenantId,
+        _artifact_id: &str,
+    ) -> Result<Option<TaskArtifact>> {
+        Ok(None)
+    }
+
+    /// List canonical task artifacts for one logical task.
+    async fn list_task_artifacts(
+        &self,
+        _tenant_id: &TenantId,
+        _task_id: &str,
+    ) -> Result<Vec<TaskArtifact>> {
+        Ok(Vec::new())
+    }
+
+    /// Resolve candidate projection chunk IDs using exact task filters.
+    async fn search_task_projection_chunk_ids(
+        &self,
+        _tenant_id: &TenantId,
+        _filters: &TaskSearchFilters,
+        _limit: usize,
+    ) -> Result<Vec<ChunkId>> {
+        Ok(Vec::new())
+    }
+
+    /// Rerank a prefiltered set of candidate chunk IDs for one query.
+    async fn rerank_chunks_for_query(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        chunk_ids: &[ChunkId],
+        k: usize,
+    ) -> Result<Vec<(MemoryChunk, f32)>> {
+        let mut chunks = Vec::with_capacity(chunk_ids.len());
+        for chunk_id in chunk_ids {
+            if let Some(chunk) = self.get(tenant_id, chunk_id).await? {
+                chunks.push(chunk);
+            }
+        }
+        Ok(rank_candidate_chunks(chunks, query, k))
+    }
 
     /// Record relevance feedback for retrieval quality adaptation.
     async fn add_feedback(&self, _feedback: FeedbackEntry) -> Result<()> {

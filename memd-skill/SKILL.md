@@ -1,661 +1,281 @@
-# memd - Intelligent Memory for AI Agents
+# memd
 
-**Persistent, searchable memory daemon for AI coding agents using hybrid retrieval with hot/warm/cold tiering.**
+Shared agent memory over MCP.
+
+Use the same shared local `memd` daemon URL for Codex CLI and Claude Code when you want cross-session memory on one machine.
 
 ## When to Use
 
-Use this skill when you need to:
-- Add persistent memory to AI agents across sessions
-- Search past conversations, code patterns, or decisions
-- Retrieve relevant context without hitting token limits
-- Index and search code repositories semantically
-- Track tool calls, errors, and debugging sessions
-- Find symbol definitions, call graphs, and imports
+Use `memd` when agents need to:
 
-## What memd Provides
+- preserve context across sessions and across different agents
+- search what other agents already tried in the same project
+- recover goals, motivation, hypotheses, parameters, and evidence instead of just raw notes
+- avoid repeating failed approaches
+- share progress on long-running engineering or scientific tasks
+- index codebases and codified context alongside task artifacts
 
-**13 MCP Tools:**
-- `memory.add` / `memory.add_batch` - Store information
-- `memory.search` - Hybrid semantic + keyword search
-- `memory.get` / `memory.delete` - CRUD operations
-- `code.find_definition` / `code.find_references` - Structural queries
-- `code.find_callers` / `code.find_imports` - Code navigation
-- `debug.find_tool_calls` / `debug.find_errors` - Debug traces
-- `memory.stats` / `memory.metrics` / `memory.compact` - System management
+Bundled binary:
 
-**Architecture:**
-- Hybrid retrieval: Dense HNSW + Sparse BM25 + Structural indexes
-- Three-tier caching: Hot (LRU) → Warm (HNSW+BM25) → Cold (segments)
-- CPU-only, offline-first, no GPU required
-- Pure Rust implementation with MCP protocol integration
+- [bin/linux-x64/memd](/home/fschulz/dev/software/memd/memd-skill/bin/linux-x64/memd)
 
-## Prerequisites
+## Core Idea
 
-- Linux (x64)
-- 4GB RAM minimum (8GB recommended)
-- AI agent with MCP support (Claude Code, Codex CLI)
-- curl (for automated installation)
+`memd` now has two complementary write surfaces:
 
-## Setup Instructions
+1. `memory.*`
+   Use for raw chunks:
+   - codebase indexing
+   - codified context
+   - ad hoc notes
+   - documentation fragments
 
-### 1. Install memd
+2. `task.*`
+   Use for structured knowledge artifacts:
+   - what the task is trying to do
+   - why it matters
+   - what was tried
+   - which tool/parameters were used
+   - what worked
+   - what failed
+   - what evidence supports the conclusion
+   - what uncertainty remains
 
-**Automated Installation (Recommended):**
+This distinction matters. `memory.add` is flexible. `task.*` is structured. The latter is how multiple agents can reliably understand each other’s work.
 
-```bash
-curl -sSL https://raw.githubusercontent.com/fmschulz/memd/main/install.sh | bash
-```
+## Tool Surface
 
-The install script will:
-- Download and install the memd binary to `~/.local/bin/memd`
-- Create default configuration at `~/.config/memd/config.toml`
-- Prompt to configure MCP for Claude Code and/or Codex CLI
-- Verify the installation
+`memd` exposes 30 MCP tools.
 
-**Manual Installation:**
+### Generic Memory
 
-```bash
-# Download binary from releases
-curl -sSL https://github.com/fmschulz/memd/releases/latest/download/memd-linux-x64 -o ~/.local/bin/memd
-chmod +x ~/.local/bin/memd
+- `memory.search`
+- `memory.add`
+- `memory.add_batch`
+- `memory.get`
+- `memory.delete`
+- `memory.feedback`
+- `memory.stats`
+- `memory.metrics`
+- `memory.compact`
+- `memory.consolidate_episode`
 
-# Ensure ~/.local/bin is in PATH
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
+### Task Knowledge Artifacts
 
-# Verify installation
-memd --version
-```
+- `task.start`
+- `task.progress`
+- `task.run_start`
+- `task.run_finish`
+- `task.add_evidence`
+- `task.finish`
+- `task.get`
+- `task.search`
 
-### 2. Create Configuration
+### Context
 
-memd uses TOML configuration at `~/.config/memd/config.toml`:
+- `context.list_subsystems`
+- `context.get_files_for_subsystem`
+- `context.search_context_documents`
+- `context.find_relevant_context`
+- `context.suggest_agent`
+- `context.get_hot_context`
 
-```bash
-mkdir -p ~/.config/memd
+### Structural
 
-cat > ~/.config/memd/config.toml <<'EOF'
-[server]
-mode = "mcp"  # or "cli"
+- `code.find_definition`
+- `code.find_references`
+- `code.find_callers`
+- `code.find_imports`
 
-[storage]
-data_dir = "~/.local/share/memd"
+### Debug
 
-[embeddings]
-model = "all-MiniLM-L6-v2"
-dimension = 384
-pooling_strategy = "mean"
+- `debug.find_tool_calls`
+- `debug.find_errors`
 
-[index]
-hnsw_m = 16
-hnsw_ef_construction = 200
-hnsw_ef_search = 50
+## Required Agent Contract
 
-[cache]
-hot_tier_size = 1000
-semantic_cache_ttl = 2700  # 45 minutes
+Agents should follow this lifecycle whenever the work is substantive.
 
-[compaction]
-tombstone_threshold = 0.20
-segment_threshold = 10
-hnsw_staleness_threshold = 0.15
-EOF
-```
+### 1. Start the task
 
-### 3. Configure AI Agent (Claude Code)
+Use `task.start` before substantive work.
 
-Add memd to your MCP configuration:
+Required concepts:
 
-```bash
-# Edit Claude Code MCP config
-cat >> ~/.config/claude/mcp_settings.json <<'EOF'
-{
-  "mcpServers": {
-    "memd": {
-      "command": "memd",
-      "args": [],
-      "env": {},
-      "disabled": false
-    }
-  }
-}
-EOF
-```
+- `goal`
+- `motivation`
+- `hypothesis`
+- `scientific_question`
+- `dataset_refs`
+- `expected_outputs`
 
-**Important:** Restart Claude Code after adding MCP server configuration.
+### 2. Record meaningful checkpoints
 
-### 4. Configure AI Agent (Codex CLI)
+Use `task.progress` only when something materially changed.
 
-For Codex CLI, add to MCP configuration:
+Required concepts:
 
-```bash
-# Edit Codex MCP config
-cat >> ~/.codex/mcp_config.json <<'EOF'
-{
-  "servers": {
-    "memd": {
-      "command": "memd",
-      "args": [],
-      "env": {}
-    }
-  }
-}
-EOF
-```
+- `summary`
+- `blockers`
+- `failed_attempts`
+- `next_step`
 
-### 5. Verify Installation
+Do not log every shell command. Log changes in understanding.
 
-Test memd is accessible:
+### 3. Record each substantive run
 
-```bash
-# Run memd directly (should start MCP server on stdio)
-memd
+Before a meaningful run:
 
-# In another terminal, check data directory was created
-ls -la ~/.local/share/memd
-```
+- `task.run_start`
 
-You should see memd waiting for MCP input on stdin. Press Ctrl+C to exit.
+Required concepts:
 
-## Usage Patterns
+- `tool_name`
+- `command`
+- `why_chosen`
+- `parameters`
+- `inputs`
 
-### Basic Memory Operations
+After the run:
 
-**Add a memory:**
+- `task.run_finish`
+
+Required concepts:
+
+- `status`
+- `outputs`
+- `metrics`
+- `notes`
+
+### 4. Record concrete evidence
+
+Use `task.add_evidence` when a result materially supports or weakens a claim.
+
+Required concepts:
+
+- `summary`
+- `evidence_kind`
+- `supports_claim`
+- metric name/value when available
+
+### 5. Finish the task
+
+Use `task.finish` when the task reaches a meaningful stopping point.
+
+Required concepts:
+
+- `what_worked`
+- `what_failed`
+- `validation`
+- `uncertainty`
+- `followups`
+- `confidence`
+
+### 6. Retrieve what others did
+
+Use:
+
+- `task.get` to inspect the canonical artifact history for one task
+- `task.search` to search across task artifacts with exact filters
+- `memory.search` to search broader raw memory and context
+
+## Guardrails for Agents
+
+These are the operating rules this skill expects:
+
+- Always search before starting work.
+- Do not repeat known failed approaches unless you have a reason.
+- Use the same `tenant_id` when agents should share knowledge.
+- Use `task.*` for work with intent, rationale, parameters, evidence, and outcomes.
+- Use `memory.add` / `memory.add_batch` for raw chunks and code indexing.
+- Log meaningful milestones, not every command.
+- Every substantive run must include parameters, why chosen, and outputs.
+- Every finished task must include what worked, what failed, validation, uncertainty, and followups.
+
+## How Shared Multi-Agent Memory Works
+
+If multiple agents write to the same tenant, later agents can search and recover:
+
+- what another agent was trying to achieve
+- why a method was chosen
+- which parameters were already tried
+- which runs failed
+- which evidence supported a conclusion
+- what work remains
+
+That is the point of the task schema: consistency across agents.
+
+## Retrieval Patterns
+
+### Use `task.search` when you know the shape of the answer
+
+Examples:
+
+- “Find failed MMseqs runs for this task”
+- “Show evidence artifacts for dataset `rna_seq`”
+- “Find tasks where tool `blast` was used”
+- “Show completed tasks in project `oncogene_screen` with uncertainty about replicate quality”
+
+### Use `memory.search` when you want broader context
+
+Examples:
+
+- “Find architecture notes about auth middleware”
+- “Show indexed code related to PostgreSQL connection handling”
+- “Search codified context docs for incident response”
+
+## Minimal Example
+
 ```json
 {
   "jsonrpc": "2.0",
   "method": "tools/call",
   "params": {
-    "name": "memory.add",
+    "name": "task.start",
     "arguments": {
-      "tenant_id": "my-project",
-      "text": "Function parseConfig reads TOML files and returns Config struct",
-      "chunk_type": "code",
-      "tags": ["rust", "config", "parsing"]
+      "tenant_id": "oncogene-screen",
+      "project_id": "crispr-screen",
+      "goal": "Identify candidate regulators of the phenotype",
+      "motivation": "Previous screens showed the phenotype but not the mechanism",
+      "hypothesis": "A small set of transcriptional regulators explains the signal",
+      "scientific_question": "Which regulators are most strongly associated with the phenotype?",
+      "dataset_refs": [
+        {"name": "screen_counts", "version": "v3"}
+      ],
+      "expected_outputs": [
+        "ranked candidate list",
+        "validation summary"
+      ]
     }
   },
   "id": 1
 }
 ```
 
-**Search for memories:**
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "tools/call",
-  "params": {
-    "name": "memory.search",
-    "arguments": {
-      "tenant_id": "my-project",
-      "query": "how to parse configuration",
-      "k": 10
-    }
-  },
-  "id": 2
-}
-```
+Then:
 
-### Tenant Isolation
+- `task.run_start`
+- `task.run_finish`
+- `task.add_evidence`
+- `task.finish`
 
-Use `tenant_id` to isolate memories by project:
+## Codebase Indexing Pattern
 
-```bash
-# Project A memories
-tenant_id: "project-alpha"
+For raw repository chunks:
 
-# Project B memories
-tenant_id: "project-beta"
+1. Start an indexing task with `task.start`
+2. Use `task.run_start` / `task.run_finish` for the indexing job
+3. Store file chunks via `memory.add_batch`
+4. Finish the indexing task with `task.finish`
 
-# Personal notes
-tenant_id: "personal"
-```
+This keeps the code chunks searchable while also recording the indexing job’s rationale and results.
 
-**Critical:** Tenants are strictly isolated - no cross-tenant data leakage.
+## Example Guides
 
-### Batch Insert
+- [session_tracking.md](examples/session_tracking.md)
+- [decision_tracking.md](examples/decision_tracking.md)
+- [codebase_indexing.md](examples/codebase_indexing.md)
 
-For bulk indexing (repositories, documentation):
+## Practical Rule
 
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "tools/call",
-  "params": {
-    "name": "memory.add_batch",
-    "arguments": {
-      "tenant_id": "my-project",
-      "chunks": [
-        {
-          "text": "Database schema uses PostgreSQL with JSONB columns",
-          "chunk_type": "doc",
-          "tags": ["database", "postgres"]
-        },
-        {
-          "text": "API endpoints follow REST conventions with /api/v1 prefix",
-          "chunk_type": "code",
-          "tags": ["api", "rest"]
-        }
-      ]
-    }
-  },
-  "id": 3
-}
-```
-
-### Code Navigation
-
-**Find function definition:**
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "tools/call",
-  "params": {
-    "name": "code.find_definition",
-    "arguments": {
-      "tenant_id": "rust-project",
-      "symbol_name": "HnswIndex"
-    }
-  },
-  "id": 4
-}
-```
-
-**Find all callers of a function:**
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "tools/call",
-  "params": {
-    "name": "code.find_callers",
-    "arguments": {
-      "tenant_id": "rust-project",
-      "function_name": "insert_batch",
-      "max_depth": 3
-    }
-  },
-  "id": 5
-}
-```
-
-### Debug Traces
-
-**Search past tool invocations:**
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "tools/call",
-  "params": {
-    "name": "debug.find_tool_calls",
-    "arguments": {
-      "tenant_id": "debug-session",
-      "tool_pattern": "git.*",
-      "limit": 20
-    }
-  },
-  "id": 6
-}
-```
-
-**Find error patterns:**
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "tools/call",
-  "params": {
-    "name": "debug.find_errors",
-    "arguments": {
-      "tenant_id": "debug-session",
-      "error_pattern": "NullPointerException",
-      "k": 10
-    }
-  },
-  "id": 7
-}
-```
-
-## Agent Integration Examples
-
-### Claude Code Pattern
-
-```markdown
-User: "Remember that we decided to use PostgreSQL with JSONB for the user profiles table"
-
-Claude: I'll store this decision in memory.
-
-<uses memory.add tool>
-{
-  "tenant_id": "ecommerce-app",
-  "text": "Architecture decision: Use PostgreSQL with JSONB columns for user profiles table to support flexible schema evolution",
-  "chunk_type": "decision",
-  "tags": ["architecture", "database", "postgres", "user-profiles"]
-}
-
-User: "How did we decide to store user profiles?"
-
-Claude: Let me search memory...
-
-<uses memory.search tool>
-{
-  "tenant_id": "ecommerce-app",
-  "query": "user profiles storage decision",
-  "k": 5
-}
-
-Result: "Architecture decision: Use PostgreSQL with JSONB columns for user profiles table..."
-```
-
-### Codex CLI Pattern
-
-```bash
-# Index a codebase
-codex -p "Index this repository into memory as 'my-rust-app'"
-
-# Search for patterns
-codex -p "Find all async functions in memory for 'my-rust-app'"
-
-# Code navigation
-codex -p "Show me the call graph for the parse_config function"
-```
-
-## Performance Characteristics
-
-Based on comprehensive benchmarks (January 31, 2026):
-
-**Retrieval Quality (Recall@10):**
-- Code Retrieval: 1.000 (Perfect)
-- Semantic Search: 0.867 (Excellent)
-- Hybrid Search: 0.833 (Exceeds target)
-- Keyword Queries: 0.875 (Good)
-
-**Latency:**
-- Warm Tier p50: 99.5ms
-- Warm Tier p90: 113.3ms
-- Warm Tier p99: 130.1ms
-- Embedding p50: 10-23ms (CPU-only, all-MiniLM-L6-v2)
-
-**Capacity:**
-- ~16MB per 10K chunks (384-dim embeddings)
-- ~500MB per 100K chunks
-- Reload time: ~2-5s for 10K chunks (HNSW rebuild)
-
-## Common Workflows
-
-### 1. Session Context Tracking
-
-```bash
-# At session start
-memory.add: "Starting work on user authentication feature"
-
-# During work
-memory.add: "Implemented JWT token validation in auth.rs:245"
-memory.add: "Bug fix: handle expired tokens with 401 response"
-
-# At session end
-memory.add: "Completed auth feature, all tests passing, ready for review"
-
-# Later session
-memory.search: "authentication implementation status"
-```
-
-### 2. Codebase Indexing
-
-```bash
-# Batch index all Rust files
-find . -name "*.rs" -exec memd-index {} \;
-
-# Search code semantically
-memory.search: "functions that handle database connections"
-
-# Navigate code structure
-code.find_definition: "DatabasePool"
-code.find_callers: "connect_to_db"
-```
-
-### 3. Decision Tracking
-
-```bash
-# Record architectural decisions
-memory.add:
-  text: "ADR-001: Use Redis for session storage instead of database to reduce latency"
-  tags: ["architecture", "redis", "sessions", "adr"]
-
-# Search decisions later
-memory.search: "why did we choose redis"
-```
-
-### 4. Debug Session Persistence
-
-```bash
-# Record debugging context
-debug.find_errors: "database connection timeout"
-memory.add: "Bug: Connection pool exhaustion after 1000 requests - fixed by increasing pool size to 50"
-
-# Next debugging session
-memory.search: "connection pool issues"
-debug.find_tool_calls: "database.*"
-```
-
-## Troubleshooting
-
-### memd Not Starting
-
-**Symptom:** `memd: command not found`
-
-**Solution:**
-```bash
-# Check if binary exists
-ls -la ~/.local/bin/memd
-
-# Check PATH
-echo $PATH | grep "$HOME/.local/bin"
-
-# Add to PATH if missing
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-### MCP Connection Failed
-
-**Symptom:** Agent can't connect to memd
-
-**Solution:**
-1. Verify memd runs standalone: `memd` (should wait for input)
-2. Check MCP config syntax: `cat ~/.config/claude/mcp_settings.json`
-3. Restart agent after config changes
-4. Check logs: `~/.local/share/memd/memd.log`
-
-### Low Search Quality
-
-**Symptom:** Search results not relevant
-
-**Solution:**
-1. Use more specific queries (not single words)
-2. Add tags to chunks for better filtering
-3. Use hybrid search (default) for best results
-4. Check tenant_id isolation (searching correct tenant)
-5. Verify embeddings are working: `memory.stats` should show indexed chunks
-
-### Slow Queries
-
-**Symptom:** Search takes >500ms
-
-**Solution:**
-1. Check index size: `memory.stats` (large indexes slower)
-2. Reduce `k` parameter (fewer results faster)
-3. Tune HNSW ef_search in config (lower=faster, higher=better quality)
-4. Use hot tier for frequent queries (automatic promotion)
-5. Run compaction: `memory.compact` (clean up tombstones)
-
-### Out of Memory
-
-**Symptom:** memd crashes or system slows down
-
-**Solution:**
-1. Check index size: `memory.stats`
-2. Reduce `hot_tier_size` in config
-3. Increase system RAM or reduce chunk count
-4. Use compaction to reclaim space: `memory.compact`
-
-## Configuration Tuning
-
-### For Code Search (Precision)
-
-```toml
-[index]
-hnsw_m = 32                    # More connections
-hnsw_ef_construction = 400     # Better graph quality
-hnsw_ef_search = 100           # Higher search quality
-
-[embeddings]
-model = "all-MiniLM-L6-v2"     # Good for code
-```
-
-### For Speed (Latency)
-
-```toml
-[index]
-hnsw_m = 8                     # Fewer connections
-hnsw_ef_construction = 100     # Faster indexing
-hnsw_ef_search = 20            # Faster search
-
-[cache]
-hot_tier_size = 5000           # Larger hot tier
-```
-
-### For Memory Efficiency
-
-```toml
-[cache]
-hot_tier_size = 100            # Small hot tier
-semantic_cache_ttl = 900       # Shorter TTL (15 min)
-
-[compaction]
-tombstone_threshold = 0.10     # Compact more aggressively
-```
-
-## Advanced Usage
-
-### Multi-Tenant Setup
-
-Isolate memories by context:
-
-```bash
-# Work projects
-tenant_id: "acme-corp-backend"
-tenant_id: "acme-corp-frontend"
-
-# Personal projects
-tenant_id: "personal-blog"
-tenant_id: "learning-rust"
-
-# Experimentation
-tenant_id: "sandbox"
-```
-
-### Tag Strategies
-
-Effective tagging improves retrieval:
-
-```bash
-# By language
-tags: ["rust", "python", "typescript"]
-
-# By domain
-tags: ["auth", "database", "api"]
-
-# By type
-tags: ["bug-fix", "feature", "refactor"]
-
-# By status
-tags: ["completed", "in-progress", "blocked"]
-
-# Combined
-tags: ["rust", "database", "bug-fix", "completed"]
-```
-
-### Batch Indexing Scripts
-
-Index entire repositories:
-
-```bash
-#!/bin/bash
-# index-repo.sh
-
-TENANT_ID="my-project"
-
-# Find all source files
-find . -type f \( -name "*.rs" -o -name "*.py" -o -name "*.ts" \) | while read file; do
-  # Extract file content
-  content=$(cat "$file")
-
-  # Add to memd via MCP (pseudo-code)
-  memd-cli add --tenant "$TENANT_ID" \
-    --text "$content" \
-    --chunk-type "code" \
-    --tags "$(basename $file | cut -d. -f2)"
-done
-```
-
-## Best Practices
-
-1. **Consistent Tenant IDs** - Use project names or UUIDs, not random strings
-2. **Descriptive Tags** - 3-5 tags per chunk, include language + domain + type
-3. **Chunk Granularity** - Functions/classes work well, avoid very large chunks
-4. **Regular Compaction** - Run `memory.compact` weekly for large indexes
-5. **Monitor Stats** - Check `memory.stats` periodically to track growth
-6. **Semantic Queries** - Write queries as questions, not keywords ("how to handle errors" > "error handling")
-
-## Integration with Skills
-
-### With /commit
-
-```bash
-# Before committing, search for similar past work
-memory.search: "how did we handle database migrations"
-
-# After commit, record decision
-memory.add: "Implemented database migration using Alembic auto-generation"
-```
-
-### With /plan
-
-```bash
-# Search for architectural patterns
-memory.search: "api error handling patterns we use"
-
-# Store planning decisions
-memory.add: "Plan: Implement rate limiting using Redis with 100 req/min per user"
-```
-
-### With /codex-review
-
-```bash
-# Search for past code review findings
-memory.search: "common security issues in auth code"
-
-# Store review outcomes
-memory.add: "Code review: Fixed SQL injection in user query endpoint"
-```
-
-## Reference
-
-- **Documentation**: See README.md and QUICKSTART.md in repository
-- **Repository**: https://github.com/fmschulz/memd
-- **Issues**: https://github.com/fmschulz/memd/issues
-- **Contact**: fmschulz@gmail.com
-
-## Version
-
-**Current Release**: v0.1.0 (January 31, 2026)
-
-**Status**: Milestone 1 Complete - Production-ready hybrid retrieval system
-
----
-
-**Quick Start Summary:**
-1. Install: `cargo build --release && cp target/release/memd ~/.local/bin/`
-2. Configure: Create `~/.config/memd/config.toml`
-3. Add to agent: Update `~/.config/claude/mcp_settings.json`
-4. Restart agent
-5. Use `memory.add` and `memory.search` tools
+If another agent would later need to know why you did something, what parameters you used, or what failed, that information belongs in a `task.*` artifact, not only in a generic `memory.add` chunk.
