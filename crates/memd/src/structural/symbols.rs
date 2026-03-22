@@ -952,6 +952,7 @@ public class UserService {
             .iter()
             .find(|s| s.name == "UserService" && s.kind == SymbolKind::Method);
         // The class and constructor have the same name, which is expected
+        assert!(constructor.is_some());
         let get_name = symbols.iter().find(|s| s.name == "getName");
         assert!(get_name.is_some());
         assert_eq!(get_name.unwrap().kind, SymbolKind::Method);
