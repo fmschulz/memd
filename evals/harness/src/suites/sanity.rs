@@ -20,7 +20,8 @@ struct SanityDataset {
     version: String,
     #[serde(default)]
     note: Option<String>,
-    query_types: Vec<String>,
+    #[serde(rename = "query_types")]
+    _query_types: Vec<String>,
     queries: Vec<SanityQuery>,
     documents: Vec<SanityDocument>,
 }
@@ -30,9 +31,9 @@ struct SanityQuery {
     id: String,
     query: String,
     #[serde(rename = "type")]
-    query_type: String,
+    _query_type: String,
     relevant: Vec<String>,
-    irrelevant: Vec<String>,
+    _irrelevant: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,7 +56,7 @@ fn extract_content_text(response: &Value) -> Option<&str> {
 pub fn run_sanity_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestResult> {
     let mut results = Vec::new();
 
-    let dataset_path = crate::resolve_dataset_path("evals/datasets/retrieval/sanity_check.json");
+    let dataset_path = crate::resolve_dataset_path("evals/bench/datasets/retrieval/sanity_check.json");
     let dataset = match load_dataset(dataset_path.as_path()) {
         Ok(d) => d,
         Err(e) => {

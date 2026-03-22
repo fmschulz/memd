@@ -1,24 +1,36 @@
 # memd
 
-Local MCP memory daemon for coding agents. `memd` stores and retrieves tenant-isolated memory chunks with hybrid retrieval and optional structural code/trace queries.
+`memd` is a local MCP server and shared knowledge base for coding agents and AI scientists.
 
-## What It Does
+It does three things:
 
-- Runs as an MCP server on stdio (`--mode mcp`, default)
-- Supports persistent storage (WAL + segments + metadata) or in-memory mode (`--in-memory`)
-- Exposes 15 MCP tools (memory, structural, debug, metrics, compaction, episode consolidation)
-- Supports hybrid retrieval in persistent mode (dense + sparse + reranking)
-- Applies tenant isolation on all read/write operations
+- stores raw searchable chunks with `memory.*`
+- stores structured task history with `task.*`
+- stores canonical knowledge artifacts and collaboration threads with `artifact.*`
 
-## Architecture Rationale
+Use `memory.*` for code, docs, notes, and indexed files.
 
-`memd` keeps hot operations local and simple:
+Use `task.*` for work that has:
 
-- Stdio MCP transport avoids network service complexity for agent integration
-- Tenant-scoped storage paths and IDs provide hard partitioning
-- Persistent mode combines append-friendly writes (WAL/segments) with query indexes
-- In-memory mode enables fast test loops and protocol validation
-- Hybrid retrieval blends lexical and semantic signals while keeping fallback behavior deterministic
+- a goal
+- a reason
+- runs and parameters
+- evidence
+- what worked
+- what failed
+
+Use `artifact.*` for collaboration around that work:
+
+- critique and revision
+- verification and review state
+- shared threads and challenge spaces
+- contributor records
+- optional safety metadata for local prototypes
+
+## What You Need
+
+- Rust
+- Python 3 for the benchmark scripts
 
 ## Build
 
@@ -27,28 +39,90 @@ cargo build --release
 ./target/release/memd --version
 ```
 
-## Run Modes
+## Run
+
+For a shared local daemon that multiple agent, scientist, or human-guided sessions can use:
 
 ```bash
-# MCP server (persistent store)
-./target/release/memd --mode mcp
-
-# MCP server (in-memory store, useful for tests)
-./target/release/memd --mode mcp --in-memory --data-dir /tmp/memd-dev
-
-# CLI mode
-./target/release/memd --mode cli --help
+./target/release/memd --mode mcp --transport http --http-bind 127.0.0.1:8787
 ```
 
-Data directory precedence:
+For the legacy stdio subprocess mode:
 
-1. `--data-dir`
-2. `config.toml` `data_dir`
-3. Default `~/.memd/data`
+```bash
+./target/release/memd --mode mcp
+```
 
-## MCP Protocol Shape
+For a throwaway shared-daemon run:
 
-`memd` expects JSON-RPC 2.0. Tool calls use:
+```bash
+./target/release/memd --mode mcp --transport http --http-bind 127.0.0.1:8787 --in-memory --data-dir /tmp/memd-demo
+```
+
+## Shared Topology
+
+Recommended use is one local `memd` daemon per machine, with multiple coding-agent and AI-scientist sessions connecting to the same `/mcp` endpoint.
+
+```text
++----------------------- Machine A: memd host -----------------------+
+| +---------------+   HTTP MCP   +-------------------------------+   |
+| | Coding agent  | -----------> |                               |   |
+| +---------------+              | memd daemon                   |   |
+| +---------------+   HTTP MCP   | 127.0.0.1:8787/mcp           |   |
+| | AI scientist  | -----------> |                               |   |
+| +---------------+              +---------------+---------------+   |
+|                                                |                   |
+|                                                | persistent store  |
+|                                                v                   |
+|                                  +-------------------------------+ |
+|                                  | metadata.db                   | |
+|                                  | tenants/<tenant>/wal.log      | |
+|                                  | tenants/<tenant>/segments/    | |
+|                                  | sparse_index/ + warm_index/   | |
+|                                  +-------------------------------+ |
++--------------------------------------------------------------------+
+
++---------------- Machine B: optional remote clients ----------------+
+| +---------------+                                  +-------------+ |
+| | Coding agent  | -- private network or tunnel --> | same /mcp  | |
+| | AI scientist  | -- private network or tunnel --> | endpoint    | |
+| +---------------+                                  +-------------+ |
++--------------------------------------------------------------------+
+```
+
+Mermaid source for the same topology:
+
+```mermaid
+flowchart LR
+  subgraph MA[Machine A: memd host]
+    C1[Coding agent]
+    A1[AI scientist]
+    M[(memd HTTP MCP daemon\n127.0.0.1:8787/mcp)]
+    D[(metadata.db + tenant WAL + segments)]
+    C1 -->|HTTP MCP| M
+    A1 -->|HTTP MCP| M
+    M -->|persistent store| D
+  end
+
+  subgraph MB[Machine B: optional remote clients]
+    C2[Coding agent]
+    A2[AI scientist]
+  end
+
+  C2 -->|private network or tunnel| M
+  A2 -->|private network or tunnel| M
+```
+
+Current boundary conditions:
+
+- same-machine shared sessions are the primary supported path
+- cross-machine access is possible by exposing the HTTP endpoint over a private network or tunnel
+- `memd` does not yet provide built-in multi-user authentication or server-enforced account isolation
+- `tenant_id` is still caller-supplied logical partitioning, not an auth boundary
+
+## Basic Use
+
+Start a task:
 
 ```json
 {
@@ -56,190 +130,152 @@ Data directory precedence:
   "id": 1,
   "method": "tools/call",
   "params": {
-    "name": "memory.add",
+    "name": "task.start",
     "arguments": {
-      "tenant_id": "demo_tenant",
-      "text": "parseConfig reads TOML and validates required fields",
-      "type": "code"
+      "tenant_id": "demo",
+      "project_id": "auth",
+      "goal": "Find the JWT bug",
+      "motivation": "Requests are failing in production",
+      "hypothesis": "Time handling is inconsistent",
+      "scientific_question": "Where does the timestamp skew happen?",
+      "expected_outputs": ["root cause", "fix"]
     }
   }
 }
 ```
 
-Tool results are MCP content blocks containing JSON text:
+Then record progress with:
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "content": [
-      {
-        "type": "text",
-        "text": "{\"chunk_id\":\"019c40c2-e632-7843-ad4b-545e63f66a47\"}"
-      }
-    ]
-  }
-}
-```
+- `task.progress`
+- `task.run_start`
+- `task.run_finish`
+- `task.add_evidence`
+- `task.finish`
 
-## Tool Inventory (15)
+For collaboration around the same work, use:
 
-Memory:
+- `artifact.create`
+- `artifact.get`
+- `artifact.search`
+- `artifact.list_thread`
 
-- `memory.search`
+For raw context, use:
+
 - `memory.add`
 - `memory.add_batch`
-- `memory.get`
-- `memory.delete`
-- `memory.stats`
-- `memory.metrics`
-- `memory.compact`
-- `memory.consolidate_episode`
+- `memory.search`
 
-Structural:
+Optional artifact safety metadata is supported through `artifact.create`:
 
-- `code.find_definition`
-- `code.find_references`
-- `code.find_callers`
-- `code.find_imports`
+- `compute_budget`
+- `cost_actual`
+- `data_access_level`
+- `policy_tags`
+- `allowed_tools`
+- `approval_state`
 
-Debug:
+Those fields are optional in the current local prototype.
 
-- `debug.find_tool_calls`
-- `debug.find_errors`
+## Data Location
 
-## Behavioral Details
+Persistent mode writes to:
 
-### Input Validation
+- `metadata.db`
+- `tenants/<tenant_id>/wal.log`
+- `tenants/<tenant_id>/segments/`
+- `tenants/<tenant_id>/warm_index/`
+- `sparse_index/`
 
-- `tenant_id`: required and validated (`[A-Za-z0-9_]+`)
-- `memory.search.k`: must be `1..=100`
-- `filters.time_range.from/to`: ISO 8601 parseable; if both set, `from <= to`
-- `chunk_id`: UUID required for `memory.get` and `memory.delete`
+Default data dir: `~/.memd/data`
 
-### Chunk Type Handling
+## Skill
 
-Canonical types:
+The agent skill is in [memd-skill](memd-skill).
 
-- `code`, `doc`, `trace`, `decision`, `plan`, `research`, `message`, `summary`, `other`
+It now includes a bundled Linux binary at [memd-skill/bin/linux-x64/memd](memd-skill/bin/linux-x64/memd).
 
-Accepted aliases at handler level:
+Start there if you want agents to use `memd` correctly:
 
-- `scientific -> doc`
-- `general -> other`
+- [memd-skill/SKILL.md](memd-skill/SKILL.md)
+- [memd-skill/INSTALL.md](memd-skill/INSTALL.md)
 
-### Add-Time Splitting
+For shared local sessions with current client CLIs:
 
-For long text (`> 1000` chars), `memory.add` and `memory.add_batch` use shared split logic across in-memory and persistent stores.
+- start `memd` once with `--transport http`
+- register Codex with `codex mcp add memd --url http://127.0.0.1:8787/mcp`
+- register Claude with `claude mcp add --transport http --scope user memd http://127.0.0.1:8787/mcp`
+- add the instruction snippet from [memd-skill/INSTALL.md](memd-skill/INSTALL.md) to `~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`
 
-- Additional chunks are stored with tags `chunk_index:<n>` and `total_chunks:<m>`
-- Split chunks also include `char_start:<n>` and `char_end:<n>` tags for citation span offsets
-- Return value remains one `chunk_id` per input chunk (the first stored chunk ID)
-
-### Search Filters
-
-Current state:
-
-- `k` and `time_range` are validated
-- `debug_tiers` returns extra tier timing/source metadata
-- `project_id` is enforced as a search result filter
-- `filters.types` is enforced as a search result filter
-- `filters.time_range` is enforced on `timestamp_created`
-- `filters.episode_id` is enforced through episode tags (`episode:<id>`)
-- Search responses include `citation` metadata (content hash, provenance, and chunk span offsets when available)
-- Search responses include `episode_id` when present on the stored chunk
-- Search uses adaptive candidate depth (`fetch_k`) for complex/filtered queries
-- If initial retrieval returns no results, a deterministic repair pass normalizes query punctuation/spacing and retries
-- `repair_info` in search responses reports whether a repair attempt was made and whether it recovered results
-
-### Episodic Memory
-
-- `memory.add` and `memory.add_batch` accept optional `episode_id`
-- Episode IDs are stored as tags (`episode:<id>`) for cross-store compatibility
-- `memory.consolidate_episode` creates a `summary` chunk from episode content
-- `memory.consolidate_episode` can optionally remove source chunks (`retain_source_chunks=false`)
-
-### Metrics and Compaction
-
-- `memory.metrics` returns `timestamp`, `index`, `latency`, `recent_queries`, `tiered`
-- Optional params:
-- `tenant_id` filters index metrics
-- `include_recent` defaults `true`
-- `include_tiered` defaults `true`
-- `memory.compact`:
-- persistent store: runs thresholded compaction or forced compaction via trait-dispatched backend implementation
-- in-memory store: returns `status: skipped`
-
-## Quick Integration
-
-### Claude Code MCP server entry
-
-```json
-{
-  "mcpServers": {
-    "memd": {
-      "command": "/absolute/path/to/memd",
-      "args": ["--mode", "mcp"]
-    }
-  }
-}
-```
-
-### Codex MCP server entry
-
-```json
-{
-  "memd": {
-    "command": "/absolute/path/to/memd",
-    "type": "stdio",
-    "args": ["--mode", "mcp"]
-  }
-}
-```
-
-## Testing
-
-Core checks:
+For a stronger default that makes `memd` mandatory for substantive multi-step technical and scientific work:
 
 ```bash
-cargo test -p memd
-cargo test -p memd-evals
-RUST_LOG=error cargo run -p memd-evals -- --suite mcp --skip-build
+./memd-skill/install_memd_enforcement.sh
 ```
 
-Deterministic baseline:
+That is the strongest practical enforcement path available without modifying the client binaries themselves.
 
-- `cargo test -p memd` is the required green gate for local/CI correctness.
-- Network/model-download tests are explicitly ignored by default (Candle embedder tests).
-- Run ignored tests only when network access and model downloads are expected:
+## Benchmarks
+
+Offline retrieval benchmark:
 
 ```bash
-cargo test -p memd -- --ignored
+./evals/bench/scripts/run_offline_retrieval_benchmark.sh
 ```
 
-Additional eval suites:
+Task-memory benchmark:
 
 ```bash
-RUST_LOG=error cargo run -p memd-evals -- --suite hybrid --skip-build
-RUST_LOG=error cargo run -p memd-evals -- --suite retrieval --skip-build
-RUST_LOG=error cargo run -p memd-evals -- --suite true-semantic --skip-build
+./evals/bench/scripts/run_task_memory_benchmark.sh
 ```
 
-Offline benchmark protocol (Phase 6):
+## Optional ONNX Cross-Encoder
+
+ONNX in this repo is only for the optional cross-encoder reranker.
+
+The default embedding path is still Candle. A normal `cargo build` does not enable ONNX.
+
+Build and run the ONNX reranker path with:
 
 ```bash
-./evals/scripts/run_offline_retrieval_benchmark.sh --model all-minilm --seed 42
+cargo build --release --features cross-encoder-reranker
+./target/release/memd --mode mcp --search-variant hybrid-cross-encoder
 ```
 
-Protocol details are documented in `evals/BENCHMARK_PROTOCOL.md`.
+Runtime behavior:
 
-## Notes on Datasets
+- `--search-variant hybrid-cross-encoder` selects the ONNX cross-encoder reranker for hybrid search
+- the scorer is initialized when the persistent store opens, not lazily on first query
+- if the feature is not compiled in, or ONNX initialization fails, `memd` logs a warning and falls back to the feature reranker
 
-Large retrieval datasets under `evals/datasets/retrieval/` are intended for local benchmarking and are not required for normal operation.
+Model and runtime assets:
 
-## Related Docs
+- cross-encoder model: `Xenova/ms-marco-MiniLM-L-6-v2` ONNX
+- tokenizer: matching `tokenizer.json`
+- ONNX Runtime shared library: downloaded from GitHub releases on supported Linux targets
+- default cache dir: `~/.cache/memd/cross-encoder`
+- automatic runtime download currently supports `linux/x86_64` and `linux/aarch64`
 
-- `QUICKSTART.md` for end-to-end command examples
-- `TESTING.md` for test matrix and release verification commands
-- `docs/` for implementation notes and review artifacts
+Useful environment variables:
+
+- `ORT_DYLIB_PATH`
+- `MEMD_CROSS_ENCODER_ORT_DYLIB_PATH`
+- `MEMD_CROSS_ENCODER_ORT_VERSION`
+- `MEMD_CROSS_ENCODER_ORT_URL`
+- `MEMD_CROSS_ENCODER_MODEL_PATH`
+- `MEMD_CROSS_ENCODER_TOKENIZER_PATH`
+- `MEMD_CROSS_ENCODER_CACHE_DIR`
+- `MEMD_CROSS_ENCODER_DISABLE=1`
+
+Real ONNX smoke test:
+
+```bash
+cargo test -p memd --features cross-encoder-reranker smoke_real_onnx_scores_relevant_pair_higher -- --ignored --nocapture
+```
+
+That smoke test calls the ONNX scorer directly, so it does not go through the reranker fallback path.
+
+## More
+
+- [QUICKSTART.md](QUICKSTART.md)
+- [docs/scientific-task-memory/schema/README.md](docs/scientific-task-memory/schema/README.md)
+- [docs/scientific-task-memory/benchmark-results/README.md](docs/scientific-task-memory/benchmark-results/README.md)

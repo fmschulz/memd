@@ -167,7 +167,7 @@ mod tests {
 
         assert_eq!(result.docs_before, 5);
         assert_eq!(result.docs_after, 5);
-        assert!(result.duration.as_nanos() >= 0);
+        let _duration = result.duration;
     }
 
     #[test]

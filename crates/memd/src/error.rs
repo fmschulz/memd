@@ -40,6 +40,10 @@ pub enum MemdError {
     #[error("toml parse error: {0}")]
     TomlError(#[from] toml::de::Error),
 
+    /// TOML serialization errors
+    #[error("toml serialization error: {0}")]
+    TomlSerError(#[from] toml::ser::Error),
+
     /// SQLite database errors
     #[error("database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
