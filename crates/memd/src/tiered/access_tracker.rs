@@ -228,7 +228,6 @@ impl AccessTracker {
     /// Apply time decay to all entries (call periodically)
     pub fn decay_all(&self) {
         let now = current_time_ms();
-        let decay_ms = (self.config.decay_half_life_hours as i64) * 3600 * 1000;
 
         let mut stats = self.stats.write();
         for access_stats in stats.values_mut() {

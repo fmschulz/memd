@@ -73,6 +73,7 @@ fn normalize(tensor: &Tensor) -> Result<Tensor> {
 }
 
 /// Candle-based embedder with model pooling
+#[derive(Clone)]
 pub struct CandleEmbedder {
     /// Pool of BERT models for parallel inference
     model_pool: Vec<Arc<Mutex<BertModel>>>,
@@ -347,15 +348,39 @@ impl Embedder for CandleEmbedder {
     }
 
     async fn embed_texts(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        // Split into batches to avoid memory issues
-        // Use batch_size from config instead of hard-coded constant
-        let batch_size = self.config.batch_size;
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Split into batches and process chunks in parallel to use the model pool.
+        let batch_size = self.config.batch_size.max(1);
+        let chunk_count = texts.chunks(batch_size).len();
+        let mut tasks = tokio::task::JoinSet::new();
+
+        for (chunk_idx, chunk) in texts.chunks(batch_size).enumerate() {
+            let embedder = self.clone();
+            let chunk_texts: Vec<String> = chunk.iter().map(|text| (*text).to_string()).collect();
+
+            tasks.spawn(async move {
+                let chunk_refs: Vec<&str> = chunk_texts.iter().map(|text| text.as_str()).collect();
+                let embeddings = embedder.embed_batch(&chunk_refs).await?;
+                Ok::<(usize, Vec<Vec<f32>>), MemdError>((chunk_idx, embeddings))
+            });
+        }
+
+        let mut ordered_batches = vec![None; chunk_count];
+        while let Some(task_result) = tasks.join_next().await {
+            let (chunk_idx, embeddings) = task_result
+                .map_err(|e| MemdError::EmbeddingError(format!("Task join error: {}", e)))??;
+            ordered_batches[chunk_idx] = Some(embeddings);
+        }
 
         let mut all_embeddings = Vec::with_capacity(texts.len());
-
-        for chunk in texts.chunks(batch_size) {
-            let batch_embeddings = self.embed_batch(chunk).await?;
-            all_embeddings.extend(batch_embeddings);
+        for batch in ordered_batches {
+            let mut embeddings = batch.ok_or_else(|| {
+                MemdError::EmbeddingError("missing batch embeddings from worker".into())
+            })?;
+            all_embeddings.append(&mut embeddings);
         }
 
         Ok(all_embeddings)
