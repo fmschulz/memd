@@ -19,6 +19,8 @@ use tracing::{debug, error, info, warn};
 
 use super::error::McpError;
 use super::handlers::{
+    handle_artifact_create, handle_artifact_get, handle_artifact_list_thread,
+    handle_artifact_search,
     handle_context_find_relevant_context, handle_context_get_files_for_subsystem,
     handle_context_get_hot_context, handle_context_list_subsystems,
     handle_context_search_documents, handle_context_suggest_agent, handle_find_callers,
@@ -28,7 +30,8 @@ use super::handlers::{
     handle_memory_get, handle_memory_metrics, handle_memory_search, handle_memory_stats,
     handle_task_add_evidence, handle_task_finish, handle_task_get, handle_task_progress,
     handle_task_run_finish, handle_task_run_start, handle_task_search, handle_task_start,
-    AddBatchParams, AddParams, CompactParams, ConsolidateEpisodeParams,
+    AddBatchParams, AddParams, ArtifactCreateParams, ArtifactGetParams,
+    ArtifactListThreadParams, CompactParams, ConsolidateEpisodeParams,
     ContextFindRelevantContextParams, ContextGetFilesForSubsystemParams,
     ContextGetHotContextParams, ContextListSubsystemsParams, ContextSearchDocumentsParams,
     ContextSuggestAgentParams, DeleteParams, FeedbackParams, FindCallersParams,
@@ -372,6 +375,35 @@ impl<S: Store> McpServer<S> {
                     McpError::InvalidParams(format!("invalid task.search params: {}", e))
                 })?;
                 handle_task_search(&*self.store, params).await
+            }
+            "artifact.create" => {
+                let params: ArtifactCreateParams =
+                    serde_json::from_value(arguments).map_err(|e| {
+                        McpError::InvalidParams(format!("invalid artifact.create params: {}", e))
+                    })?;
+                handle_artifact_create(&*self.store, self.tenant_manager.as_ref(), params).await
+            }
+            "artifact.get" => {
+                let params: ArtifactGetParams = serde_json::from_value(arguments).map_err(|e| {
+                    McpError::InvalidParams(format!("invalid artifact.get params: {}", e))
+                })?;
+                handle_artifact_get(&*self.store, params).await
+            }
+            "artifact.search" => {
+                let params: TaskSearchParams = serde_json::from_value(arguments).map_err(|e| {
+                    McpError::InvalidParams(format!("invalid artifact.search params: {}", e))
+                })?;
+                handle_artifact_search(&*self.store, params).await
+            }
+            "artifact.list_thread" => {
+                let params: ArtifactListThreadParams =
+                    serde_json::from_value(arguments).map_err(|e| {
+                        McpError::InvalidParams(format!(
+                            "invalid artifact.list_thread params: {}",
+                            e
+                        ))
+                    })?;
+                handle_artifact_list_thread(&*self.store, params).await
             }
             "memory.get" => {
                 let params: GetParams = serde_json::from_value(arguments)

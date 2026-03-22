@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub mod chunking;
 pub mod cli;
 pub mod compaction;
@@ -44,8 +46,8 @@ pub use structural::{
     SymbolKind, SymbolRecord,
 };
 pub use task_memory::{
-    build_task_projections, ArtifactKind, DatasetRef, EntityRef, ProjectionKind, TaskArtifact,
-    TaskArtifactWriteResult, TaskProjection, TaskProvenance, TaskSearchFilters,
+    build_task_projections, ArtifactKind, ContributorRef, DatasetRef, EntityRef, ProjectionKind,
+    TaskArtifact, TaskArtifactWriteResult, TaskProjection, TaskProvenance, TaskSearchFilters,
 };
 pub use text::{CodeTokenizer, ProcessedSentence, Sentence, SentenceSplitter, TextProcessor};
 pub use tiered::{
