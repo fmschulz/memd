@@ -75,22 +75,26 @@ codex exec \
 
 grep -qx 'stored' "${CODEX_WRITE_OUT}"
 
+CLAUDE_READ_PROMPT="Use the memd MCP server only. Do not use Bash. Search tenant_id \"${TENANT}\" for \"marker_from_codex_20260322\" with memory.search and return only the matching text if found."
 CLAUDE_READ_OUTPUT="$(
-  claude -p \
-    --permission-mode bypassPermissions \
-    --strict-mcp-config \
-    --mcp-config "${CLAUDE_CONFIG}" \
-    -- "Use the memd MCP server only. Do not use Bash. Search tenant_id \"${TENANT}\" for \"marker_from_codex_20260322\" with memory.search and return only the matching text if found."
+  printf '%s' "${CLAUDE_READ_PROMPT}" | \
+    claude -p \
+      --permission-mode bypassPermissions \
+      --strict-mcp-config \
+      --mcp-config "${CLAUDE_CONFIG}" \
+      --output-format text
 )"
 
 grep -Fqx 'marker_from_codex_20260322' <<<"${CLAUDE_READ_OUTPUT}"
 
+CLAUDE_WRITE_PROMPT="Use the memd MCP server only. Do not use Bash. Call memory.add with tenant_id \"${TENANT}\", project_id \"verification\", type \"summary\", text \"marker_from_claude_20260322\". Then answer with exactly: stored"
 CLAUDE_WRITE_OUTPUT="$(
-  claude -p \
-    --permission-mode bypassPermissions \
-    --strict-mcp-config \
-    --mcp-config "${CLAUDE_CONFIG}" \
-    -- "Use the memd MCP server only. Do not use Bash. Call memory.add with tenant_id \"${TENANT}\", project_id \"verification\", type \"summary\", text \"marker_from_claude_20260322\". Then answer with exactly: stored"
+  printf '%s' "${CLAUDE_WRITE_PROMPT}" | \
+    claude -p \
+      --permission-mode bypassPermissions \
+      --strict-mcp-config \
+      --mcp-config "${CLAUDE_CONFIG}" \
+      --output-format text
 )"
 
 grep -Fqx 'stored' <<<"${CLAUDE_WRITE_OUTPUT}"

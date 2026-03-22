@@ -1,10 +1,10 @@
 # Installing the memd Skill
 
-This skill tells agents when to use `memory.*` and when to use `task.*`.
+This skill tells agents when to use `memory.*`, `task.*`, and `artifact.*`.
 
 It also ships with a bundled Linux binary:
 
-- [bin/linux-x64/memd](/home/fschulz/dev/software/memd/memd-skill/bin/linux-x64/memd)
+- [bin/linux-x64/memd](bin/linux-x64/memd)
 
 The preferred shared-session setup is a single local `memd` HTTP daemon that both Codex CLI and Claude Code connect to.
 
@@ -74,6 +74,25 @@ The default data dir is still `~/.memd/data`. You can override it globally in `~
 
 Prefer the client CLIs over manual file editing.
 
+If you want the strongest available default behavior, use the enforcement installer:
+
+```bash
+./memd-skill/install_memd_enforcement.sh
+```
+
+That script:
+
+- registers `memd` for Codex CLI and Claude Code
+- upserts stronger `memd`-usage blocks into `~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`
+- makes `memd` mandatory for substantive multi-step technical and scientific work
+- tells agents not to silently skip memory writes when `memd` is available
+
+Optional wrapper install:
+
+```bash
+./memd-skill/install_memd_enforcement.sh --install-wrappers
+```
+
 ### Codex CLI
 
 ```bash
@@ -84,7 +103,7 @@ Codex stores this in `~/.codex/config.toml`.
 
 The skill includes a matching template at:
 
-- [mcp_config_codex.toml](/home/fschulz/dev/software/memd/memd-skill/mcp_config_codex.toml)
+- [mcp_config_codex.toml](mcp_config_codex.toml)
 
 ### Claude Code
 
@@ -98,11 +117,17 @@ From a repo checkout, you can also run the helper:
 ./scripts/install_shared_http_clients.sh --append-snippets
 ```
 
+That older helper is still useful for lightweight shared setup, but the stronger enforcement path is:
+
+```bash
+./memd-skill/install_memd_enforcement.sh
+```
+
 Claude stores this in `~/.claude.json`.
 
 The skill includes a matching template at:
 
-- [mcp_config_claude.json](/home/fschulz/dev/software/memd/memd-skill/mcp_config_claude.json)
+- [mcp_config_claude.json](mcp_config_claude.json)
 
 ## Add instruction snippets
 
@@ -111,20 +136,22 @@ MCP registration makes the tools available. The instruction snippets below make 
 ### `~/.codex/AGENTS.md`
 
 ```md
-Use the `memd` MCP server for shared memory across sessions and agents.
+Use the `memd` MCP server as a shared knowledge base across sessions and agents.
 
 Before substantive work, search `memd` with the current `tenant_id`.
 For meaningful work, record `task.start`, `task.progress`, `task.run_start`, `task.run_finish`, `task.add_evidence`, and `task.finish`.
+Use `artifact.create`, `artifact.search`, `artifact.get`, and `artifact.list_thread` when critique, revision, verification, or thread inspection matters.
 Use the same `tenant_id` for agents that should share knowledge unless the user asks for a different memory scope.
 ```
 
 ### `~/.claude/CLAUDE.md`
 
 ```md
-Use the `memd` MCP server for shared memory across sessions and agents.
+Use the `memd` MCP server as a shared knowledge base across sessions and agents.
 
 Before substantive work, search `memd` with the current `tenant_id`.
 For meaningful work, record `task.start`, `task.progress`, `task.run_start`, `task.run_finish`, `task.add_evidence`, and `task.finish`.
+Use `artifact.create`, `artifact.search`, `artifact.get`, and `artifact.list_thread` when critique, revision, verification, or thread inspection matters.
 Use the same `tenant_id` for agents that should share knowledge unless the user asks for a different memory scope.
 ```
 
@@ -159,6 +186,19 @@ claude mcp get memd
 ./scripts/verify_shared_http_clients.sh
 ```
 
+### Verify the stronger enforcement setup
+
+```bash
+./memd-skill/verify_memd_enforcement.sh
+```
+
+That verifier checks:
+
+- the enforcement blocks exist in `~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`
+- `memd` is registered for both clients
+- Codex can write a task artifact into `memd`
+- Claude can recover that task artifact from the same shared tenant
+
 After that, verify that `memd` exposes the current tool surface, especially:
 
 - `memory.add`
@@ -172,6 +212,10 @@ After that, verify that `memd` exposes the current tool surface, especially:
 - `task.finish`
 - `task.get`
 - `task.search`
+- `artifact.create`
+- `artifact.get`
+- `artifact.search`
+- `artifact.list_thread`
 
 ## Troubleshooting
 
@@ -202,6 +246,15 @@ Check:
 3. Same `data_dir`
 4. Persistent mode, not `--in-memory`
 
+### Agents still are not using `memd` often enough
+
+Check:
+
+1. You ran `./memd-skill/install_memd_enforcement.sh`
+2. The enforcement block exists in both `~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`
+3. The clients were restarted after the files changed
+4. The work is actually substantive enough to trigger the contract
+
 ### Manual config locations
 
 If you prefer editing config files directly instead of using the client CLIs:
@@ -211,4 +264,4 @@ If you prefer editing config files directly instead of using the client CLIs:
 
 ## Next
 
-Read [SKILL.md](/home/fschulz/dev/software/memd/memd-skill/SKILL.md).
+Read [SKILL.md](SKILL.md).
