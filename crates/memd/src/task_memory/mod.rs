@@ -46,6 +46,9 @@ pub enum ArtifactKind {
     RunStart,
     RunFinish,
     Evidence,
+    Review,
+    Revision,
+    Verification,
     TaskFinish,
 }
 
@@ -57,6 +60,9 @@ impl ArtifactKind {
             Self::RunStart => "run_start",
             Self::RunFinish => "run_finish",
             Self::Evidence => "evidence",
+            Self::Review => "review",
+            Self::Revision => "revision",
+            Self::Verification => "verification",
             Self::TaskFinish => "task_finish",
         }
     }
@@ -72,9 +78,12 @@ impl FromStr for ArtifactKind {
             "run_start" => Ok(Self::RunStart),
             "run_finish" => Ok(Self::RunFinish),
             "evidence" => Ok(Self::Evidence),
+            "review" => Ok(Self::Review),
+            "revision" => Ok(Self::Revision),
+            "verification" => Ok(Self::Verification),
             "task_finish" => Ok(Self::TaskFinish),
             _ => Err(format!(
-                "invalid artifact_kind '{}', must be one of: task_start, task_progress, run_start, run_finish, evidence, task_finish",
+                "invalid artifact_kind '{}', must be one of: task_start, task_progress, run_start, run_finish, evidence, review, revision, verification, task_finish",
                 value
             )),
         }
@@ -162,6 +171,18 @@ impl EntityRef {
     }
 }
 
+/// Contributor metadata attached to a knowledge artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContributorRef {
+    pub contributor_id: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub contribution: Option<String>,
+}
+
 /// Optional provenance for a canonical task artifact.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskProvenance {
@@ -212,6 +233,16 @@ pub struct TaskArtifact {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub artifact_role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub challenge_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub thread_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reply_to_artifact_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub relation_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub goal: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub motivation: Option<String>,
@@ -242,6 +273,10 @@ pub struct TaskArtifact {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expected_outputs: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_artifact_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contributors: Vec<ContributorRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dataset_refs: Vec<DatasetRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entity_refs: Vec<EntityRef>,
@@ -263,6 +298,22 @@ pub struct TaskArtifact {
     pub why_chosen: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub confidence: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub requested_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub verification_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub compute_budget: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cost_actual: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub data_access_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policy_tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_tools: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub approval_state: Option<String>,
     #[serde(default, skip_serializing_if = "TaskProvenance::is_empty")]
     pub provenance: TaskProvenance,
     pub timestamp_created: i64,
@@ -293,6 +344,11 @@ impl TaskArtifact {
             agent_id: None,
             session_id: None,
             status: None,
+            artifact_role: None,
+            challenge_id: None,
+            thread_id: None,
+            reply_to_artifact_id: None,
+            relation_kind: None,
             goal: None,
             motivation: None,
             hypothesis: None,
@@ -308,6 +364,8 @@ impl TaskArtifact {
             uncertainty: Vec::new(),
             followups: Vec::new(),
             expected_outputs: Vec::new(),
+            related_artifact_ids: Vec::new(),
+            contributors: Vec::new(),
             dataset_refs: Vec::new(),
             entity_refs: Vec::new(),
             tool_name: None,
@@ -319,6 +377,14 @@ impl TaskArtifact {
             metrics: None,
             why_chosen: None,
             confidence: None,
+            requested_action: None,
+            verification_status: None,
+            compute_budget: None,
+            cost_actual: None,
+            data_access_level: None,
+            policy_tags: Vec::new(),
+            allowed_tools: Vec::new(),
+            approval_state: None,
             provenance: TaskProvenance::default(),
             timestamp_created: now_ms,
             timestamp_observed: None,
@@ -357,6 +423,28 @@ impl TaskArtifact {
 
     pub fn new_evidence(tenant_id: TenantId, task_id: impl Into<String>) -> Self {
         Self::new(ArtifactKind::Evidence, tenant_id, task_id)
+    }
+
+    pub fn new_review(tenant_id: TenantId, task_id: impl Into<String>) -> Self {
+        let mut artifact = Self::new(ArtifactKind::Review, tenant_id, task_id);
+        artifact.status = Some("recorded".to_string());
+        artifact
+    }
+
+    pub fn new_revision(tenant_id: TenantId, task_id: impl Into<String>) -> Self {
+        let mut artifact = Self::new(ArtifactKind::Revision, tenant_id, task_id);
+        artifact.status = Some("recorded".to_string());
+        artifact
+    }
+
+    pub fn new_verification(tenant_id: TenantId, task_id: impl Into<String>) -> Self {
+        let mut artifact = Self::new(ArtifactKind::Verification, tenant_id, task_id);
+        artifact.status = Some("recorded".to_string());
+        artifact
+    }
+
+    pub fn thread_key(&self) -> &str {
+        self.thread_id.as_deref().unwrap_or(&self.task_id)
     }
 
     pub fn event_summary(&self) -> Option<String> {
@@ -404,6 +492,14 @@ pub struct TaskSearchFilters {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub challenge_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub thread_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reply_to_artifact_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub artifact_role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub dataset_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub dataset_version: Option<String>,
@@ -419,6 +515,12 @@ pub struct TaskSearchFilters {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub requested_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub verification_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub relation_kind: Option<String>,
 }
 
 fn base_projection_tags(artifact: &TaskArtifact) -> Vec<String> {
@@ -432,6 +534,40 @@ fn base_projection_tags(artifact: &TaskArtifact) -> Vec<String> {
     ];
     if let Some(status) = artifact.status.as_ref().filter(|s| !s.trim().is_empty()) {
         tags.push(format!("task:status:{}", sanitize_tag_value(status)));
+    }
+    if let Some(challenge_id) = artifact
+        .challenge_id
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        tags.push(format!(
+            "task:challenge:{}",
+            sanitize_tag_value(challenge_id)
+        ));
+    }
+    if let Some(thread_id) = artifact
+        .thread_id
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        tags.push(format!("task:thread:{}", sanitize_tag_value(thread_id)));
+    }
+    if let Some(artifact_role) = artifact
+        .artifact_role
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        tags.push(format!("task:role:{}", sanitize_tag_value(artifact_role)));
+    }
+    if let Some(verification_status) = artifact
+        .verification_status
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        tags.push(format!(
+            "task:verification:{}",
+            sanitize_tag_value(verification_status)
+        ));
     }
     for dataset in &artifact.dataset_refs {
         tags.push(format!("task:dataset:{}", dataset.key()));
@@ -456,6 +592,9 @@ fn build_projection_chunk(
             ArtifactKind::RunStart => "task.run_start".to_string(),
             ArtifactKind::RunFinish => "task.run_finish".to_string(),
             ArtifactKind::Evidence => "task.add_evidence".to_string(),
+            ArtifactKind::Review
+            | ArtifactKind::Revision
+            | ArtifactKind::Verification => "artifact.create".to_string(),
         })
     });
     let mut source = Source::from(&artifact.provenance);
@@ -500,6 +639,18 @@ pub fn build_task_projections(artifact: &TaskArtifact) -> Vec<TaskProjection> {
             .unwrap_or_else(|| "recorded".to_string()),
         artifact.task_id
     )];
+    if let Some(role) = artifact.artifact_role.as_ref() {
+        summary_lines.push(format!("Artifact role: {}", role));
+    }
+    if let Some(challenge_id) = artifact.challenge_id.as_ref() {
+        summary_lines.push(format!("Challenge: {}", challenge_id));
+    }
+    if let Some(thread_id) = artifact.thread_id.as_ref() {
+        summary_lines.push(format!("Thread: {}", thread_id));
+    }
+    if let Some(reply_to) = artifact.reply_to_artifact_id.as_ref() {
+        summary_lines.push(format!("Reply to: {}", reply_to));
+    }
     if let Some(goal) = artifact.goal.as_ref() {
         summary_lines.push(format!("Goal: {}", goal));
     }
@@ -512,6 +663,12 @@ pub fn build_task_projections(artifact: &TaskArtifact) -> Vec<TaskProjection> {
     if !entity_names.is_empty() {
         summary_lines.push(format!("Entities: {}", entity_names.join(", ")));
     }
+    if let Some(requested_action) = artifact.requested_action.as_ref() {
+        summary_lines.push(format!("Requested action: {}", requested_action));
+    }
+    if let Some(verification_status) = artifact.verification_status.as_ref() {
+        summary_lines.push(format!("Verification status: {}", verification_status));
+    }
     if let Some(summary) = artifact.event_summary() {
         summary_lines.push(format!("Summary: {}", summary));
     }
@@ -521,12 +678,14 @@ pub fn build_task_projections(artifact: &TaskArtifact) -> Vec<TaskProjection> {
             ArtifactKind::TaskStart => ProjectionKind::TaskGoal,
             ArtifactKind::RunStart | ArtifactKind::RunFinish => ProjectionKind::Run,
             ArtifactKind::Evidence => ProjectionKind::Evidence,
+            ArtifactKind::Verification => ProjectionKind::Validation,
             _ => ProjectionKind::TaskSummary,
         },
         match artifact.artifact_kind {
             ArtifactKind::TaskStart => ChunkType::Plan,
             ArtifactKind::RunStart | ArtifactKind::RunFinish => ChunkType::Trace,
             ArtifactKind::Evidence => ChunkType::Research,
+            ArtifactKind::Verification => ChunkType::Summary,
             _ => ChunkType::Summary,
         },
         summary_lines.join("\n"),
@@ -685,6 +844,12 @@ pub fn build_task_projections(artifact: &TaskArtifact) -> Vec<TaskProjection> {
         }
         if let Some(confidence) = artifact.confidence {
             validation_lines.push(format!("Confidence: {:.3}", confidence));
+        }
+        if let Some(verification_status) = artifact.verification_status.as_ref() {
+            validation_lines.push(format!("Verification status: {}", verification_status));
+        }
+        if let Some(approval_state) = artifact.approval_state.as_ref() {
+            validation_lines.push(format!("Approval state: {}", approval_state));
         }
         projections.push(build_projection_chunk(
             artifact,
