@@ -6,8 +6,10 @@ use tracing::info;
 
 use memd::cli::{run_cli, CliCommand};
 use memd::embeddings::EmbeddingModel;
+use memd::store::HybridConfig;
 use memd::{
-    init_logging, load_config, MemoryStore, PersistentStore, PersistentStoreConfig, TenantManager,
+    init_logging, load_config, MemoryStore, PersistentStore, PersistentStoreConfig, RerankerMode,
+    TenantManager,
 };
 
 /// Run mode for memd
@@ -17,6 +19,15 @@ enum Mode {
     Mcp,
     /// CLI mode for direct commands
     Cli,
+}
+
+/// Server transport for MCP mode.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum TransportChoice {
+    /// JSON-RPC over stdio (client launches subprocess)
+    Stdio,
+    /// Streamable HTTP on a long-lived local daemon
+    Http,
 }
 
 /// Embedding model choice
@@ -37,6 +48,19 @@ impl From<ModelChoice> for EmbeddingModel {
     }
 }
 
+/// Retrieval strategy for persistent mode.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SearchVariant {
+    /// Dense+sparse hybrid with feature reranker (default).
+    HybridFeature,
+    /// Dense+sparse hybrid with cross-encoder reranker.
+    HybridCrossEncoder,
+    /// Dense-only retrieval path.
+    DenseOnly,
+    /// BM25 baseline via hybrid search with dense_k=0.
+    Bm25Only,
+}
+
 /// memd - Local memory daemon for AI agents
 ///
 /// Provides MCP server interface for memory operations.
@@ -55,6 +79,18 @@ struct Args {
     #[arg(long)]
     data_dir: Option<PathBuf>,
 
+    /// Override the MCP server transport
+    #[arg(long, value_enum)]
+    transport: Option<TransportChoice>,
+
+    /// Bind address for HTTP transport, e.g. 127.0.0.1:8787
+    #[arg(long)]
+    http_bind: Option<String>,
+
+    /// HTTP endpoint path for streamable HTTP transport
+    #[arg(long)]
+    http_path: Option<String>,
+
     /// Use in-memory storage instead of persistent storage (for testing)
     #[arg(long, default_value = "false")]
     in_memory: bool,
@@ -66,6 +102,10 @@ struct Args {
     /// Embedding model to use
     #[arg(long, value_enum, default_value = "all-minilm")]
     embedding_model: ModelChoice,
+
+    /// Retrieval strategy variant for persistent mode
+    #[arg(long, value_enum, default_value = "hybrid-feature")]
+    search_variant: SearchVariant,
 
     /// CLI subcommand (only used in cli mode)
     #[command(subcommand)]
@@ -89,56 +129,115 @@ async fn main() {
         .or_else(|| config.data_dir_expanded().ok())
         .unwrap_or_else(|| PathBuf::from("data"));
 
+    // If a subcommand is provided, treat it as CLI mode even when mode flag is omitted.
+    let mode = if args.command.is_some() {
+        Mode::Cli
+    } else {
+        args.mode
+    };
+
+    // Apply server overrides after loading config and resolving data_dir.
+    let mut config = config;
+    if let Some(transport) = args.transport {
+        config.server.transport = match transport {
+            TransportChoice::Stdio => "stdio".to_string(),
+            TransportChoice::Http => "http".to_string(),
+        };
+    }
+    if let Some(bind) = args.http_bind.clone() {
+        config.server.bind = bind;
+    }
+    if let Some(path) = args.http_path.clone() {
+        config.server.path = path;
+    }
+    config.data_dir = data_dir.clone();
+    if let Err(e) = config.validate() {
+        eprintln!("error: invalid configuration: {}", e);
+        std::process::exit(1);
+    }
+
     // Initialize logging
     let log_level = if args.verbose {
         "debug"
     } else {
         &config.log_level
     };
-    let log_format = match args.mode {
+    let log_format = match mode {
         Mode::Mcp => "json",
         Mode::Cli => "pretty",
     };
     init_logging(log_format, log_level);
 
-    match args.mode {
+    match mode {
         Mode::Mcp => {
+            let server_transport = config.server.transport.clone();
+            let http_bind = config.server.bind.clone();
+            let http_path = config.server.path.clone();
+
             info!(
                 version = env!("CARGO_PKG_VERSION"),
                 config_path = ?args.config,
                 data_dir = %data_dir.display(),
+                transport = %server_transport,
+                http_bind = %http_bind,
+                http_path = %http_path,
                 in_memory = args.in_memory,
                 "memd starting"
             );
-
-            // Update config with computed data_dir for TenantManager
-            let mut config = config;
-            config.data_dir = data_dir.clone();
 
             // Run server with appropriate store type
             if args.in_memory {
                 info!("using in-memory store");
                 let store = Arc::new(MemoryStore::new());
-                let mut server = memd::mcp::McpServer::new(config, store);
-                if let Err(e) = server.run().await {
-                    eprintln!("error: MCP server error: {}", e);
-                    std::process::exit(1);
+                match server_transport.as_str() {
+                    "http" => {
+                        let server = memd::mcp::McpServer::new(config.clone(), store);
+                        if let Err(e) =
+                            memd::mcp::run_http_server(server, &http_bind, &http_path).await
+                        {
+                            eprintln!("error: HTTP MCP server error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                    _ => {
+                        let mut server = memd::mcp::McpServer::new(config.clone(), store);
+                        if let Err(e) = server.run().await {
+                            eprintln!("error: MCP server error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
                 }
             } else {
                 info!(data_dir = %data_dir.display(), embedding_model = ?args.embedding_model, "using persistent store");
-                let store_config = PersistentStoreConfig {
+                let mut store_config = PersistentStoreConfig {
                     data_dir: data_dir.clone(),
                     embedding_model: args.embedding_model.into(),
                     ..Default::default()
                 };
+                apply_search_variant(args.search_variant, &mut store_config);
                 match PersistentStore::open(store_config) {
                     Ok(store) => {
                         let metrics = store.metrics_arc();
                         let store = Arc::new(store);
-                        let mut server = memd::mcp::McpServer::with_metrics(config, store, metrics);
-                        if let Err(e) = server.run().await {
-                            eprintln!("error: MCP server error: {}", e);
-                            std::process::exit(1);
+                        match server_transport.as_str() {
+                            "http" => {
+                                let server =
+                                    memd::mcp::McpServer::with_metrics(config.clone(), store, metrics);
+                                if let Err(e) =
+                                    memd::mcp::run_http_server(server, &http_bind, &http_path).await
+                                {
+                                    eprintln!("error: HTTP MCP server error: {}", e);
+                                    std::process::exit(1);
+                                }
+                            }
+                            _ => {
+                                let mut server =
+                                    memd::mcp::McpServer::with_metrics(config.clone(), store, metrics);
+                                if let Err(e) = server.run().await {
+                                    eprintln!("error: MCP server error: {}", e);
+                                    std::process::exit(1);
+                                }
+                            }
                         }
                     }
                     Err(e) => {
@@ -153,6 +252,15 @@ async fn main() {
                 // Create tenant manager
                 let tenant_manager = Some(TenantManager::new(data_dir.clone()));
 
+                if !cmd.requires_store() {
+                    let store = MemoryStore::new();
+                    if let Err(e) = run_cli(&store, tenant_manager.as_ref(), cmd).await {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
+                    }
+                    return;
+                }
+
                 // Run CLI with appropriate store type
                 if args.in_memory {
                     info!("using in-memory store");
@@ -163,11 +271,12 @@ async fn main() {
                     }
                 } else {
                     info!(data_dir = %data_dir.display(), embedding_model = ?args.embedding_model, "using persistent store");
-                    let store_config = PersistentStoreConfig {
+                    let mut store_config = PersistentStoreConfig {
                         data_dir: data_dir.clone(),
                         embedding_model: args.embedding_model.into(),
                         ..Default::default()
                     };
+                    apply_search_variant(args.search_variant, &mut store_config);
                     match PersistentStore::open(store_config) {
                         Ok(store) => {
                             if let Err(e) = run_cli(&store, tenant_manager.as_ref(), cmd).await {
@@ -185,6 +294,41 @@ async fn main() {
                 eprintln!("error: CLI mode requires a subcommand. Use --help for usage.");
                 std::process::exit(1);
             }
+        }
+    }
+}
+
+fn apply_search_variant(search_variant: SearchVariant, config: &mut PersistentStoreConfig) {
+    match search_variant {
+        SearchVariant::HybridFeature => {
+            config.enable_dense_search = true;
+            config.enable_hybrid_search = true;
+            let mut hybrid = HybridConfig::default();
+            hybrid.reranker.mode = RerankerMode::Feature;
+            config.hybrid_config = Some(hybrid);
+        }
+        SearchVariant::HybridCrossEncoder => {
+            config.enable_dense_search = true;
+            config.enable_hybrid_search = true;
+            let mut hybrid = HybridConfig::default();
+            hybrid.reranker.mode = RerankerMode::CrossEncoder;
+            config.hybrid_config = Some(hybrid);
+        }
+        SearchVariant::DenseOnly => {
+            config.enable_dense_search = true;
+            config.enable_hybrid_search = false;
+            config.hybrid_config = None;
+        }
+        SearchVariant::Bm25Only => {
+            config.enable_dense_search = true;
+            config.enable_hybrid_search = true;
+            config.enable_tiered_search = false;
+            let mut hybrid = HybridConfig::default();
+            hybrid.dense_k = 0;
+            hybrid.sparse_k = 200;
+            hybrid.enable_sparse = true;
+            hybrid.reranker.mode = RerankerMode::Feature;
+            config.hybrid_config = Some(hybrid);
         }
     }
 }
