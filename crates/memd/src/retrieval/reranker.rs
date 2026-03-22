@@ -3,6 +3,8 @@
 //! Applies recency, project/type preferences, and optional query-document
 //! interaction scoring to produce final rankings.
 
+#[cfg(feature = "cross-encoder-reranker")]
+use super::onnx_cross_encoder;
 use crate::types::{ChunkId, ChunkType};
 
 /// Reranker strategy.
@@ -204,10 +206,7 @@ impl FeatureReranker {
     }
 }
 
-/// Lightweight query-document interaction reranker.
-///
-/// Uses lexical interaction features to approximate cross-encoder style
-/// pair scoring while remaining deterministic and offline-friendly.
+/// Query-document interaction reranker.
 pub struct CrossEncoderReranker {
     config: RerankerConfig,
 }
@@ -224,18 +223,19 @@ impl CrossEncoderReranker {
     ) -> Vec<RankedResult> {
         let feature = FeatureReranker::new(self.config.clone());
         let query = context.query_text.as_deref().unwrap_or("");
+        let cross_scores = cross_encoder_scores(query, &chunks);
 
         let mut results: Vec<RankedResult> = chunks
             .into_iter()
+            .zip(cross_scores)
             .map(|chunk| {
+                let (chunk, cross_encoder_score) = chunk;
                 let recency_bonus =
                     feature.compute_recency_bonus(chunk.timestamp_created, context.now_ms);
                 let project_bonus =
                     feature.compute_project_bonus(&chunk.project_id, &context.current_project);
                 let type_bonus =
                     feature.compute_type_bonus(chunk.chunk_type, &context.preferred_types);
-                let cross_encoder_score =
-                    interaction_score(query, chunk.text.as_deref().unwrap_or_default());
 
                 let final_score = self.config.rrf_weight * chunk.rrf_score
                     + self.config.cross_encoder_weight * cross_encoder_score
@@ -272,10 +272,20 @@ impl RerankerEngine {
     pub fn new(config: RerankerConfig) -> Self {
         #[cfg(feature = "cross-encoder-reranker")]
         {
+            let mut mode = config.mode;
+            if mode == RerankerMode::CrossEncoder
+                && !cfg!(test)
+                && !onnx_cross_encoder::is_available()
+            {
+                tracing::warn!(
+                    "cross-encoder reranker requested but ONNX scorer is unavailable; falling back to feature reranker"
+                );
+                mode = RerankerMode::Feature;
+            }
             return Self {
                 feature: FeatureReranker::new(config.clone()),
                 cross: CrossEncoderReranker::new(config.clone()),
-                mode: config.mode,
+                mode,
             };
         }
 
@@ -370,6 +380,41 @@ fn interaction_score(query: &str, text: &str) -> f32 {
     let freq_score = ((freq as f32) / q_tokens.len() as f32).min(3.0) / 3.0;
 
     (0.6 * coverage + 0.25 * phrase_score + 0.15 * freq_score).clamp(0.0, 1.0)
+}
+
+fn cross_encoder_scores(query: &str, chunks: &[ChunkWithMeta]) -> Vec<f32> {
+    if chunks.is_empty() {
+        return Vec::new();
+    }
+    if cfg!(test) {
+        return chunks
+            .iter()
+            .map(|chunk| interaction_score(query, chunk.text.as_deref().unwrap_or_default()))
+            .collect();
+    }
+    #[cfg(feature = "cross-encoder-reranker")]
+    {
+        let docs: Vec<String> = chunks
+            .iter()
+            .map(|chunk| chunk.text.clone().unwrap_or_default())
+            .collect();
+        match onnx_cross_encoder::score_pairs(query, &docs) {
+            Ok(scores) if scores.len() == chunks.len() => return scores,
+            Ok(_) => {
+                tracing::warn!(
+                    "cross-encoder scorer returned mismatched score count; using lexical fallback"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "cross-encoder scorer failed; using lexical fallback");
+            }
+        }
+    }
+
+    chunks
+        .iter()
+        .map(|chunk| interaction_score(query, chunk.text.as_deref().unwrap_or_default()))
+        .collect()
 }
 
 #[cfg(test)]

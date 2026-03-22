@@ -1,7 +1,7 @@
 //! MCP (Model Context Protocol) module
 //!
-//! Implements the MCP server for agent integration via JSON-RPC over stdio.
-//! This is the primary interface for tools like Claude Code and Codex CLI.
+//! Implements the MCP server for agent integration via JSON-RPC over stdio
+//! and streamable HTTP.
 
 pub mod error;
 pub mod handlers;
@@ -12,5 +12,5 @@ pub mod tools;
 pub use error::McpError;
 pub use handlers::*;
 pub use protocol::{Request, RequestId, Response, RpcError};
-pub use server::{run_server, McpServer};
+pub use server::{run_http_server, run_server, McpServer};
 pub use tools::{get_all_tools, get_tool, tool_names, ToolDefinition};

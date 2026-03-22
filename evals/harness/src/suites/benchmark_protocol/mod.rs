@@ -1,5 +1,6 @@
 //! Offline retrieval benchmark protocol (Phase 6)
 
+mod longmemeval;
 mod math;
 mod regression;
 mod run;

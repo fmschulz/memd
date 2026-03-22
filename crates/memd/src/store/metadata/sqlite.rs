@@ -11,6 +11,7 @@ use rusqlite::Connection;
 use super::{ChunkMetadata, IndexState, MetadataStore};
 use crate::error::Result;
 use crate::store::{normalize_query, FeedbackEntry, RelevanceLabel};
+use crate::task_memory::{TaskArtifact, TaskSearchFilters};
 use crate::types::{ChunkId, ChunkStatus, ChunkType, TenantId};
 
 /// SQLite-backed metadata store
@@ -122,6 +123,211 @@ impl SqliteMetadataStore {
             "CREATE INDEX IF NOT EXISTS idx_feedback_tenant_chunk
              ON feedback(tenant_id, chunk_id)",
             [],
+        )?;
+
+        Self::init_task_schema(&conn)?;
+
+        Ok(())
+    }
+
+    fn init_task_schema(conn: &Connection) -> Result<()> {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS task_artifacts (
+                artifact_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                project_id TEXT,
+                task_id TEXT NOT NULL,
+                parent_task_id TEXT,
+                artifact_kind TEXT NOT NULL,
+                status TEXT,
+                agent_id TEXT,
+                session_id TEXT,
+                goal TEXT,
+                summary TEXT,
+                tool_name TEXT,
+                tool_version TEXT,
+                canonical_json TEXT NOT NULL,
+                timestamp_created INTEGER NOT NULL,
+                timestamp_observed INTEGER
+            )",
+            [],
+        )?;
+        Self::ensure_task_artifact_columns(conn)?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_artifacts_tenant_task
+             ON task_artifacts(tenant_id, task_id, artifact_kind, timestamp_created DESC)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_artifacts_tool
+             ON task_artifacts(tenant_id, tool_name, timestamp_created DESC)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS tasks (
+                task_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                project_id TEXT,
+                parent_task_id TEXT,
+                agent_id TEXT,
+                session_id TEXT,
+                status TEXT,
+                goal TEXT,
+                scientific_question TEXT,
+                hypothesis TEXT,
+                last_artifact_id TEXT NOT NULL,
+                started_at_ms INTEGER,
+                finished_at_ms INTEGER,
+                updated_at_ms INTEGER NOT NULL
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_tenant_status
+             ON tasks(tenant_id, status, updated_at_ms DESC)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS task_events (
+                artifact_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                artifact_kind TEXT NOT NULL,
+                status TEXT,
+                summary TEXT,
+                timestamp_created INTEGER NOT NULL,
+                timestamp_observed INTEGER
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_events_tenant_task
+             ON task_events(tenant_id, task_id, timestamp_created DESC)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS runs (
+                artifact_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                tool_name TEXT,
+                status TEXT,
+                command TEXT,
+                metrics_json TEXT,
+                timestamp_created INTEGER NOT NULL
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS evidence (
+                artifact_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                summary TEXT,
+                supports_claim INTEGER,
+                metrics_json TEXT,
+                timestamp_created INTEGER NOT NULL
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS datasets (
+                dataset_key TEXT PRIMARY KEY,
+                dataset_name TEXT NOT NULL,
+                dataset_version TEXT,
+                description TEXT
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS entities (
+                entity_key TEXT PRIMARY KEY,
+                entity_name TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                role TEXT
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS task_datasets (
+                artifact_id TEXT NOT NULL,
+                tenant_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                dataset_key TEXT NOT NULL,
+                dataset_name TEXT NOT NULL,
+                dataset_version TEXT,
+                PRIMARY KEY (artifact_id, dataset_key)
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_datasets_tenant_task
+             ON task_datasets(tenant_id, task_id, dataset_name, dataset_version)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS task_entities (
+                artifact_id TEXT NOT NULL,
+                tenant_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                entity_key TEXT NOT NULL,
+                entity_name TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                PRIMARY KEY (artifact_id, entity_key)
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_entities_tenant_task
+             ON task_entities(tenant_id, task_id, entity_name, entity_type)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS artifact_links (
+                artifact_id TEXT NOT NULL,
+                chunk_id TEXT NOT NULL,
+                link_kind TEXT NOT NULL,
+                projection_kind TEXT,
+                PRIMARY KEY (artifact_id, chunk_id, link_kind)
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_artifact_links_chunk
+             ON artifact_links(chunk_id)",
+            [],
+        )?;
+
+        Ok(())
+    }
+
+    fn ensure_task_artifact_columns(conn: &Connection) -> Result<()> {
+        let mut stmt = conn.prepare("PRAGMA table_info(task_artifacts)")?;
+        let rows = stmt.query_map([], |row| row.get::<usize, String>(1))?;
+        let mut column_names = std::collections::HashSet::new();
+        for name in rows {
+            column_names.insert(name?);
+        }
+
+        Self::ensure_index_column(
+            conn,
+            &column_names,
+            "tool_name",
+            "ALTER TABLE task_artifacts ADD COLUMN tool_name TEXT",
+        )?;
+        Self::ensure_index_column(
+            conn,
+            &column_names,
+            "tool_version",
+            "ALTER TABLE task_artifacts ADD COLUMN tool_version TEXT",
         )?;
 
         Ok(())
@@ -246,6 +452,424 @@ impl SqliteMetadataStore {
             });
         }
         Ok(feedback)
+    }
+
+    /// Insert the canonical task artifact envelope plus normalized side rows.
+    pub fn insert_task_artifact_bundle(
+        &self,
+        artifact: &TaskArtifact,
+        projection_chunk_ids: &[String],
+        projection_kinds: &[String],
+    ) -> Result<()> {
+        let canonical_json = serde_json::to_string(artifact)?;
+        let summary = artifact.event_summary();
+        let status = artifact.status.as_deref();
+        let project_id = artifact.project_id.as_option();
+        let scientific_question = artifact.scientific_question.as_deref();
+        let hypothesis = artifact.hypothesis.as_deref();
+        let started_at_ms =
+            (artifact.artifact_kind.as_str() == "task_start").then_some(artifact.timestamp_created);
+        let finished_at_ms = (artifact.artifact_kind.as_str() == "task_finish")
+            .then_some(artifact.timestamp_created);
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        tx.execute(
+            "INSERT OR REPLACE INTO task_artifacts (
+                artifact_id, tenant_id, project_id, task_id, parent_task_id,
+                artifact_kind, status, agent_id, session_id, goal, summary,
+                tool_name, tool_version, canonical_json, timestamp_created, timestamp_observed
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            rusqlite::params![
+                artifact.artifact_id.as_str(),
+                artifact.tenant_id.as_str(),
+                project_id,
+                artifact.task_id.as_str(),
+                artifact.parent_task_id.as_deref(),
+                artifact.artifact_kind.as_str(),
+                status,
+                artifact.agent_id.as_deref(),
+                artifact.session_id.as_deref(),
+                artifact.goal.as_deref(),
+                summary.as_deref(),
+                artifact.tool_name.as_deref(),
+                artifact.tool_version.as_deref(),
+                canonical_json,
+                artifact.timestamp_created,
+                artifact.timestamp_observed,
+            ],
+        )?;
+
+        tx.execute(
+            "INSERT INTO tasks (
+                task_id, tenant_id, project_id, parent_task_id, agent_id, session_id,
+                status, goal, scientific_question, hypothesis, last_artifact_id,
+                started_at_ms, finished_at_ms, updated_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            ON CONFLICT(task_id) DO UPDATE SET
+                project_id = COALESCE(excluded.project_id, tasks.project_id),
+                parent_task_id = COALESCE(excluded.parent_task_id, tasks.parent_task_id),
+                agent_id = COALESCE(excluded.agent_id, tasks.agent_id),
+                session_id = COALESCE(excluded.session_id, tasks.session_id),
+                status = COALESCE(excluded.status, tasks.status),
+                goal = COALESCE(excluded.goal, tasks.goal),
+                scientific_question = COALESCE(excluded.scientific_question, tasks.scientific_question),
+                hypothesis = COALESCE(excluded.hypothesis, tasks.hypothesis),
+                last_artifact_id = excluded.last_artifact_id,
+                started_at_ms = COALESCE(tasks.started_at_ms, excluded.started_at_ms),
+                finished_at_ms = COALESCE(excluded.finished_at_ms, tasks.finished_at_ms),
+                updated_at_ms = excluded.updated_at_ms",
+            rusqlite::params![
+                artifact.task_id.as_str(),
+                artifact.tenant_id.as_str(),
+                project_id,
+                artifact.parent_task_id.as_deref(),
+                artifact.agent_id.as_deref(),
+                artifact.session_id.as_deref(),
+                status,
+                artifact.goal.as_deref(),
+                scientific_question,
+                hypothesis,
+                artifact.artifact_id.as_str(),
+                started_at_ms,
+                finished_at_ms,
+                artifact.timestamp_created,
+            ],
+        )?;
+
+        tx.execute(
+            "INSERT OR REPLACE INTO task_events (
+                artifact_id, tenant_id, task_id, artifact_kind, status, summary,
+                timestamp_created, timestamp_observed
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                artifact.artifact_id.as_str(),
+                artifact.tenant_id.as_str(),
+                artifact.task_id.as_str(),
+                artifact.artifact_kind.as_str(),
+                status,
+                summary.as_deref(),
+                artifact.timestamp_created,
+                artifact.timestamp_observed,
+            ],
+        )?;
+
+        for dataset in &artifact.dataset_refs {
+            tx.execute(
+                "INSERT OR REPLACE INTO datasets (dataset_key, dataset_name, dataset_version, description)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    dataset.key(),
+                    dataset.name.as_str(),
+                    dataset.version.as_deref(),
+                    dataset.description.as_deref(),
+                ],
+            )?;
+            tx.execute(
+                "INSERT OR REPLACE INTO task_datasets (
+                    artifact_id, tenant_id, task_id, dataset_key, dataset_name, dataset_version
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    artifact.artifact_id.as_str(),
+                    artifact.tenant_id.as_str(),
+                    artifact.task_id.as_str(),
+                    dataset.key(),
+                    dataset.name.as_str(),
+                    dataset.version.as_deref(),
+                ],
+            )?;
+        }
+
+        for entity in &artifact.entity_refs {
+            tx.execute(
+                "INSERT OR REPLACE INTO entities (entity_key, entity_name, entity_type, role)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    entity.key(),
+                    entity.name.as_str(),
+                    entity.entity_type.as_str(),
+                    entity.role.as_deref(),
+                ],
+            )?;
+            tx.execute(
+                "INSERT OR REPLACE INTO task_entities (
+                    artifact_id, tenant_id, task_id, entity_key, entity_name, entity_type
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    artifact.artifact_id.as_str(),
+                    artifact.tenant_id.as_str(),
+                    artifact.task_id.as_str(),
+                    entity.key(),
+                    entity.name.as_str(),
+                    entity.entity_type.as_str(),
+                ],
+            )?;
+        }
+
+        for (idx, chunk_id) in projection_chunk_ids.iter().enumerate() {
+            tx.execute(
+                "INSERT OR REPLACE INTO artifact_links (
+                    artifact_id, chunk_id, link_kind, projection_kind
+                ) VALUES (?1, ?2, 'retrieval_projection', ?3)",
+                rusqlite::params![
+                    artifact.artifact_id.as_str(),
+                    chunk_id,
+                    projection_kinds.get(idx).map(|kind| kind.as_str()),
+                ],
+            )?;
+        }
+
+        match artifact.artifact_kind {
+            crate::task_memory::ArtifactKind::RunStart
+            | crate::task_memory::ArtifactKind::RunFinish => {
+                tx.execute(
+                    "INSERT OR REPLACE INTO runs (
+                        artifact_id, tenant_id, task_id, tool_name, status, command, metrics_json, timestamp_created
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    rusqlite::params![
+                        artifact.artifact_id.as_str(),
+                        artifact.tenant_id.as_str(),
+                        artifact.task_id.as_str(),
+                        artifact.tool_name.as_deref(),
+                        status,
+                        artifact.command.as_deref(),
+                        artifact.metrics.as_ref().map(|metrics| metrics.to_string()),
+                        artifact.timestamp_created,
+                    ],
+                )?;
+            }
+            crate::task_memory::ArtifactKind::Evidence => {
+                tx.execute(
+                    "INSERT OR REPLACE INTO evidence (
+                        artifact_id, tenant_id, task_id, summary, supports_claim, metrics_json, timestamp_created
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    rusqlite::params![
+                        artifact.artifact_id.as_str(),
+                        artifact.tenant_id.as_str(),
+                        artifact.task_id.as_str(),
+                        summary.as_deref(),
+                        artifact.supports_claim.map(|value| if value { 1 } else { 0 }),
+                        artifact.metrics.as_ref().map(|metrics| metrics.to_string()),
+                        artifact.timestamp_created,
+                    ],
+                )?;
+            }
+            _ => {}
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Fetch the canonical task artifact envelope by ID.
+    pub fn get_task_artifact(
+        &self,
+        tenant_id: &TenantId,
+        artifact_id: &str,
+    ) -> Result<Option<TaskArtifact>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT canonical_json
+             FROM task_artifacts
+             WHERE tenant_id = ?1 AND artifact_id = ?2",
+        )?;
+
+        let result = stmt.query_row(rusqlite::params![tenant_id.as_str(), artifact_id], |row| {
+            row.get::<usize, String>(0)
+        });
+
+        match result {
+            Ok(canonical_json) => Ok(Some(serde_json::from_str(&canonical_json)?)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// List canonical task artifacts for one logical task ordered by creation time.
+    pub fn list_task_artifacts(
+        &self,
+        tenant_id: &TenantId,
+        task_id: &str,
+    ) -> Result<Vec<TaskArtifact>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT canonical_json
+             FROM task_artifacts
+             WHERE tenant_id = ?1 AND task_id = ?2
+             ORDER BY timestamp_created ASC, artifact_id ASC",
+        )?;
+
+        let rows = stmt.query_map(rusqlite::params![tenant_id.as_str(), task_id], |row| {
+            row.get::<usize, String>(0)
+        })?;
+
+        let mut artifacts = Vec::new();
+        for row in rows {
+            artifacts.push(serde_json::from_str(&row?)?);
+        }
+        Ok(artifacts)
+    }
+
+    /// Resolve projection chunk IDs for exact task filters.
+    pub fn search_task_projection_chunk_ids(
+        &self,
+        tenant_id: &TenantId,
+        filters: &TaskSearchFilters,
+        limit: usize,
+    ) -> Result<Vec<ChunkId>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        use rusqlite::types::Value as SqlValue;
+
+        let mut sql = String::from(
+            "SELECT DISTINCT l.chunk_id
+             FROM task_artifacts a
+             JOIN artifact_links l
+               ON l.artifact_id = a.artifact_id
+              AND l.link_kind = 'retrieval_projection'
+             WHERE a.tenant_id = ?1",
+        );
+        let mut params = vec![SqlValue::Text(tenant_id.as_str().to_string())];
+        let mut idx = 2usize;
+
+        if let Some(task_id) = filters.task_id.as_deref() {
+            sql.push_str(&format!(" AND a.task_id = ?{}", idx));
+            params.push(SqlValue::Text(task_id.to_string()));
+            idx += 1;
+        }
+        if let Some(artifact_kind) = filters.artifact_kind {
+            sql.push_str(&format!(" AND a.artifact_kind = ?{}", idx));
+            params.push(SqlValue::Text(artifact_kind.as_str().to_string()));
+            idx += 1;
+        }
+        if let Some(status) = filters.status.as_deref() {
+            sql.push_str(&format!(" AND a.status = ?{}", idx));
+            params.push(SqlValue::Text(status.to_string()));
+            idx += 1;
+        }
+        if let Some(project_id) = filters.project_id.as_deref() {
+            sql.push_str(&format!(" AND a.project_id = ?{}", idx));
+            params.push(SqlValue::Text(project_id.to_string()));
+            idx += 1;
+        }
+        if let Some(agent_id) = filters.agent_id.as_deref() {
+            sql.push_str(&format!(" AND a.agent_id = ?{}", idx));
+            params.push(SqlValue::Text(agent_id.to_string()));
+            idx += 1;
+        }
+        if let Some(session_id) = filters.session_id.as_deref() {
+            sql.push_str(&format!(" AND a.session_id = ?{}", idx));
+            params.push(SqlValue::Text(session_id.to_string()));
+            idx += 1;
+        }
+        if let Some(tool_name) = filters.tool_name.as_deref() {
+            sql.push_str(&format!(" AND a.tool_name = ?{}", idx));
+            params.push(SqlValue::Text(tool_name.to_string()));
+            idx += 1;
+        }
+        if let Some(dataset_name) = filters.dataset_name.as_deref() {
+            sql.push_str(&format!(
+                " AND EXISTS (
+                    SELECT 1
+                    FROM task_datasets d
+                    WHERE d.artifact_id = a.artifact_id
+                      AND d.dataset_name = ?{}
+                )",
+                idx
+            ));
+            params.push(SqlValue::Text(dataset_name.to_string()));
+            idx += 1;
+            if let Some(dataset_version) = filters.dataset_version.as_deref() {
+                sql.push_str(&format!(
+                    " AND EXISTS (
+                        SELECT 1
+                        FROM task_datasets dv
+                        WHERE dv.artifact_id = a.artifact_id
+                          AND dv.dataset_name = ?{}
+                          AND dv.dataset_version = ?{}
+                    )",
+                    idx,
+                    idx + 1
+                ));
+                params.push(SqlValue::Text(dataset_name.to_string()));
+                params.push(SqlValue::Text(dataset_version.to_string()));
+                idx += 2;
+            }
+        } else if let Some(dataset_version) = filters.dataset_version.as_deref() {
+            sql.push_str(&format!(
+                " AND EXISTS (
+                    SELECT 1
+                    FROM task_datasets d
+                    WHERE d.artifact_id = a.artifact_id
+                      AND d.dataset_version = ?{}
+                )",
+                idx
+            ));
+            params.push(SqlValue::Text(dataset_version.to_string()));
+            idx += 1;
+        }
+        if let Some(entity_name) = filters.entity_name.as_deref() {
+            sql.push_str(&format!(
+                " AND EXISTS (
+                    SELECT 1
+                    FROM task_entities e
+                    WHERE e.artifact_id = a.artifact_id
+                      AND e.entity_name = ?{}
+                )",
+                idx
+            ));
+            params.push(SqlValue::Text(entity_name.to_string()));
+            idx += 1;
+            if let Some(entity_type) = filters.entity_type.as_deref() {
+                sql.push_str(&format!(
+                    " AND EXISTS (
+                        SELECT 1
+                        FROM task_entities et
+                        WHERE et.artifact_id = a.artifact_id
+                          AND et.entity_name = ?{}
+                          AND et.entity_type = ?{}
+                    )",
+                    idx,
+                    idx + 1
+                ));
+                params.push(SqlValue::Text(entity_name.to_string()));
+                params.push(SqlValue::Text(entity_type.to_string()));
+                idx += 2;
+            }
+        } else if let Some(entity_type) = filters.entity_type.as_deref() {
+            sql.push_str(&format!(
+                " AND EXISTS (
+                    SELECT 1
+                    FROM task_entities e
+                    WHERE e.artifact_id = a.artifact_id
+                      AND e.entity_type = ?{}
+                )",
+                idx
+            ));
+            params.push(SqlValue::Text(entity_type.to_string()));
+            idx += 1;
+        }
+
+        sql.push_str(" ORDER BY a.timestamp_created DESC");
+        sql.push_str(&format!(" LIMIT ?{}", idx));
+        params.push(SqlValue::Integer(limit as i64));
+
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            row.get::<usize, String>(0)
+        })?;
+
+        let mut chunk_ids = Vec::new();
+        for row in rows {
+            if let Ok(chunk_id) = ChunkId::parse(&row?) {
+                chunk_ids.push(chunk_id);
+            }
+        }
+        Ok(chunk_ids)
     }
 
     /// Convert a database row to ChunkMetadata
@@ -662,6 +1286,8 @@ impl MetadataStore for SqliteMetadataStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::task_memory::{ArtifactKind, DatasetRef, TaskArtifact, TaskSearchFilters};
+    use crate::types::ProjectId;
     use rusqlite::Connection;
     use tempfile::tempdir;
 
@@ -961,6 +1587,112 @@ mod tests {
             .unwrap();
         let (pending, indexed, failed) = store.count_by_index_state(&tenant_id).unwrap();
         assert_eq!((pending, indexed, failed), (0, 1, 0));
+    }
+
+    #[test]
+    fn task_artifact_bundle_roundtrip() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("task.db");
+        let store = SqliteMetadataStore::open(&db_path).unwrap();
+
+        let tenant_id = TenantId::new("tenant_task").unwrap();
+        let mut artifact = TaskArtifact::new_task_start(tenant_id.clone());
+        artifact.project_id = ProjectId::new(Some("project_alpha".to_string()));
+        artifact.goal = Some("Profile the perturbation response".to_string());
+        artifact.motivation = Some("The regulator remains unresolved".to_string());
+        artifact.hypothesis = Some("RpoS drives the induced genes".to_string());
+        artifact.scientific_question =
+            Some("Which genes increase after the perturbation?".to_string());
+        artifact.dataset_refs = vec![DatasetRef {
+            name: "rna_seq".to_string(),
+            version: Some("v1".to_string()),
+            description: Some("Count matrix".to_string()),
+        }];
+
+        store
+            .insert_task_artifact_bundle(
+                &artifact,
+                &["chunk-1".to_string(), "chunk-2".to_string()],
+                &["task_goal".to_string(), "task_summary".to_string()],
+            )
+            .unwrap();
+
+        let loaded = store
+            .get_task_artifact(&tenant_id, &artifact.artifact_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.task_id, artifact.task_id);
+        assert_eq!(loaded.goal, artifact.goal);
+        assert_eq!(loaded.dataset_refs, artifact.dataset_refs);
+
+        let conn = store.conn.lock().unwrap();
+        let link_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM artifact_links WHERE artifact_id = ?1",
+                rusqlite::params![artifact.artifact_id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(link_count, 2);
+    }
+
+    #[test]
+    fn task_projection_search_filters_by_exact_dimensions() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("task_search.db");
+        let store = SqliteMetadataStore::open(&db_path).unwrap();
+        let tenant_id = TenantId::new("tenant_task").unwrap();
+        let chunk_a = ChunkId::new().to_string();
+        let chunk_b = ChunkId::new().to_string();
+
+        let mut run_artifact = TaskArtifact::new_run_start(tenant_id.clone(), "task-a");
+        run_artifact.project_id = ProjectId::new(Some("project_alpha".to_string()));
+        run_artifact.status = Some("started".to_string());
+        run_artifact.tool_name = Some("mmseqs".to_string());
+        run_artifact.dataset_refs = vec![DatasetRef {
+            name: "rna_seq".to_string(),
+            version: Some("v1".to_string()),
+            description: None,
+        }];
+        store
+            .insert_task_artifact_bundle(&run_artifact, &[chunk_a.clone()], &["run".to_string()])
+            .unwrap();
+
+        let mut other_artifact = TaskArtifact::new_run_start(tenant_id.clone(), "task-b");
+        other_artifact.project_id = ProjectId::new(Some("project_beta".to_string()));
+        other_artifact.status = Some("started".to_string());
+        other_artifact.tool_name = Some("blast".to_string());
+        other_artifact.dataset_refs = vec![DatasetRef {
+            name: "proteomics".to_string(),
+            version: Some("v2".to_string()),
+            description: None,
+        }];
+        store
+            .insert_task_artifact_bundle(&other_artifact, &[chunk_b], &["run".to_string()])
+            .unwrap();
+
+        let chunk_ids = store
+            .search_task_projection_chunk_ids(
+                &tenant_id,
+                &TaskSearchFilters {
+                    task_id: Some("task-a".to_string()),
+                    artifact_kind: Some(ArtifactKind::RunStart),
+                    status: Some("started".to_string()),
+                    dataset_name: Some("rna_seq".to_string()),
+                    dataset_version: Some("v1".to_string()),
+                    entity_name: None,
+                    entity_type: None,
+                    tool_name: Some("mmseqs".to_string()),
+                    project_id: Some("project_alpha".to_string()),
+                    agent_id: None,
+                    session_id: None,
+                },
+                20,
+            )
+            .unwrap();
+
+        assert_eq!(chunk_ids.len(), 1);
+        assert_eq!(chunk_ids[0].to_string(), chunk_a);
     }
 
     #[test]

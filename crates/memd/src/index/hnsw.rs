@@ -139,11 +139,27 @@ impl HnswIndex {
 
     /// Create a new index with persistence path
     ///
-    /// Note: Loading from an existing index is not yet supported due to
-    /// hnsw_rs lifetime constraints. If an index exists at the path, it
-    /// will be ignored and a new empty index created.
+    /// If a persisted mapping/cache exists at the path, attempt to load and
+    /// rebuild the graph from cached embeddings.
     pub fn with_persistence(config: HnswConfig, path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
+
+        let mapping_path = path.join("mapping.json");
+        if mapping_path.exists() {
+            match Self::load(&path, config.clone()) {
+                Ok(index) => {
+                    tracing::info!("Loaded persisted HNSW index from {:?}", path);
+                    return Ok(index);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = ?path,
+                        "failed to load persisted HNSW index, creating empty index"
+                    );
+                }
+            }
+        }
 
         let mut index = Self::new(config);
         index.persist_path = Some(path);
@@ -378,7 +394,7 @@ impl HnswIndex {
         };
 
         // Create fresh HNSW
-        let mut hnsw = Hnsw::new(
+        let hnsw = Hnsw::new(
             config.max_connections,
             config.max_elements,
             16,

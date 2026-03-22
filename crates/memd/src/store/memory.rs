@@ -14,6 +14,9 @@ use super::{
     apply_feedback_scores, split_for_add, FeedbackConfig, FeedbackEntry, Store, StoreStats,
 };
 use crate::error::Result;
+use crate::task_memory::{
+    TaskArtifact, TaskArtifactWriteResult, TaskProjection, TaskSearchFilters,
+};
 use crate::types::{ChunkId, ChunkStatus, MemoryChunk, TenantId};
 
 /// In-memory store implementation
@@ -23,6 +26,10 @@ use crate::types::{ChunkId, ChunkStatus, MemoryChunk, TenantId};
 pub struct MemoryStore {
     /// Map of tenant_id -> (chunk_id -> chunk)
     chunks: RwLock<HashMap<String, HashMap<String, MemoryChunk>>>,
+    /// Canonical task artifacts keyed by tenant and artifact ID.
+    task_artifacts: RwLock<HashMap<String, HashMap<String, TaskArtifact>>>,
+    /// Projection links keyed by tenant then artifact ID.
+    task_projection_links: RwLock<HashMap<String, HashMap<String, Vec<ChunkId>>>>,
     /// Per-tenant relevance feedback log.
     feedback: RwLock<HashMap<String, Vec<FeedbackEntry>>>,
 }
@@ -32,6 +39,8 @@ impl MemoryStore {
     pub fn new() -> Self {
         Self {
             chunks: RwLock::new(HashMap::new()),
+            task_artifacts: RwLock::new(HashMap::new()),
+            task_projection_links: RwLock::new(HashMap::new()),
             feedback: RwLock::new(HashMap::new()),
         }
     }
@@ -116,6 +125,129 @@ impl Store for MemoryStore {
         let mut store = self.feedback.write().unwrap();
         store.entry(tenant).or_default().push(feedback);
         Ok(())
+    }
+
+    async fn add_task_artifact(
+        &self,
+        artifact: TaskArtifact,
+        projections: Vec<TaskProjection>,
+    ) -> Result<TaskArtifactWriteResult> {
+        let projection_chunk_ids = self
+            .add_batch(
+                projections
+                    .into_iter()
+                    .map(|projection| projection.chunk)
+                    .collect(),
+            )
+            .await?
+            .into_iter()
+            .map(|chunk_id| chunk_id.to_string())
+            .collect::<Vec<_>>();
+
+        let tenant = artifact.tenant_id.to_string();
+        let artifact_id = artifact.artifact_id.clone();
+        let task_id = artifact.task_id.clone();
+        let projection_ids = projection_chunk_ids
+            .iter()
+            .filter_map(|id| ChunkId::parse(id).ok())
+            .collect::<Vec<_>>();
+
+        let mut task_store = self.task_artifacts.write().unwrap();
+        task_store
+            .entry(tenant.clone())
+            .or_default()
+            .insert(artifact_id.clone(), artifact);
+        drop(task_store);
+
+        let mut projection_store = self.task_projection_links.write().unwrap();
+        projection_store
+            .entry(tenant)
+            .or_default()
+            .insert(artifact_id.clone(), projection_ids);
+
+        Ok(TaskArtifactWriteResult {
+            task_id,
+            artifact_id,
+            projection_chunk_ids,
+        })
+    }
+
+    async fn get_task_artifact(
+        &self,
+        tenant_id: &TenantId,
+        artifact_id: &str,
+    ) -> Result<Option<TaskArtifact>> {
+        let task_store = self.task_artifacts.read().unwrap();
+        Ok(task_store
+            .get(tenant_id.as_str())
+            .and_then(|artifacts| artifacts.get(artifact_id))
+            .cloned())
+    }
+
+    async fn list_task_artifacts(
+        &self,
+        tenant_id: &TenantId,
+        task_id: &str,
+    ) -> Result<Vec<TaskArtifact>> {
+        let task_store = self.task_artifacts.read().unwrap();
+        let mut artifacts = task_store
+            .get(tenant_id.as_str())
+            .map(|artifacts| {
+                artifacts
+                    .values()
+                    .filter(|artifact| artifact.task_id == task_id)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        artifacts.sort_by(|left, right| {
+            left.timestamp_created
+                .cmp(&right.timestamp_created)
+                .then_with(|| left.artifact_id.cmp(&right.artifact_id))
+        });
+        Ok(artifacts)
+    }
+
+    async fn search_task_projection_chunk_ids(
+        &self,
+        tenant_id: &TenantId,
+        filters: &TaskSearchFilters,
+        limit: usize,
+    ) -> Result<Vec<ChunkId>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let task_store = self.task_artifacts.read().unwrap();
+        let link_store = self.task_projection_links.read().unwrap();
+        let mut chunk_ids = Vec::new();
+
+        let Some(artifacts) = task_store.get(tenant_id.as_str()) else {
+            return Ok(Vec::new());
+        };
+        let links = link_store.get(tenant_id.as_str());
+
+        let mut matching = artifacts
+            .values()
+            .filter(|artifact| artifact_matches_filters(artifact, filters))
+            .cloned()
+            .collect::<Vec<_>>();
+        matching.sort_by_key(|artifact| std::cmp::Reverse(artifact.timestamp_created));
+
+        for artifact in matching {
+            if let Some(chunk_list) =
+                links.and_then(|tenant_links| tenant_links.get(&artifact.artifact_id))
+            {
+                for chunk_id in chunk_list {
+                    chunk_ids.push(chunk_id.clone());
+                    if chunk_ids.len() >= limit {
+                        return Ok(chunk_ids);
+                    }
+                }
+            }
+        }
+
+        Ok(chunk_ids)
     }
 
     async fn list_feedback(
@@ -334,6 +466,89 @@ fn current_time_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn artifact_matches_filters(artifact: &TaskArtifact, filters: &TaskSearchFilters) -> bool {
+    if let Some(task_id) = filters.task_id.as_deref() {
+        if artifact.task_id != task_id {
+            return false;
+        }
+    }
+    if let Some(kind) = filters.artifact_kind {
+        if artifact.artifact_kind != kind {
+            return false;
+        }
+    }
+    if let Some(status) = filters.status.as_deref() {
+        if artifact.status.as_deref() != Some(status) {
+            return false;
+        }
+    }
+    if let Some(project_id) = filters.project_id.as_deref() {
+        if artifact.project_id.as_option() != Some(project_id) {
+            return false;
+        }
+    }
+    if let Some(agent_id) = filters.agent_id.as_deref() {
+        if artifact.agent_id.as_deref() != Some(agent_id) {
+            return false;
+        }
+    }
+    if let Some(session_id) = filters.session_id.as_deref() {
+        if artifact.session_id.as_deref() != Some(session_id) {
+            return false;
+        }
+    }
+    if let Some(tool_name) = filters.tool_name.as_deref() {
+        if artifact.tool_name.as_deref() != Some(tool_name)
+            && artifact.provenance.tool_name.as_deref() != Some(tool_name)
+        {
+            return false;
+        }
+    }
+    if let Some(dataset_name) = filters.dataset_name.as_deref() {
+        let has_match = artifact.dataset_refs.iter().any(|dataset| {
+            dataset.name == dataset_name
+                && filters
+                    .dataset_version
+                    .as_deref()
+                    .map(|version| dataset.version.as_deref() == Some(version))
+                    .unwrap_or(true)
+        });
+        if !has_match {
+            return false;
+        }
+    } else if let Some(dataset_version) = filters.dataset_version.as_deref() {
+        if !artifact
+            .dataset_refs
+            .iter()
+            .any(|dataset| dataset.version.as_deref() == Some(dataset_version))
+        {
+            return false;
+        }
+    }
+    if let Some(entity_name) = filters.entity_name.as_deref() {
+        let has_match = artifact.entity_refs.iter().any(|entity| {
+            entity.name == entity_name
+                && filters
+                    .entity_type
+                    .as_deref()
+                    .map(|entity_type| entity.entity_type == entity_type)
+                    .unwrap_or(true)
+        });
+        if !has_match {
+            return false;
+        }
+    } else if let Some(entity_type) = filters.entity_type.as_deref() {
+        if !artifact
+            .entity_refs
+            .iter()
+            .any(|entity| entity.entity_type == entity_type)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
