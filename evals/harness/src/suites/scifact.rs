@@ -106,7 +106,7 @@ pub fn run_scifact_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<Test
 
     // Load dataset
     let dataset_path =
-        crate::resolve_dataset_path("evals/datasets/retrieval/beir_scifact_fixed.json");
+        crate::resolve_dataset_path("evals/bench/datasets/retrieval/beir_scifact_fixed.json");
     let dataset = match load_dataset(dataset_path.as_path()) {
         Ok(d) => d,
         Err(e) => {

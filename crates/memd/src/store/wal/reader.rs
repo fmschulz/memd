@@ -101,6 +101,9 @@ pub mod recovery {
         /// Called for each Delete record
         fn on_delete(&mut self, record: &WalRecord) -> io::Result<()>;
 
+        /// Called for each TaskArtifact record.
+        fn on_task_artifact(&mut self, record: &WalRecord) -> io::Result<()>;
+
         /// Check if a chunk already exists (for idempotency)
         fn chunk_exists(&self, chunk_id: &str) -> io::Result<bool>;
     }
@@ -112,6 +115,8 @@ pub mod recovery {
         pub adds: usize,
         /// Number of Delete records applied
         pub deletes: usize,
+        /// Number of task artifact records applied
+        pub task_artifacts: usize,
         /// Number of records skipped (already exist)
         pub skipped: usize,
         /// Number of checkpoint records encountered (should be 0 after last checkpoint)
@@ -143,6 +148,10 @@ pub mod recovery {
                 WalRecordType::Delete => {
                     handler.on_delete(record)?;
                     stats.deletes += 1;
+                }
+                WalRecordType::TaskArtifact => {
+                    handler.on_task_artifact(record)?;
+                    stats.task_artifacts += 1;
                 }
                 WalRecordType::Checkpoint => {
                     // Should not appear after last checkpoint
@@ -334,6 +343,10 @@ mod tests {
                 Ok(())
             }
 
+            fn on_task_artifact(&mut self, _record: &WalRecord) -> io::Result<()> {
+                Ok(())
+            }
+
             fn chunk_exists(&self, chunk_id: &str) -> io::Result<bool> {
                 Ok(self.existing.contains(chunk_id))
             }
@@ -371,6 +384,7 @@ mod tests {
                 adds: 1,    // Only new_chunk added
                 skipped: 1, // existing_chunk skipped
                 deletes: 1, // to_delete processed
+                task_artifacts: 0,
                 checkpoints: 0,
             }
         );
@@ -394,6 +408,10 @@ mod tests {
             }
 
             fn on_delete(&mut self, _record: &WalRecord) -> io::Result<()> {
+                Ok(())
+            }
+
+            fn on_task_artifact(&mut self, _record: &WalRecord) -> io::Result<()> {
                 Ok(())
             }
 

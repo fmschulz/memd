@@ -89,6 +89,24 @@ impl WalWriter {
         Ok(())
     }
 
+    /// Append a batch of records with one fsync at the end.
+    ///
+    /// This is useful for batch ingestion paths that can tolerate all-or-nothing
+    /// durability per batch rather than per record.
+    pub fn append_batch(&mut self, records: &[WalRecord]) -> io::Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+
+        for record in records {
+            let bytes = record.encode_to_bytes();
+            self.file.write_all(&bytes)?;
+        }
+        self.file.sync_all()?;
+        self.records_written += records.len() as u64;
+        Ok(())
+    }
+
     /// Append an Add record (convenience method)
     pub fn append_add(
         &mut self,
@@ -104,6 +122,26 @@ impl WalWriter {
             payload,
         );
         self.append(&record)
+    }
+
+    /// Append multiple Add records with one fsync at the end.
+    pub fn append_add_batch(
+        &mut self,
+        tenant_id: &str,
+        records: &[(String, i64, Vec<u8>)],
+    ) -> io::Result<()> {
+        let batch: Vec<WalRecord> = records
+            .iter()
+            .map(|(chunk_id, timestamp, payload)| {
+                WalRecord::add(
+                    tenant_id.to_string(),
+                    chunk_id.clone(),
+                    *timestamp,
+                    payload.clone(),
+                )
+            })
+            .collect();
+        self.append_batch(&batch)
     }
 
     /// Append a Delete record (convenience method)
@@ -123,6 +161,23 @@ impl WalWriter {
     /// After recovery, records before the last checkpoint can be skipped.
     pub fn append_checkpoint(&mut self, tenant_id: &str, timestamp: i64) -> io::Result<()> {
         let record = WalRecord::checkpoint(tenant_id.to_string(), timestamp);
+        self.append(&record)
+    }
+
+    /// Append a TaskArtifact record (convenience method).
+    pub fn append_task_artifact(
+        &mut self,
+        tenant_id: &str,
+        artifact_id: &str,
+        timestamp: i64,
+        payload: Vec<u8>,
+    ) -> io::Result<()> {
+        let record = WalRecord::task_artifact(
+            tenant_id.to_string(),
+            artifact_id.to_string(),
+            timestamp,
+            payload,
+        );
         self.append(&record)
     }
 
@@ -229,6 +284,78 @@ mod tests {
 
         let (record3, _) = WalRecord::decode_from_bytes(&contents[offset1 + offset2..]).unwrap();
         assert_eq!(record3.record_type, WalRecordType::Checkpoint);
+    }
+
+    #[test]
+    fn append_batch_writes_all_records() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_path = temp_dir.path().join("batch.wal");
+        let mut writer = WalWriter::create(&wal_path).unwrap();
+
+        let batch = vec![
+            WalRecord::add("tenant".into(), "c1".into(), 1000, b"a".to_vec()),
+            WalRecord::delete("tenant".into(), "c2".into(), 1001),
+            WalRecord::checkpoint("tenant".into(), 1002),
+        ];
+        writer.append_batch(&batch).unwrap();
+        assert_eq!(writer.records_written(), 3);
+
+        let (records, _) = super::super::reader::WalReader::open(&wal_path)
+            .unwrap()
+            .read_all_records()
+            .unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].record_type, WalRecordType::Add);
+        assert_eq!(records[1].record_type, WalRecordType::Delete);
+        assert_eq!(records[2].record_type, WalRecordType::Checkpoint);
+    }
+
+    #[test]
+    fn append_add_batch_writes_all_add_records() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_path = temp_dir.path().join("batch_add.wal");
+        let mut writer = WalWriter::create(&wal_path).unwrap();
+
+        writer
+            .append_add_batch(
+                "tenant",
+                &[
+                    ("c1".to_string(), 1000, b"payload1".to_vec()),
+                    ("c2".to_string(), 1001, b"payload2".to_vec()),
+                ],
+            )
+            .unwrap();
+        assert_eq!(writer.records_written(), 2);
+
+        let (records, _) = super::super::reader::WalReader::open(&wal_path)
+            .unwrap()
+            .read_all_records()
+            .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].record_type, WalRecordType::Add);
+        assert_eq!(records[0].chunk_id, "c1");
+        assert_eq!(records[1].record_type, WalRecordType::Add);
+        assert_eq!(records[1].chunk_id, "c2");
+    }
+
+    #[test]
+    fn append_task_artifact_writes_record() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_path = temp_dir.path().join("task_artifact.wal");
+        let mut writer = WalWriter::create(&wal_path).unwrap();
+
+        writer
+            .append_task_artifact("tenant", "artifact-1", 1002, b"payload".to_vec())
+            .unwrap();
+        assert_eq!(writer.records_written(), 1);
+
+        let (records, _) = super::super::reader::WalReader::open(&wal_path)
+            .unwrap()
+            .read_all_records()
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].record_type, WalRecordType::TaskArtifact);
+        assert_eq!(records[0].chunk_id, "artifact-1");
     }
 
     #[test]

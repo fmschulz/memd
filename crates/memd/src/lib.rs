@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod retrieval;
 pub mod store;
 pub mod structural;
+pub mod task_memory;
 pub mod text;
 pub mod tiered;
 pub mod types;
@@ -25,7 +26,7 @@ pub use embeddings::{CandleEmbedder, Embedder, EmbeddingConfig, EmbeddingResult,
 pub use error::{MemdError, Result};
 pub use index::{HnswConfig, HnswIndex, SearchResult};
 pub use logging::init_logging;
-pub use mcp::{run_server, McpServer};
+pub use mcp::{run_http_server, run_server, McpServer};
 pub use metrics::{
     IndexStats, LatencyStats, MetricsCollector, MetricsSnapshot, QueryMetrics, Timer,
 };
@@ -41,6 +42,10 @@ pub use structural::{
     detect_language, parse_file, ExtractedSymbol, LanguageSupport, ParseResult, QueryIntent,
     QueryRouter, RouteResult, StructuralStore, SupportedLanguage, SymbolExtractor, SymbolIndexer,
     SymbolKind, SymbolRecord,
+};
+pub use task_memory::{
+    build_task_projections, ArtifactKind, DatasetRef, EntityRef, ProjectionKind, TaskArtifact,
+    TaskArtifactWriteResult, TaskProjection, TaskProvenance, TaskSearchFilters,
 };
 pub use text::{CodeTokenizer, ProcessedSentence, Sentence, SentenceSplitter, TextProcessor};
 pub use tiered::{

@@ -6,7 +6,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use super::traits::{Embedder, EmbeddingConfig, EmbeddingResult, PoolingStrategy};
+use super::traits::{Embedder, EmbeddingConfig, EmbeddingResult};
 use crate::error::Result;
 
 /// Mock embedder for testing
@@ -91,6 +91,7 @@ impl Embedder for MockEmbedder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embeddings::PoolingStrategy;
 
     #[tokio::test]
     async fn test_mock_deterministic() {
