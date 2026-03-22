@@ -1,4 +1,4 @@
-# Scientific Task Memory Schema
+# Scientific Knowledge Artifact Schema
 
 This directory documents the task-oriented knowledge artifact schema used by `memd`.
 
@@ -37,6 +37,9 @@ Current artifact kinds:
 - `run_start`
 - `run_finish`
 - `evidence`
+- `review`
+- `revision`
+- `verification`
 - `task_finish`
 
 Important canonical fields include:
@@ -50,6 +53,11 @@ Important canonical fields include:
 - `agent_id`
 - `session_id`
 - `status`
+- `artifact_role`
+- `challenge_id`
+- `thread_id`
+- `reply_to_artifact_id`
+- `relation_kind`
 - `goal`
 - `motivation`
 - `hypothesis`
@@ -63,6 +71,8 @@ Important canonical fields include:
 - `followups`
 - `dataset_refs`
 - `entity_refs`
+- `related_artifact_ids`
+- `contributors`
 - `tool_name`
 - `tool_version`
 - `command`
@@ -72,6 +82,14 @@ Important canonical fields include:
 - `metrics`
 - `why_chosen`
 - `confidence`
+- `requested_action`
+- `verification_status`
+- `compute_budget`
+- `cost_actual`
+- `data_access_level`
+- `policy_tags`
+- `allowed_tools`
+- `approval_state`
 - `provenance`
 - `timestamp_created`
 - `timestamp_observed`
@@ -94,6 +112,9 @@ Current tables:
 - `task_datasets`
 - `task_entities`
 - `artifact_links`
+- `artifact_relations`
+- `artifact_contributors`
+- `challenges`
 
 These tables exist to support exact task-aware filters and joins without coupling retrieval to every schema field.
 
@@ -125,6 +146,10 @@ The projection layer is intentionally separate from the canonical envelope:
 - `task_id`
 - `artifact_kind`
 - `status`
+- `challenge_id`
+- `thread_id`
+- `reply_to_artifact_id`
+- `artifact_role`
 - `dataset_name`
 - `dataset_version`
 - `entity_name`
@@ -133,6 +158,9 @@ The projection layer is intentionally separate from the canonical envelope:
 - `project_id`
 - `agent_id`
 - `session_id`
+- `requested_action`
+- `verification_status`
+- `relation_kind`
 
 These filters are resolved first, then the candidate set is reranked for retrieval.
 
@@ -157,6 +185,8 @@ Agents should follow this contract:
 4. Use `task.run_start` / `task.run_finish` around substantive runs.
 5. Use `task.add_evidence` when a concrete result matters.
 6. Use `task.finish` to record worked/failed/validation/uncertainty/followups.
+7. Use `artifact.create` when the important event is critique, revision, verification, or thread-level coordination rather than a task lifecycle step.
+8. Use `artifact.search` / `artifact.list_thread` when the artifact itself is the unit of exchange.
 
 This is how `memd` enforces consistent reporting across agents in the same tenant.
 

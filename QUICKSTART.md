@@ -67,7 +67,42 @@ Then continue with:
 - `task.get`
 - `task.search`
 
-## 5. Use `memory.*` for raw content
+## 5. Use `artifact.*` for critique, verification, and thread inspection
+
+Example:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 11,
+  "method": "tools/call",
+  "params": {
+    "name": "artifact.create",
+    "arguments": {
+      "tenant_id": "quickstart",
+      "artifact_kind": "review",
+      "task_id": "reuse-the-task-id-from-task.start",
+      "artifact_role": "critique",
+      "summary": "Need a clearer verification path for this task",
+      "requested_action": "review",
+      "verification_status": "pending"
+    }
+  }
+}
+```
+
+Then inspect or search the thread with:
+
+- `artifact.get`
+- `artifact.search`
+- `artifact.list_thread`
+
+Optional safety metadata such as `compute_budget`, `cost_actual`,
+`data_access_level`, `policy_tags`, `allowed_tools`, and `approval_state` can
+also be sent through `artifact.create`. They are optional in the current local
+prototype.
+
+## 6. Use `memory.*` for raw content
 
 Example:
 
@@ -89,16 +124,16 @@ Example:
 }
 ```
 
-## 6. Register clients and install the skill if needed
+## 7. Register clients and install the skill if needed
 
 See:
 
-- [memd-skill/INSTALL.md](/home/fschulz/dev/software/memd/memd-skill/INSTALL.md)
-- [memd-skill/SKILL.md](/home/fschulz/dev/software/memd/memd-skill/SKILL.md)
+- [memd-skill/INSTALL.md](memd-skill/INSTALL.md)
+- [memd-skill/SKILL.md](memd-skill/SKILL.md)
 
 The skill includes a bundled Linux binary:
 
-- [memd-skill/bin/linux-x64/memd](/home/fschulz/dev/software/memd/memd-skill/bin/linux-x64/memd)
+- [memd-skill/bin/linux-x64/memd](memd-skill/bin/linux-x64/memd)
 
 Register the shared daemon with current clients:
 
@@ -107,7 +142,13 @@ codex mcp add memd --url http://127.0.0.1:8787/mcp
 claude mcp add --transport http --scope user memd http://127.0.0.1:8787/mcp
 ```
 
-## 7. Optional ONNX cross-encoder reranker
+If you want stronger habitual `memd` usage from both clients, run:
+
+```bash
+./memd-skill/install_memd_enforcement.sh
+```
+
+## 8. Optional ONNX cross-encoder reranker
 
 ONNX here means the optional cross-encoder reranker, not the default embedding path.
 
@@ -129,4 +170,4 @@ For the real ONNX smoke test:
 cargo test -p memd --features cross-encoder-reranker smoke_real_onnx_scores_relevant_pair_higher -- --ignored --nocapture
 ```
 
-See the ONNX section in [README.md](/home/fschulz/dev/software/memd/README.md) for cache location, runtime downloads, and env vars.
+See the ONNX section in [README.md](README.md) for cache location, runtime downloads, and env vars.

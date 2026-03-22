@@ -144,6 +144,15 @@ pub trait Store: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// List canonical task artifacts for a logical thread.
+    async fn list_thread_artifacts(
+        &self,
+        _tenant_id: &TenantId,
+        _thread_id: &str,
+    ) -> Result<Vec<TaskArtifact>> {
+        Ok(Vec::new())
+    }
+
     /// Resolve candidate projection chunk IDs using exact task filters.
     async fn search_task_projection_chunk_ids(
         &self,
@@ -169,6 +178,15 @@ pub trait Store: Send + Sync {
             }
         }
         Ok(rank_candidate_chunks(chunks, query, k))
+    }
+
+    /// Resolve canonical artifacts for retrieval projection chunk IDs.
+    async fn resolve_artifacts_for_chunks(
+        &self,
+        _tenant_id: &TenantId,
+        _chunk_ids: &[ChunkId],
+    ) -> Result<HashMap<String, TaskArtifact>> {
+        Ok(HashMap::new())
     }
 
     /// Record relevance feedback for retrieval quality adaptation.

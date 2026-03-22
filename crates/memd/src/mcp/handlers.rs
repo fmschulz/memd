@@ -14,8 +14,8 @@ use super::error::McpError;
 use crate::metrics::{IndexStats, MetricsCollector};
 use crate::store::{FeedbackEntry, RelevanceLabel, Store, StoreStats, TenantManager};
 use crate::task_memory::{
-    build_task_projections, ArtifactKind, DatasetRef, EntityRef, TaskArtifact, TaskProvenance,
-    TaskSearchFilters,
+    build_task_projections, ArtifactKind, ContributorRef, DatasetRef, EntityRef, TaskArtifact,
+    TaskProvenance, TaskSearchFilters,
 };
 use crate::types::{ChunkId, ChunkType, MemoryChunk, ProjectId, Source, TenantId};
 
@@ -127,6 +127,18 @@ pub struct TaskEntityRefParams {
     pub entity_type: String,
     #[serde(default)]
     pub role: Option<String>,
+}
+
+/// Contributor metadata supplied to artifact tools.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskContributorParams {
+    pub contributor_id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub contribution: Option<String>,
 }
 
 /// Provenance supplied to task tools.
@@ -333,6 +345,14 @@ pub struct TaskSearchFiltersParams {
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]
+    pub challenge_id: Option<String>,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub reply_to_artifact_id: Option<String>,
+    #[serde(default)]
+    pub artifact_role: Option<String>,
+    #[serde(default)]
     pub dataset_name: Option<String>,
     #[serde(default)]
     pub dataset_version: Option<String>,
@@ -348,6 +368,12 @@ pub struct TaskSearchFiltersParams {
     pub agent_id: Option<String>,
     #[serde(default)]
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub requested_action: Option<String>,
+    #[serde(default)]
+    pub verification_status: Option<String>,
+    #[serde(default)]
+    pub relation_kind: Option<String>,
 }
 
 /// Parameters for task.search
@@ -360,6 +386,126 @@ pub struct TaskSearchParams {
     pub k: usize,
     #[serde(default)]
     pub filters: Option<TaskSearchFiltersParams>,
+}
+
+/// Parameters for artifact.create
+#[derive(Debug, Deserialize)]
+pub struct ArtifactCreateParams {
+    pub tenant_id: String,
+    pub artifact_kind: String,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub parent_task_id: Option<String>,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub artifact_role: Option<String>,
+    #[serde(default)]
+    pub challenge_id: Option<String>,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub reply_to_artifact_id: Option<String>,
+    #[serde(default)]
+    pub relation_kind: Option<String>,
+    #[serde(default)]
+    pub goal: Option<String>,
+    #[serde(default)]
+    pub motivation: Option<String>,
+    #[serde(default)]
+    pub hypothesis: Option<String>,
+    #[serde(default)]
+    pub scientific_question: Option<String>,
+    #[serde(default)]
+    pub method_summary: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub evidence_kind: Option<String>,
+    #[serde(default)]
+    pub supports_claim: Option<bool>,
+    #[serde(default)]
+    pub blockers: Vec<String>,
+    #[serde(default)]
+    pub what_worked: Vec<String>,
+    #[serde(default)]
+    pub what_failed: Vec<String>,
+    #[serde(default)]
+    pub validation: Vec<String>,
+    #[serde(default)]
+    pub uncertainty: Vec<String>,
+    #[serde(default)]
+    pub followups: Vec<String>,
+    #[serde(default)]
+    pub expected_outputs: Vec<String>,
+    #[serde(default)]
+    pub related_artifact_ids: Vec<String>,
+    #[serde(default)]
+    pub contributors: Vec<TaskContributorParams>,
+    #[serde(default)]
+    pub dataset_refs: Vec<TaskDatasetRefParams>,
+    #[serde(default)]
+    pub entity_refs: Vec<TaskEntityRefParams>,
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    #[serde(default)]
+    pub tool_version: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub parameters: Option<Value>,
+    #[serde(default)]
+    pub inputs: Vec<String>,
+    #[serde(default)]
+    pub outputs: Vec<String>,
+    #[serde(default)]
+    pub metrics: Option<Value>,
+    #[serde(default)]
+    pub why_chosen: Option<String>,
+    #[serde(default)]
+    pub confidence: Option<f32>,
+    #[serde(default)]
+    pub requested_action: Option<String>,
+    #[serde(default)]
+    pub verification_status: Option<String>,
+    #[serde(default)]
+    pub compute_budget: Option<Value>,
+    #[serde(default)]
+    pub cost_actual: Option<Value>,
+    #[serde(default)]
+    pub data_access_level: Option<String>,
+    #[serde(default)]
+    pub policy_tags: Vec<String>,
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    #[serde(default)]
+    pub approval_state: Option<String>,
+    #[serde(default)]
+    pub provenance: Option<TaskProvenanceParams>,
+}
+
+/// Parameters for artifact.get
+#[derive(Debug, Deserialize)]
+pub struct ArtifactGetParams {
+    pub tenant_id: String,
+    pub artifact_id: String,
+}
+
+/// Parameters for artifact.list_thread
+#[derive(Debug, Deserialize)]
+pub struct ArtifactListThreadParams {
+    pub tenant_id: String,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub artifact_id: Option<String>,
 }
 
 /// Parameters for memory.get
@@ -647,6 +793,9 @@ pub struct ChunkResult {
     /// Which tier this result came from (only present when debug_tiers=true)
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub source_tier: Option<String>,
+    /// Canonical artifact linked to this projection chunk when available.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub artifact: Option<TaskArtifact>,
 }
 
 /// Source information in results
@@ -730,6 +879,36 @@ pub struct TaskArtifactResult {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TaskGetResult {
     pub task_id: String,
+    pub artifacts: Vec<TaskArtifact>,
+}
+
+/// Result of artifact.get.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ArtifactGetResult {
+    pub artifact: Option<TaskArtifact>,
+}
+
+/// One artifact returned from artifact.search.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ArtifactSearchHit {
+    pub artifact: TaskArtifact,
+    pub score: f32,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub matched_chunk_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub matched_text: Option<String>,
+}
+
+/// Result of artifact.search.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ArtifactSearchResult {
+    pub results: Vec<ArtifactSearchHit>,
+}
+
+/// Result of artifact.list_thread.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ArtifactThreadResult {
+    pub thread_id: String,
     pub artifacts: Vec<TaskArtifact>,
 }
 
@@ -1231,6 +1410,7 @@ fn chunk_to_result(chunk: &MemoryChunk, score: f32, source_tier: Option<String>)
         episode_id: extract_episode_id(&chunk.tags),
         citation: Some(build_citation(chunk)),
         source_tier,
+        artifact: None,
     }
 }
 
@@ -1449,6 +1629,22 @@ fn entity_params_to_refs(params: Vec<TaskEntityRefParams>) -> Result<Vec<EntityR
     Ok(refs)
 }
 
+fn contributor_params_to_refs(
+    params: Vec<TaskContributorParams>,
+) -> Result<Vec<ContributorRef>, McpError> {
+    let mut refs = Vec::with_capacity(params.len());
+    for contributor in params {
+        validate_identifier("contributors[].contributor_id", &contributor.contributor_id)?;
+        refs.push(ContributorRef {
+            contributor_id: contributor.contributor_id,
+            display_name: contributor.display_name,
+            role: contributor.role,
+            contribution: contributor.contribution,
+        });
+    }
+    Ok(refs)
+}
+
 fn params_to_task_provenance(params: Option<TaskProvenanceParams>) -> TaskProvenance {
     params
         .map(|p| TaskProvenance {
@@ -1481,6 +1677,10 @@ fn parse_task_search_filters(
         task_id: filters.task_id.clone(),
         artifact_kind,
         status: filters.status.clone(),
+        challenge_id: filters.challenge_id.clone(),
+        thread_id: filters.thread_id.clone(),
+        reply_to_artifact_id: filters.reply_to_artifact_id.clone(),
+        artifact_role: filters.artifact_role.clone(),
         dataset_name: filters.dataset_name.clone(),
         dataset_version: filters.dataset_version.clone(),
         entity_name: filters.entity_name.clone(),
@@ -1489,6 +1689,9 @@ fn parse_task_search_filters(
         project_id: filters.project_id.clone(),
         agent_id: filters.agent_id.clone(),
         session_id: filters.session_id.clone(),
+        requested_action: filters.requested_action.clone(),
+        verification_status: filters.verification_status.clone(),
+        relation_kind: filters.relation_kind.clone(),
     })
 }
 
@@ -1496,6 +1699,10 @@ fn has_active_task_filters(filters: &TaskSearchFilters) -> bool {
     filters.task_id.is_some()
         || filters.artifact_kind.is_some()
         || filters.status.is_some()
+        || filters.challenge_id.is_some()
+        || filters.thread_id.is_some()
+        || filters.reply_to_artifact_id.is_some()
+        || filters.artifact_role.is_some()
         || filters.dataset_name.is_some()
         || filters.dataset_version.is_some()
         || filters.entity_name.is_some()
@@ -1504,6 +1711,9 @@ fn has_active_task_filters(filters: &TaskSearchFilters) -> bool {
         || filters.project_id.is_some()
         || filters.agent_id.is_some()
         || filters.session_id.is_some()
+        || filters.requested_action.is_some()
+        || filters.verification_status.is_some()
+        || filters.relation_kind.is_some()
 }
 
 /// Convert SourceParams to Source
@@ -1531,6 +1741,82 @@ fn format_mcp_response<T: Serialize>(result: &T) -> Result<Value, McpError> {
             "text": json_str
         }]
     }))
+}
+
+async fn attach_artifacts_to_chunk_results<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    results: &mut [ChunkResult],
+) -> Result<(), McpError> {
+    let chunk_ids = results
+        .iter()
+        .filter_map(|result| ChunkId::parse(&result.chunk_id).ok())
+        .collect::<Vec<_>>();
+    let artifacts = store
+        .resolve_artifacts_for_chunks(tenant_id, &chunk_ids)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    for result in results {
+        if let Some(artifact) = artifacts.get(&result.chunk_id) {
+            result.artifact = Some(artifact.clone());
+        }
+    }
+
+    Ok(())
+}
+
+fn default_status_for_artifact_kind(kind: ArtifactKind) -> &'static str {
+    match kind {
+        ArtifactKind::TaskStart | ArtifactKind::TaskProgress => "in_progress",
+        ArtifactKind::RunStart => "started",
+        ArtifactKind::RunFinish | ArtifactKind::TaskFinish => "completed",
+        ArtifactKind::Evidence
+        | ArtifactKind::Review
+        | ArtifactKind::Revision
+        | ArtifactKind::Verification => "recorded",
+    }
+}
+
+fn apply_common_artifact_fields(
+    artifact: &mut TaskArtifact,
+    project_id: Option<String>,
+    parent_task_id: Option<String>,
+    agent_id: Option<String>,
+    session_id: Option<String>,
+    status: Option<String>,
+    artifact_role: Option<String>,
+    challenge_id: Option<String>,
+    thread_id: Option<String>,
+    reply_to_artifact_id: Option<String>,
+    relation_kind: Option<String>,
+    dataset_refs: Vec<DatasetRef>,
+    entity_refs: Vec<EntityRef>,
+    contributors: Vec<ContributorRef>,
+    provenance: TaskProvenance,
+) {
+    artifact.project_id = ProjectId::from(project_id);
+    artifact.parent_task_id = parent_task_id;
+    artifact.agent_id = agent_id;
+    artifact.session_id = session_id;
+    artifact.status = Some(
+        status.unwrap_or_else(|| default_status_for_artifact_kind(artifact.artifact_kind).to_string()),
+    );
+    artifact.artifact_role = artifact_role;
+    artifact.challenge_id = challenge_id;
+    artifact.thread_id = thread_id;
+    artifact.reply_to_artifact_id = reply_to_artifact_id;
+    artifact.relation_kind = relation_kind;
+    artifact.dataset_refs = dataset_refs;
+    artifact.entity_refs = entity_refs;
+    artifact.contributors = contributors;
+    artifact.provenance = provenance;
+    artifact.tool_name = artifact.provenance.tool_name.clone().or_else(|| artifact.tool_name.clone());
+    artifact.tool_version = artifact
+        .provenance
+        .tool_version
+        .clone()
+        .or_else(|| artifact.tool_version.clone());
 }
 
 async fn collect_episode_chunks<S: Store>(
@@ -1666,18 +1952,7 @@ pub async fn handle_memory_search<S: Store>(
 
         let results: Vec<ChunkResult> = scored_chunks
             .iter()
-            .map(|(chunk, score)| ChunkResult {
-                chunk_id: chunk.chunk_id.to_string(),
-                text: chunk.text.clone(),
-                score: *score,
-                chunk_type: chunk.chunk_type.to_string(),
-                source: SourceResult::from(&chunk.source),
-                timestamp_created: chunk.timestamp_created,
-                tags: chunk.tags.clone(),
-                episode_id: extract_episode_id(&chunk.tags),
-                citation: Some(build_citation(chunk)),
-                source_tier: default_tier.clone(),
-            })
+            .map(|(chunk, score)| chunk_to_result(chunk, *score, default_tier.clone()))
             .collect();
 
         return format_mcp_response(&SearchResult {
@@ -1721,18 +1996,7 @@ pub async fn handle_memory_search<S: Store>(
 
     let results: Vec<ChunkResult> = scored_chunks
         .iter()
-        .map(|(chunk, score)| ChunkResult {
-            chunk_id: chunk.chunk_id.to_string(),
-            text: chunk.text.clone(),
-            score: *score,
-            chunk_type: chunk.chunk_type.to_string(),
-            source: SourceResult::from(&chunk.source),
-            timestamp_created: chunk.timestamp_created,
-            tags: chunk.tags.clone(),
-            episode_id: extract_episode_id(&chunk.tags),
-            citation: Some(build_citation(chunk)),
-            source_tier: None,
-        })
+        .map(|(chunk, score)| chunk_to_result(chunk, *score, None))
         .collect();
 
     format_mcp_response(&SearchResult {
@@ -1885,6 +2149,7 @@ pub async fn handle_task_start<S: Store>(
     }
 
     let mut artifact = TaskArtifact::new_task_start(tenant_id);
+    artifact.thread_id = Some(artifact.task_id.clone());
     artifact.project_id = ProjectId::from(params.project_id);
     artifact.parent_task_id = params.parent_task_id;
     artifact.agent_id = params.agent_id;
@@ -1935,6 +2200,7 @@ pub async fn handle_task_finish<S: Store>(
     }
 
     let mut artifact = TaskArtifact::new_task_finish(tenant_id, params.task_id);
+    artifact.thread_id = Some(artifact.task_id.clone());
     artifact.project_id = ProjectId::from(params.project_id);
     artifact.agent_id = params.agent_id;
     artifact.session_id = params.session_id;
@@ -1989,6 +2255,7 @@ pub async fn handle_task_progress<S: Store>(
     }
 
     let mut artifact = TaskArtifact::new_task_progress(tenant_id, params.task_id);
+    artifact.thread_id = Some(artifact.task_id.clone());
     artifact.project_id = ProjectId::from(params.project_id);
     artifact.agent_id = params.agent_id;
     artifact.session_id = params.session_id;
@@ -2044,6 +2311,7 @@ pub async fn handle_task_run_start<S: Store>(
     }
 
     let mut artifact = TaskArtifact::new_run_start(tenant_id, params.task_id);
+    artifact.thread_id = Some(artifact.task_id.clone());
     artifact.project_id = ProjectId::from(params.project_id);
     artifact.agent_id = params.agent_id;
     artifact.session_id = params.session_id;
@@ -2100,6 +2368,7 @@ pub async fn handle_task_run_finish<S: Store>(
     }
 
     let mut artifact = TaskArtifact::new_run_finish(tenant_id, params.task_id);
+    artifact.thread_id = Some(artifact.task_id.clone());
     artifact.project_id = ProjectId::from(params.project_id);
     artifact.agent_id = params.agent_id;
     artifact.session_id = params.session_id;
@@ -2157,6 +2426,7 @@ pub async fn handle_task_add_evidence<S: Store>(
     }
 
     let mut artifact = TaskArtifact::new_evidence(tenant_id, params.task_id);
+    artifact.thread_id = Some(artifact.task_id.clone());
     artifact.project_id = ProjectId::from(params.project_id);
     artifact.agent_id = params.agent_id;
     artifact.session_id = params.session_id;
@@ -2189,6 +2459,227 @@ pub async fn handle_task_add_evidence<S: Store>(
     })
 }
 
+/// Handle artifact.create tool call.
+pub async fn handle_artifact_create<S: Store>(
+    store: &S,
+    tenant_manager: Option<&TenantManager>,
+    params: ArtifactCreateParams,
+) -> Result<Value, McpError> {
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let artifact_kind =
+        ArtifactKind::from_str(&params.artifact_kind).map_err(McpError::InvalidParams)?;
+    if let Some(confidence) = params.confidence {
+        validate_confidence(confidence)?;
+    }
+    if let Some(reply_to_artifact_id) = params.reply_to_artifact_id.as_deref() {
+        validate_identifier("reply_to_artifact_id", reply_to_artifact_id)?;
+    }
+
+    info!(
+        tenant_id = %tenant_id,
+        artifact_kind = %artifact_kind.as_str(),
+        "artifact.create"
+    );
+
+    if let Some(tm) = tenant_manager {
+        tm.ensure_tenant_dir(&tenant_id)
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+    }
+
+    let parent_artifact = if let Some(reply_to_artifact_id) = params.reply_to_artifact_id.as_deref()
+    {
+        store
+            .get_task_artifact(&tenant_id, reply_to_artifact_id)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?
+    } else {
+        None
+    };
+
+    let explicit_task_id = match params.task_id.as_deref() {
+        Some(task_id) => {
+            validate_identifier("task_id", task_id)?;
+            Some(task_id.to_string())
+        }
+        None => None,
+    };
+    let task_id = explicit_task_id
+        .clone()
+        .or_else(|| parent_artifact.as_ref().map(|artifact| artifact.task_id.clone()));
+
+    let mut artifact = match artifact_kind {
+        ArtifactKind::TaskStart => {
+            let mut artifact = TaskArtifact::new_task_start(tenant_id.clone());
+            if let Some(task_id) = explicit_task_id.clone() {
+                artifact.task_id = task_id;
+            }
+            artifact
+        }
+        ArtifactKind::TaskProgress => {
+            TaskArtifact::new_task_progress(
+                tenant_id.clone(),
+                task_id.clone().ok_or_else(|| {
+                    McpError::InvalidParams(
+                        "task_id is required for non-task_start artifacts".to_string(),
+                    )
+                })?,
+            )
+        }
+        ArtifactKind::RunStart => TaskArtifact::new_run_start(
+            tenant_id.clone(),
+            task_id.clone().ok_or_else(|| {
+                McpError::InvalidParams(
+                    "task_id is required for non-task_start artifacts".to_string(),
+                )
+            })?,
+        ),
+        ArtifactKind::RunFinish => TaskArtifact::new_run_finish(
+            tenant_id.clone(),
+            task_id.clone().ok_or_else(|| {
+                McpError::InvalidParams(
+                    "task_id is required for non-task_start artifacts".to_string(),
+                )
+            })?,
+        ),
+        ArtifactKind::Evidence => TaskArtifact::new_evidence(
+            tenant_id.clone(),
+            task_id.clone().ok_or_else(|| {
+                McpError::InvalidParams(
+                    "task_id is required for non-task_start artifacts".to_string(),
+                )
+            })?,
+        ),
+        ArtifactKind::Review => TaskArtifact::new_review(
+            tenant_id.clone(),
+            task_id.clone().ok_or_else(|| {
+                McpError::InvalidParams(
+                    "task_id is required for review artifacts".to_string(),
+                )
+            })?,
+        ),
+        ArtifactKind::Revision => TaskArtifact::new_revision(
+            tenant_id.clone(),
+            task_id.clone().ok_or_else(|| {
+                McpError::InvalidParams(
+                    "task_id is required for revision artifacts".to_string(),
+                )
+            })?,
+        ),
+        ArtifactKind::Verification => TaskArtifact::new_verification(
+            tenant_id.clone(),
+            task_id.clone().ok_or_else(|| {
+                McpError::InvalidParams(
+                    "task_id is required for verification artifacts".to_string(),
+                )
+            })?,
+        ),
+        ArtifactKind::TaskFinish => TaskArtifact::new_task_finish(
+            tenant_id.clone(),
+            task_id.clone().ok_or_else(|| {
+                McpError::InvalidParams(
+                    "task_id is required for non-task_start artifacts".to_string(),
+                )
+            })?,
+        ),
+    };
+
+    let inherited_project_id = parent_artifact
+        .as_ref()
+        .and_then(|artifact| artifact.project_id.as_option().map(str::to_string));
+    let inherited_thread_id = parent_artifact
+        .as_ref()
+        .map(|artifact| artifact.thread_key().to_string());
+    let inherited_challenge_id = parent_artifact
+        .as_ref()
+        .and_then(|artifact| artifact.challenge_id.clone());
+
+    let dataset_refs = dataset_params_to_refs(params.dataset_refs)?;
+    let entity_refs = entity_params_to_refs(params.entity_refs)?;
+    let contributors = contributor_params_to_refs(params.contributors)?;
+    let provenance = params_to_task_provenance(params.provenance);
+
+    artifact.tool_name = params.tool_name;
+    artifact.tool_version = params.tool_version;
+    artifact.command = params.command;
+    artifact.parameters = params.parameters;
+    artifact.inputs = params.inputs;
+    artifact.outputs = params.outputs;
+    artifact.metrics = params.metrics;
+    artifact.why_chosen = params.why_chosen;
+    artifact.goal = params.goal;
+    artifact.motivation = params.motivation;
+    artifact.hypothesis = params.hypothesis;
+    artifact.scientific_question = params.scientific_question;
+    artifact.method_summary = params.method_summary;
+    artifact.summary = params.summary;
+    artifact.evidence_kind = params.evidence_kind;
+    artifact.supports_claim = params.supports_claim;
+    artifact.blockers = params.blockers;
+    artifact.what_worked = params.what_worked;
+    artifact.what_failed = params.what_failed;
+    artifact.validation = params.validation;
+    artifact.uncertainty = params.uncertainty;
+    artifact.followups = params.followups;
+    artifact.expected_outputs = params.expected_outputs;
+    artifact.related_artifact_ids = params.related_artifact_ids;
+    artifact.confidence = params.confidence;
+    artifact.requested_action = params.requested_action;
+    artifact.verification_status = params.verification_status;
+    artifact.compute_budget = params.compute_budget;
+    artifact.cost_actual = params.cost_actual;
+    artifact.data_access_level = params.data_access_level;
+    artifact.policy_tags = params.policy_tags;
+    artifact.allowed_tools = params.allowed_tools;
+    artifact.approval_state = params.approval_state;
+
+    let relation_kind = params.relation_kind.or_else(|| {
+        if params.reply_to_artifact_id.is_some() {
+            Some(match artifact_kind {
+                ArtifactKind::Review => "reviews".to_string(),
+                ArtifactKind::Revision => "revises".to_string(),
+                ArtifactKind::Verification => "verifies".to_string(),
+                _ => "reply_to".to_string(),
+            })
+        } else {
+            None
+        }
+    });
+    let thread_id = params
+        .thread_id
+        .or(inherited_thread_id)
+        .or_else(|| Some(artifact.task_id.clone()));
+
+    apply_common_artifact_fields(
+        &mut artifact,
+        params.project_id.or(inherited_project_id),
+        params.parent_task_id,
+        params.agent_id,
+        params.session_id,
+        params.status,
+        params.artifact_role,
+        params.challenge_id.or(inherited_challenge_id),
+        thread_id,
+        params.reply_to_artifact_id,
+        relation_kind,
+        dataset_refs,
+        entity_refs,
+        contributors,
+        provenance,
+    );
+
+    let projections = build_task_projections(&artifact);
+    let result = store
+        .add_task_artifact(artifact, projections)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    format_mcp_response(&TaskArtifactResult {
+        task_id: result.task_id,
+        artifact_id: result.artifact_id,
+        projection_chunk_ids: result.projection_chunk_ids,
+    })
+}
+
 /// Handle task.get tool call.
 pub async fn handle_task_get<S: Store>(
     store: &S,
@@ -2206,6 +2697,22 @@ pub async fn handle_task_get<S: Store>(
         task_id: params.task_id,
         artifacts,
     })
+}
+
+/// Handle artifact.get tool call.
+pub async fn handle_artifact_get<S: Store>(
+    store: &S,
+    params: ArtifactGetParams,
+) -> Result<Value, McpError> {
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    validate_identifier("artifact_id", &params.artifact_id)?;
+
+    let artifact = store
+        .get_task_artifact(&tenant_id, &params.artifact_id)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    format_mcp_response(&ArtifactGetResult { artifact })
 }
 
 /// Handle task.search tool call.
@@ -2235,12 +2742,105 @@ pub async fn handle_task_search<S: Store>(
         .iter()
         .map(|(chunk, score)| chunk_to_result(chunk, *score, None))
         .collect::<Vec<_>>();
+    let mut results = results;
+    attach_artifacts_to_chunk_results(store, &tenant_id, &mut results).await?;
 
     format_mcp_response(&SearchResult {
         results,
         tier_info: None,
         repair_info: None,
     })
+}
+
+/// Handle artifact.search tool call.
+pub async fn handle_artifact_search<S: Store>(
+    store: &S,
+    params: TaskSearchParams,
+) -> Result<Value, McpError> {
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    validate_search_k(params.k)?;
+    let filters = parse_task_search_filters(params.filters.as_ref())?;
+    let has_filters = has_active_task_filters(&filters);
+    let candidate_limit = if has_filters {
+        params.k.saturating_mul(20).clamp(50, 1000)
+    } else {
+        params.k.saturating_mul(25).clamp(100, 1000)
+    };
+
+    let chunk_ids = store
+        .search_task_projection_chunk_ids(&tenant_id, &filters, candidate_limit)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let ranked = store
+        .rerank_chunks_for_query(&tenant_id, &params.query, &chunk_ids, candidate_limit)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let ranked_chunk_ids = ranked
+        .iter()
+        .map(|(chunk, _)| chunk.chunk_id.clone())
+        .collect::<Vec<_>>();
+    let artifacts = store
+        .resolve_artifacts_for_chunks(&tenant_id, &ranked_chunk_ids)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    let mut seen = HashSet::new();
+    let mut results = Vec::new();
+    for (chunk, score) in ranked {
+        let Some(artifact) = artifacts.get(&chunk.chunk_id.to_string()).cloned() else {
+            continue;
+        };
+        if !seen.insert(artifact.artifact_id.clone()) {
+            continue;
+        }
+        results.push(ArtifactSearchHit {
+            artifact,
+            score,
+            matched_chunk_id: Some(chunk.chunk_id.to_string()),
+            matched_text: Some(chunk.text),
+        });
+        if results.len() >= params.k {
+            break;
+        }
+    }
+
+    format_mcp_response(&ArtifactSearchResult { results })
+}
+
+/// Handle artifact.list_thread tool call.
+pub async fn handle_artifact_list_thread<S: Store>(
+    store: &S,
+    params: ArtifactListThreadParams,
+) -> Result<Value, McpError> {
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+
+    let thread_id = match (params.thread_id, params.artifact_id) {
+        (Some(thread_id), _) => {
+            validate_identifier("thread_id", &thread_id)?;
+            thread_id
+        }
+        (None, Some(artifact_id)) => {
+            validate_identifier("artifact_id", &artifact_id)?;
+            let artifact = store
+                .get_task_artifact(&tenant_id, &artifact_id)
+                .await
+                .map_err(|e| McpError::ToolError(e.to_string()))?
+                .ok_or_else(|| McpError::ToolError("artifact not found".to_string()))?;
+            artifact.thread_key().to_string()
+        }
+        (None, None) => {
+            return Err(McpError::InvalidParams(
+                "artifact.list_thread requires thread_id or artifact_id".to_string(),
+            ));
+        }
+    };
+
+    let artifacts = store
+        .list_thread_artifacts(&tenant_id, &thread_id)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    format_mcp_response(&ArtifactThreadResult { thread_id, artifacts })
 }
 
 /// Handle memory.get tool call
@@ -4738,6 +5338,10 @@ mod tests {
                     task_id: Some(task_a.task_id),
                     artifact_kind: Some("run_start".to_string()),
                     status: Some("started".to_string()),
+                    challenge_id: None,
+                    thread_id: None,
+                    reply_to_artifact_id: None,
+                    artifact_role: None,
                     dataset_name: Some("rna_seq".to_string()),
                     dataset_version: Some("v1".to_string()),
                     entity_name: None,
@@ -4746,6 +5350,9 @@ mod tests {
                     project_id: Some("proj_alpha".to_string()),
                     agent_id: None,
                     session_id: None,
+                    requested_action: None,
+                    verification_status: None,
+                    relation_kind: None,
                 }),
             },
         )
@@ -4758,6 +5365,228 @@ mod tests {
             .tags
             .iter()
             .any(|tag| tag.starts_with("task:kind:run_start")));
+    }
+
+    #[tokio::test]
+    async fn artifact_create_get_search_and_thread_flow() {
+        let store = make_store();
+
+        let start: TaskArtifactResult = parse_tool_payload(
+            &handle_task_start(
+                &store,
+                None,
+                TaskStartParams {
+                    tenant_id: "test".to_string(),
+                    project_id: Some("shared_proto".to_string()),
+                    parent_task_id: None,
+                    agent_id: Some("planner-1".to_string()),
+                    session_id: Some("session-a".to_string()),
+                    goal: "Coordinate a shared artifact thread".to_string(),
+                    motivation: "Multiple agents should reuse and critique the same record"
+                        .to_string(),
+                    hypothesis: "Artifact-native collaboration reduces duplicated work"
+                        .to_string(),
+                    scientific_question: "How should critique flow through the shared thread?"
+                        .to_string(),
+                    dataset_refs: vec![TaskDatasetRefParams {
+                        name: "repo_snapshot".to_string(),
+                        version: Some("head".to_string()),
+                        description: None,
+                    }],
+                    expected_outputs: vec!["thread seed".to_string()],
+                    entity_refs: vec![],
+                    provenance: None,
+                },
+            )
+            .await
+            .unwrap(),
+        );
+
+        let review: TaskArtifactResult = parse_tool_payload(
+            &handle_artifact_create(
+                &store,
+                None,
+                ArtifactCreateParams {
+                    tenant_id: "test".to_string(),
+                    artifact_kind: "review".to_string(),
+                    task_id: Some(start.task_id.clone()),
+                    project_id: Some("shared_proto".to_string()),
+                    parent_task_id: None,
+                    agent_id: Some("reviewer-1".to_string()),
+                    session_id: Some("session-b".to_string()),
+                    status: None,
+                    artifact_role: Some("critique".to_string()),
+                    challenge_id: Some("artifact_protocol".to_string()),
+                    thread_id: None,
+                    reply_to_artifact_id: Some(start.artifact_id.clone()),
+                    relation_kind: None,
+                    goal: None,
+                    motivation: None,
+                    hypothesis: None,
+                    scientific_question: None,
+                    method_summary: None,
+                    summary: Some("Need a clearer review and verification path for artifacts"
+                        .to_string()),
+                    evidence_kind: None,
+                    supports_claim: None,
+                    blockers: vec![],
+                    what_worked: vec![],
+                    what_failed: vec!["Search still centers projection chunks".to_string()],
+                    validation: vec![],
+                    uncertainty: vec!["Exact artifact exchange semantics are still thin".to_string()],
+                    followups: vec!["Add artifact.search and thread inspection".to_string()],
+                    expected_outputs: vec![],
+                    related_artifact_ids: vec![],
+                    contributors: vec![TaskContributorParams {
+                        contributor_id: "pi".to_string(),
+                        display_name: Some("Principal Investigator".to_string()),
+                        role: Some("human_scientist".to_string()),
+                        contribution: Some("Requested critique of the seed artifact".to_string()),
+                    }],
+                    dataset_refs: vec![],
+                    entity_refs: vec![],
+                    tool_name: Some("artifact.create".to_string()),
+                    tool_version: None,
+                    command: None,
+                    parameters: None,
+                    inputs: vec![],
+                    outputs: vec![],
+                    metrics: None,
+                    why_chosen: None,
+                    confidence: Some(0.74),
+                    requested_action: Some("review".to_string()),
+                    verification_status: Some("pending".to_string()),
+                    compute_budget: None,
+                    cost_actual: None,
+                    data_access_level: Some("local_private".to_string()),
+                    policy_tags: vec!["prototype".to_string()],
+                    allowed_tools: vec!["task.search".to_string(), "artifact.search".to_string()],
+                    approval_state: Some("not_required".to_string()),
+                    provenance: None,
+                },
+            )
+            .await
+            .unwrap(),
+        );
+
+        let get_payload: ArtifactGetResult = parse_tool_payload(
+            &handle_artifact_get(
+                &store,
+                ArtifactGetParams {
+                    tenant_id: "test".to_string(),
+                    artifact_id: review.artifact_id.clone(),
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        let review_artifact = get_payload.artifact.expect("artifact should exist");
+        assert_eq!(review_artifact.challenge_id.as_deref(), Some("artifact_protocol"));
+        assert_eq!(review_artifact.reply_to_artifact_id.as_deref(), Some(start.artifact_id.as_str()));
+        assert_eq!(review_artifact.requested_action.as_deref(), Some("review"));
+        assert_eq!(review_artifact.verification_status.as_deref(), Some("pending"));
+        assert_eq!(review_artifact.thread_key(), start.task_id.as_str());
+        assert_eq!(review_artifact.contributors.len(), 1);
+
+        let thread_payload: ArtifactThreadResult = parse_tool_payload(
+            &handle_artifact_list_thread(
+                &store,
+                ArtifactListThreadParams {
+                    tenant_id: "test".to_string(),
+                    thread_id: None,
+                    artifact_id: Some(review.artifact_id.clone()),
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(thread_payload.thread_id, start.task_id);
+        assert_eq!(thread_payload.artifacts.len(), 2);
+
+        let search_payload: ArtifactSearchResult = parse_tool_payload(
+            &handle_artifact_search(
+                &store,
+                TaskSearchParams {
+                    tenant_id: "test".to_string(),
+                    query: "clearer review path".to_string(),
+                    k: 5,
+                    filters: Some(TaskSearchFiltersParams {
+                        task_id: None,
+                        artifact_kind: Some("review".to_string()),
+                        status: None,
+                        challenge_id: Some("artifact_protocol".to_string()),
+                        thread_id: None,
+                        reply_to_artifact_id: Some(start.artifact_id.clone()),
+                        artifact_role: Some("critique".to_string()),
+                        dataset_name: None,
+                        dataset_version: None,
+                        entity_name: None,
+                        entity_type: None,
+                        tool_name: None,
+                        project_id: Some("shared_proto".to_string()),
+                        agent_id: None,
+                        session_id: None,
+                        requested_action: Some("review".to_string()),
+                        verification_status: Some("pending".to_string()),
+                        relation_kind: Some("reviews".to_string()),
+                    }),
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(search_payload.results.len(), 1);
+        assert_eq!(search_payload.results[0].artifact.artifact_id, review.artifact_id);
+
+        let task_search_payload: SearchResult = parse_tool_payload(
+            &handle_task_search(
+                &store,
+                TaskSearchParams {
+                    tenant_id: "test".to_string(),
+                    query: "clearer review path".to_string(),
+                    k: 5,
+                    filters: Some(TaskSearchFiltersParams {
+                        task_id: Some(thread_payload.thread_id),
+                        artifact_kind: Some("review".to_string()),
+                        status: None,
+                        challenge_id: Some("artifact_protocol".to_string()),
+                        thread_id: None,
+                        reply_to_artifact_id: Some(start.artifact_id),
+                        artifact_role: Some("critique".to_string()),
+                        dataset_name: None,
+                        dataset_version: None,
+                        entity_name: None,
+                        entity_type: None,
+                        tool_name: None,
+                        project_id: Some("shared_proto".to_string()),
+                        agent_id: None,
+                        session_id: None,
+                        requested_action: Some("review".to_string()),
+                        verification_status: Some("pending".to_string()),
+                        relation_kind: Some("reviews".to_string()),
+                    }),
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        assert!(!task_search_payload.results.is_empty());
+        assert!(task_search_payload
+            .results
+            .iter()
+            .all(|result| result.artifact.is_some()));
+        assert_eq!(
+            task_search_payload
+                .results
+                .iter()
+                .find_map(|result| {
+                    result
+                        .artifact
+                        .as_ref()
+                        .and_then(|artifact| artifact.artifact_role.as_deref())
+                }),
+            Some("critique")
+        );
     }
 
     #[tokio::test]

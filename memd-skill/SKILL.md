@@ -1,8 +1,8 @@
 # memd
 
-Shared agent memory over MCP.
+Shared knowledge artifacts over MCP for coding agents and AI scientists.
 
-Use the same shared local `memd` daemon URL for Codex CLI and Claude Code when you want cross-session memory on one machine.
+Use the same shared local `memd` daemon URL for Codex CLI and Claude Code when you want one machine to host a shared knowledge base across sessions.
 
 ## When to Use
 
@@ -13,15 +13,21 @@ Use `memd` when agents need to:
 - recover goals, motivation, hypotheses, parameters, and evidence instead of just raw notes
 - avoid repeating failed approaches
 - share progress on long-running engineering or scientific tasks
+- exchange critique, revisions, and verification artifacts around the same thread
 - index codebases and codified context alongside task artifacts
 
 Bundled binary:
 
-- [bin/linux-x64/memd](/home/fschulz/dev/software/memd/memd-skill/bin/linux-x64/memd)
+- [bin/linux-x64/memd](bin/linux-x64/memd)
+
+For a stronger default install that upserts stricter `memd` usage rules into
+`~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`, run:
+
+- [install_memd_enforcement.sh](install_memd_enforcement.sh)
 
 ## Core Idea
 
-`memd` now has two complementary write surfaces:
+`memd` now has three complementary write surfaces:
 
 1. `memory.*`
    Use for raw chunks:
@@ -41,11 +47,19 @@ Bundled binary:
    - what evidence supports the conclusion
    - what uncertainty remains
 
-This distinction matters. `memory.add` is flexible. `task.*` is structured. The latter is how multiple agents can reliably understand each other’s work.
+3. `artifact.*`
+   Use for artifact-native collaboration:
+   - critique and review
+   - revisions and counterproposals
+   - verification checkpoints
+   - thread inspection
+   - optional safety metadata
+
+This distinction matters. `memory.add` is flexible. `task.*` captures task lifecycle. `artifact.*` captures the exchange layer around that work.
 
 ## Tool Surface
 
-`memd` exposes 30 MCP tools.
+`memd` exposes 34 MCP tools.
 
 ### Generic Memory
 
@@ -70,6 +84,13 @@ This distinction matters. `memory.add` is flexible. `task.*` is structured. The 
 - `task.finish`
 - `task.get`
 - `task.search`
+
+### Canonical Artifacts
+
+- `artifact.create`
+- `artifact.get`
+- `artifact.search`
+- `artifact.list_thread`
 
 ### Context
 
@@ -176,8 +197,44 @@ Required concepts:
 Use:
 
 - `task.get` to inspect the canonical artifact history for one task
-- `task.search` to search across task artifacts with exact filters
+- `task.search` to search across task artifacts with exact filters and linked canonical artifacts
+- `artifact.get` to inspect one canonical artifact by `artifact_id`
+- `artifact.search` to search canonical artifacts rather than only retrieval chunks
+- `artifact.list_thread` to inspect the full collaboration thread around an artifact
 - `memory.search` to search broader raw memory and context
+
+### 7. Record critique and verification explicitly
+
+Use `artifact.create` when the important event is not a lifecycle checkpoint but an exchange artifact:
+
+- critique
+- revision
+- verification
+- challenge/thread coordination
+- human guidance injected into the shared record
+
+Useful fields:
+
+- `artifact_kind`
+- `artifact_role`
+- `challenge_id`
+- `thread_id`
+- `reply_to_artifact_id`
+- `relation_kind`
+- `contributors`
+- `requested_action`
+- `verification_status`
+
+Optional safety metadata:
+
+- `compute_budget`
+- `cost_actual`
+- `data_access_level`
+- `policy_tags`
+- `allowed_tools`
+- `approval_state`
+
+Those safety fields are optional in the current local prototype.
 
 ## Guardrails for Agents
 
@@ -187,6 +244,7 @@ These are the operating rules this skill expects:
 - Do not repeat known failed approaches unless you have a reason.
 - Use the same `tenant_id` when agents should share knowledge.
 - Use `task.*` for work with intent, rationale, parameters, evidence, and outcomes.
+- Use `artifact.*` when another agent or scientist needs to critique, revise, verify, or inspect a thread directly.
 - Use `memory.add` / `memory.add_batch` for raw chunks and code indexing.
 - Log meaningful milestones, not every command.
 - Every substantive run must include parameters, why chosen, and outputs.
@@ -201,9 +259,11 @@ If multiple agents write to the same tenant, later agents can search and recover
 - which parameters were already tried
 - which runs failed
 - which evidence supported a conclusion
+- which critiques and revisions were already recorded
+- who contributed to the artifact thread
 - what work remains
 
-That is the point of the task schema: consistency across agents.
+That is the point of the artifact schema: consistency across agents and scientists.
 
 ## Retrieval Patterns
 
@@ -215,6 +275,15 @@ Examples:
 - “Show evidence artifacts for dataset `rna_seq`”
 - “Find tasks where tool `blast` was used”
 - “Show completed tasks in project `oncogene_screen` with uncertainty about replicate quality”
+
+### Use `artifact.search` when the artifact itself is the answer
+
+Examples:
+
+- “Find critique artifacts for this thread”
+- “Show pending verification artifacts in challenge `artifact_protocol`”
+- “Find revisions replying to a given artifact”
+- “Show thread artifacts contributed by the PI”
 
 ### Use `memory.search` when you want broader context
 
@@ -258,6 +327,12 @@ Then:
 - `task.run_finish`
 - `task.add_evidence`
 - `task.finish`
+
+If the next important event is a critique or verification artifact, use:
+
+- `artifact.create`
+- `artifact.search`
+- `artifact.list_thread`
 
 ## Codebase Indexing Pattern
 
