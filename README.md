@@ -1,11 +1,12 @@
 # memd
 
-`memd` is a local MCP server for shared agent memory.
+`memd` is a local MCP server and shared knowledge base for coding agents and AI scientists.
 
-It does two things:
+It does three things:
 
 - stores raw searchable chunks with `memory.*`
 - stores structured task history with `task.*`
+- stores canonical knowledge artifacts and collaboration threads with `artifact.*`
 
 Use `memory.*` for code, docs, notes, and indexed files.
 
@@ -17,6 +18,14 @@ Use `task.*` for work that has:
 - evidence
 - what worked
 - what failed
+
+Use `artifact.*` for collaboration around that work:
+
+- critique and revision
+- verification and review state
+- shared threads and challenge spaces
+- contributor records
+- optional safety metadata for local prototypes
 
 ## What You Need
 
@@ -32,7 +41,7 @@ cargo build --release
 
 ## Run
 
-For a shared local daemon that multiple agent sessions can use:
+For a shared local daemon that multiple agent, scientist, or human-guided sessions can use:
 
 ```bash
 ./target/release/memd --mode mcp --transport http --http-bind 127.0.0.1:8787
@@ -52,15 +61,15 @@ For a throwaway shared-daemon run:
 
 ## Shared Topology
 
-Recommended use is one local `memd` daemon per machine, with multiple Codex and Claude sessions connecting to the same `/mcp` endpoint.
+Recommended use is one local `memd` daemon per machine, with multiple coding-agent and AI-scientist sessions connecting to the same `/mcp` endpoint.
 
 ```text
 +----------------------- Machine A: memd host -----------------------+
 | +---------------+   HTTP MCP   +-------------------------------+   |
-| | Codex session | -----------> |                               |   |
+| | Coding agent  | -----------> |                               |   |
 | +---------------+              | memd daemon                   |   |
 | +---------------+   HTTP MCP   | 127.0.0.1:8787/mcp           |   |
-| | Claude session| -----------> |                               |   |
+| | AI scientist  | -----------> |                               |   |
 | +---------------+              +---------------+---------------+   |
 |                                                |                   |
 |                                                | persistent store  |
@@ -75,8 +84,8 @@ Recommended use is one local `memd` daemon per machine, with multiple Codex and 
 
 +---------------- Machine B: optional remote clients ----------------+
 | +---------------+                                  +-------------+ |
-| | Codex session | -- private network or tunnel --> | same /mcp  | |
-| | Claude session| -- private network or tunnel --> | endpoint    | |
+| | Coding agent  | -- private network or tunnel --> | same /mcp  | |
+| | AI scientist  | -- private network or tunnel --> | endpoint    | |
 | +---------------+                                  +-------------+ |
 +--------------------------------------------------------------------+
 ```
@@ -86,8 +95,8 @@ Mermaid source for the same topology:
 ```mermaid
 flowchart LR
   subgraph MA[Machine A: memd host]
-    C1[Codex session]
-    A1[Claude session]
+    C1[Coding agent]
+    A1[AI scientist]
     M[(memd HTTP MCP daemon\n127.0.0.1:8787/mcp)]
     D[(metadata.db + tenant WAL + segments)]
     C1 -->|HTTP MCP| M
@@ -96,8 +105,8 @@ flowchart LR
   end
 
   subgraph MB[Machine B: optional remote clients]
-    C2[Codex session]
-    A2[Claude session]
+    C2[Coding agent]
+    A2[AI scientist]
   end
 
   C2 -->|private network or tunnel| M
@@ -143,11 +152,29 @@ Then record progress with:
 - `task.add_evidence`
 - `task.finish`
 
+For collaboration around the same work, use:
+
+- `artifact.create`
+- `artifact.get`
+- `artifact.search`
+- `artifact.list_thread`
+
 For raw context, use:
 
 - `memory.add`
 - `memory.add_batch`
 - `memory.search`
+
+Optional artifact safety metadata is supported through `artifact.create`:
+
+- `compute_budget`
+- `cost_actual`
+- `data_access_level`
+- `policy_tags`
+- `allowed_tools`
+- `approval_state`
+
+Those fields are optional in the current local prototype.
 
 ## Data Location
 
@@ -163,21 +190,29 @@ Default data dir: `~/.memd/data`
 
 ## Skill
 
-The agent skill is in [memd-skill](/home/fschulz/dev/software/memd/memd-skill).
+The agent skill is in [memd-skill](memd-skill).
 
-It now includes a bundled Linux binary at [memd-skill/bin/linux-x64/memd](/home/fschulz/dev/software/memd/memd-skill/bin/linux-x64/memd).
+It now includes a bundled Linux binary at [memd-skill/bin/linux-x64/memd](memd-skill/bin/linux-x64/memd).
 
 Start there if you want agents to use `memd` correctly:
 
-- [memd-skill/SKILL.md](/home/fschulz/dev/software/memd/memd-skill/SKILL.md)
-- [memd-skill/INSTALL.md](/home/fschulz/dev/software/memd/memd-skill/INSTALL.md)
+- [memd-skill/SKILL.md](memd-skill/SKILL.md)
+- [memd-skill/INSTALL.md](memd-skill/INSTALL.md)
 
 For shared local sessions with current client CLIs:
 
 - start `memd` once with `--transport http`
 - register Codex with `codex mcp add memd --url http://127.0.0.1:8787/mcp`
 - register Claude with `claude mcp add --transport http --scope user memd http://127.0.0.1:8787/mcp`
-- add the instruction snippet from [memd-skill/INSTALL.md](/home/fschulz/dev/software/memd/memd-skill/INSTALL.md) to `~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`
+- add the instruction snippet from [memd-skill/INSTALL.md](memd-skill/INSTALL.md) to `~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`
+
+For a stronger default that makes `memd` mandatory for substantive multi-step technical and scientific work:
+
+```bash
+./memd-skill/install_memd_enforcement.sh
+```
+
+That is the strongest practical enforcement path available without modifying the client binaries themselves.
 
 ## Benchmarks
 
@@ -241,6 +276,6 @@ That smoke test calls the ONNX scorer directly, so it does not go through the re
 
 ## More
 
-- [QUICKSTART.md](/home/fschulz/dev/software/memd/QUICKSTART.md)
-- [docs/scientific-task-memory/schema/README.md](/home/fschulz/dev/software/memd/docs/scientific-task-memory/schema/README.md)
-- [docs/scientific-task-memory/benchmark-results/README.md](/home/fschulz/dev/software/memd/docs/scientific-task-memory/benchmark-results/README.md)
+- [QUICKSTART.md](QUICKSTART.md)
+- [docs/scientific-task-memory/schema/README.md](docs/scientific-task-memory/schema/README.md)
+- [docs/scientific-task-memory/benchmark-results/README.md](docs/scientific-task-memory/benchmark-results/README.md)

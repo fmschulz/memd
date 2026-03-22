@@ -693,9 +693,13 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                             "task_id": {"type": "string"},
                             "artifact_kind": {
                                 "type": "string",
-                                "enum": ["task_start", "task_progress", "run_start", "run_finish", "evidence", "task_finish"]
+                                "enum": ["task_start", "task_progress", "run_start", "run_finish", "evidence", "review", "revision", "verification", "task_finish"]
                             },
                             "status": {"type": "string"},
+                            "challenge_id": {"type": "string"},
+                            "thread_id": {"type": "string"},
+                            "reply_to_artifact_id": {"type": "string"},
+                            "artifact_role": {"type": "string"},
                             "dataset_name": {"type": "string"},
                             "dataset_version": {"type": "string"},
                             "entity_name": {"type": "string"},
@@ -703,9 +707,189 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                             "tool_name": {"type": "string"},
                             "project_id": {"type": "string"},
                             "agent_id": {"type": "string"},
-                            "session_id": {"type": "string"}
+                            "session_id": {"type": "string"},
+                            "requested_action": {"type": "string"},
+                            "verification_status": {"type": "string"},
+                            "relation_kind": {"type": "string"}
                         }
                     }
+                },
+                "required": ["tenant_id"]
+            }),
+        ),
+        ToolDefinition::new(
+            "artifact.create",
+            "Create a canonical knowledge artifact with optional collaboration, verification, and safety metadata.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "artifact_kind": {
+                        "type": "string",
+                        "enum": ["task_start", "task_progress", "run_start", "run_finish", "evidence", "review", "revision", "verification", "task_finish"]
+                    },
+                    "task_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "parent_task_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "session_id": {"type": "string"},
+                    "status": {"type": "string"},
+                    "artifact_role": {"type": "string"},
+                    "challenge_id": {"type": "string"},
+                    "thread_id": {"type": "string"},
+                    "reply_to_artifact_id": {"type": "string"},
+                    "relation_kind": {"type": "string"},
+                    "goal": {"type": "string"},
+                    "motivation": {"type": "string"},
+                    "hypothesis": {"type": "string"},
+                    "scientific_question": {"type": "string"},
+                    "method_summary": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "evidence_kind": {"type": "string"},
+                    "supports_claim": {"type": "boolean"},
+                    "blockers": {"type": "array", "items": {"type": "string"}},
+                    "what_worked": {"type": "array", "items": {"type": "string"}},
+                    "what_failed": {"type": "array", "items": {"type": "string"}},
+                    "validation": {"type": "array", "items": {"type": "string"}},
+                    "uncertainty": {"type": "array", "items": {"type": "string"}},
+                    "followups": {"type": "array", "items": {"type": "string"}},
+                    "expected_outputs": {"type": "array", "items": {"type": "string"}},
+                    "related_artifact_ids": {"type": "array", "items": {"type": "string"}},
+                    "contributors": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "contributor_id": {"type": "string"},
+                                "display_name": {"type": "string"},
+                                "role": {"type": "string"},
+                                "contribution": {"type": "string"}
+                            },
+                            "required": ["contributor_id"]
+                        }
+                    },
+                    "dataset_refs": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "version": {"type": "string"},
+                                "description": {"type": "string"}
+                            },
+                            "required": ["name"]
+                        }
+                    },
+                    "entity_refs": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "entity_type": {"type": "string"},
+                                "role": {"type": "string"}
+                            },
+                            "required": ["name", "entity_type"]
+                        }
+                    },
+                    "tool_name": {"type": "string"},
+                    "tool_version": {"type": "string"},
+                    "command": {"type": "string"},
+                    "parameters": {"type": "object"},
+                    "inputs": {"type": "array", "items": {"type": "string"}},
+                    "outputs": {"type": "array", "items": {"type": "string"}},
+                    "metrics": {"type": "object"},
+                    "why_chosen": {"type": "string"},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "requested_action": {"type": "string"},
+                    "verification_status": {"type": "string"},
+                    "compute_budget": {},
+                    "cost_actual": {},
+                    "data_access_level": {"type": "string"},
+                    "policy_tags": {"type": "array", "items": {"type": "string"}},
+                    "allowed_tools": {"type": "array", "items": {"type": "string"}},
+                    "approval_state": {"type": "string"},
+                    "provenance": {
+                        "type": "object",
+                        "properties": {
+                            "uri": {"type": "string"},
+                            "repo": {"type": "string"},
+                            "commit": {"type": "string"},
+                            "path": {"type": "string"},
+                            "tool_name": {"type": "string"},
+                            "tool_version": {"type": "string"},
+                            "tool_call_id": {"type": "string"}
+                        }
+                    }
+                },
+                "required": ["tenant_id", "artifact_kind"]
+            }),
+        ),
+        ToolDefinition::new(
+            "artifact.get",
+            "Get one canonical knowledge artifact by artifact_id.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "artifact_id": {"type": "string"}
+                },
+                "required": ["tenant_id", "artifact_id"]
+            }),
+        ),
+        ToolDefinition::new(
+            "artifact.search",
+            "Search canonical knowledge artifacts by ranking their retrieval projections, then return the linked canonical artifacts.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "query": {"type": "string", "default": ""},
+                    "k": {
+                        "type": "integer",
+                        "default": 20,
+                        "minimum": 1,
+                        "maximum": 100
+                    },
+                    "filters": {
+                        "type": "object",
+                        "properties": {
+                            "task_id": {"type": "string"},
+                            "artifact_kind": {
+                                "type": "string",
+                                "enum": ["task_start", "task_progress", "run_start", "run_finish", "evidence", "review", "revision", "verification", "task_finish"]
+                            },
+                            "status": {"type": "string"},
+                            "challenge_id": {"type": "string"},
+                            "thread_id": {"type": "string"},
+                            "reply_to_artifact_id": {"type": "string"},
+                            "artifact_role": {"type": "string"},
+                            "dataset_name": {"type": "string"},
+                            "dataset_version": {"type": "string"},
+                            "entity_name": {"type": "string"},
+                            "entity_type": {"type": "string"},
+                            "tool_name": {"type": "string"},
+                            "project_id": {"type": "string"},
+                            "agent_id": {"type": "string"},
+                            "session_id": {"type": "string"},
+                            "requested_action": {"type": "string"},
+                            "verification_status": {"type": "string"},
+                            "relation_kind": {"type": "string"}
+                        }
+                    }
+                },
+                "required": ["tenant_id"]
+            }),
+        ),
+        ToolDefinition::new(
+            "artifact.list_thread",
+            "List canonical artifacts that belong to the same thread, addressed either by thread_id or by an existing artifact_id.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "thread_id": {"type": "string"},
+                    "artifact_id": {"type": "string"}
                 },
                 "required": ["tenant_id"]
             }),
@@ -1259,6 +1443,10 @@ pub fn tool_names() -> Vec<&'static str> {
         "task.finish",
         "task.get",
         "task.search",
+        "artifact.create",
+        "artifact.get",
+        "artifact.search",
+        "artifact.list_thread",
         "memory.get",
         "memory.delete",
         "memory.feedback",
@@ -1286,9 +1474,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn get_all_tools_returns_thirty() {
+    fn get_all_tools_returns_thirty_four() {
         let tools = get_all_tools();
-        assert_eq!(tools.len(), 30);
+        assert_eq!(tools.len(), 34);
     }
 
     #[test]
@@ -1306,6 +1494,10 @@ mod tests {
         assert!(names.contains(&"task.finish"));
         assert!(names.contains(&"task.get"));
         assert!(names.contains(&"task.search"));
+        assert!(names.contains(&"artifact.create"));
+        assert!(names.contains(&"artifact.get"));
+        assert!(names.contains(&"artifact.search"));
+        assert!(names.contains(&"artifact.list_thread"));
         assert!(names.contains(&"memory.get"));
         assert!(names.contains(&"memory.delete"));
         assert!(names.contains(&"memory.feedback"));
@@ -1460,9 +1652,23 @@ mod tests {
     }
 
     #[test]
+    fn artifact_create_schema_has_required_fields() {
+        let tool = get_tool("artifact.create").unwrap();
+        let required = tool
+            .input_schema
+            .get("required")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required_strs.contains(&"tenant_id"));
+        assert!(required_strs.contains(&"artifact_kind"));
+    }
+
+    #[test]
     fn tool_names_list() {
         let names = tool_names();
-        assert_eq!(names.len(), 30);
+        assert_eq!(names.len(), 34);
         assert!(names.contains(&"memory.search"));
         assert!(names.contains(&"memory.metrics"));
         assert!(names.contains(&"memory.feedback"));
@@ -1476,6 +1682,10 @@ mod tests {
         assert!(names.contains(&"task.finish"));
         assert!(names.contains(&"task.get"));
         assert!(names.contains(&"task.search"));
+        assert!(names.contains(&"artifact.create"));
+        assert!(names.contains(&"artifact.get"));
+        assert!(names.contains(&"artifact.search"));
+        assert!(names.contains(&"artifact.list_thread"));
         assert!(names.contains(&"context.list_subsystems"));
         assert!(names.contains(&"context.get_files_for_subsystem"));
         assert!(names.contains(&"context.search_context_documents"));

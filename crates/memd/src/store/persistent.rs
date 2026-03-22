@@ -1188,6 +1188,14 @@ impl Store for PersistentStore {
         self.metadata.list_task_artifacts(tenant_id, task_id)
     }
 
+    async fn list_thread_artifacts(
+        &self,
+        tenant_id: &TenantId,
+        thread_id: &str,
+    ) -> Result<Vec<TaskArtifact>> {
+        self.metadata.list_thread_artifacts(tenant_id, thread_id)
+    }
+
     async fn search_task_projection_chunk_ids(
         &self,
         tenant_id: &TenantId,
@@ -1265,6 +1273,14 @@ impl Store for PersistentStore {
             .collect::<Vec<_>>();
         results.truncate(k);
         Ok(results)
+    }
+
+    async fn resolve_artifacts_for_chunks(
+        &self,
+        tenant_id: &TenantId,
+        chunk_ids: &[ChunkId],
+    ) -> Result<HashMap<String, TaskArtifact>> {
+        self.metadata.resolve_artifacts_for_chunks(tenant_id, chunk_ids)
     }
 
     async fn list_feedback(
