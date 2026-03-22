@@ -30,6 +30,8 @@ pub struct MemoryStore {
     task_artifacts: RwLock<HashMap<String, HashMap<String, TaskArtifact>>>,
     /// Projection links keyed by tenant then artifact ID.
     task_projection_links: RwLock<HashMap<String, HashMap<String, Vec<ChunkId>>>>,
+    /// Reverse lookup of projection chunk ID -> artifact ID.
+    projection_to_artifact: RwLock<HashMap<String, HashMap<String, String>>>,
     /// Per-tenant relevance feedback log.
     feedback: RwLock<HashMap<String, Vec<FeedbackEntry>>>,
 }
@@ -41,6 +43,7 @@ impl MemoryStore {
             chunks: RwLock::new(HashMap::new()),
             task_artifacts: RwLock::new(HashMap::new()),
             task_projection_links: RwLock::new(HashMap::new()),
+            projection_to_artifact: RwLock::new(HashMap::new()),
             feedback: RwLock::new(HashMap::new()),
         }
     }
@@ -161,9 +164,16 @@ impl Store for MemoryStore {
 
         let mut projection_store = self.task_projection_links.write().unwrap();
         projection_store
-            .entry(tenant)
+            .entry(tenant.clone())
             .or_default()
             .insert(artifact_id.clone(), projection_ids);
+        drop(projection_store);
+
+        let mut reverse = self.projection_to_artifact.write().unwrap();
+        let reverse_map = reverse.entry(tenant.clone()).or_default();
+        for projection_chunk_id in &projection_chunk_ids {
+            reverse_map.insert(projection_chunk_id.clone(), artifact_id.clone());
+        }
 
         Ok(TaskArtifactWriteResult {
             task_id,
@@ -196,6 +206,30 @@ impl Store for MemoryStore {
                 artifacts
                     .values()
                     .filter(|artifact| artifact.task_id == task_id)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        artifacts.sort_by(|left, right| {
+            left.timestamp_created
+                .cmp(&right.timestamp_created)
+                .then_with(|| left.artifact_id.cmp(&right.artifact_id))
+        });
+        Ok(artifacts)
+    }
+
+    async fn list_thread_artifacts(
+        &self,
+        tenant_id: &TenantId,
+        thread_id: &str,
+    ) -> Result<Vec<TaskArtifact>> {
+        let task_store = self.task_artifacts.read().unwrap();
+        let mut artifacts = task_store
+            .get(tenant_id.as_str())
+            .map(|artifacts| {
+                artifacts
+                    .values()
+                    .filter(|artifact| artifact.thread_key() == thread_id)
                     .cloned()
                     .collect::<Vec<_>>()
             })
@@ -248,6 +282,33 @@ impl Store for MemoryStore {
         }
 
         Ok(chunk_ids)
+    }
+
+    async fn resolve_artifacts_for_chunks(
+        &self,
+        tenant_id: &TenantId,
+        chunk_ids: &[ChunkId],
+    ) -> Result<HashMap<String, TaskArtifact>> {
+        let reverse = self.projection_to_artifact.read().unwrap();
+        let task_store = self.task_artifacts.read().unwrap();
+        let mut resolved = HashMap::new();
+
+        let Some(tenant_reverse) = reverse.get(tenant_id.as_str()) else {
+            return Ok(resolved);
+        };
+        let Some(tenant_artifacts) = task_store.get(tenant_id.as_str()) else {
+            return Ok(resolved);
+        };
+
+        for chunk_id in chunk_ids {
+            if let Some(artifact_id) = tenant_reverse.get(&chunk_id.to_string()) {
+                if let Some(artifact) = tenant_artifacts.get(artifact_id) {
+                    resolved.insert(chunk_id.to_string(), artifact.clone());
+                }
+            }
+        }
+
+        Ok(resolved)
     }
 
     async fn list_feedback(
@@ -484,6 +545,26 @@ fn artifact_matches_filters(artifact: &TaskArtifact, filters: &TaskSearchFilters
             return false;
         }
     }
+    if let Some(challenge_id) = filters.challenge_id.as_deref() {
+        if artifact.challenge_id.as_deref() != Some(challenge_id) {
+            return false;
+        }
+    }
+    if let Some(thread_id) = filters.thread_id.as_deref() {
+        if artifact.thread_key() != thread_id {
+            return false;
+        }
+    }
+    if let Some(reply_to_artifact_id) = filters.reply_to_artifact_id.as_deref() {
+        if artifact.reply_to_artifact_id.as_deref() != Some(reply_to_artifact_id) {
+            return false;
+        }
+    }
+    if let Some(artifact_role) = filters.artifact_role.as_deref() {
+        if artifact.artifact_role.as_deref() != Some(artifact_role) {
+            return false;
+        }
+    }
     if let Some(project_id) = filters.project_id.as_deref() {
         if artifact.project_id.as_option() != Some(project_id) {
             return false;
@@ -503,6 +584,16 @@ fn artifact_matches_filters(artifact: &TaskArtifact, filters: &TaskSearchFilters
         if artifact.tool_name.as_deref() != Some(tool_name)
             && artifact.provenance.tool_name.as_deref() != Some(tool_name)
         {
+            return false;
+        }
+    }
+    if let Some(requested_action) = filters.requested_action.as_deref() {
+        if artifact.requested_action.as_deref() != Some(requested_action) {
+            return false;
+        }
+    }
+    if let Some(verification_status) = filters.verification_status.as_deref() {
+        if artifact.verification_status.as_deref() != Some(verification_status) {
             return false;
         }
     }
