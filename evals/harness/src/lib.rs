@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn retrieval_dataset_types_are_supported_or_mapped() {
-        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../datasets/retrieval");
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../bench/datasets/retrieval");
         let entries = std::fs::read_dir(&base).expect("read retrieval dataset dir");
 
         for entry in entries {

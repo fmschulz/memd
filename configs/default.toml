@@ -23,6 +23,11 @@ log_format = "json"
 
 [server]
 # Transport type for MCP server communication
-# Currently supported: stdio
-# Future options may include: tcp, unix
+# Supported: stdio, http
 transport = "stdio"
+
+# Bind address for HTTP transport
+bind = "127.0.0.1:8787"
+
+# Endpoint path for streamable HTTP transport
+path = "/mcp"

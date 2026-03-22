@@ -252,7 +252,7 @@ pub fn run_structural_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<T
     let mut results = Vec::new();
 
     // Load primary dataset
-    let dataset_path = Path::new("evals/datasets/structural/structural_queries.json");
+    let dataset_path = Path::new("evals/bench/datasets/structural/structural_queries.json");
     let dataset = match load_dataset(dataset_path) {
         Ok(d) => d,
         Err(e) => {
@@ -1126,7 +1126,7 @@ mod tests {
 
     #[test]
     fn test_load_dataset() {
-        let dataset_path = Path::new("evals/datasets/structural/structural_queries.json");
+        let dataset_path = Path::new("evals/bench/datasets/structural/structural_queries.json");
         if dataset_path.exists() {
             let result = load_dataset(dataset_path);
             assert!(result.is_ok());

@@ -139,11 +139,27 @@ impl HnswIndex {
 
     /// Create a new index with persistence path
     ///
-    /// Note: Loading from an existing index is not yet supported due to
-    /// hnsw_rs lifetime constraints. If an index exists at the path, it
-    /// will be ignored and a new empty index created.
+    /// If a persisted mapping/cache exists at the path, attempt to load and
+    /// rebuild the graph from cached embeddings.
     pub fn with_persistence(config: HnswConfig, path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
+
+        let mapping_path = path.join("mapping.json");
+        if mapping_path.exists() {
+            match Self::load(&path, config.clone()) {
+                Ok(index) => {
+                    tracing::info!("Loaded persisted HNSW index from {:?}", path);
+                    return Ok(index);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = ?path,
+                        "failed to load persisted HNSW index, creating empty index"
+                    );
+                }
+            }
+        }
 
         let mut index = Self::new(config);
         index.persist_path = Some(path);
@@ -179,7 +195,7 @@ impl HnswIndex {
     pub fn insert_batch(&self, items: &[(ChunkId, Vec<f32>)]) -> Result<()> {
         let mut mapping = self.mapping.write();
         let mut cache = self.embedding_cache.write();
-        let hnsw = self.hnsw.write();
+        let mut to_insert = Vec::with_capacity(items.len());
 
         for (chunk_id, embedding) in items {
             if embedding.len() != self.config.dimension {
@@ -195,7 +211,22 @@ impl HnswIndex {
 
             let internal_id = mapping.insert(chunk_id);
             cache.insert(internal_id, embedding)?;
-            hnsw.insert_slice((embedding, internal_id));
+            to_insert.push((embedding.as_slice(), internal_id));
+        }
+        drop(cache);
+        drop(mapping);
+
+        let hnsw = self.hnsw.write();
+        let threshold = std::thread::available_parallelism()
+            .map(|n| std::cmp::max(64, n.get().saturating_mul(8)))
+            .unwrap_or(64);
+
+        if to_insert.len() >= threshold {
+            hnsw.parallel_insert_slice(&to_insert);
+        } else {
+            for item in to_insert {
+                hnsw.insert_slice(item);
+            }
         }
 
         Ok(())
@@ -363,7 +394,7 @@ impl HnswIndex {
         };
 
         // Create fresh HNSW
-        let mut hnsw = Hnsw::new(
+        let hnsw = Hnsw::new(
             config.max_connections,
             config.max_elements,
             16,
@@ -524,7 +555,10 @@ mod tests {
 
         assert!(exact.is_some(), "results should include exact match");
         assert!(similar.is_some(), "results should include nearest neighbor");
-        assert!(unrelated.is_none(), "results should exclude unrelated vector");
+        assert!(
+            unrelated.is_none(),
+            "results should exclude unrelated vector"
+        );
         assert!(exact.unwrap().score > 0.99);
         assert!(similar.unwrap().score > 0.9);
     }
