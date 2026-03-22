@@ -1,3 +1,8 @@
+---
+name: memd
+description: Use when coding agents or AI scientists need a shared local MCP knowledge base to preserve cross-session memory, structured task history, and artifact-based collaboration across Codex and Claude.
+---
+
 # memd
 
 Shared knowledge artifacts over MCP for coding agents and AI scientists.
