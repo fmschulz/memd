@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Local memory daemon for AI agents - MCP server with hybrid retrieval"
 
+[features]
+default = []
+cross-encoder-reranker = ["dep:ort", "dep:ndarray", "dep:flate2", "dep:tar"]
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
@@ -15,6 +19,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
 tokio.workspace = true
+axum.workspace = true
 async-trait.workspace = true
 sha2.workspace = true
 
@@ -30,15 +35,16 @@ candle-core.workspace = true
 candle-nn.workspace = true
 candle-transformers.workspace = true
 hf-hub.workspace = true
-# Removed ONNX/Python dependencies
-# ort.workspace = true
-# ndarray.workspace = true
+ort = { workspace = true, optional = true }
+ndarray = { workspace = true, optional = true }
 hnsw_rs.workspace = true
 anndists.workspace = true
 half.workspace = true
 ureq.workspace = true
 dirs.workspace = true
 tokenizers.workspace = true
+flate2 = { workspace = true, optional = true }
+tar = { workspace = true, optional = true }
 tantivy.workspace = true
 rust-stemmers.workspace = true
 unicode-segmentation.workspace = true

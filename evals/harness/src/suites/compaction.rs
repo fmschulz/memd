@@ -88,7 +88,7 @@ pub struct CompactionEvalConfig {
 impl Default for CompactionEvalConfig {
     fn default() -> Self {
         Self {
-            dataset_path: PathBuf::from("evals/datasets/compaction/invariant_test.json"),
+            dataset_path: PathBuf::from("evals/bench/datasets/compaction/invariant_test.json"),
             max_p99_during_compaction_ms: 500,
             latency_test_chunk_count: 100,
             latency_test_iterations: 20,

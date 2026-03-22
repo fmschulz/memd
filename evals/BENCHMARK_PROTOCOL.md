@@ -1,96 +1,94 @@
 # Offline Retrieval Benchmark Protocol
 
-This document defines the canonical Phase 6 benchmark procedure for retrieval quality in `memd`.
-
-## Goal
-
-Measure retrieval quality on labeled corpora with reproducible commands and machine-readable outputs suitable for CI, release gates, and regression tracking.
+This is the kept offline retrieval benchmark flow.
 
 ## Datasets
 
-Primary challenging datasets:
+Challenging datasets:
 
-- `evals/datasets/retrieval/beir_fiqa.json`
-- `evals/datasets/retrieval/beir_scidocs.json`
-- `evals/datasets/retrieval/beir_trec-covid.json`
+- `evals/bench/datasets/retrieval/beir_fiqa.json`
+- `evals/bench/datasets/retrieval/beir_scidocs.json`
+- `evals/bench/datasets/retrieval/beir_trec-covid.json`
 
-Smoke dataset for fast gates:
+Smoke dataset:
 
-- `evals/datasets/retrieval/code_pairs.json`
+- `evals/bench/datasets/retrieval/code_pairs.json`
+
+Only `code_pairs.json` is tracked in git. The larger BEIR-format JSON exports are intentionally not tracked at branch tip.
+
+Fetch the mirrored datasets with:
+
+```bash
+./evals/bench/scripts/fetch_offline_benchmark_datasets.sh
+```
+
+Current mirror coverage:
+
+- `beir_fiqa.json`
+- `beir_scidocs.json`
+
+`beir_trec-covid.json` is not mirrored by that helper because the converted JSON is too large for the normal repository workflow. If you have a local converted copy, place it at the path above and pass it explicitly through `--dataset-path`.
 
 ## Metrics
-
-Per query:
 
 - `Recall@10`
 - `MRR`
 - `Precision@10`
 - `latency_ms`
 
-Aggregate:
-
-- Mean + 95% bootstrap confidence interval for each metric
-- Query-count `n`
+Aggregate reports include bootstrap confidence intervals.
 
 ## Determinism
 
-- Bootstrap is seeded (`--seed`, default `42`).
-- Bootstrap iterations are explicit (`--bootstrap-iterations`, default `1000`).
-- Optional caps (`--max-queries`, `--max-documents`) make CI/manual runs bounded and reproducible.
+- `--seed` controls bootstrap randomness
+- `--bootstrap-iterations` controls the CI sample count
+- `--max-queries` and `--max-documents` keep runs bounded
 
-## Command (single dataset)
+## Single dataset
 
 ```bash
 cargo run -p memd-evals -- --suite benchmark --skip-build \
-  --dataset-path evals/datasets/retrieval/beir_fiqa.json \
+  --dataset-path evals/bench/datasets/retrieval/beir_fiqa.json \
   --embedding-model all-minilm \
+  --system-variant hybrid-feature \
   --bootstrap-iterations 1000 \
   --seed 42 \
-  --report-json evals/results/offline/beir_fiqa_all-minilm.json
+  --report-json evals/bench/results/offline/beir_fiqa_all-minilm.json
 ```
 
-## Command (all three challenging datasets)
+## Cross-corpus run
 
 ```bash
-./evals/scripts/run_offline_retrieval_benchmark.sh \
+./evals/bench/scripts/run_offline_retrieval_benchmark.sh \
   --model all-minilm \
+  --system-variant hybrid-feature \
   --bootstrap-iterations 1000 \
   --seed 42
 ```
 
-Outputs:
+## Quality gates
 
-- One JSON report per dataset/model
-- `statistical_analysis.md`
-- `statistical_analysis.json`
+Fast smoke gate:
 
-## Quality Gates
+- dataset: `code_pairs.json`
+- thresholds: `Recall@10 >= 0.8`, `MRR >= 0.6`
 
-Two gate tiers are defined:
-
-1. CI/release smoke gate (fast):
-   - dataset: `code_pairs.json`
-   - thresholds: `Recall@10 >= 0.8`, `MRR >= 0.6`
-2. Offline benchmark gate (manual/nightly):
-   - challenging BEIR datasets
-   - thresholds are configured per run or maintained externally in release criteria
-
-Example thresholded run:
+Example:
 
 ```bash
 cargo run -p memd-evals -- --suite benchmark --skip-build \
-  --dataset-path evals/datasets/retrieval/code_pairs.json \
+  --dataset-path evals/bench/datasets/retrieval/code_pairs.json \
   --threshold-recall 0.8 \
   --threshold-mrr 0.6
 ```
 
-## Report Schema
+## Regression check
 
-Each benchmark JSON report includes:
-
-- dataset metadata (`dataset_description`, `dataset_version`, `dataset_path`)
-- run config (`embedding_model`, `bootstrap_iterations`, `seed`)
-- thresholds used
-- gate result (`quality_gate_passed`, `quality_gate_message`)
-- aggregate metric block with CIs
-- full `query_metrics` vector
+```bash
+cargo run -p memd-evals -- --suite benchmark-regression --skip-build \
+  --baseline-report evals/bench/baselines/code_pairs_hybrid_feature_baseline.json \
+  --candidate-report /tmp/candidate.json \
+  --significance-alpha 0.05 \
+  --min-effect-size 0.1 \
+  --regression-report-json /tmp/regression_gate.json
+```
