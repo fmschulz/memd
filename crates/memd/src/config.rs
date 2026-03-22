@@ -45,13 +45,27 @@ fn default_log_format() -> String {
 /// Server-specific configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
-    /// Transport type: stdio for now
+    /// Transport type: stdio or http
     #[serde(default = "default_transport")]
     pub transport: String,
+    /// Bind address for the HTTP MCP server
+    #[serde(default = "default_bind")]
+    pub bind: String,
+    /// Endpoint path for the HTTP MCP server
+    #[serde(default = "default_path")]
+    pub path: String,
 }
 
 fn default_transport() -> String {
     "stdio".to_string()
+}
+
+fn default_bind() -> String {
+    "127.0.0.1:8787".to_string()
+}
+
+fn default_path() -> String {
+    "/mcp".to_string()
 }
 
 impl Default for Config {
@@ -69,6 +83,8 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             transport: default_transport(),
+            bind: default_bind(),
+            path: default_path(),
         }
     }
 }
@@ -108,13 +124,25 @@ impl Config {
         }
 
         // Validate transport
-        let valid_transports = ["stdio"];
+        let valid_transports = ["stdio", "http"];
         if !valid_transports.contains(&self.server.transport.to_lowercase().as_str()) {
             return Err(MemdError::ConfigError(format!(
                 "invalid server.transport '{}', must be one of: {}",
                 self.server.transport,
                 valid_transports.join(", ")
             )));
+        }
+
+        if self.server.bind.trim().is_empty() {
+            return Err(MemdError::ConfigError(
+                "server.bind must not be empty".to_string(),
+            ));
+        }
+
+        if !self.server.path.starts_with('/') {
+            return Err(MemdError::ConfigError(
+                "server.path must start with '/'".to_string(),
+            ));
         }
 
         Ok(())
@@ -203,6 +231,8 @@ mod tests {
 
             [server]
             transport = "stdio"
+            bind = "127.0.0.1:9999"
+            path = "/shared"
         "#;
 
         let config = load_from_str(toml).unwrap();
@@ -210,6 +240,8 @@ mod tests {
         assert_eq!(config.log_level, "debug");
         assert_eq!(config.log_format, "pretty");
         assert_eq!(config.server.transport, "stdio");
+        assert_eq!(config.server.bind, "127.0.0.1:9999");
+        assert_eq!(config.server.path, "/shared");
     }
 
     #[test]
@@ -223,6 +255,8 @@ mod tests {
         // Other fields should use defaults
         assert_eq!(config.log_format, "json");
         assert_eq!(config.server.transport, "stdio");
+        assert_eq!(config.server.bind, "127.0.0.1:8787");
+        assert_eq!(config.server.path, "/mcp");
     }
 
     #[test]
@@ -283,5 +317,33 @@ mod tests {
         // When no path provided and no XDG config exists, should return defaults
         let config = load_config(None).unwrap();
         assert_eq!(config.log_level, "info");
+    }
+
+    #[test]
+    fn http_transport_is_valid() {
+        let toml = r#"
+            [server]
+            transport = "http"
+            bind = "127.0.0.1:8787"
+            path = "/mcp"
+        "#;
+
+        let config = load_from_str(toml).unwrap();
+        assert_eq!(config.server.transport, "http");
+    }
+
+    #[test]
+    fn invalid_server_path_rejected() {
+        let toml = r#"
+            [server]
+            path = "mcp"
+        "#;
+
+        let result = load_from_str(toml);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("server.path must start with '/'"));
     }
 }

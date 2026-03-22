@@ -101,7 +101,7 @@ pub fn run_codesearchnet_tests(memd_path: &PathBuf, embedding_model: &str) -> Ve
 
     // Load dataset
     let dataset_path =
-        crate::resolve_dataset_path("evals/datasets/retrieval/codesearchnet_python.json");
+        crate::resolve_dataset_path("evals/bench/datasets/retrieval/codesearchnet_python.json");
     let dataset = match load_dataset(dataset_path.as_path()) {
         Ok(d) => d,
         Err(e) => {

@@ -40,15 +40,27 @@ setup-python.sh
 
 # Planning and implementation documents (internal only)
 /.planning/
-/docs/
+/DEL/
+/docs/*
+!/docs/scientific-task-memory/
+!/docs/scientific-task-memory/schema/
+!/docs/scientific-task-memory/schema/README.md
+!/docs/scientific-task-memory/benchmark-results/
+!/docs/scientific-task-memory/benchmark-results/README.md
+!/docs/scientific-task-memory/benchmark-results/task_memory_benchmark_corpus.json
+!/docs/scientific-task-memory/benchmark-results/task_memory_benchmark_results.json
+!/docs/scientific-task-memory/benchmark-results/task_memory_benchmark_results.md
 QUICK_START_PYTHON.md
 START_HERE.md
 DOCKER.md
+REPO_AUDIT.md
+TESTING.md
 
 # Evaluation results (benchmarks change frequently)
 /evals/results/
 /evals/datasets/beir/
 /evals/datasets/codesearchnet/
+/evals/bench/datasets/retrieval/beir_trec-covid.json
 /evals/BENCHMARK_*.md
 /evals/CODEX_*.md
 /evals/COMPREHENSIVE_*.md

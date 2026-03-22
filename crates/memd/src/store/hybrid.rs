@@ -445,29 +445,48 @@ impl HybridSearcher {
         chunk_id: &ChunkId,
         text: &str,
     ) -> Result<()> {
-        // Index in dense (via DenseSearcher)
-        self.dense.index_chunk(tenant_id, chunk_id, text).await?;
+        self.index_batch(tenant_id, &[(chunk_id.clone(), text.to_string())])
+            .await
+    }
 
-        // Index in sparse if enabled
+    /// Index multiple chunks in dense+sparse indexes with batched operations.
+    pub async fn index_batch(
+        &self,
+        tenant_id: &TenantId,
+        chunks: &[(ChunkId, String)],
+    ) -> Result<()> {
+        if chunks.is_empty() {
+            return Ok(());
+        }
+
+        self.dense.index_batch(tenant_id, chunks).await?;
+
         if self.config.enable_sparse {
             if let Some(ref sparse) = self.sparse {
-                // Process text into sentences for fine-grained indexing
-                let processed = self.text_processor.process_chunk(text);
-                let sentences: Vec<String> = processed.into_iter().map(|p| p.text).collect();
-
-                if !sentences.is_empty() {
-                    sparse.insert(tenant_id, chunk_id, &sentences)?;
+                let sparse_items: Vec<(TenantId, ChunkId, Vec<String>)> = chunks
+                    .iter()
+                    .filter_map(|(chunk_id, text)| {
+                        let processed = self.text_processor.process_chunk(text);
+                        let sentences: Vec<String> =
+                            processed.into_iter().map(|p| p.text).collect();
+                        if sentences.is_empty() {
+                            return None;
+                        }
+                        Some((tenant_id.clone(), chunk_id.clone(), sentences))
+                    })
+                    .collect();
+                if !sparse_items.is_empty() {
+                    sparse.insert_batch(&sparse_items)?;
                 }
             }
         }
 
         debug!(
             tenant_id = %tenant_id,
-            chunk_id = %chunk_id,
+            chunk_count = chunks.len(),
             sparse_enabled = self.config.enable_sparse,
-            "indexed chunk in hybrid searcher"
+            "indexed batch in hybrid searcher"
         );
-
         Ok(())
     }
 
@@ -1281,6 +1300,40 @@ mod tests {
         // Should have results (at least from sparse)
         assert!(!results.is_empty());
         assert_eq!(results[0].chunk_id, chunk_id);
+    }
+
+    #[tokio::test]
+    async fn test_index_batch_and_search() {
+        let searcher = make_test_hybrid_searcher(true);
+        let tenant = make_tenant();
+        let chunk_a = ChunkId::new();
+        let chunk_b = ChunkId::new();
+        let chunks = vec![
+            (
+                chunk_a.clone(),
+                "The alpha parser handles config and json".to_string(),
+            ),
+            (
+                chunk_b.clone(),
+                "The beta formatter emits markdown output".to_string(),
+            ),
+        ];
+
+        searcher.index_batch(&tenant, &chunks).await.unwrap();
+
+        let alpha = searcher
+            .search(&tenant, "alpha parser", 10, None)
+            .await
+            .unwrap();
+        assert!(!alpha.is_empty());
+        assert_eq!(alpha[0].chunk_id, chunk_a);
+
+        let beta = searcher
+            .search(&tenant, "beta formatter", 10, None)
+            .await
+            .unwrap();
+        assert!(!beta.is_empty());
+        assert_eq!(beta[0].chunk_id, chunk_b);
     }
 
     #[tokio::test]

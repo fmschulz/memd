@@ -7,6 +7,6 @@ pub mod format;
 pub mod reader;
 pub mod writer;
 
-pub use format::{WalRecord, WalRecordType, WAL_MAGIC};
+pub use format::{TaskArtifactWalPayload, WalRecord, WalRecordType, WAL_MAGIC};
 pub use reader::{recovery, WalReader};
 pub use writer::WalWriter;

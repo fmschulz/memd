@@ -1,40 +1,74 @@
 //! MCP server implementation
 //!
-//! Handles JSON-RPC communication over stdio transport.
+//! Handles JSON-RPC communication over stdio and streamable HTTP transports.
 //! This is the primary interface for agent integration.
 
 use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 
+use axum::extract::State;
+use axum::http::header::{CONTENT_TYPE, ORIGIN};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response as HttpResponse};
+use axum::routing::post;
+use axum::Router;
 use serde_json::{json, Value};
+use tokio::net::TcpListener;
+use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, error, info, warn};
 
 use super::error::McpError;
 use super::handlers::{
-    handle_find_callers, handle_find_definition, handle_find_errors, handle_find_imports,
-    handle_find_references, handle_find_tool_calls, handle_memory_add, handle_memory_add_batch,
-    handle_memory_compact, handle_memory_consolidate_episode, handle_memory_delete,
-    handle_memory_feedback, handle_memory_get, handle_memory_metrics, handle_memory_search,
-    handle_memory_stats, AddBatchParams, AddParams, CompactParams, ConsolidateEpisodeParams,
-    DeleteParams, FeedbackParams, FindCallersParams, FindDefinitionParams, FindErrorsParams,
-    FindImportsParams, FindReferencesParams, FindToolCallsParams, GetParams, MetricsParams,
-    SearchParams, StatsParams,
+    handle_context_find_relevant_context, handle_context_get_files_for_subsystem,
+    handle_context_get_hot_context, handle_context_list_subsystems,
+    handle_context_search_documents, handle_context_suggest_agent, handle_find_callers,
+    handle_find_definition, handle_find_errors, handle_find_imports, handle_find_references,
+    handle_find_tool_calls, handle_memory_add, handle_memory_add_batch, handle_memory_compact,
+    handle_memory_consolidate_episode, handle_memory_delete, handle_memory_feedback,
+    handle_memory_get, handle_memory_metrics, handle_memory_search, handle_memory_stats,
+    handle_task_add_evidence, handle_task_finish, handle_task_get, handle_task_progress,
+    handle_task_run_finish, handle_task_run_start, handle_task_search, handle_task_start,
+    AddBatchParams, AddParams, CompactParams, ConsolidateEpisodeParams,
+    ContextFindRelevantContextParams, ContextGetFilesForSubsystemParams,
+    ContextGetHotContextParams, ContextListSubsystemsParams, ContextSearchDocumentsParams,
+    ContextSuggestAgentParams, DeleteParams, FeedbackParams, FindCallersParams,
+    FindDefinitionParams, FindErrorsParams, FindImportsParams, FindReferencesParams,
+    FindToolCallsParams, GetParams, MetricsParams, SearchParams, StatsParams,
+    TaskAddEvidenceParams, TaskFinishParams, TaskGetParams, TaskProgressParams,
+    TaskRunFinishParams, TaskRunStartParams, TaskSearchParams, TaskStartParams,
 };
-use super::protocol::{Request, Response};
+use super::protocol::{Request, Response, RpcError};
 use super::tools::get_all_tools;
 use crate::metrics::MetricsCollector;
 use crate::store::{Store, TenantManager};
 use crate::structural::{SymbolQueryService, TraceQueryService};
 use crate::Config;
 
-/// MCP protocol version supported by this server
-const PROTOCOL_VERSION: &str = "2024-11-05";
+/// Default MCP protocol version for the stdio path and legacy docs.
+const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// Protocol versions accepted by the HTTP daemon for current Codex/Claude clients.
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-11-25"];
 
 /// Server name for capability negotiation
 const SERVER_NAME: &str = "memd";
 
 /// Server version
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const MCP_PROTOCOL_VERSION_HEADER: &str = "mcp-protocol-version";
+
+struct HttpServerState<S: Store> {
+    server: Arc<AsyncMutex<McpServer<S>>>,
+}
+
+impl<S: Store> Clone for HttpServerState<S> {
+    fn clone(&self) -> Self {
+        Self {
+            server: Arc::clone(&self.server),
+        }
+    }
+}
 
 /// MCP server that handles JSON-RPC requests over stdio
 pub struct McpServer<S: Store> {
@@ -123,7 +157,7 @@ impl<S: Store> McpServer<S> {
             debug!(request = %line, "received request");
 
             // Parse and handle the request
-            let response = self.handle_line(&line).await;
+            let response = self.handle_jsonrpc(&line).await;
 
             // Serialize and write response
             let json = match response.to_json() {
@@ -152,7 +186,7 @@ impl<S: Store> McpServer<S> {
     }
 
     /// Handle a single line of input (one JSON-RPC request)
-    async fn handle_line(&mut self, line: &str) -> Response {
+    pub async fn handle_jsonrpc(&mut self, line: &str) -> Response {
         // Try to parse the request
         let request = match Request::parse(line) {
             Ok(r) => r,
@@ -172,7 +206,7 @@ impl<S: Store> McpServer<S> {
 
         let result = match request.method.as_str() {
             "initialize" => self.handle_initialize(request.params).await,
-            "initialized" => {
+            "initialized" | "notifications/initialized" | "notifications/cancelled" | "ping" => {
                 // Notification that client is ready - no response needed
                 // but we return success for notifications that have an id
                 if request.is_notification() {
@@ -204,22 +238,23 @@ impl<S: Store> McpServer<S> {
     /// Handle the 'initialize' request
     ///
     /// Returns server capabilities and protocol version.
-    async fn handle_initialize(&mut self, _params: Option<Value>) -> Result<Value, McpError> {
+    async fn handle_initialize(&mut self, params: Option<Value>) -> Result<Value, McpError> {
         if self.initialized {
             warn!("server already initialized");
         }
 
         self.initialized = true;
+        let protocol_version = negotiate_protocol_version(params.as_ref());
 
         info!(
-            protocol_version = PROTOCOL_VERSION,
+            protocol_version = protocol_version,
             server_name = SERVER_NAME,
             server_version = SERVER_VERSION,
             "server initialized"
         );
 
         Ok(json!({
-            "protocolVersion": PROTOCOL_VERSION,
+            "protocolVersion": protocol_version,
             "capabilities": {
                 "tools": {}
             },
@@ -286,6 +321,58 @@ impl<S: Store> McpServer<S> {
                 })?;
                 handle_memory_add_batch(&*self.store, self.tenant_manager.as_ref(), params).await
             }
+            "task.start" => {
+                let params: TaskStartParams = serde_json::from_value(arguments).map_err(|e| {
+                    McpError::InvalidParams(format!("invalid task.start params: {}", e))
+                })?;
+                handle_task_start(&*self.store, self.tenant_manager.as_ref(), params).await
+            }
+            "task.progress" => {
+                let params: TaskProgressParams =
+                    serde_json::from_value(arguments).map_err(|e| {
+                        McpError::InvalidParams(format!("invalid task.progress params: {}", e))
+                    })?;
+                handle_task_progress(&*self.store, self.tenant_manager.as_ref(), params).await
+            }
+            "task.run_start" => {
+                let params: TaskRunStartParams =
+                    serde_json::from_value(arguments).map_err(|e| {
+                        McpError::InvalidParams(format!("invalid task.run_start params: {}", e))
+                    })?;
+                handle_task_run_start(&*self.store, self.tenant_manager.as_ref(), params).await
+            }
+            "task.run_finish" => {
+                let params: TaskRunFinishParams =
+                    serde_json::from_value(arguments).map_err(|e| {
+                        McpError::InvalidParams(format!("invalid task.run_finish params: {}", e))
+                    })?;
+                handle_task_run_finish(&*self.store, self.tenant_manager.as_ref(), params).await
+            }
+            "task.add_evidence" => {
+                let params: TaskAddEvidenceParams =
+                    serde_json::from_value(arguments).map_err(|e| {
+                        McpError::InvalidParams(format!("invalid task.add_evidence params: {}", e))
+                    })?;
+                handle_task_add_evidence(&*self.store, self.tenant_manager.as_ref(), params).await
+            }
+            "task.finish" => {
+                let params: TaskFinishParams = serde_json::from_value(arguments).map_err(|e| {
+                    McpError::InvalidParams(format!("invalid task.finish params: {}", e))
+                })?;
+                handle_task_finish(&*self.store, self.tenant_manager.as_ref(), params).await
+            }
+            "task.get" => {
+                let params: TaskGetParams = serde_json::from_value(arguments).map_err(|e| {
+                    McpError::InvalidParams(format!("invalid task.get params: {}", e))
+                })?;
+                handle_task_get(&*self.store, params).await
+            }
+            "task.search" => {
+                let params: TaskSearchParams = serde_json::from_value(arguments).map_err(|e| {
+                    McpError::InvalidParams(format!("invalid task.search params: {}", e))
+                })?;
+                handle_task_search(&*self.store, params).await
+            }
             "memory.get" => {
                 let params: GetParams = serde_json::from_value(arguments)
                     .map_err(|e| McpError::InvalidParams(format!("invalid get params: {}", e)))?;
@@ -330,6 +417,57 @@ impl<S: Store> McpServer<S> {
                         ))
                     })?;
                 handle_memory_consolidate_episode(&*self.store, params).await
+            }
+            "context.list_subsystems" => {
+                let params: ContextListSubsystemsParams = serde_json::from_value(arguments)
+                    .map_err(|e| {
+                        McpError::InvalidParams(format!("invalid list_subsystems params: {}", e))
+                    })?;
+                handle_context_list_subsystems(&*self.store, params).await
+            }
+            "context.get_files_for_subsystem" => {
+                let params: ContextGetFilesForSubsystemParams = serde_json::from_value(arguments)
+                    .map_err(|e| {
+                    McpError::InvalidParams(format!(
+                        "invalid get_files_for_subsystem params: {}",
+                        e
+                    ))
+                })?;
+                handle_context_get_files_for_subsystem(&*self.store, params).await
+            }
+            "context.search_context_documents" => {
+                let params: ContextSearchDocumentsParams = serde_json::from_value(arguments)
+                    .map_err(|e| {
+                        McpError::InvalidParams(format!(
+                            "invalid search_context_documents params: {}",
+                            e
+                        ))
+                    })?;
+                handle_context_search_documents(&*self.store, params).await
+            }
+            "context.find_relevant_context" => {
+                let params: ContextFindRelevantContextParams = serde_json::from_value(arguments)
+                    .map_err(|e| {
+                        McpError::InvalidParams(format!(
+                            "invalid find_relevant_context params: {}",
+                            e
+                        ))
+                    })?;
+                handle_context_find_relevant_context(&*self.store, params).await
+            }
+            "context.suggest_agent" => {
+                let params: ContextSuggestAgentParams =
+                    serde_json::from_value(arguments).map_err(|e| {
+                        McpError::InvalidParams(format!("invalid suggest_agent params: {}", e))
+                    })?;
+                handle_context_suggest_agent(&*self.store, params).await
+            }
+            "context.get_hot_context" => {
+                let params: ContextGetHotContextParams = serde_json::from_value(arguments)
+                    .map_err(|e| {
+                        McpError::InvalidParams(format!("invalid get_hot_context params: {}", e))
+                    })?;
+                handle_context_get_hot_context(&*self.store, params).await
             }
             "code.find_definition" => {
                 let params: FindDefinitionParams =
@@ -399,6 +537,229 @@ impl<S: Store> McpServer<S> {
     }
 }
 
+fn negotiate_protocol_version(params: Option<&Value>) -> &'static str {
+    let requested = params
+        .and_then(|value| value.get("protocolVersion"))
+        .and_then(Value::as_str);
+
+    match requested {
+        Some(version) => SUPPORTED_PROTOCOL_VERSIONS
+            .iter()
+            .find(|candidate| **candidate == version)
+            .copied()
+            .unwrap_or_else(|| {
+                SUPPORTED_PROTOCOL_VERSIONS
+                    .last()
+                    .copied()
+                    .unwrap_or(DEFAULT_PROTOCOL_VERSION)
+            }),
+        None => DEFAULT_PROTOCOL_VERSION,
+    }
+}
+
+fn is_supported_protocol_version(version: &str) -> bool {
+    SUPPORTED_PROTOCOL_VERSIONS.contains(&version)
+}
+
+fn validate_http_origin(headers: &HeaderMap) -> Result<(), StatusCode> {
+    let Some(origin) = headers.get(ORIGIN) else {
+        return Ok(());
+    };
+
+    let Ok(origin) = origin.to_str() else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+
+    if origin == "null" {
+        return Ok(());
+    }
+
+    let allowed = ["http://localhost", "https://localhost", "http://127.0.0.1", "https://127.0.0.1", "http://[::1]", "https://[::1]"];
+    if allowed.iter().any(|prefix| origin.starts_with(prefix)) {
+        return Ok(());
+    }
+
+    Err(StatusCode::FORBIDDEN)
+}
+
+fn response_with_headers(
+    status: StatusCode,
+    content_type: Option<&'static str>,
+    body: String,
+    protocol_version: Option<&str>,
+) -> HttpResponse {
+    let mut response = (status, body).into_response();
+    if let Some(content_type) = content_type {
+        response.headers_mut().insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static(content_type),
+        );
+    }
+    if let Some(protocol_version) = protocol_version {
+        if let Ok(value) = HeaderValue::from_str(protocol_version) {
+            response.headers_mut().insert(
+                HeaderName::from_static(MCP_PROTOCOL_VERSION_HEADER),
+                value,
+            );
+        }
+    }
+    response
+}
+
+fn json_error_http_response(
+    status: StatusCode,
+    error: RpcError,
+    protocol_version: Option<&str>,
+) -> HttpResponse {
+    let json = Response::error(None, error)
+        .to_json()
+        .unwrap_or_else(|_| {
+            "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"internal error\"}}"
+                .to_string()
+        });
+    response_with_headers(status, Some("application/json"), json, protocol_version)
+}
+
+async fn handle_http_post<S: Store + Send + Sync + 'static>(
+    State(state): State<HttpServerState<S>>,
+    headers: HeaderMap,
+    body: String,
+) -> HttpResponse {
+    if let Err(status) = validate_http_origin(&headers) {
+        return response_with_headers(status, None, String::new(), None);
+    }
+
+    if let Some(protocol_version) = headers
+        .get(MCP_PROTOCOL_VERSION_HEADER)
+        .and_then(|value| value.to_str().ok())
+    {
+        if !is_supported_protocol_version(protocol_version) {
+            return json_error_http_response(
+                StatusCode::BAD_REQUEST,
+                RpcError::invalid_params(format!(
+                    "unsupported MCP protocol version '{}'",
+                    protocol_version
+                )),
+                None,
+            );
+        }
+    }
+
+    let rpc_value: Value = match serde_json::from_str(&body) {
+        Ok(value) => value,
+        Err(e) => {
+            return json_error_http_response(
+                StatusCode::BAD_REQUEST,
+                RpcError::parse_error(e.to_string()),
+                None,
+            )
+        }
+    };
+
+    let protocol_version = match rpc_value.get("method").and_then(Value::as_str) {
+        Some("initialize") => Some(negotiate_protocol_version(rpc_value.get("params"))),
+        _ => headers
+            .get(MCP_PROTOCOL_VERSION_HEADER)
+            .and_then(|value| value.to_str().ok()),
+    };
+
+    if rpc_value.get("method").is_some() {
+        let request = match serde_json::from_value::<Request>(rpc_value.clone()) {
+            Ok(request) => request,
+            Err(e) => {
+                return json_error_http_response(
+                    StatusCode::BAD_REQUEST,
+                    RpcError::invalid_request(e.to_string()),
+                    protocol_version,
+                )
+            }
+        };
+
+        let is_notification = request.is_notification();
+        let mut server = state.server.lock().await;
+        let response = server.handle_request(request).await;
+
+        if is_notification {
+            if let Some(error) = response.error {
+                return json_error_http_response(StatusCode::BAD_REQUEST, error, protocol_version);
+            }
+            return response_with_headers(StatusCode::ACCEPTED, None, String::new(), protocol_version);
+        }
+
+        let json = match response.to_json() {
+            Ok(json) => json,
+            Err(e) => {
+                return json_error_http_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    RpcError::internal_error(e.to_string()),
+                    protocol_version,
+                )
+            }
+        };
+
+        return response_with_headers(
+            StatusCode::OK,
+            Some("application/json"),
+            json,
+            protocol_version,
+        );
+    }
+
+    if rpc_value.get("id").is_some()
+        && (rpc_value.get("result").is_some() || rpc_value.get("error").is_some())
+    {
+        return response_with_headers(StatusCode::ACCEPTED, None, String::new(), protocol_version);
+    }
+
+    json_error_http_response(
+        StatusCode::BAD_REQUEST,
+        RpcError::invalid_request("expected a JSON-RPC request, notification, or response"),
+        protocol_version,
+    )
+}
+
+async fn handle_http_get(headers: HeaderMap) -> HttpResponse {
+    if let Err(status) = validate_http_origin(&headers) {
+        return response_with_headers(status, None, String::new(), None);
+    }
+
+    response_with_headers(StatusCode::METHOD_NOT_ALLOWED, None, String::new(), None)
+}
+
+pub async fn run_http_server<S: Store + Send + Sync + 'static>(
+    server: McpServer<S>,
+    bind: &str,
+    path: &str,
+) -> crate::Result<()> {
+    let listener = TcpListener::bind(bind).await?;
+    serve_http_server(listener, server, path).await
+}
+
+async fn serve_http_server<S: Store + Send + Sync + 'static>(
+    listener: TcpListener,
+    server: McpServer<S>,
+    path: &str,
+) -> crate::Result<()> {
+    let accept_header_note = "clients should send Accept: application/json, text/event-stream";
+    info!(
+        bind = %listener.local_addr().map(|addr| addr.to_string()).unwrap_or_else(|_| "<unknown>".to_string()),
+        path = path,
+        note = accept_header_note,
+        "HTTP MCP server starting"
+    );
+
+    let state = HttpServerState {
+        server: Arc::new(AsyncMutex::new(server)),
+    };
+    let app = Router::new()
+        .route(path, post(handle_http_post::<S>).get(handle_http_get))
+        .with_state(state);
+
+    axum::serve(listener, app)
+        .await
+        .map_err(|e| crate::error::MemdError::ProtocolError(e.to_string()))
+}
+
 /// Run the MCP server with the given configuration
 ///
 /// This is the main entry point for the MCP server.
@@ -417,6 +778,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use super::super::protocol::RequestId;
     use crate::config::Config;
@@ -427,6 +789,7 @@ mod tests {
     use crate::types::{ChunkId, MemoryChunk, TenantId};
     use async_trait::async_trait;
     use tempfile::tempdir;
+    use tokio::task::{spawn_blocking, yield_now};
 
     struct IndexStatsStore;
 
@@ -511,6 +874,53 @@ mod tests {
             trace_query_service: None,
             initialized: false,
         }
+    }
+
+    async fn spawn_http_test_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = test_server();
+        let handle = tokio::spawn(async move {
+            serve_http_server(listener, server, "/mcp").await.unwrap();
+        });
+        yield_now().await;
+        (format!("http://{}/mcp", addr), handle)
+    }
+
+    async fn http_post_json(
+        url: String,
+        body: String,
+        origin: Option<String>,
+    ) -> Result<(u16, String), ureq::Error> {
+        spawn_blocking(move || {
+            let mut request = ureq::post(&url)
+                .set("Accept", "application/json, text/event-stream")
+                .timeout(Duration::from_secs(5));
+            if let Some(origin) = origin.as_deref() {
+                request = request.set("Origin", origin);
+            }
+            let response = request.send_string(&body)?;
+            let status = response.status();
+            let body = response.into_string().unwrap_or_default();
+            Ok((status, body))
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn http_get(url: String, origin: Option<String>) -> Result<u16, ureq::Error> {
+        spawn_blocking(move || {
+            let mut request = ureq::get(&url)
+                .set("Accept", "text/event-stream")
+                .timeout(Duration::from_secs(5));
+            if let Some(origin) = origin.as_deref() {
+                request = request.set("Origin", origin);
+            }
+            let response = request.call()?;
+            Ok(response.status())
+        })
+        .await
+        .unwrap()
     }
 
     fn parse_tool_payload(result: &Value) -> serde_json::Value {
@@ -717,14 +1127,377 @@ mod tests {
         assert_eq!(results[0]["episode_id"], "ep_alpha");
     }
 
+    async fn run_task_tool_flow<S: Store>(server: &McpServer<S>, tenant_id: &str) {
+        let start_result = server
+            .handle_tools_call(Some(json!({
+                "name": "task.start",
+                "arguments": {
+                    "tenant_id": tenant_id,
+                    "project_id": "science_proj",
+                    "goal": "Map the perturbation-responsive genes",
+                    "motivation": "The pathway response is unresolved",
+                    "hypothesis": "RpoS drives the induced genes",
+                    "scientific_question": "Which genes increase after the perturbation?",
+                    "dataset_refs": [
+                        {
+                            "name": "rna_seq",
+                            "version": "v1"
+                        }
+                    ],
+                    "entity_refs": [
+                        {
+                            "name": "RpoS",
+                            "entity_type": "protein",
+                            "role": "candidate regulator"
+                        }
+                    ],
+                    "expected_outputs": ["differential expression table"]
+                }
+            })))
+            .await
+            .expect("task.start should succeed");
+
+        let start_payload = parse_tool_payload(&start_result);
+        let task_id = start_payload["task_id"]
+            .as_str()
+            .expect("task.start should return task_id")
+            .to_string();
+        assert!(start_payload["artifact_id"].as_str().is_some());
+        assert!(start_payload["projection_chunk_ids"].as_array().is_some());
+
+        server
+            .handle_tools_call(Some(json!({
+                    "name": "task.progress",
+                    "arguments": {
+                        "tenant_id": tenant_id,
+                        "task_id": task_id.clone(),
+                    "project_id": "science_proj",
+                    "summary": "Initial QC exposed one low-depth replicate",
+                    "blockers": ["One replicate is borderline"],
+                    "failed_attempts": ["Default trimming removed too much signal"],
+                    "next_step": "Re-run with lighter trimming"
+                }
+            })))
+            .await
+            .expect("task.progress should succeed");
+
+        server
+            .handle_tools_call(Some(json!({
+                    "name": "task.run_start",
+                    "arguments": {
+                        "tenant_id": tenant_id,
+                        "task_id": task_id.clone(),
+                    "project_id": "science_proj",
+                    "tool_name": "mmseqs",
+                    "tool_version": "15",
+                    "command": "mmseqs search db query out tmp",
+                    "why_chosen": "Fast enough for iterative parameter sweeps",
+                    "parameters": {"sensitivity": 7.5},
+                    "inputs": ["query.faa"],
+                    "summary": "Homology search for candidate regulators",
+                    "dataset_refs": [{"name": "rna_seq", "version": "v1"}]
+                }
+            })))
+            .await
+            .expect("task.run_start should succeed");
+
+        server
+            .handle_tools_call(Some(json!({
+                    "name": "task.run_finish",
+                    "arguments": {
+                        "tenant_id": tenant_id,
+                        "task_id": task_id.clone(),
+                    "project_id": "science_proj",
+                    "status": "completed",
+                    "tool_name": "mmseqs",
+                    "tool_version": "15",
+                    "command": "mmseqs search db query out tmp",
+                    "outputs": ["hits.tsv"],
+                    "metrics": {"top_hit_bitscore": 310.5},
+                    "notes": "Recovered a strong candidate regulator",
+                    "validation": ["Top hit was stable across reruns"]
+                }
+            })))
+            .await
+            .expect("task.run_finish should succeed");
+
+        server
+            .handle_tools_call(Some(json!({
+                    "name": "task.add_evidence",
+                    "arguments": {
+                        "tenant_id": tenant_id,
+                        "task_id": task_id.clone(),
+                    "project_id": "science_proj",
+                    "summary": "Top hit exceeded the curated threshold",
+                    "evidence_kind": "metric",
+                    "supports_claim": true,
+                    "metric_name": "top_hit_bitscore",
+                    "metric_value": 310.5
+                }
+            })))
+            .await
+            .expect("task.add_evidence should succeed");
+
+        let finish_result = server
+            .handle_tools_call(Some(json!({
+                "name": "task.finish",
+                "arguments": {
+                    "tenant_id": tenant_id,
+                    "project_id": "science_proj",
+                    "task_id": task_id.clone(),
+                    "what_worked": ["QC filtering stabilized the hit list"],
+                    "what_failed": ["The first aligner preset over-trimmed reads"],
+                    "validation": ["Independent replicate confirmed the top genes"],
+                    "uncertainty": ["One replicate remains borderline"],
+                    "followups": ["Collect one additional replicate"],
+                    "confidence": 0.83
+                }
+            })))
+            .await
+            .expect("task.finish should succeed");
+
+        let finish_payload = parse_tool_payload(&finish_result);
+        assert!(finish_payload["artifact_id"].as_str().is_some());
+
+        let get_result = server
+            .handle_tools_call(Some(json!({
+                "name": "task.get",
+                "arguments": {
+                    "tenant_id": tenant_id,
+                    "task_id": task_id.clone()
+                }
+            })))
+            .await
+            .expect("task.get should succeed");
+        let get_payload = parse_tool_payload(&get_result);
+        let artifacts = get_payload["artifacts"]
+            .as_array()
+            .expect("task.get should include artifacts");
+        assert_eq!(artifacts.len(), 6);
+
+        let task_search_result = server
+            .handle_tools_call(Some(json!({
+                "name": "task.search",
+                "arguments": {
+                    "tenant_id": tenant_id,
+                    "query": "parameter sweeps",
+                    "k": 10,
+                    "filters": {
+                        "task_id": task_id.clone(),
+                        "artifact_kind": "run_start",
+                        "status": "started",
+                        "dataset_name": "rna_seq",
+                        "dataset_version": "v1",
+                        "tool_name": "mmseqs",
+                        "project_id": "science_proj"
+                    }
+                }
+            })))
+            .await
+            .expect("task.search should succeed");
+        let task_search_payload = parse_tool_payload(&task_search_result);
+        let task_results = task_search_payload["results"]
+            .as_array()
+            .expect("task.search should include results");
+        assert_eq!(task_results.len(), 1);
+
+        let search_result = server
+            .handle_tools_call(Some(json!({
+                "name": "memory.search",
+                "arguments": {
+                    "tenant_id": tenant_id,
+                    "project_id": "science_proj",
+                    "query": "over-trimmed reads",
+                    "k": 10
+                }
+            })))
+            .await
+            .expect("memory.search should find task projection");
+
+        let search_payload = parse_tool_payload(&search_result);
+        let results = search_payload["results"]
+            .as_array()
+            .expect("search payload should include results");
+        assert!(!results.is_empty());
+        assert!(results.iter().any(|result| {
+            result["tags"]
+                .as_array()
+                .map(|tags| {
+                    tags.iter().any(|tag| {
+                        tag.as_str()
+                            .map(|value| value.starts_with("task:projection:failed"))
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        }));
+    }
+
     #[tokio::test]
     async fn handle_initialize() {
         let mut server = test_server();
         let result = server.handle_initialize(None).await.unwrap();
 
-        assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(result["protocolVersion"], DEFAULT_PROTOCOL_VERSION);
         assert_eq!(result["serverInfo"]["name"], SERVER_NAME);
         assert!(result["capabilities"]["tools"].is_object());
+    }
+
+    #[tokio::test]
+    async fn handle_initialize_negotiates_supported_protocol_version() {
+        let mut server = test_server();
+        let result = server
+            .handle_initialize(Some(json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "test-client",
+                    "version": "1.0.0"
+                }
+            })))
+            .await
+            .unwrap();
+
+        assert_eq!(result["protocolVersion"], "2025-11-25");
+    }
+
+    #[tokio::test]
+    async fn notifications_initialized_alias_is_accepted() {
+        let mut server = test_server();
+        let response = server
+            .handle_jsonrpc(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
+            .await;
+
+        assert!(response.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn http_transport_supports_initialize_and_memory_search() {
+        let (url, handle) = spawn_http_test_server().await;
+
+        let (status, init_body) = http_post_json(
+            url.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "http-test",
+                        "version": "1.0.0"
+                    }
+                }
+            })
+            .to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, 200);
+        let init_payload: Value = serde_json::from_str(&init_body).unwrap();
+        assert_eq!(init_payload["result"]["protocolVersion"], "2025-11-25");
+
+        let (status, add_body) = http_post_json(
+            url.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "memory.add",
+                    "arguments": {
+                        "tenant_id": "http_test",
+                        "text": "shared marker from http transport",
+                        "type": "summary"
+                    }
+                }
+            })
+            .to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, 200);
+        let add_payload: Value = serde_json::from_str(&add_body).unwrap();
+        let add_tool_payload = parse_tool_payload(&add_payload["result"]);
+        let chunk_id = add_tool_payload["chunk_id"].as_str().unwrap().to_string();
+
+        let (status, search_body) = http_post_json(
+            url.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "memory.search",
+                    "arguments": {
+                        "tenant_id": "http_test",
+                        "query": "shared marker",
+                        "k": 5
+                    }
+                }
+            })
+            .to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, 200);
+        let search_payload: Value = serde_json::from_str(&search_body).unwrap();
+        let search_tool_payload = parse_tool_payload(&search_payload["result"]);
+        let results = search_tool_payload["results"].as_array().unwrap();
+        assert!(results
+            .iter()
+            .any(|result| result["chunk_id"].as_str() == Some(chunk_id.as_str())));
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn http_transport_get_returns_method_not_allowed() {
+        let (url, handle) = spawn_http_test_server().await;
+
+        match http_get(url, None).await {
+            Ok(status) => panic!("expected 405 error, got {}", status),
+            Err(ureq::Error::Status(status, _)) => assert_eq!(status, 405),
+            Err(err) => panic!("unexpected error: {}", err),
+        }
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn http_transport_rejects_invalid_origin() {
+        let (url, handle) = spawn_http_test_server().await;
+
+        match http_post_json(
+            url,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "http-test",
+                        "version": "1.0.0"
+                    }
+                }
+            })
+            .to_string(),
+            Some("https://evil.example".to_string()),
+        )
+        .await
+        {
+            Ok((status, _)) => panic!("expected 403 error, got {}", status),
+            Err(ureq::Error::Status(status, _)) => assert_eq!(status, 403),
+            Err(err) => panic!("unexpected error: {}", err),
+        }
+
+        handle.abort();
     }
 
     #[tokio::test]
@@ -810,6 +1583,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_tool_task_start() {
+        let server = test_server_no_tenant_manager();
+        let result = server
+            .handle_tools_call(Some(json!({
+                "name": "task.start",
+                "arguments": {
+                    "tenant_id": "test_tenant",
+                    "goal": "Map the perturbation-responsive genes",
+                    "motivation": "The pathway response is unresolved",
+                    "hypothesis": "RpoS drives the induced genes",
+                    "scientific_question": "Which genes increase after the perturbation?",
+                    "dataset_refs": [{"name": "rna_seq"}],
+                    "expected_outputs": ["differential expression table"]
+                }
+            })))
+            .await
+            .unwrap();
+
+        let payload = parse_tool_payload(&result);
+        assert!(uuid::Uuid::parse_str(payload["task_id"].as_str().unwrap()).is_ok());
+        assert!(uuid::Uuid::parse_str(payload["artifact_id"].as_str().unwrap()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn handle_tool_task_finish_rejects_invalid_confidence() {
+        let server = test_server_no_tenant_manager();
+        let result = server
+            .handle_tools_call(Some(json!({
+                "name": "task.finish",
+                "arguments": {
+                    "tenant_id": "test_tenant",
+                    "task_id": "task-1",
+                    "what_worked": [],
+                    "what_failed": [],
+                    "validation": [],
+                    "uncertainty": [],
+                    "followups": [],
+                    "confidence": 1.2
+                }
+            })))
+            .await;
+
+        assert!(matches!(result, Err(McpError::InvalidParams(_))));
+    }
+
+    #[tokio::test]
     async fn handle_tool_stats() {
         let server = test_server();
         let result = server
@@ -823,6 +1642,63 @@ mod tests {
             .unwrap();
 
         assert!(result["content"].is_array());
+    }
+
+    #[tokio::test]
+    async fn handle_context_tools_are_dispatched() {
+        let server = test_server_no_tenant_manager();
+        let tenant_id = "context_dispatch_tenant";
+
+        server
+            .handle_tools_call(Some(json!({
+                "name": "memory.add",
+                "arguments": {
+                    "tenant_id": tenant_id,
+                    "text": "retrieval architecture hot note",
+                    "type": "doc",
+                    "tags": [
+                        "ctx:doc",
+                        "ctx:subsystem:retrieval",
+                        "ctx:tier:hot"
+                    ]
+                }
+            })))
+            .await
+            .expect("memory.add should succeed");
+
+        let list_result = server
+            .handle_tools_call(Some(json!({
+                "name": "context.list_subsystems",
+                "arguments": {
+                    "tenant_id": tenant_id
+                }
+            })))
+            .await
+            .expect("context.list_subsystems should succeed");
+        let list_payload = parse_tool_payload(&list_result);
+        let subsystems = list_payload["subsystems"]
+            .as_array()
+            .expect("list_subsystems should return a subsystems array");
+        assert!(subsystems
+            .iter()
+            .any(|entry| entry["key"].as_str() == Some("retrieval")));
+
+        let hot_result = server
+            .handle_tools_call(Some(json!({
+                "name": "context.get_hot_context",
+                "arguments": {
+                    "tenant_id": tenant_id,
+                    "k": 5
+                }
+            })))
+            .await
+            .expect("context.get_hot_context should succeed");
+        let hot_payload = parse_tool_payload(&hot_result);
+        let results = hot_payload["results"]
+            .as_array()
+            .expect("get_hot_context should return results");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["source_tier"], "hot");
     }
 
     #[tokio::test]
@@ -1025,6 +1901,12 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn e2e_task_tools_with_memory_store() {
+        let server = test_server_no_tenant_manager();
+        run_task_tool_flow(&server, "e2e_task_memory_tenant").await;
+    }
+
+    #[tokio::test]
     async fn e2e_memory_tools_with_persistent_store() {
         let dir = tempdir().expect("tempdir");
         let store = Arc::new(
@@ -1082,6 +1964,26 @@ mod tests {
         let server = McpServer::new(test_config_with_data_dir(dir.path().to_path_buf()), store);
 
         run_episode_consolidation_flow(&server, "e2e_episode_persistent_tenant").await;
+    }
+
+    #[tokio::test]
+    async fn e2e_task_tools_with_persistent_store() {
+        let dir = tempdir().expect("tempdir");
+        let store = Arc::new(
+            PersistentStore::open(PersistentStoreConfig {
+                data_dir: dir.path().to_path_buf(),
+                segment_max_chunks: 100,
+                wal_checkpoint_interval: 10,
+                enable_dense_search: false,
+                enable_hybrid_search: false,
+                enable_tiered_search: false,
+                ..Default::default()
+            })
+            .expect("persistent store"),
+        );
+        let server = McpServer::new(test_config_with_data_dir(dir.path().to_path_buf()), store);
+
+        run_task_tool_flow(&server, "e2e_task_persistent_tenant").await;
     }
 
     #[tokio::test]
