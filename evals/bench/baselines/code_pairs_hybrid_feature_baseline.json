@@ -1,0 +1,107 @@
+{
+  "generated_unix_seconds": 1770676696,
+  "dataset_path": "evals/datasets/retrieval/code_pairs.json",
+  "dataset_description": "Code similarity pairs for retrieval quality evaluation. Handcrafted realistic code samples covering common patterns (JSON, APIs, validation, sorting, error handling, database, auth, file I/O).",
+  "dataset_version": "1.0",
+  "system_variant": "hybrid-feature",
+  "embedding_model": "all-minilm",
+  "bootstrap_iterations": 200,
+  "seed": 42,
+  "queries_evaluated": 8,
+  "documents_indexed": 16,
+  "thresholds": {
+    "recall": null,
+    "mrr": null,
+    "precision": null
+  },
+  "summary": {
+    "recall": {
+      "mean": 1.0,
+      "ci_lower": 1.0,
+      "ci_upper": 1.0,
+      "std_dev": 0.0,
+      "n": 8
+    },
+    "mrr": {
+      "mean": 1.0,
+      "ci_lower": 1.0,
+      "ci_upper": 1.0,
+      "std_dev": 0.0,
+      "n": 8
+    },
+    "precision": {
+      "mean": 0.19999999999999998,
+      "ci_lower": 0.19999999999999998,
+      "ci_upper": 0.19999999999999998,
+      "std_dev": 2.967195843610875e-17,
+      "n": 8
+    },
+    "latency_ms": {
+      "mean": 91.06236799999999,
+      "ci_lower": 84.104240125,
+      "ci_upper": 101.292401,
+      "std_dev": 12.304251826901808,
+      "n": 8
+    }
+  },
+  "quality_gate_passed": true,
+  "quality_gate_message": "All configured thresholds satisfied",
+  "query_metrics": [
+    {
+      "query_id": "Q1",
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "precision_at_10": 0.2,
+      "latency_ms": 105.04983499999999
+    },
+    {
+      "query_id": "Q2",
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "precision_at_10": 0.2,
+      "latency_ms": 113.721674
+    },
+    {
+      "query_id": "Q3",
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "precision_at_10": 0.2,
+      "latency_ms": 89.723686
+    },
+    {
+      "query_id": "Q4",
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "precision_at_10": 0.2,
+      "latency_ms": 88.202272
+    },
+    {
+      "query_id": "Q5",
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "precision_at_10": 0.2,
+      "latency_ms": 86.0253
+    },
+    {
+      "query_id": "Q6",
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "precision_at_10": 0.2,
+      "latency_ms": 81.553243
+    },
+    {
+      "query_id": "Q7",
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "precision_at_10": 0.2,
+      "latency_ms": 76.425347
+    },
+    {
+      "query_id": "Q8",
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "precision_at_10": 0.2,
+      "latency_ms": 87.797587
+    }
+  ]
+}

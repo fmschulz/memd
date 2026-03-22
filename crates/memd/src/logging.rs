@@ -14,7 +14,13 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 /// Logs are written to stderr so they don't interfere with MCP protocol
 /// messages on stdout.
 pub fn init_logging(format: &str, level: &str) {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        // Keep memd logs at requested level while suppressing noisy third-party info logs
+        // that significantly slow benchmark runs.
+        EnvFilter::new(format!(
+            "{level},tantivy=warn,hnsw_rs=warn,hf_hub=warn,tokenizers=warn"
+        ))
+    });
 
     match format {
         "json" => {

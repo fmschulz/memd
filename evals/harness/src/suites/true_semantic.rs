@@ -27,7 +27,7 @@ pub fn run_true_semantic_tests(memd_path: &PathBuf, embedding_model: &str) -> Ve
     let mut results = Vec::new();
 
     let dataset_path =
-        crate::resolve_dataset_path("evals/datasets/retrieval/true_semantic_test.json");
+        crate::resolve_dataset_path("evals/bench/datasets/retrieval/true_semantic_test.json");
     let dataset = match load_dataset_generic(dataset_path.as_path()) {
         Ok(d) => d,
         Err(e) => {

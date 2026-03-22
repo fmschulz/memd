@@ -28,14 +28,13 @@ struct NFCorpusDataset {
 
 #[derive(Debug, Deserialize, Clone)]
 struct NFCorpusQuery {
-    id: String,
+    #[serde(rename = "id")]
+    _id: String,
     query: String,
     #[serde(rename = "type")]
-    #[allow(dead_code)]
-    query_type: String,
+    _query_type: String,
     relevant: Vec<String>,
-    #[allow(dead_code)]
-    irrelevant: Vec<String>,
+    _irrelevant: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,7 +103,7 @@ pub fn run_nfcorpus_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<Tes
     let mut results = Vec::new();
 
     // Load dataset
-    let dataset_path = crate::resolve_dataset_path("evals/datasets/retrieval/beir_nfcorpus.json");
+    let dataset_path = crate::resolve_dataset_path("evals/bench/datasets/retrieval/beir_nfcorpus.json");
     let dataset = match load_dataset(dataset_path.as_path()) {
         Ok(d) => d,
         Err(e) => {

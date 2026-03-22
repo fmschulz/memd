@@ -5,9 +5,16 @@
 //! relevance, and packs results within token budgets.
 
 pub mod fusion;
+#[cfg(feature = "cross-encoder-reranker")]
+mod onnx_cross_encoder;
+#[cfg(feature = "cross-encoder-reranker")]
+mod onnx_runtime;
 pub mod packer;
 pub mod reranker;
 
 pub use fusion::{FusedResult, FusionCandidate, FusionSource, RrfConfig, RrfFusion};
 pub use packer::{ContextPacker, PackedChunk, PackedContext, PackerConfig, PackerInput};
-pub use reranker::{ChunkWithMeta, FeatureReranker, RankedResult, RerankerConfig, RerankerContext};
+pub use reranker::{
+    ChunkWithMeta, CrossEncoderReranker, FeatureReranker, RankedResult, RerankerConfig,
+    RerankerContext, RerankerEngine, RerankerMode,
+};
