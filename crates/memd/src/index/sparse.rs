@@ -28,6 +28,9 @@ pub trait SparseIndex: Send + Sync {
     /// Each sentence is indexed separately to enable fine-grained matching.
     fn insert(&self, tenant_id: &TenantId, chunk_id: &ChunkId, sentences: &[String]) -> Result<()>;
 
+    /// Index multiple chunks in one write transaction/commit.
+    fn insert_batch(&self, items: &[(TenantId, ChunkId, Vec<String>)]) -> Result<()>;
+
     /// Search for chunks matching the query.
     ///
     /// Returns up to `k` results sorted by BM25 score (descending).

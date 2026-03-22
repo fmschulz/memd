@@ -69,7 +69,7 @@ pub struct TieredEvalConfig {
 impl Default for TieredEvalConfig {
     fn default() -> Self {
         Self {
-            dataset_path: PathBuf::from("evals/datasets/retrieval/tiered_eval.json"),
+            dataset_path: PathBuf::from("evals/bench/datasets/retrieval/tiered_eval.json"),
             hot_tier_latency_threshold_ms: 50,
             warm_tier_latency_threshold_ms: 200,
             min_cache_hit_rate: 0.8,
@@ -125,7 +125,7 @@ pub fn run_tiered_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestR
 
     // Load dataset
     let mut config = TieredEvalConfig::default();
-    config.dataset_path = crate::resolve_dataset_path("evals/datasets/retrieval/tiered_eval.json");
+    config.dataset_path = crate::resolve_dataset_path("evals/bench/datasets/retrieval/tiered_eval.json");
     let dataset = match load_dataset(&config.dataset_path) {
         Ok(d) => d,
         Err(e) => {

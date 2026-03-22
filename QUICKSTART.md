@@ -1,45 +1,41 @@
 # Quick Start
 
-This guide gets `memd` running, validates MCP behavior, and connects it to Claude Code/Codex.
-
 ## 1. Build
 
 ```bash
 cargo build --release
-./target/release/memd --version
 ```
 
-## 2. Start memd
+## 2. Start the shared local daemon
 
 ```bash
-# Persistent mode (default data dir: ~/.memd/data)
+./target/release/memd --mode mcp --transport http --http-bind 127.0.0.1:8787
+```
+
+Or for a disposable local run:
+
+```bash
+./target/release/memd --mode mcp --transport http --http-bind 127.0.0.1:8787 --in-memory --data-dir /tmp/memd-quickstart
+```
+
+For legacy subprocess mode:
+
+```bash
 ./target/release/memd --mode mcp
-
-# Or isolated in-memory mode for local testing
-./target/release/memd --mode mcp --in-memory --data-dir /tmp/memd-quickstart
 ```
 
-## 3. Send MCP requests manually
-
-In another terminal, pipe JSON-RPC lines into `memd`:
+## 3. Check that HTTP MCP starts
 
 ```bash
-printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"quickstart","version":"0.1.0"}}}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"memory.add","arguments":{"tenant_id":"quickstart_tenant","text":"parseConfig reads TOML and validates required fields","type":"code","tags":["rust","config"]}}}' \
-  '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"memory.search","arguments":{"tenant_id":"quickstart_tenant","query":"parseConfig","k":5}}}' \
-  | ./target/release/memd --mode mcp --in-memory --data-dir /tmp/memd-quickstart
+curl -sS -X POST http://127.0.0.1:8787/mcp \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"quickstart","version":"0.1.0"}}}'
 ```
 
-You will see JSON-RPC responses. Tool payloads come inside:
+## 4. Use `task.*` for real work
 
-- `result.content[0].type == "text"`
-- `result.content[0].text == "<JSON string payload>"`
-
-## 4. Core memory tool examples
-
-### Add
+Start a task:
 
 ```json
 {
@@ -47,111 +43,33 @@ You will see JSON-RPC responses. Tool payloads come inside:
   "id": 10,
   "method": "tools/call",
   "params": {
-    "name": "memory.add",
+    "name": "task.start",
     "arguments": {
-      "tenant_id": "quickstart_tenant",
-      "text": "Config parser now rejects missing api_key",
-      "type": "decision",
-      "project_id": "backend",
-      "source": {
-        "path": "src/config.rs",
-        "repo": "memd"
-      },
-      "tags": ["config", "validation"]
+      "tenant_id": "quickstart",
+      "project_id": "auth",
+      "goal": "Diagnose token validation failures",
+      "motivation": "Production requests are failing",
+      "hypothesis": "Time handling is inconsistent",
+      "scientific_question": "Where does timestamp skew happen?",
+      "expected_outputs": ["root cause", "fix"]
     }
   }
 }
 ```
 
-### Search
+Then continue with:
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 11,
-  "method": "tools/call",
-  "params": {
-    "name": "memory.search",
-    "arguments": {
-      "tenant_id": "quickstart_tenant",
-      "query": "config parser",
-      "k": 10,
-      "debug_tiers": true,
-      "filters": {
-        "time_range": {
-          "from": "2026-01-01T00:00:00Z",
-          "to": "2026-01-31T23:59:59Z"
-        }
-      }
-    }
-  }
-}
-```
+- `task.progress`
+- `task.run_start`
+- `task.run_finish`
+- `task.add_evidence`
+- `task.finish`
+- `task.get`
+- `task.search`
 
-Validation rules:
+## 5. Use `memory.*` for raw content
 
-- `k` must be between `1` and `100`
-- `filters.time_range.from/to` must be ISO 8601
-- if both are set, `from <= to`
-
-Current behavior notes:
-
-- `filters.types`, `project_id`, and `filters.time_range` are enforced as search result filters
-- `filters.episode_id` is enforced via episode tags (`episode:<id>`)
-- each search result includes a `citation` object (content hash + provenance + split offsets when chunked)
-- each search result may include `episode_id` when present
-- search applies adaptive retrieval depth for complex queries and filters
-- when initial retrieval is empty, query normalization retry may run; response includes `repair_info`
-
-### Get / Delete / Stats
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 12,
-  "method": "tools/call",
-  "params": {
-    "name": "memory.get",
-    "arguments": {
-      "tenant_id": "quickstart_tenant",
-      "chunk_id": "<uuid>"
-    }
-  }
-}
-```
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 13,
-  "method": "tools/call",
-  "params": {
-    "name": "memory.delete",
-    "arguments": {
-      "tenant_id": "quickstart_tenant",
-      "chunk_id": "<uuid>"
-    }
-  }
-}
-```
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 14,
-  "method": "tools/call",
-  "params": {
-    "name": "memory.stats",
-    "arguments": {
-      "tenant_id": "quickstart_tenant"
-    }
-  }
-}
-```
-
-## 5. Metrics and compaction
-
-### Metrics
+Example:
 
 ```json
 {
@@ -159,183 +77,56 @@ Current behavior notes:
   "id": 20,
   "method": "tools/call",
   "params": {
-    "name": "memory.metrics",
+    "name": "memory.add",
     "arguments": {
-      "tenant_id": "quickstart_tenant",
-      "include_recent": false,
-      "include_tiered": true
+      "tenant_id": "quickstart",
+      "text": "parseConfig reads TOML and validates fields",
+      "type": "code",
+      "project_id": "backend",
+      "tags": ["rust", "config"]
     }
   }
 }
 ```
 
-### Compaction
+## 6. Register clients and install the skill if needed
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 21,
-  "method": "tools/call",
-  "params": {
-    "name": "memory.compact",
-    "arguments": {
-      "tenant_id": "quickstart_tenant",
-      "force": false
-    }
-  }
-}
-```
+See:
 
-Compaction behavior:
+- [memd-skill/INSTALL.md](/home/fschulz/dev/software/memd/memd-skill/INSTALL.md)
+- [memd-skill/SKILL.md](/home/fschulz/dev/software/memd/memd-skill/SKILL.md)
 
-- persistent store: runs if thresholds exceeded, or immediately when `force=true`
-- in-memory store: returns `status: "skipped"`
+The skill includes a bundled Linux binary:
 
-### Consolidate Episode
+- [memd-skill/bin/linux-x64/memd](/home/fschulz/dev/software/memd/memd-skill/bin/linux-x64/memd)
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 22,
-  "method": "tools/call",
-  "params": {
-    "name": "memory.consolidate_episode",
-    "arguments": {
-      "tenant_id": "quickstart_tenant",
-      "episode_id": "session-2026-02-09",
-      "max_chunks": 40,
-      "retain_source_chunks": true
-    }
-  }
-}
-```
-
-## 6. Chunk types
-
-Canonical values:
-
-- `code`
-- `doc`
-- `trace`
-- `decision`
-- `plan`
-- `research`
-- `message`
-- `summary`
-- `other`
-
-Accepted aliases:
-
-- `scientific` maps to `doc`
-- `general` maps to `other`
-
-## 7. Long-document behavior
-
-When `text` length is greater than `1000` characters, `memory.add`/`memory.add_batch` split input into multiple chunks.
-
-Stored chunks get tags:
-
-- `chunk_index:<n>`
-- `total_chunks:<m>`
-- `char_start:<n>`
-- `char_end:<n>`
-
-API return semantics:
-
-- one returned `chunk_id` per input chunk (first stored chunk ID)
-
-## 8. Connect to Claude Code
-
-Add an MCP server entry (path may vary by installation):
-
-```json
-{
-  "mcpServers": {
-    "memd": {
-      "command": "/absolute/path/to/memd",
-      "args": ["--mode", "mcp"]
-    }
-  }
-}
-```
-
-## 9. Connect to Codex
-
-```json
-{
-  "memd": {
-    "command": "/absolute/path/to/memd",
-    "type": "stdio",
-    "args": ["--mode", "mcp"]
-  }
-}
-```
-
-## 10. Initialize guardrails (recommended)
+Register the shared daemon with current clients:
 
 ```bash
-./target/release/memd --mode cli init --tenant-id quickstart_tenant
+codex mcp add memd --url http://127.0.0.1:8787/mcp
+claude mcp add --transport http --scope user memd http://127.0.0.1:8787/mcp
 ```
 
-This creates repository guardrail files and MCP snippets, and by default updates:
+## 7. Optional ONNX cross-encoder reranker
 
-- `~/.codex/mcp_config.json`
-- `~/.config/claude/mcp_settings.json`
+ONNX here means the optional cross-encoder reranker, not the default embedding path.
 
-Scope options:
+Build it with:
 
 ```bash
-# Default local scope (read/write current tenant only)
-./target/release/memd init --tenant-id quickstart_tenant --scope local
-
-# Global read scope (read all discovered tenants, write current tenant only)
-./target/release/memd init --tenant-id quickstart_tenant --scope global
-
-# Explicit allowlist read scope
-./target/release/memd init --tenant-id quickstart_tenant --scope allowlist --allow-tenants shared_arch,shared_debug
+cargo build --release --features cross-encoder-reranker
 ```
 
-## 11. Validate locally
+Run it with:
 
 ```bash
-cargo test -p memd
-cargo test -p memd-evals
-RUST_LOG=error cargo run -p memd-evals -- --suite mcp --skip-build
+./target/release/memd --mode mcp --search-variant hybrid-cross-encoder
 ```
 
-## 12. Export memory for human review
-
-Use the CLI export command to inspect what `memd` has stored for a tenant:
+For the real ONNX smoke test:
 
 ```bash
-./target/release/memd --mode cli export \
-  --tenant-id quickstart_tenant \
-  --format markdown \
-  --output memd-export.md
+cargo test -p memd --features cross-encoder-reranker smoke_real_onnx_scores_relevant_pair_higher -- --ignored --nocapture
 ```
 
-Other formats:
-
-- `--format json`
-- `--format jsonl`
-
-Optional quality/eval suites:
-
-```bash
-RUST_LOG=error cargo run -p memd-evals -- --suite hybrid --skip-build
-RUST_LOG=error cargo run -p memd-evals -- --suite retrieval --skip-build
-RUST_LOG=error cargo run -p memd-evals -- --suite true-semantic --skip-build
-```
-
-Offline benchmark protocol:
-
-```bash
-./evals/scripts/run_offline_retrieval_benchmark.sh --model all-minilm --seed 42
-```
-
-## 13. Troubleshooting
-
-- `invalid 'k': must be between 1 and 100`: adjust `k`
-- `invalid filters.time_range.*`: use ISO 8601 timestamps
-- `tenant_id ... invalid characters`: use only letters, digits, underscores
-- `memory.compact` returns skipped: expected in in-memory mode, or no thresholds exceeded in persistent mode
+See the ONNX section in [README.md](/home/fschulz/dev/software/memd/README.md) for cache location, runtime downloads, and env vars.

@@ -1,0 +1,969 @@
+{
+  "description": "Phase 5 benchmark corpus for memd task-oriented knowledge artifacts with confusable sibling tasks",
+  "version": "2026-03-21.v2",
+  "notes": {
+    "purpose": "Compare memd chunk-native baseline search against memd task-memory search on the same underlying task knowledge.",
+    "hardening": "Sibling tasks share project scopes, tools, datasets, and overlapping vocabulary so project-scoped systems cannot separate cases trivially.",
+    "systems": [
+      "memd_chunk_baseline",
+      "memd_task_memory"
+    ]
+  },
+  "cases": [
+    {
+      "case_id": "jwt_timezone_fix",
+      "project_id": "phase5_auth_reliability",
+      "goal": "Diagnose intermittent JWT validation failures",
+      "motivation": "Production auth requests were intermittently rejected and other agents needed a shared history of the investigation",
+      "hypothesis": "Timestamp normalization differed between the token issuer and validator",
+      "scientific_question": "Which part of the auth path introduced timestamp skew?",
+      "dataset_refs": [
+        {"name": "auth_logs", "version": "2026-03-21"}
+      ],
+      "entity_refs": [
+        {"name": "JwtService", "entity_type": "service", "role": "validator"}
+      ],
+      "expected_outputs": [
+        "root cause summary",
+        "validated fix",
+        "follow-up checklist"
+      ],
+      "progress": {
+        "summary": "Mapped token issuance and validation paths",
+        "blockers": [
+          "Clock skew source was still unknown"
+        ],
+        "failed_attempts": [
+          "A config-only explanation did not match the auth logs"
+        ],
+        "next_step": "Run focused auth tests with UTC normalization checks"
+      },
+      "run_start": {
+        "tool_name": "cargo-test",
+        "tool_version": "rust-1.87",
+        "command": "cargo test auth::jwt -- --nocapture",
+        "why_chosen": "Needed fast feedback on the timezone hypothesis",
+        "parameters": {
+          "module": "auth::jwt",
+          "include_expiration_cases": true
+        },
+        "inputs": [
+          "src/auth/jwt.rs",
+          "tests/auth_jwt.rs"
+        ],
+        "summary": "Validate JWT expiration behavior"
+      },
+      "run_finish": {
+        "status": "completed",
+        "outputs": [
+          "7 tests passed",
+          "1 test failed"
+        ],
+        "metrics": {
+          "tests_passed": 7,
+          "tests_failed": 1
+        },
+        "notes": "The remaining failure only appeared when local timezone offsets were mixed with UTC claims",
+        "validation": [
+          "Token signing logic was correct",
+          "Expiration handling still needed normalization fixes"
+        ]
+      },
+      "evidence": {
+        "summary": "Failure only appeared when local timezone offsets were mixed with UTC claims",
+        "evidence_kind": "test_failure",
+        "supports_claim": true,
+        "metric_name": "failed_case_count",
+        "metric_value": 1
+      },
+      "finish": {
+        "what_worked": [
+          "UTC normalization fixed the validation failures",
+          "The focused auth tests isolated the failure quickly"
+        ],
+        "what_failed": [
+          "The initial implementation mixed local server time and UTC claims"
+        ],
+        "validation": [
+          "All auth::jwt tests passed after normalization",
+          "Refresh flow remained backward compatible"
+        ],
+        "uncertainty": [
+          "Operational rollout still needed a checklist"
+        ],
+        "followups": [
+          "Document key rotation procedures",
+          "Add integration tests for multi-service validation"
+        ],
+        "confidence": 0.9
+      }
+    },
+    {
+      "case_id": "jwt_refresh_grace_window",
+      "project_id": "phase5_auth_reliability",
+      "goal": "Stabilize refresh token acceptance after reissue",
+      "motivation": "Agents needed a shared record of why freshly rotated refresh tokens were sometimes rejected during incident cleanup",
+      "hypothesis": "The refresh grace window compared against the original issue timestamp instead of the rotated_at timestamp",
+      "scientific_question": "Why were newly reissued refresh tokens still failing validation?",
+      "dataset_refs": [
+        {"name": "auth_logs", "version": "2026-03-21"}
+      ],
+      "entity_refs": [
+        {"name": "JwtService", "entity_type": "service", "role": "refresh validator"}
+      ],
+      "expected_outputs": [
+        "root cause summary",
+        "validated fix",
+        "regression checklist"
+      ],
+      "progress": {
+        "summary": "Traced refresh-token rotation and acceptance path",
+        "blockers": [
+          "Need to confirm whether grace-window comparisons use rotated_at or issued_at"
+        ],
+        "failed_attempts": [
+          "A cache invalidation explanation did not match the refresh audit sequence"
+        ],
+        "next_step": "Run focused refresh acceptance tests around rotated_at comparisons"
+      },
+      "run_start": {
+        "tool_name": "cargo-test",
+        "tool_version": "rust-1.87",
+        "command": "cargo test auth::refresh -- --nocapture",
+        "why_chosen": "Needed tight feedback on the rotation timestamp hypothesis",
+        "parameters": {
+          "module": "auth::refresh",
+          "include_rotation_cases": true
+        },
+        "inputs": [
+          "src/auth/refresh.rs",
+          "tests/auth_refresh.rs"
+        ],
+        "summary": "Validate refresh token grace window behavior"
+      },
+      "run_finish": {
+        "status": "completed",
+        "outputs": [
+          "6 tests passed",
+          "1 test failed"
+        ],
+        "metrics": {
+          "tests_passed": 6,
+          "tests_failed": 1
+        },
+        "notes": "The remaining failure only appeared when the grace window was calculated from the original issue timestamp after token rotation",
+        "validation": [
+          "Refresh token signatures were correct",
+          "Grace-window comparison still needed rotated_at normalization"
+        ]
+      },
+      "evidence": {
+        "summary": "Failures disappeared once the grace period was keyed to rotated_at instead of issued_at",
+        "evidence_kind": "test_result",
+        "supports_claim": true,
+        "metric_name": "failed_case_count",
+        "metric_value": 1
+      },
+      "finish": {
+        "what_worked": [
+          "Using rotated_at for grace-window checks stopped fresh-token rejections",
+          "Focused refresh tests isolated the timestamp comparison quickly"
+        ],
+        "what_failed": [
+          "The first implementation compared the grace window against issued_at after rotation"
+        ],
+        "validation": [
+          "All auth::refresh tests passed after the rotated_at fix",
+          "Existing sessions stayed valid through the grace period"
+        ],
+        "uncertainty": [
+          "Need rollout guardrails for mixed-version auth services"
+        ],
+        "followups": [
+          "Document refresh token rotation invariants",
+          "Add multi-service refresh acceptance tests"
+        ],
+        "confidence": 0.88
+      }
+    },
+    {
+      "case_id": "mmseqs_marker_search",
+      "project_id": "phase5_regulator_screening",
+      "goal": "Identify marker hits for candidate regulators",
+      "motivation": "Agents needed a consistent record of search parameters and hit quality across repeated homology runs",
+      "hypothesis": "MMseqs with moderate sensitivity would recover candidate regulators without excessive noise",
+      "scientific_question": "Which homology search settings recovered the strongest regulator candidates?",
+      "dataset_refs": [
+        {"name": "screen_counts", "version": "v3"}
+      ],
+      "entity_refs": [
+        {"name": "RpoS", "entity_type": "protein", "role": "candidate regulator"}
+      ],
+      "expected_outputs": [
+        "candidate hit list",
+        "parameter summary",
+        "evidence note"
+      ],
+      "progress": {
+        "summary": "Established the candidate search plan and narrowed the tool choice",
+        "blockers": [
+          "Need a sensitivity setting that balances recall and precision"
+        ],
+        "failed_attempts": [
+          "The first BLAST configuration returned too many low-quality hits"
+        ],
+        "next_step": "Run MMseqs with moderate sensitivity and inspect bitscores"
+      },
+      "run_start": {
+        "tool_name": "mmseqs",
+        "tool_version": "15",
+        "command": "mmseqs search db query out tmp --s 7.5",
+        "why_chosen": "MMseqs was faster than BLAST and supported iterative sensitivity tuning",
+        "parameters": {
+          "sensitivity": 7.5,
+          "min_seq_id": 0.3
+        },
+        "inputs": [
+          "query.faa",
+          "regulator_db"
+        ],
+        "summary": "Candidate regulator homology search"
+      },
+      "run_finish": {
+        "status": "completed",
+        "outputs": [
+          "top hit RpoS_bitscore=312.4",
+          "12 candidate hits retained"
+        ],
+        "metrics": {
+          "top_hit_bitscore": 312.4,
+          "candidate_hits": 12
+        },
+        "notes": "Moderate sensitivity recovered the best candidate hit without flooding the result set",
+        "validation": [
+          "Top bitscore remained stable across reruns"
+        ]
+      },
+      "evidence": {
+        "summary": "The top RpoS hit exceeded the curated bitscore threshold",
+        "evidence_kind": "benchmark_result",
+        "supports_claim": true,
+        "metric_name": "top_hit_bitscore",
+        "metric_value": 312.4
+      },
+      "finish": {
+        "what_worked": [
+          "MMseqs at sensitivity 7.5 recovered the strongest candidate",
+          "Bitscore stability across reruns increased confidence"
+        ],
+        "what_failed": [
+          "The earlier BLAST configuration returned too many low-quality hits"
+        ],
+        "validation": [
+          "Top candidate remained stable across repeated runs"
+        ],
+        "uncertainty": [
+          "Need wet-lab follow-up for the weaker candidates"
+        ],
+        "followups": [
+          "Validate RpoS experimentally",
+          "Review lower-ranked hits with domain filters"
+        ],
+        "confidence": 0.86
+      }
+    },
+    {
+      "case_id": "mmseqs_sigma_factor_search",
+      "project_id": "phase5_regulator_screening",
+      "goal": "Identify marker hits for secondary sigma factor candidates",
+      "motivation": "Agents needed a consistent record of sigma-factor search parameters and hit quality across repeated regulator screens",
+      "hypothesis": "MMseqs with slightly lower sensitivity would recover secondary sigma factors while avoiding weak low-complexity matches",
+      "scientific_question": "Which MMseqs settings recovered the strongest secondary sigma factor candidates?",
+      "dataset_refs": [
+        {"name": "screen_counts", "version": "v3"}
+      ],
+      "entity_refs": [
+        {"name": "RpoE", "entity_type": "protein", "role": "secondary sigma factor"}
+      ],
+      "expected_outputs": [
+        "candidate hit list",
+        "parameter summary",
+        "evidence note"
+      ],
+      "progress": {
+        "summary": "Narrowed the screen to secondary sigma factors after the broad regulator sweep",
+        "blockers": [
+          "Need a setting that avoids short low-complexity matches without losing the main signal"
+        ],
+        "failed_attempts": [
+          "The first HMMER pass returned too many short low-complexity alignments"
+        ],
+        "next_step": "Run MMseqs with lower sensitivity and inspect secondary sigma factor bitscores"
+      },
+      "run_start": {
+        "tool_name": "mmseqs",
+        "tool_version": "15",
+        "command": "mmseqs search db sigma_query out tmp --s 5.5",
+        "why_chosen": "MMseqs let us retune sensitivity quickly while keeping the same regulator database",
+        "parameters": {
+          "sensitivity": 5.5,
+          "min_seq_id": 0.35
+        },
+        "inputs": [
+          "sigma_query.faa",
+          "regulator_db"
+        ],
+        "summary": "Secondary sigma factor homology search"
+      },
+      "run_finish": {
+        "status": "completed",
+        "outputs": [
+          "top hit RpoE_bitscore=276.8",
+          "9 candidate hits retained"
+        ],
+        "metrics": {
+          "top_hit_bitscore": 276.8,
+          "candidate_hits": 9
+        },
+        "notes": "Lower sensitivity kept the main RpoE-like hit while removing most of the low-complexity noise",
+        "validation": [
+          "Top secondary sigma factor hit remained stable across reruns"
+        ]
+      },
+      "evidence": {
+        "summary": "The top RpoE-like hit stayed above the curated bitscore threshold after lowering sensitivity",
+        "evidence_kind": "benchmark_result",
+        "supports_claim": true,
+        "metric_name": "top_hit_bitscore",
+        "metric_value": 276.8
+      },
+      "finish": {
+        "what_worked": [
+          "MMseqs at sensitivity 5.5 kept the strongest secondary sigma factor candidate",
+          "Lower sensitivity reduced low-complexity false positives"
+        ],
+        "what_failed": [
+          "The first HMMER configuration returned too many short weak matches"
+        ],
+        "validation": [
+          "Top RpoE-like candidate remained stable across repeated runs"
+        ],
+        "uncertainty": [
+          "Need domain-level review before ranking weaker sigma candidates"
+        ],
+        "followups": [
+          "Validate RpoE experimentally",
+          "Review lower-ranked hits with domain architecture filters"
+        ],
+        "confidence": 0.83
+      }
+    },
+    {
+      "case_id": "kafka_queue_selection",
+      "project_id": "phase5_event_bus_selection",
+      "goal": "Select the event bus for the microservices platform",
+      "motivation": "The platform needed durable event replay and throughput guarantees while preserving an auditable decision trail",
+      "hypothesis": "Kafka would satisfy replay and throughput requirements better than RabbitMQ",
+      "scientific_question": "Which event bus best matched replay, throughput, and operability constraints?",
+      "dataset_refs": [
+        {"name": "platform_requirements", "version": "adr-input-v2"}
+      ],
+      "entity_refs": [
+        {"name": "Kafka", "entity_type": "technology", "role": "candidate"}
+      ],
+      "expected_outputs": [
+        "decision summary",
+        "trade-off list",
+        "follow-up migration plan"
+      ],
+      "progress": {
+        "summary": "Narrowed the evaluation to Kafka versus RabbitMQ",
+        "blockers": [
+          "Local development footprint for Kafka still needed validation"
+        ],
+        "failed_attempts": [
+          "The first local three-broker prototype was too operationally heavy"
+        ],
+        "next_step": "Benchmark throughput and replay behavior under a shared workload"
+      },
+      "run_start": {
+        "tool_name": "benchmark-runner",
+        "tool_version": "1.2.0",
+        "command": "benchmark-runner eventbus --candidates kafka rabbitmq",
+        "why_chosen": "Needed comparable throughput and replay measurements under the same workload",
+        "parameters": {
+          "messages_per_second": 100000,
+          "replay_test": true
+        },
+        "inputs": [
+          "platform_requirements",
+          "benchmark_scenarios.yaml"
+        ],
+        "summary": "Event bus throughput and replay benchmark"
+      },
+      "run_finish": {
+        "status": "completed",
+        "outputs": [
+          "kafka_throughput=112000",
+          "rabbitmq_throughput=38000",
+          "replay_supported=true only for kafka"
+        ],
+        "metrics": {
+          "kafka_mps": 112000,
+          "rabbitmq_mps": 38000
+        },
+        "notes": "Kafka satisfied throughput and replay goals; RabbitMQ remained operationally simpler",
+        "validation": [
+          "Benchmark scenario reproduced twice with similar results"
+        ]
+      },
+      "evidence": {
+        "summary": "Kafka exceeded throughput requirements and uniquely satisfied replay requirements",
+        "evidence_kind": "benchmark_result",
+        "supports_claim": true,
+        "metric_name": "kafka_mps",
+        "metric_value": 112000
+      },
+      "finish": {
+        "what_worked": [
+          "Kafka satisfied replay and throughput requirements",
+          "A lighter local single-broker workflow reduced onboarding cost"
+        ],
+        "what_failed": [
+          "RabbitMQ did not satisfy replay requirements",
+          "The first multi-broker local prototype was too operationally heavy"
+        ],
+        "validation": [
+          "Benchmark outputs matched requirements",
+          "Operational review confirmed the lighter local workflow"
+        ],
+        "uncertainty": [
+          "Production observability costs still need forecasting"
+        ],
+        "followups": [
+          "Write the ADR",
+          "Publish local setup guidance"
+        ],
+        "confidence": 0.84
+      }
+    },
+    {
+      "case_id": "nats_jetstream_selection",
+      "project_id": "phase5_event_bus_selection",
+      "goal": "Select the event bus for control-plane notifications",
+      "motivation": "The control plane needed durable delivery with lower local ops cost while preserving an auditable decision trail",
+      "hypothesis": "NATS JetStream would satisfy latency and operability constraints better than Kafka for the control plane",
+      "scientific_question": "Which event bus best matched low-latency control-plane delivery and manageable local operations?",
+      "dataset_refs": [
+        {"name": "platform_requirements", "version": "adr-input-v2"}
+      ],
+      "entity_refs": [
+        {"name": "NATS JetStream", "entity_type": "technology", "role": "candidate"}
+      ],
+      "expected_outputs": [
+        "decision summary",
+        "trade-off list",
+        "local rollout plan"
+      ],
+      "progress": {
+        "summary": "Narrowed the control-plane evaluation to NATS JetStream versus Kafka",
+        "blockers": [
+          "Need to confirm whether a lighter local setup still meets retention needs"
+        ],
+        "failed_attempts": [
+          "The first Kafka-first control-plane prototype was heavier than the team wanted for local development"
+        ],
+        "next_step": "Benchmark latency, replay depth, and local setup complexity under a shared workload"
+      },
+      "run_start": {
+        "tool_name": "benchmark-runner",
+        "tool_version": "1.2.0",
+        "command": "benchmark-runner eventbus --candidates nats-jetstream kafka",
+        "why_chosen": "Needed comparable latency, replay, and operator-footprint measurements under the same workload",
+        "parameters": {
+          "messages_per_second": 50000,
+          "replay_test": true,
+          "latency_budget_ms": 25
+        },
+        "inputs": [
+          "platform_requirements",
+          "benchmark_scenarios.yaml"
+        ],
+        "summary": "Control-plane event bus latency and operability benchmark"
+      },
+      "run_finish": {
+        "status": "completed",
+        "outputs": [
+          "nats_p99_latency_ms=12",
+          "kafka_p99_latency_ms=29",
+          "operator_checklist_steps=4 for nats"
+        ],
+        "metrics": {
+          "nats_p99_latency_ms": 12,
+          "kafka_p99_latency_ms": 29,
+          "operator_checklist_steps": 4
+        },
+        "notes": "NATS JetStream met the latency target and kept the local operator checklist lighter, while Kafka still offered deeper replay",
+        "validation": [
+          "Benchmark scenario reproduced twice with similar latency results"
+        ]
+      },
+      "evidence": {
+        "summary": "NATS JetStream stayed under the latency budget and required fewer local setup steps",
+        "evidence_kind": "benchmark_result",
+        "supports_claim": true,
+        "metric_name": "nats_p99_latency_ms",
+        "metric_value": 12
+      },
+      "finish": {
+        "what_worked": [
+          "NATS JetStream met the control-plane latency target",
+          "The lighter local setup reduced onboarding cost"
+        ],
+        "what_failed": [
+          "The first Kafka-first control-plane prototype was too operationally heavy for the team"
+        ],
+        "validation": [
+          "Latency stayed within budget across repeated benchmark runs",
+          "Retention checks confirmed the control plane only needed short replay windows"
+        ],
+        "uncertainty": [
+          "Long-term multi-region replay needs still need a separate review"
+        ],
+        "followups": [
+          "Write the control-plane ADR",
+          "Document the local JetStream bootstrap flow"
+        ],
+        "confidence": 0.82
+      }
+    },
+    {
+      "case_id": "codebase_indexing",
+      "project_id": "phase5_repo_indexing",
+      "goal": "Index the repository for cross-agent code search",
+      "motivation": "Agents needed shared searchable access to code patterns, definitions, and architecture context",
+      "hypothesis": "Batch indexing source files with path metadata and subsystem tags would provide enough retrieval quality for code understanding",
+      "scientific_question": "What indexing approach gives useful search coverage without excessive ingest cost?",
+      "dataset_refs": [
+        {"name": "repository_snapshot", "version": "HEAD"}
+      ],
+      "entity_refs": [
+        {"name": "AuthMiddleware", "entity_type": "symbol", "role": "indexed symbol"}
+      ],
+      "expected_outputs": [
+        "indexed code chunks",
+        "coverage summary",
+        "follow-up gaps"
+      ],
+      "progress": {
+        "summary": "Indexed Rust source successfully but documentation retrieval remained noisy",
+        "blockers": [
+          "Markdown architecture docs were not chunked with subsystem tags"
+        ],
+        "failed_attempts": [
+          "A naive docs-only batch caused noisy retrieval without path-derived tags"
+        ],
+        "next_step": "Add targeted indexing for architecture docs with ctx tags"
+      },
+      "run_start": {
+        "tool_name": "index-codebase.sh",
+        "tool_version": "phase5",
+        "command": "./scripts/index-codebase.sh",
+        "why_chosen": "Needed reproducible batch ingest with file-path-derived tags",
+        "parameters": {
+          "languages": ["rust"],
+          "batch_size": 200
+        },
+        "inputs": [
+          "src/**/*.rs",
+          "tests/**/*.rs",
+          "README.md"
+        ],
+        "summary": "Repository indexing run"
+      },
+      "run_finish": {
+        "status": "completed",
+        "outputs": [
+          "214 files indexed",
+          "4 files skipped"
+        ],
+        "metrics": {
+          "files_indexed": 214,
+          "files_skipped": 4
+        },
+        "notes": "Binary assets and generated files were intentionally skipped",
+        "validation": [
+          "Spot-check searches returned expected API and database code"
+        ]
+      },
+      "evidence": {
+        "summary": "Spot-check searches returned the expected API and database files after indexing",
+        "evidence_kind": "spot_check",
+        "supports_claim": true,
+        "metric_name": "files_indexed",
+        "metric_value": 214
+      },
+      "finish": {
+        "what_worked": [
+          "Batch ingest of Rust files produced useful code search coverage",
+          "Path-derived subsystem tags improved discovery"
+        ],
+        "what_failed": [
+          "Unstructured documentation ingest was too noisy",
+          "Generated files added low-value retrieval candidates"
+        ],
+        "validation": [
+          "Searches for API handlers and database helpers returned the expected files"
+        ],
+        "uncertainty": [
+          "Documentation retrieval still needs a better chunking strategy"
+        ],
+        "followups": [
+          "Index architecture docs separately",
+          "Add language-specific chunking for frontend files"
+        ],
+        "confidence": 0.81
+      }
+    },
+    {
+      "case_id": "frontend_route_indexing",
+      "project_id": "phase5_repo_indexing",
+      "goal": "Index frontend routes and UI docs for cross-agent search",
+      "motivation": "Agents needed shared searchable access to route ownership, component usage, and UI architecture notes",
+      "hypothesis": "Batch indexing frontend files with route-segment tags would make route and component search useful without indexing every build artifact",
+      "scientific_question": "What indexing approach gives useful frontend route coverage without excessive ingest noise?",
+      "dataset_refs": [
+        {"name": "repository_snapshot", "version": "HEAD"}
+      ],
+      "entity_refs": [
+        {"name": "BillingRoutes", "entity_type": "symbol", "role": "indexed symbol"}
+      ],
+      "expected_outputs": [
+        "indexed frontend chunks",
+        "coverage summary",
+        "follow-up gaps"
+      ],
+      "progress": {
+        "summary": "Indexed frontend source successfully but route alias lookups remained noisy",
+        "blockers": [
+          "MDX docs and route aliases were not chunked with route-segment tags"
+        ],
+        "failed_attempts": [
+          "A broad docs-plus-storybook batch caused noisy retrieval without route-derived tags"
+        ],
+        "next_step": "Add route-segment tags to frontend and MDX indexing"
+      },
+      "run_start": {
+        "tool_name": "index-codebase.sh",
+        "tool_version": "phase5",
+        "command": "./scripts/index-codebase.sh --frontend",
+        "why_chosen": "Needed reproducible batch ingest with route-derived tags for UI files",
+        "parameters": {
+          "languages": ["typescript", "tsx", "mdx"],
+          "batch_size": 160
+        },
+        "inputs": [
+          "web/src/**/*.tsx",
+          "web/src/routes/**/*.ts",
+          "docs/ui/**/*.mdx"
+        ],
+        "summary": "Frontend route and UI indexing run"
+      },
+      "run_finish": {
+        "status": "completed",
+        "outputs": [
+          "188 files indexed",
+          "9 files skipped"
+        ],
+        "metrics": {
+          "files_indexed": 188,
+          "files_skipped": 9
+        },
+        "notes": "Generated storybook output and minified bundles were intentionally skipped",
+        "validation": [
+          "Spot-check searches returned the expected route modules and billing components"
+        ]
+      },
+      "evidence": {
+        "summary": "Spot-check searches returned the expected route modules and billing components after indexing",
+        "evidence_kind": "spot_check",
+        "supports_claim": true,
+        "metric_name": "files_indexed",
+        "metric_value": 188
+      },
+      "finish": {
+        "what_worked": [
+          "Batch ingest of frontend files produced useful route and component search coverage",
+          "Route-derived tags improved discovery for UI flows"
+        ],
+        "what_failed": [
+          "A broad docs-plus-storybook batch was too noisy",
+          "Minified bundles added low-value retrieval candidates"
+        ],
+        "validation": [
+          "Searches for billing routes and shared UI helpers returned the expected files"
+        ],
+        "uncertainty": [
+          "Route aliases and MDX docs still need better chunking"
+        ],
+        "followups": [
+          "Index UI docs separately with route tags",
+          "Add component ownership metadata"
+        ],
+        "confidence": 0.79
+      }
+    }
+  ],
+  "queries": [
+    {
+      "id": "q_task_goal_jwt",
+      "case_id": "jwt_timezone_fix",
+      "query_type": "task_lifecycle",
+      "query": "why were token validation failures being investigated",
+      "target_facet": "task_goal",
+      "task_filters": {
+        "artifact_kind": "task_start"
+      }
+    },
+    {
+      "id": "q_failed_jwt",
+      "case_id": "jwt_timezone_fix",
+      "query_type": "failed_attempt",
+      "query": "what failed in the JWT auth implementation",
+      "target_facet": "failed",
+      "task_filters": {
+        "artifact_kind": "task_finish"
+      }
+    },
+    {
+      "id": "q_paraphrase_jwt_skew",
+      "case_id": "jwt_timezone_fix",
+      "query_type": "failed_attempt",
+      "query": "where in auth did local offset handling leak into UTC token claims",
+      "target_facet": "failed",
+      "task_filters": {
+        "artifact_kind": "task_finish"
+      }
+    },
+    {
+      "id": "q_failed_refresh_window",
+      "case_id": "jwt_refresh_grace_window",
+      "query_type": "failed_attempt",
+      "query": "what caused freshly rotated refresh tokens to still be rejected",
+      "target_facet": "failed",
+      "task_filters": {
+        "artifact_kind": "task_finish"
+      }
+    },
+    {
+      "id": "q_why_refresh_runner",
+      "case_id": "jwt_refresh_grace_window",
+      "query_type": "why_chosen",
+      "query": "why were cargo tests used for the refresh grace window probe",
+      "target_facet": "run",
+      "task_filters": {
+        "artifact_kind": "run_start",
+        "tool_name": "cargo-test",
+        "dataset_name": "auth_logs",
+        "dataset_version": "2026-03-21"
+      }
+    },
+    {
+      "id": "q_evidence_refresh",
+      "case_id": "jwt_refresh_grace_window",
+      "query_type": "evidence_lookup",
+      "query": "what evidence showed rotated_at should drive the refresh grace period",
+      "target_facet": "evidence",
+      "task_filters": {
+        "artifact_kind": "evidence",
+        "dataset_name": "auth_logs"
+      }
+    },
+    {
+      "id": "q_params_mmseqs",
+      "case_id": "mmseqs_marker_search",
+      "query_type": "parameter_lookup",
+      "query": "which sensitivity parameter was used in the mmseqs search",
+      "target_facet": "run",
+      "task_filters": {
+        "artifact_kind": "run_start",
+        "tool_name": "mmseqs",
+        "dataset_name": "screen_counts",
+        "dataset_version": "v3"
+      }
+    },
+    {
+      "id": "q_why_mmseqs",
+      "case_id": "mmseqs_marker_search",
+      "query_type": "why_chosen",
+      "query": "why was mmseqs chosen for candidate regulator search",
+      "target_facet": "run",
+      "task_filters": {
+        "artifact_kind": "run_start",
+        "tool_name": "mmseqs"
+      }
+    },
+    {
+      "id": "q_evidence_mmseqs",
+      "case_id": "mmseqs_marker_search",
+      "query_type": "evidence_lookup",
+      "query": "what evidence supported the top regulator hit",
+      "target_facet": "evidence",
+      "task_filters": {
+        "artifact_kind": "evidence",
+        "dataset_name": "screen_counts"
+      }
+    },
+    {
+      "id": "q_paraphrase_mmseqs",
+      "case_id": "mmseqs_marker_search",
+      "query_type": "parameter_lookup",
+      "query": "which regulator scan used moderate mmseqs sensitivity instead of the noisy blast setup",
+      "target_facet": "run",
+      "task_filters": {
+        "artifact_kind": "run_start",
+        "tool_name": "mmseqs",
+        "dataset_name": "screen_counts"
+      }
+    },
+    {
+      "id": "q_params_sigma",
+      "case_id": "mmseqs_sigma_factor_search",
+      "query_type": "parameter_lookup",
+      "query": "which sensitivity setting was used for the secondary sigma factor search",
+      "target_facet": "run",
+      "task_filters": {
+        "artifact_kind": "run_start",
+        "tool_name": "mmseqs",
+        "dataset_name": "screen_counts",
+        "dataset_version": "v3"
+      }
+    },
+    {
+      "id": "q_evidence_sigma",
+      "case_id": "mmseqs_sigma_factor_search",
+      "query_type": "evidence_lookup",
+      "query": "what evidence kept the secondary sigma factor hit above threshold",
+      "target_facet": "evidence",
+      "task_filters": {
+        "artifact_kind": "evidence",
+        "dataset_name": "screen_counts"
+      }
+    },
+    {
+      "id": "q_failed_kafka",
+      "case_id": "kafka_queue_selection",
+      "query_type": "failed_attempt",
+      "query": "what failed in the Kafka evaluation prototype",
+      "target_facet": "failed",
+      "task_filters": {
+        "artifact_kind": "task_finish"
+      }
+    },
+    {
+      "id": "q_why_kafka_runner",
+      "case_id": "kafka_queue_selection",
+      "query_type": "why_chosen",
+      "query": "why was benchmark-runner used for queue selection",
+      "target_facet": "run",
+      "task_filters": {
+        "artifact_kind": "run_start",
+        "tool_name": "benchmark-runner"
+      }
+    },
+    {
+      "id": "q_evidence_kafka",
+      "case_id": "kafka_queue_selection",
+      "query_type": "evidence_lookup",
+      "query": "which queue exceeded throughput requirements",
+      "target_facet": "evidence",
+      "task_filters": {
+        "artifact_kind": "evidence"
+      }
+    },
+    {
+      "id": "q_decision_nats",
+      "case_id": "nats_jetstream_selection",
+      "query_type": "decision_basis",
+      "query": "which bus won because operator burden stayed lower and p99 latency stayed tighter",
+      "target_facet": "evidence",
+      "task_filters": {
+        "artifact_kind": "evidence",
+        "dataset_name": "platform_requirements"
+      }
+    },
+    {
+      "id": "q_failed_nats_proto",
+      "case_id": "nats_jetstream_selection",
+      "query_type": "failed_attempt",
+      "query": "what failed in the first kafka-first control-plane prototype",
+      "target_facet": "failed",
+      "task_filters": {
+        "artifact_kind": "task_finish"
+      }
+    },
+    {
+      "id": "q_why_nats_runner",
+      "case_id": "nats_jetstream_selection",
+      "query_type": "why_chosen",
+      "query": "why was benchmark-runner used for the control-plane event bus comparison",
+      "target_facet": "run",
+      "task_filters": {
+        "artifact_kind": "run_start",
+        "tool_name": "benchmark-runner",
+        "dataset_name": "platform_requirements",
+        "dataset_version": "adr-input-v2"
+      }
+    },
+    {
+      "id": "q_progress_indexing",
+      "case_id": "codebase_indexing",
+      "query_type": "task_lifecycle",
+      "query": "what indexing gaps remained for documentation",
+      "target_facet": "task_summary",
+      "task_filters": {
+        "artifact_kind": "task_progress"
+      }
+    },
+    {
+      "id": "q_validation_indexing",
+      "case_id": "codebase_indexing",
+      "query_type": "evidence_lookup",
+      "query": "what validated the code indexing workflow",
+      "target_facet": "validation",
+      "task_filters": {
+        "artifact_kind": "task_finish"
+      }
+    },
+    {
+      "id": "q_paraphrase_indexing",
+      "case_id": "codebase_indexing",
+      "query_type": "task_lifecycle",
+      "query": "what still made architecture docs retrieval noisy after the main repo index",
+      "target_facet": "task_summary",
+      "task_filters": {
+        "artifact_kind": "task_progress"
+      }
+    },
+    {
+      "id": "q_progress_frontend",
+      "case_id": "frontend_route_indexing",
+      "query_type": "task_lifecycle",
+      "query": "what indexing gaps remained for frontend route lookups",
+      "target_facet": "task_summary",
+      "task_filters": {
+        "artifact_kind": "task_progress"
+      }
+    },
+    {
+      "id": "q_validation_frontend",
+      "case_id": "frontend_route_indexing",
+      "query_type": "evidence_lookup",
+      "query": "what validated the frontend route indexing workflow",
+      "target_facet": "validation",
+      "task_filters": {
+        "artifact_kind": "task_finish"
+      }
+    }
+  ]
+}

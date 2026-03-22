@@ -78,6 +78,12 @@ pub fn run_regression_gate(config: RegressionConfig) -> Vec<TestResult> {
         }
     };
 
+    if let Err(err) = validate_report_compatibility(&baseline, &candidate) {
+        results.push(TestResult::fail("P6_regression_align_reports", &err));
+        return results;
+    }
+    results.push(TestResult::pass("P6_regression_align_reports"));
+
     let aligned = align_metrics(&baseline.query_metrics, &candidate.query_metrics);
     if aligned.is_empty() {
         results.push(TestResult::fail(
@@ -91,7 +97,9 @@ pub fn run_regression_gate(config: RegressionConfig) -> Vec<TestResult> {
     let metrics = vec![
         evaluate_metric(
             "recall_at_10",
-            aligned.iter().map(|(b, c)| (b.recall_at_10, c.recall_at_10)),
+            aligned
+                .iter()
+                .map(|(b, c)| (b.recall_at_10, c.recall_at_10)),
             config.alpha,
             config.min_effect_size,
         ),
@@ -103,7 +111,9 @@ pub fn run_regression_gate(config: RegressionConfig) -> Vec<TestResult> {
         ),
         evaluate_metric(
             "precision_at_10",
-            aligned.iter().map(|(b, c)| (b.precision_at_10, c.precision_at_10)),
+            aligned
+                .iter()
+                .map(|(b, c)| (b.precision_at_10, c.precision_at_10)),
             config.alpha,
             config.min_effect_size,
         ),
@@ -152,6 +162,25 @@ pub fn run_regression_gate(config: RegressionConfig) -> Vec<TestResult> {
     results
 }
 
+fn validate_report_compatibility(
+    baseline: &BenchmarkReport,
+    candidate: &BenchmarkReport,
+) -> Result<(), String> {
+    if baseline.dataset_path != candidate.dataset_path {
+        return Err(format!(
+            "dataset mismatch: baseline='{}' candidate='{}'",
+            baseline.dataset_path, candidate.dataset_path
+        ));
+    }
+    if baseline.system_variant != candidate.system_variant {
+        return Err(format!(
+            "system_variant mismatch: baseline='{}' candidate='{}'",
+            baseline.system_variant, candidate.system_variant
+        ));
+    }
+    Ok(())
+}
+
 fn load_report(path: &PathBuf) -> Result<BenchmarkReport, String> {
     let content = fs::read_to_string(path).map_err(|err| format!("read file: {err}"))?;
     serde_json::from_str(&content).map_err(|err| format!("parse json: {err}"))
@@ -161,7 +190,8 @@ fn align_metrics<'a>(
     baseline: &'a [QueryMetrics],
     candidate: &'a [QueryMetrics],
 ) -> Vec<(&'a QueryMetrics, &'a QueryMetrics)> {
-    let mut baseline_by_query: HashMap<&str, &QueryMetrics> = HashMap::with_capacity(baseline.len());
+    let mut baseline_by_query: HashMap<&str, &QueryMetrics> =
+        HashMap::with_capacity(baseline.len());
     for metric in baseline {
         baseline_by_query.insert(metric.query_id.as_str(), metric);
     }
@@ -175,12 +205,7 @@ fn align_metrics<'a>(
     aligned
 }
 
-fn evaluate_metric<I>(
-    name: &str,
-    pairs: I,
-    alpha: f64,
-    min_effect_size: f64,
-) -> RegressionMetric
+fn evaluate_metric<I>(name: &str, pairs: I, alpha: f64, min_effect_size: f64) -> RegressionMetric
 where
     I: IntoIterator<Item = (f64, f64)>,
 {
@@ -252,7 +277,45 @@ fn now_unix_seconds() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::{BenchmarkSummary, MetricWithCi, PhaseTiming, Thresholds};
     use super::*;
+
+    fn dummy_report(dataset_path: &str, system_variant: &str) -> BenchmarkReport {
+        let metric = MetricWithCi {
+            mean: 0.0,
+            ci_lower: 0.0,
+            ci_upper: 0.0,
+            std_dev: 0.0,
+            n: 0,
+        };
+        BenchmarkReport {
+            generated_unix_seconds: 0,
+            dataset_path: dataset_path.to_string(),
+            dataset_description: "dummy".to_string(),
+            dataset_version: "v1".to_string(),
+            system_variant: system_variant.to_string(),
+            embedding_model: "all-minilm".to_string(),
+            bootstrap_iterations: 100,
+            seed: 42,
+            queries_evaluated: 0,
+            documents_indexed: 0,
+            thresholds: Thresholds {
+                recall: None,
+                mrr: None,
+                precision: None,
+            },
+            summary: BenchmarkSummary {
+                recall: metric.clone(),
+                mrr: metric.clone(),
+                precision: metric.clone(),
+                latency_ms: metric,
+            },
+            phase_timing: PhaseTiming::default(),
+            quality_gate_passed: true,
+            quality_gate_message: "ok".to_string(),
+            query_metrics: Vec::new(),
+        }
+    }
 
     #[test]
     fn gate_fails_on_significant_degradation() {
@@ -274,5 +337,13 @@ mod tests {
             0.2,
         );
         assert!(metric.gate_passed);
+    }
+
+    #[test]
+    fn compatibility_rejects_variant_mismatch() {
+        let baseline = dummy_report("dataset.json", "hybrid-feature");
+        let candidate = dummy_report("dataset.json", "dense-only");
+        let err = validate_report_compatibility(&baseline, &candidate).unwrap_err();
+        assert!(err.contains("system_variant mismatch"));
     }
 }
