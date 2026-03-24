@@ -19,25 +19,25 @@ use tracing::{debug, error, info, warn};
 
 use super::error::McpError;
 use super::handlers::{
-    handle_artifact_create, handle_artifact_get, handle_artifact_list_thread,
-    handle_artifact_search,
-    handle_context_find_relevant_context, handle_context_get_files_for_subsystem,
-    handle_context_get_hot_context, handle_context_list_subsystems,
-    handle_context_search_documents, handle_context_suggest_agent, handle_find_callers,
-    handle_find_definition, handle_find_errors, handle_find_imports, handle_find_references,
-    handle_find_tool_calls, handle_memory_add, handle_memory_add_batch, handle_memory_compact,
-    handle_memory_consolidate_episode, handle_memory_delete, handle_memory_feedback,
-    handle_memory_get, handle_memory_metrics, handle_memory_search, handle_memory_stats,
-    handle_task_add_evidence, handle_task_finish, handle_task_get, handle_task_progress,
-    handle_task_run_finish, handle_task_run_start, handle_task_search, handle_task_start,
-    AddBatchParams, AddParams, ArtifactCreateParams, ArtifactGetParams,
-    ArtifactListThreadParams, CompactParams, ConsolidateEpisodeParams,
-    ContextFindRelevantContextParams, ContextGetFilesForSubsystemParams,
+    handle_artifact_create, handle_artifact_find_decisions, handle_artifact_find_evidence,
+    handle_artifact_find_failures, handle_artifact_get, handle_artifact_list_thread,
+    handle_artifact_search, handle_context_brief_project, handle_context_find_relevant_context,
+    handle_context_get_files_for_subsystem, handle_context_get_hot_context,
+    handle_context_list_subsystems, handle_context_search_documents, handle_context_suggest_agent,
+    handle_find_callers, handle_find_definition, handle_find_errors, handle_find_imports,
+    handle_find_references, handle_find_tool_calls, handle_memory_add, handle_memory_add_batch,
+    handle_memory_compact, handle_memory_consolidate_episode, handle_memory_delete,
+    handle_memory_feedback, handle_memory_get, handle_memory_metrics, handle_memory_search,
+    handle_memory_stats, handle_task_add_evidence, handle_task_finish, handle_task_get,
+    handle_task_progress, handle_task_resume, handle_task_run_finish, handle_task_run_start,
+    handle_task_search, handle_task_start, AddBatchParams, AddParams, ArtifactCreateParams,
+    ArtifactGetParams, ArtifactLibraryParams, ArtifactListThreadParams, CompactParams,
+    ConsolidateEpisodeParams, ContextFindRelevantContextParams, ContextGetFilesForSubsystemParams,
     ContextGetHotContextParams, ContextListSubsystemsParams, ContextSearchDocumentsParams,
     ContextSuggestAgentParams, DeleteParams, FeedbackParams, FindCallersParams,
     FindDefinitionParams, FindErrorsParams, FindImportsParams, FindReferencesParams,
-    FindToolCallsParams, GetParams, MetricsParams, SearchParams, StatsParams,
-    TaskAddEvidenceParams, TaskFinishParams, TaskGetParams, TaskProgressParams,
+    FindToolCallsParams, GetParams, MetricsParams, ProjectBriefParams, SearchParams, StatsParams,
+    TaskAddEvidenceParams, TaskFinishParams, TaskGetParams, TaskProgressParams, TaskResumeParams,
     TaskRunFinishParams, TaskRunStartParams, TaskSearchParams, TaskStartParams,
 };
 use super::protocol::{Request, Response, RpcError};
@@ -376,6 +376,12 @@ impl<S: Store> McpServer<S> {
                 })?;
                 handle_task_search(&*self.store, params).await
             }
+            "task.resume" => {
+                let params: TaskResumeParams = serde_json::from_value(arguments).map_err(|e| {
+                    McpError::InvalidParams(format!("invalid task.resume params: {}", e))
+                })?;
+                handle_task_resume(&*self.store, params).await
+            }
             "artifact.create" => {
                 let params: ArtifactCreateParams =
                     serde_json::from_value(arguments).map_err(|e| {
@@ -394,6 +400,36 @@ impl<S: Store> McpServer<S> {
                     McpError::InvalidParams(format!("invalid artifact.search params: {}", e))
                 })?;
                 handle_artifact_search(&*self.store, params).await
+            }
+            "artifact.find_failures" => {
+                let params: ArtifactLibraryParams =
+                    serde_json::from_value(arguments).map_err(|e| {
+                        McpError::InvalidParams(format!(
+                            "invalid artifact.find_failures params: {}",
+                            e
+                        ))
+                    })?;
+                handle_artifact_find_failures(&*self.store, params).await
+            }
+            "artifact.find_decisions" => {
+                let params: ArtifactLibraryParams =
+                    serde_json::from_value(arguments).map_err(|e| {
+                        McpError::InvalidParams(format!(
+                            "invalid artifact.find_decisions params: {}",
+                            e
+                        ))
+                    })?;
+                handle_artifact_find_decisions(&*self.store, params).await
+            }
+            "artifact.find_evidence" => {
+                let params: ArtifactLibraryParams =
+                    serde_json::from_value(arguments).map_err(|e| {
+                        McpError::InvalidParams(format!(
+                            "invalid artifact.find_evidence params: {}",
+                            e
+                        ))
+                    })?;
+                handle_artifact_find_evidence(&*self.store, params).await
             }
             "artifact.list_thread" => {
                 let params: ArtifactListThreadParams =
@@ -486,6 +522,16 @@ impl<S: Store> McpServer<S> {
                         ))
                     })?;
                 handle_context_find_relevant_context(&*self.store, params).await
+            }
+            "context.brief_project" => {
+                let params: ProjectBriefParams =
+                    serde_json::from_value(arguments).map_err(|e| {
+                        McpError::InvalidParams(format!(
+                            "invalid context.brief_project params: {}",
+                            e
+                        ))
+                    })?;
+                handle_context_brief_project(&*self.store, params).await
             }
             "context.suggest_agent" => {
                 let params: ContextSuggestAgentParams =
@@ -606,7 +652,14 @@ fn validate_http_origin(headers: &HeaderMap) -> Result<(), StatusCode> {
         return Ok(());
     }
 
-    let allowed = ["http://localhost", "https://localhost", "http://127.0.0.1", "https://127.0.0.1", "http://[::1]", "https://[::1]"];
+    let allowed = [
+        "http://localhost",
+        "https://localhost",
+        "http://127.0.0.1",
+        "https://127.0.0.1",
+        "http://[::1]",
+        "https://[::1]",
+    ];
     if allowed.iter().any(|prefix| origin.starts_with(prefix)) {
         return Ok(());
     }
@@ -622,17 +675,15 @@ fn response_with_headers(
 ) -> HttpResponse {
     let mut response = (status, body).into_response();
     if let Some(content_type) = content_type {
-        response.headers_mut().insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static(content_type),
-        );
+        response
+            .headers_mut()
+            .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
     }
     if let Some(protocol_version) = protocol_version {
         if let Ok(value) = HeaderValue::from_str(protocol_version) {
-            response.headers_mut().insert(
-                HeaderName::from_static(MCP_PROTOCOL_VERSION_HEADER),
-                value,
-            );
+            response
+                .headers_mut()
+                .insert(HeaderName::from_static(MCP_PROTOCOL_VERSION_HEADER), value);
         }
     }
     response
@@ -643,12 +694,10 @@ fn json_error_http_response(
     error: RpcError,
     protocol_version: Option<&str>,
 ) -> HttpResponse {
-    let json = Response::error(None, error)
-        .to_json()
-        .unwrap_or_else(|_| {
-            "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"internal error\"}}"
-                .to_string()
-        });
+    let json = Response::error(None, error).to_json().unwrap_or_else(|_| {
+        "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"internal error\"}}"
+            .to_string()
+    });
     response_with_headers(status, Some("application/json"), json, protocol_version)
 }
 
@@ -715,7 +764,12 @@ async fn handle_http_post<S: Store + Send + Sync + 'static>(
             if let Some(error) = response.error {
                 return json_error_http_response(StatusCode::BAD_REQUEST, error, protocol_version);
             }
-            return response_with_headers(StatusCode::ACCEPTED, None, String::new(), protocol_version);
+            return response_with_headers(
+                StatusCode::ACCEPTED,
+                None,
+                String::new(),
+                protocol_version,
+            );
         }
 
         let json = match response.to_json() {

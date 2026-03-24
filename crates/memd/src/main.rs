@@ -221,8 +221,11 @@ async fn main() {
                         let store = Arc::new(store);
                         match server_transport.as_str() {
                             "http" => {
-                                let server =
-                                    memd::mcp::McpServer::with_metrics(config.clone(), store, metrics);
+                                let server = memd::mcp::McpServer::with_metrics(
+                                    config.clone(),
+                                    store,
+                                    metrics,
+                                );
                                 if let Err(e) =
                                     memd::mcp::run_http_server(server, &http_bind, &http_path).await
                                 {
@@ -231,8 +234,11 @@ async fn main() {
                                 }
                             }
                             _ => {
-                                let mut server =
-                                    memd::mcp::McpServer::with_metrics(config.clone(), store, metrics);
+                                let mut server = memd::mcp::McpServer::with_metrics(
+                                    config.clone(),
+                                    store,
+                                    metrics,
+                                );
                                 if let Err(e) = server.run().await {
                                     eprintln!("error: MCP server error: {}", e);
                                     std::process::exit(1);

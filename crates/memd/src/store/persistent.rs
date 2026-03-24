@@ -22,7 +22,7 @@ use crate::compaction::{CompactionConfig, CompactionMetrics, CompactionResult, C
 use crate::metrics::TieredMetrics;
 use crate::store::{apply_feedback_scores, FeedbackConfig, FeedbackEntry};
 use crate::task_memory::{
-    TaskArtifact, TaskArtifactWriteResult, TaskProjection, TaskSearchFilters,
+    TaskArtifact, TaskArtifactWriteResult, TaskProjection, TaskRecord, TaskSearchFilters,
 };
 use crate::tiered::{CacheStats, HotTierStats, TierDecision, TieredTiming};
 
@@ -1196,6 +1196,15 @@ impl Store for PersistentStore {
         self.metadata.list_thread_artifacts(tenant_id, thread_id)
     }
 
+    async fn list_tasks(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TaskRecord>> {
+        self.metadata.list_tasks(tenant_id, project_id, limit)
+    }
+
     async fn search_task_projection_chunk_ids(
         &self,
         tenant_id: &TenantId,
@@ -1280,7 +1289,8 @@ impl Store for PersistentStore {
         tenant_id: &TenantId,
         chunk_ids: &[ChunkId],
     ) -> Result<HashMap<String, TaskArtifact>> {
-        self.metadata.resolve_artifacts_for_chunks(tenant_id, chunk_ids)
+        self.metadata
+            .resolve_artifacts_for_chunks(tenant_id, chunk_ids)
     }
 
     async fn list_feedback(
