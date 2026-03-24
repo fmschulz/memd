@@ -23,7 +23,7 @@ use crate::compaction::{CompactionMetrics, CompactionResult};
 use crate::error::{MemdError, Result};
 use crate::metrics::IndexStats;
 use crate::task_memory::{
-    TaskArtifact, TaskArtifactWriteResult, TaskProjection, TaskSearchFilters,
+    TaskArtifact, TaskArtifactWriteResult, TaskProjection, TaskRecord, TaskSearchFilters,
 };
 use crate::tiered::TieredTiming;
 use crate::types::{ChunkId, MemoryChunk, TenantId};
@@ -150,6 +150,16 @@ pub trait Store: Send + Sync {
         _tenant_id: &TenantId,
         _thread_id: &str,
     ) -> Result<Vec<TaskArtifact>> {
+        Ok(Vec::new())
+    }
+
+    /// List logical task records for a tenant, optionally scoped to one project.
+    async fn list_tasks(
+        &self,
+        _tenant_id: &TenantId,
+        _project_id: Option<&str>,
+        _limit: usize,
+    ) -> Result<Vec<TaskRecord>> {
         Ok(Vec::new())
     }
 

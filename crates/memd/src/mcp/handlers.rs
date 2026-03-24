@@ -14,10 +14,27 @@ use super::error::McpError;
 use crate::metrics::{IndexStats, MetricsCollector};
 use crate::store::{FeedbackEntry, RelevanceLabel, Store, StoreStats, TenantManager};
 use crate::task_memory::{
-    build_task_projections, ArtifactKind, ContributorRef, DatasetRef, EntityRef, TaskArtifact,
-    TaskProvenance, TaskSearchFilters,
+    build_library_digest_artifact, build_project_brief_digest_artifact, build_project_brief_view,
+    build_task_projections, build_task_resume_digest_artifact, build_task_resume_view,
+    derive_artifact_promotion_state, infer_decision_items, infer_evidence_items,
+    infer_failure_items, ArtifactKind, ContributorRef, DatasetRef, DecisionViewItem, EntityRef,
+    EvidenceViewItem, FailureViewItem, ProjectBriefView, TaskArtifact, TaskProvenance,
+    TaskResumeView, TaskSearchFilters, DIGEST_ROLE_DECISION_LIBRARY, DIGEST_ROLE_EVIDENCE_LIBRARY,
+    DIGEST_ROLE_FAILURE_LIBRARY, DIGEST_ROLE_PROJECT_BRIEF, DIGEST_ROLE_TASK_RESUME,
 };
 use crate::types::{ChunkId, ChunkType, MemoryChunk, ProjectId, Source, TenantId};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryMode {
+    #[default]
+    Generic,
+    BriefProject,
+    ResumeTask,
+    FindFailures,
+    FindDecisions,
+    FindEvidence,
+}
 
 // ---------- Request Types ----------
 
@@ -35,6 +52,8 @@ pub struct SearchParams {
     /// Enable debug output showing tier source for each result
     #[serde(default)]
     pub debug_tiers: Option<bool>,
+    #[serde(default)]
+    pub mode: Option<QueryMode>,
 }
 
 fn default_k() -> usize {
@@ -386,6 +405,41 @@ pub struct TaskSearchParams {
     pub k: usize,
     #[serde(default)]
     pub filters: Option<TaskSearchFiltersParams>,
+    #[serde(default)]
+    pub mode: Option<QueryMode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProjectBriefParams {
+    pub tenant_id: String,
+    pub project_id: String,
+    #[serde(default)]
+    pub query: String,
+    #[serde(default = "default_k")]
+    pub k: usize,
+    #[serde(default = "default_true")]
+    pub include_related_projects: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TaskResumeParams {
+    pub tenant_id: String,
+    pub task_id: String,
+    #[serde(default)]
+    pub query: String,
+    #[serde(default = "default_k")]
+    pub k: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ArtifactLibraryParams {
+    pub tenant_id: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub query: String,
+    #[serde(default = "default_k")]
+    pub k: usize,
 }
 
 /// Parameters for artifact.create
@@ -546,6 +600,12 @@ pub struct CompactParams {
     pub tenant_id: String,
     #[serde(default)]
     pub force: bool,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub digest_modes: Option<Vec<QueryMode>>,
+    #[serde(default)]
+    pub force_digest_rebuild: bool,
 }
 
 /// Parameters for memory.feedback
@@ -781,6 +841,7 @@ pub struct ChunkResult {
     pub text: String,
     pub score: f32, // Stub: 1.0 for all results
     pub chunk_type: String,
+    pub promotion_state: String,
     pub source: SourceResult,
     pub timestamp_created: i64,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -910,6 +971,36 @@ pub struct ArtifactSearchResult {
 pub struct ArtifactThreadResult {
     pub thread_id: String,
     pub artifacts: Vec<TaskArtifact>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProjectBriefResult {
+    pub artifact: TaskArtifact,
+    pub brief: ProjectBriefView,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TaskResumeResult {
+    pub artifact: TaskArtifact,
+    pub resume: TaskResumeView,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FailureSearchResult {
+    pub artifact: TaskArtifact,
+    pub results: Vec<FailureViewItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DecisionSearchViewResult {
+    pub artifact: TaskArtifact,
+    pub results: Vec<DecisionViewItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EvidenceSearchViewResult {
+    pub artifact: TaskArtifact,
+    pub results: Vec<EvidenceViewItem>,
 }
 
 /// Result of a delete operation
@@ -1404,6 +1495,7 @@ fn chunk_to_result(chunk: &MemoryChunk, score: f32, source_tier: Option<String>)
         text: chunk.text.clone(),
         score,
         chunk_type: chunk.chunk_type.to_string(),
+        promotion_state: chunk.promotion_state.to_string(),
         source: SourceResult::from(&chunk.source),
         timestamp_created: chunk.timestamp_created,
         tags: chunk.tags.clone(),
@@ -1771,11 +1863,576 @@ fn default_status_for_artifact_kind(kind: ArtifactKind) -> &'static str {
         ArtifactKind::TaskStart | ArtifactKind::TaskProgress => "in_progress",
         ArtifactKind::RunStart => "started",
         ArtifactKind::RunFinish | ArtifactKind::TaskFinish => "completed",
+        ArtifactKind::Digest => "generated",
         ArtifactKind::Evidence
         | ArtifactKind::Review
         | ArtifactKind::Revision
-        | ArtifactKind::Verification => "recorded",
+        | ArtifactKind::Verification
+        | ArtifactKind::Decision => "recorded",
     }
+}
+
+fn score_text_candidate(query: &str, text: &str, timestamp_created: i64) -> f32 {
+    if query.trim().is_empty() {
+        return timestamp_created as f32 / 1_000_000_000_000.0;
+    }
+
+    let lower_text = text.to_ascii_lowercase();
+    let terms = query
+        .split_whitespace()
+        .map(|term| term.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let mut score = 0.0f32;
+    for term in &terms {
+        if lower_text.contains(term) {
+            score += 1.0;
+        }
+    }
+    if lower_text.contains(&query.to_ascii_lowercase()) {
+        score += 2.0;
+    }
+    score + (timestamp_created as f32 / 1_000_000_000_000.0)
+}
+
+fn sort_ranked_items<T, F>(items: &mut [T], query: &str, score_fn: F)
+where
+    F: Fn(&T) -> (String, i64, bool),
+{
+    items.sort_by(|left, right| {
+        let (left_text, left_ts, left_explicit) = score_fn(left);
+        let (right_text, right_ts, right_explicit) = score_fn(right);
+        right_explicit
+            .cmp(&left_explicit)
+            .then_with(|| {
+                score_text_candidate(query, &right_text, right_ts)
+                    .partial_cmp(&score_text_candidate(query, &left_text, left_ts))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| right_ts.cmp(&left_ts))
+    });
+}
+
+fn finalize_artifact_for_storage(artifact: &mut TaskArtifact) {
+    artifact.promotion_state = derive_artifact_promotion_state(artifact);
+}
+
+async fn persist_digest_artifact<S: Store>(
+    store: &S,
+    mut artifact: TaskArtifact,
+) -> Result<TaskArtifact, McpError> {
+    finalize_artifact_for_storage(&mut artifact);
+    let projections = build_task_projections(&artifact);
+    store
+        .add_task_artifact(artifact.clone(), projections)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    Ok(artifact)
+}
+
+async fn load_task_views<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    project_id: Option<&str>,
+    limit: usize,
+) -> Result<Vec<TaskResumeView>, McpError> {
+    let tasks = store
+        .list_tasks(tenant_id, project_id, limit)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let mut views = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        let artifacts = store
+            .list_task_artifacts(tenant_id, &task.task_id)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        views.push(build_task_resume_view(task, &artifacts));
+    }
+    Ok(views)
+}
+
+async fn load_project_artifacts<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    project_id: Option<&str>,
+    limit: usize,
+) -> Result<Vec<TaskArtifact>, McpError> {
+    let tasks = store
+        .list_tasks(tenant_id, project_id, limit)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let mut artifacts = Vec::new();
+    for task in tasks {
+        artifacts.extend(
+            store
+                .list_task_artifacts(tenant_id, &task.task_id)
+                .await
+                .map_err(|e| McpError::ToolError(e.to_string()))?,
+        );
+    }
+    artifacts.sort_by_key(|artifact| std::cmp::Reverse(artifact.timestamp_created));
+    Ok(artifacts)
+}
+
+async fn ensure_project_brief_digest<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    project_id: &str,
+    include_related_projects: bool,
+) -> Result<(TaskArtifact, ProjectBriefView), McpError> {
+    let task_views = load_task_views(store, tenant_id, Some(project_id), 200).await?;
+    let same_project_artifacts =
+        load_project_artifacts(store, tenant_id, Some(project_id), 200).await?;
+    let recent_failures = infer_failure_items(&same_project_artifacts)
+        .into_iter()
+        .take(10)
+        .collect::<Vec<_>>();
+    let recent_decisions = infer_decision_items(&same_project_artifacts)
+        .into_iter()
+        .take(10)
+        .collect::<Vec<_>>();
+    let evidence_highlights = infer_evidence_items(&same_project_artifacts)
+        .into_iter()
+        .take(10)
+        .collect::<Vec<_>>();
+
+    let related_projects = if include_related_projects {
+        store
+            .list_tasks(tenant_id, None, 200)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?
+            .into_iter()
+            .filter_map(|task| task.project_id.as_option().map(str::to_string))
+            .filter(|candidate| candidate != project_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .take(5)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    let brief = build_project_brief_view(
+        tenant_id,
+        project_id,
+        task_views,
+        recent_failures.clone(),
+        recent_decisions.clone(),
+        evidence_highlights.clone(),
+        related_projects,
+    );
+    let artifact =
+        persist_digest_artifact(store, build_project_brief_digest_artifact(&brief)).await?;
+    Ok((artifact, brief))
+}
+
+async fn ensure_task_resume_digest<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    task_id: &str,
+) -> Result<(TaskArtifact, TaskResumeView), McpError> {
+    let tasks = store
+        .list_tasks(tenant_id, None, 500)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let task = tasks
+        .into_iter()
+        .find(|task| task.task_id == task_id)
+        .ok_or_else(|| McpError::ToolError("task not found".to_string()))?;
+    let artifacts = store
+        .list_task_artifacts(tenant_id, task_id)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let resume = build_task_resume_view(task, &artifacts);
+    let artifact =
+        persist_digest_artifact(store, build_task_resume_digest_artifact(&resume)).await?;
+    Ok((artifact, resume))
+}
+
+fn build_scope_key(project_id: Option<&str>, tenant_id: &TenantId, suffix: &str) -> String {
+    project_id
+        .map(|project_id| format!("project:{}:{}", project_id, suffix))
+        .unwrap_or_else(|| format!("tenant:{}:{}", tenant_id, suffix))
+}
+
+async fn ensure_failure_library_digest<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    project_id: Option<&str>,
+) -> Result<(TaskArtifact, Vec<FailureViewItem>), McpError> {
+    let artifacts = load_project_artifacts(store, tenant_id, project_id, 500).await?;
+    let failures = infer_failure_items(&artifacts);
+    let source_updated_at_ms = artifacts
+        .iter()
+        .map(|artifact| artifact.timestamp_created)
+        .max()
+        .unwrap_or(0);
+    let artifact = build_library_digest_artifact(
+        tenant_id.clone(),
+        project_id.map(|id| ProjectId::from(id)),
+        DIGEST_ROLE_FAILURE_LIBRARY,
+        &build_scope_key(project_id, tenant_id, DIGEST_ROLE_FAILURE_LIBRARY),
+        format!(
+            "Failure library for {} contains {} recent failure summaries.",
+            project_id.unwrap_or(tenant_id.as_str()),
+            failures.len()
+        ),
+        failures
+            .iter()
+            .map(|item| item.summary.clone())
+            .take(12)
+            .collect(),
+        Vec::new(),
+        Vec::new(),
+        failures
+            .iter()
+            .map(|item| item.artifact_id.clone())
+            .collect(),
+        source_updated_at_ms,
+    );
+    let artifact = persist_digest_artifact(store, artifact).await?;
+    Ok((artifact, failures))
+}
+
+async fn ensure_decision_library_digest<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    project_id: Option<&str>,
+) -> Result<(TaskArtifact, Vec<DecisionViewItem>), McpError> {
+    let artifacts = load_project_artifacts(store, tenant_id, project_id, 500).await?;
+    let decisions = infer_decision_items(&artifacts);
+    let source_updated_at_ms = artifacts
+        .iter()
+        .map(|artifact| artifact.timestamp_created)
+        .max()
+        .unwrap_or(0);
+    let artifact = build_library_digest_artifact(
+        tenant_id.clone(),
+        project_id.map(|id| ProjectId::from(id)),
+        DIGEST_ROLE_DECISION_LIBRARY,
+        &build_scope_key(project_id, tenant_id, DIGEST_ROLE_DECISION_LIBRARY),
+        format!(
+            "Decision library for {} contains {} explicit or inferred decisions.",
+            project_id.unwrap_or(tenant_id.as_str()),
+            decisions.len()
+        ),
+        Vec::new(),
+        decisions
+            .iter()
+            .map(|item| item.summary.clone())
+            .take(12)
+            .collect(),
+        Vec::new(),
+        decisions
+            .iter()
+            .map(|item| item.artifact_id.clone())
+            .collect(),
+        source_updated_at_ms,
+    );
+    let artifact = persist_digest_artifact(store, artifact).await?;
+    Ok((artifact, decisions))
+}
+
+async fn ensure_evidence_library_digest<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    project_id: Option<&str>,
+) -> Result<(TaskArtifact, Vec<EvidenceViewItem>), McpError> {
+    let artifacts = load_project_artifacts(store, tenant_id, project_id, 500).await?;
+    let evidence = infer_evidence_items(&artifacts);
+    let source_updated_at_ms = artifacts
+        .iter()
+        .map(|artifact| artifact.timestamp_created)
+        .max()
+        .unwrap_or(0);
+    let artifact = build_library_digest_artifact(
+        tenant_id.clone(),
+        project_id.map(|id| ProjectId::from(id)),
+        DIGEST_ROLE_EVIDENCE_LIBRARY,
+        &build_scope_key(project_id, tenant_id, DIGEST_ROLE_EVIDENCE_LIBRARY),
+        format!(
+            "Evidence library for {} contains {} evidence highlights.",
+            project_id.unwrap_or(tenant_id.as_str()),
+            evidence.len()
+        ),
+        Vec::new(),
+        evidence
+            .iter()
+            .map(|item| item.summary.clone())
+            .take(12)
+            .collect(),
+        Vec::new(),
+        evidence
+            .iter()
+            .map(|item| item.artifact_id.clone())
+            .collect(),
+        source_updated_at_ms,
+    );
+    let artifact = persist_digest_artifact(store, artifact).await?;
+    Ok((artifact, evidence))
+}
+
+async fn rebuild_requested_digests<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    project_id: Option<&str>,
+    modes: &[QueryMode],
+) -> Result<Vec<String>, McpError> {
+    let requested = if modes.is_empty() {
+        vec![
+            QueryMode::BriefProject,
+            QueryMode::FindFailures,
+            QueryMode::FindDecisions,
+            QueryMode::FindEvidence,
+        ]
+    } else {
+        modes.to_vec()
+    };
+
+    let mut artifact_ids = Vec::new();
+    for mode in requested {
+        match mode {
+            QueryMode::BriefProject => {
+                if let Some(project_id) = project_id {
+                    artifact_ids.push(
+                        ensure_project_brief_digest(store, tenant_id, project_id, true)
+                            .await?
+                            .0
+                            .artifact_id,
+                    );
+                }
+            }
+            QueryMode::FindFailures => artifact_ids.push(
+                ensure_failure_library_digest(store, tenant_id, project_id)
+                    .await?
+                    .0
+                    .artifact_id,
+            ),
+            QueryMode::FindDecisions => artifact_ids.push(
+                ensure_decision_library_digest(store, tenant_id, project_id)
+                    .await?
+                    .0
+                    .artifact_id,
+            ),
+            QueryMode::FindEvidence => artifact_ids.push(
+                ensure_evidence_library_digest(store, tenant_id, project_id)
+                    .await?
+                    .0
+                    .artifact_id,
+            ),
+            QueryMode::Generic | QueryMode::ResumeTask => {}
+        }
+    }
+    artifact_ids.sort();
+    artifact_ids.dedup();
+    Ok(artifact_ids)
+}
+
+async fn collect_candidate_chunk_ids<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    filters_list: Vec<TaskSearchFilters>,
+    limit: usize,
+) -> Result<Vec<ChunkId>, McpError> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for filters in filters_list {
+        let ids = store
+            .search_task_projection_chunk_ids(tenant_id, &filters, limit)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        for id in ids {
+            if seen.insert(id.clone()) {
+                out.push(id);
+                if out.len() >= limit {
+                    return Ok(out);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+async fn candidate_chunk_ids_for_mode<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    mode: QueryMode,
+    filters: &TaskSearchFilters,
+    limit: usize,
+) -> Result<Vec<ChunkId>, McpError> {
+    let mut filters_list = Vec::new();
+    match mode {
+        QueryMode::Generic => {}
+        QueryMode::BriefProject => {
+            if let Some(project_id) = filters.project_id.as_deref() {
+                let _ = ensure_project_brief_digest(store, tenant_id, project_id, true).await?;
+                filters_list.push(TaskSearchFilters {
+                    artifact_kind: Some(ArtifactKind::Digest),
+                    artifact_role: Some(DIGEST_ROLE_PROJECT_BRIEF.to_string()),
+                    project_id: Some(project_id.to_string()),
+                    ..Default::default()
+                });
+                filters_list.push(TaskSearchFilters {
+                    project_id: Some(project_id.to_string()),
+                    ..Default::default()
+                });
+            }
+        }
+        QueryMode::ResumeTask => {
+            if let Some(task_id) = filters.task_id.as_deref() {
+                let _ = ensure_task_resume_digest(store, tenant_id, task_id).await?;
+                filters_list.push(TaskSearchFilters {
+                    artifact_kind: Some(ArtifactKind::Digest),
+                    artifact_role: Some(DIGEST_ROLE_TASK_RESUME.to_string()),
+                    task_id: Some(task_id.to_string()),
+                    ..Default::default()
+                });
+                filters_list.push(TaskSearchFilters {
+                    task_id: Some(task_id.to_string()),
+                    ..Default::default()
+                });
+            }
+        }
+        QueryMode::FindFailures => {
+            let _ = ensure_failure_library_digest(store, tenant_id, filters.project_id.as_deref())
+                .await?;
+            filters_list.push(TaskSearchFilters {
+                artifact_kind: Some(ArtifactKind::Digest),
+                artifact_role: Some(DIGEST_ROLE_FAILURE_LIBRARY.to_string()),
+                project_id: filters.project_id.clone(),
+                ..Default::default()
+            });
+            for kind in [
+                ArtifactKind::TaskFinish,
+                ArtifactKind::TaskProgress,
+                ArtifactKind::Digest,
+            ] {
+                filters_list.push(TaskSearchFilters {
+                    artifact_kind: Some(kind),
+                    project_id: filters.project_id.clone(),
+                    ..Default::default()
+                });
+            }
+        }
+        QueryMode::FindDecisions => {
+            let _ = ensure_decision_library_digest(store, tenant_id, filters.project_id.as_deref())
+                .await?;
+            filters_list.push(TaskSearchFilters {
+                artifact_kind: Some(ArtifactKind::Digest),
+                artifact_role: Some(DIGEST_ROLE_DECISION_LIBRARY.to_string()),
+                project_id: filters.project_id.clone(),
+                ..Default::default()
+            });
+            for kind in [
+                ArtifactKind::Decision,
+                ArtifactKind::Verification,
+                ArtifactKind::TaskFinish,
+            ] {
+                filters_list.push(TaskSearchFilters {
+                    artifact_kind: Some(kind),
+                    project_id: filters.project_id.clone(),
+                    ..Default::default()
+                });
+            }
+        }
+        QueryMode::FindEvidence => {
+            let _ = ensure_evidence_library_digest(store, tenant_id, filters.project_id.as_deref())
+                .await?;
+            filters_list.push(TaskSearchFilters {
+                artifact_kind: Some(ArtifactKind::Digest),
+                artifact_role: Some(DIGEST_ROLE_EVIDENCE_LIBRARY.to_string()),
+                project_id: filters.project_id.clone(),
+                ..Default::default()
+            });
+            for kind in [ArtifactKind::Evidence, ArtifactKind::TaskFinish] {
+                filters_list.push(TaskSearchFilters {
+                    artifact_kind: Some(kind),
+                    project_id: filters.project_id.clone(),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    collect_candidate_chunk_ids(store, tenant_id, filters_list, limit).await
+}
+
+async fn summary_preferred_results<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    query: &str,
+    project_id: Option<&str>,
+    mode: QueryMode,
+    limit: usize,
+) -> Result<Vec<(MemoryChunk, f32)>, McpError> {
+    let modes = if mode != QueryMode::Generic {
+        vec![mode]
+    } else if project_id.is_some() {
+        vec![
+            QueryMode::BriefProject,
+            QueryMode::FindFailures,
+            QueryMode::FindDecisions,
+            QueryMode::FindEvidence,
+        ]
+    } else {
+        Vec::new()
+    };
+
+    if modes.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut all_ids = Vec::new();
+    let mut seen = HashSet::new();
+    for mode in modes {
+        let ids = candidate_chunk_ids_for_mode(
+            store,
+            tenant_id,
+            mode,
+            &TaskSearchFilters {
+                project_id: project_id.map(|value| value.to_string()),
+                ..Default::default()
+            },
+            limit.saturating_mul(4),
+        )
+        .await?;
+        for id in ids {
+            if seen.insert(id.clone()) {
+                all_ids.push(id);
+            }
+        }
+    }
+
+    store
+        .rerank_chunks_for_query(tenant_id, query, &all_ids, limit)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))
+}
+
+fn merge_preferred_and_raw(
+    preferred: Vec<(MemoryChunk, f32)>,
+    raw: Vec<(MemoryChunk, f32)>,
+    limit: usize,
+) -> Vec<(MemoryChunk, f32)> {
+    let mut seen = HashSet::new();
+    let mut merged = Vec::new();
+
+    for (chunk, score) in preferred {
+        if seen.insert(chunk.chunk_id.clone()) {
+            merged.push((chunk, score + 10.0));
+            if merged.len() >= limit {
+                return merged;
+            }
+        }
+    }
+    for (chunk, score) in raw {
+        if seen.insert(chunk.chunk_id.clone()) {
+            merged.push((chunk, score));
+            if merged.len() >= limit {
+                break;
+            }
+        }
+    }
+    merged
 }
 
 fn apply_common_artifact_fields(
@@ -1799,9 +2456,10 @@ fn apply_common_artifact_fields(
     artifact.parent_task_id = parent_task_id;
     artifact.agent_id = agent_id;
     artifact.session_id = session_id;
-    artifact.status = Some(
-        status.unwrap_or_else(|| default_status_for_artifact_kind(artifact.artifact_kind).to_string()),
-    );
+    artifact.status =
+        Some(status.unwrap_or_else(|| {
+            default_status_for_artifact_kind(artifact.artifact_kind).to_string()
+        }));
     artifact.artifact_role = artifact_role;
     artifact.challenge_id = challenge_id;
     artifact.thread_id = thread_id;
@@ -1811,7 +2469,11 @@ fn apply_common_artifact_fields(
     artifact.entity_refs = entity_refs;
     artifact.contributors = contributors;
     artifact.provenance = provenance;
-    artifact.tool_name = artifact.provenance.tool_name.clone().or_else(|| artifact.tool_name.clone());
+    artifact.tool_name = artifact
+        .provenance
+        .tool_name
+        .clone()
+        .or_else(|| artifact.tool_name.clone());
     artifact.tool_version = artifact
         .provenance
         .tool_version
@@ -1864,6 +2526,7 @@ pub async fn handle_memory_search<S: Store>(
     validate_search_k(params.k)?;
     let parsed_filters = parse_search_filters(params.filters.as_ref())?;
     let debug_tiers = params.debug_tiers.unwrap_or(false);
+    let mode = params.mode.unwrap_or_default();
     let project_id_filter = params.project_id.as_deref();
     let has_filters = has_active_search_filters(project_id_filter, &parsed_filters);
     let fetch_k = adaptive_fetch_k(params.k, &params.query, has_filters);
@@ -1883,9 +2546,21 @@ pub async fn handle_memory_search<S: Store>(
             .search_with_tier_info(&tenant_id, &params.query, fetch_k)
             .await
             .map_err(|e| McpError::ToolError(e.to_string()))?;
-
-        let mut scored_chunks =
-            apply_search_filters(scored_chunks, project_id_filter, &parsed_filters, params.k);
+        let preferred = summary_preferred_results(
+            store,
+            &tenant_id,
+            &params.query,
+            project_id_filter,
+            mode,
+            params.k.min(8),
+        )
+        .await?;
+        let mut scored_chunks = apply_search_filters(
+            merge_preferred_and_raw(preferred, scored_chunks, fetch_k),
+            project_id_filter,
+            &parsed_filters,
+            params.k,
+        );
         let mut timing = timing;
         let mut repair_info = None;
 
@@ -1967,8 +2642,21 @@ pub async fn handle_memory_search<S: Store>(
         .search_with_scores(&tenant_id, &params.query, fetch_k)
         .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
-    let mut scored_chunks =
-        apply_search_filters(scored_chunks, project_id_filter, &parsed_filters, params.k);
+    let preferred = summary_preferred_results(
+        store,
+        &tenant_id,
+        &params.query,
+        project_id_filter,
+        mode,
+        params.k.min(8),
+    )
+    .await?;
+    let mut scored_chunks = apply_search_filters(
+        merge_preferred_and_raw(preferred, scored_chunks, fetch_k),
+        project_id_filter,
+        &parsed_filters,
+        params.k,
+    );
     let mut repair_info = None;
 
     if scored_chunks.is_empty() && !params.query.is_empty() {
@@ -2165,6 +2853,7 @@ pub async fn handle_task_start<S: Store>(
     artifact.tool_name = artifact.provenance.tool_name.clone();
     artifact.tool_version = artifact.provenance.tool_version.clone();
 
+    finalize_artifact_for_storage(&mut artifact);
     let projections = build_task_projections(&artifact);
     let result = store
         .add_task_artifact(artifact, projections)
@@ -2219,6 +2908,7 @@ pub async fn handle_task_finish<S: Store>(
     artifact.tool_name = artifact.provenance.tool_name.clone();
     artifact.tool_version = artifact.provenance.tool_version.clone();
 
+    finalize_artifact_for_storage(&mut artifact);
     let projections = build_task_projections(&artifact);
     let result = store
         .add_task_artifact(artifact, projections)
@@ -2269,6 +2959,7 @@ pub async fn handle_task_progress<S: Store>(
     artifact.tool_name = artifact.provenance.tool_name.clone();
     artifact.tool_version = artifact.provenance.tool_version.clone();
 
+    finalize_artifact_for_storage(&mut artifact);
     let result = store
         .add_task_artifact(artifact.clone(), build_task_projections(&artifact))
         .await
@@ -2332,6 +3023,7 @@ pub async fn handle_task_run_start<S: Store>(
         artifact.provenance.tool_version = artifact.tool_version.clone();
     }
 
+    finalize_artifact_for_storage(&mut artifact);
     let result = store
         .add_task_artifact(artifact.clone(), build_task_projections(&artifact))
         .await
@@ -2390,6 +3082,7 @@ pub async fn handle_task_run_finish<S: Store>(
         artifact.provenance.tool_version = artifact.tool_version.clone();
     }
 
+    finalize_artifact_for_storage(&mut artifact);
     let result = store
         .add_task_artifact(artifact.clone(), build_task_projections(&artifact))
         .await
@@ -2447,6 +3140,7 @@ pub async fn handle_task_add_evidence<S: Store>(
     artifact.tool_name = artifact.provenance.tool_name.clone();
     artifact.tool_version = artifact.provenance.tool_version.clone();
 
+    finalize_artifact_for_storage(&mut artifact);
     let result = store
         .add_task_artifact(artifact.clone(), build_task_projections(&artifact))
         .await
@@ -2503,9 +3197,11 @@ pub async fn handle_artifact_create<S: Store>(
         }
         None => None,
     };
-    let task_id = explicit_task_id
-        .clone()
-        .or_else(|| parent_artifact.as_ref().map(|artifact| artifact.task_id.clone()));
+    let task_id = explicit_task_id.clone().or_else(|| {
+        parent_artifact
+            .as_ref()
+            .map(|artifact| artifact.task_id.clone())
+    });
 
     let mut artifact = match artifact_kind {
         ArtifactKind::TaskStart => {
@@ -2515,16 +3211,14 @@ pub async fn handle_artifact_create<S: Store>(
             }
             artifact
         }
-        ArtifactKind::TaskProgress => {
-            TaskArtifact::new_task_progress(
-                tenant_id.clone(),
-                task_id.clone().ok_or_else(|| {
-                    McpError::InvalidParams(
-                        "task_id is required for non-task_start artifacts".to_string(),
-                    )
-                })?,
-            )
-        }
+        ArtifactKind::TaskProgress => TaskArtifact::new_task_progress(
+            tenant_id.clone(),
+            task_id.clone().ok_or_else(|| {
+                McpError::InvalidParams(
+                    "task_id is required for non-task_start artifacts".to_string(),
+                )
+            })?,
+        ),
         ArtifactKind::RunStart => TaskArtifact::new_run_start(
             tenant_id.clone(),
             task_id.clone().ok_or_else(|| {
@@ -2552,17 +3246,13 @@ pub async fn handle_artifact_create<S: Store>(
         ArtifactKind::Review => TaskArtifact::new_review(
             tenant_id.clone(),
             task_id.clone().ok_or_else(|| {
-                McpError::InvalidParams(
-                    "task_id is required for review artifacts".to_string(),
-                )
+                McpError::InvalidParams("task_id is required for review artifacts".to_string())
             })?,
         ),
         ArtifactKind::Revision => TaskArtifact::new_revision(
             tenant_id.clone(),
             task_id.clone().ok_or_else(|| {
-                McpError::InvalidParams(
-                    "task_id is required for revision artifacts".to_string(),
-                )
+                McpError::InvalidParams("task_id is required for revision artifacts".to_string())
             })?,
         ),
         ArtifactKind::Verification => TaskArtifact::new_verification(
@@ -2573,6 +3263,30 @@ pub async fn handle_artifact_create<S: Store>(
                 )
             })?,
         ),
+        ArtifactKind::Decision => TaskArtifact::new_decision(
+            tenant_id.clone(),
+            task_id.clone().ok_or_else(|| {
+                McpError::InvalidParams("task_id is required for decision artifacts".to_string())
+            })?,
+        ),
+        ArtifactKind::Digest => {
+            let role = params.artifact_role.clone().ok_or_else(|| {
+                McpError::InvalidParams(
+                    "artifact_role is required for digest artifacts".to_string(),
+                )
+            })?;
+            let digest_scope = params
+                .project_id
+                .clone()
+                .or_else(|| task_id.clone())
+                .unwrap_or_else(|| "tenant".to_string());
+            let (artifact_id, synthetic_task_id, digest_key) =
+                crate::task_memory::stable_digest_identity(&role, &digest_scope);
+            let mut artifact =
+                TaskArtifact::new_digest(tenant_id.clone(), synthetic_task_id, digest_key, role);
+            artifact.artifact_id = artifact_id;
+            artifact
+        }
         ArtifactKind::TaskFinish => TaskArtifact::new_task_finish(
             tenant_id.clone(),
             task_id.clone().ok_or_else(|| {
@@ -2667,6 +3381,7 @@ pub async fn handle_artifact_create<S: Store>(
         provenance,
     );
 
+    finalize_artifact_for_storage(&mut artifact);
     let projections = build_task_projections(&artifact);
     let result = store
         .add_task_artifact(artifact, projections)
@@ -2723,6 +3438,7 @@ pub async fn handle_task_search<S: Store>(
     let tenant_id = validate_tenant_id(&params.tenant_id)?;
     validate_search_k(params.k)?;
     let filters = parse_task_search_filters(params.filters.as_ref())?;
+    let mode = params.mode.unwrap_or_default();
     let has_filters = has_active_task_filters(&filters);
     let candidate_limit = if has_filters {
         params.k.saturating_mul(20).clamp(50, 1000)
@@ -2730,10 +3446,21 @@ pub async fn handle_task_search<S: Store>(
         params.k.saturating_mul(25).clamp(100, 1000)
     };
 
-    let chunk_ids = store
+    let mut chunk_ids = if mode != QueryMode::Generic {
+        candidate_chunk_ids_for_mode(store, &tenant_id, mode, &filters, candidate_limit).await?
+    } else {
+        Vec::new()
+    };
+    let base_chunk_ids = store
         .search_task_projection_chunk_ids(&tenant_id, &filters, candidate_limit)
         .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let mut seen = chunk_ids.iter().cloned().collect::<HashSet<_>>();
+    for chunk_id in base_chunk_ids {
+        if seen.insert(chunk_id.clone()) {
+            chunk_ids.push(chunk_id);
+        }
+    }
     let ranked = store
         .rerank_chunks_for_query(&tenant_id, &params.query, &chunk_ids, params.k)
         .await
@@ -2760,6 +3487,7 @@ pub async fn handle_artifact_search<S: Store>(
     let tenant_id = validate_tenant_id(&params.tenant_id)?;
     validate_search_k(params.k)?;
     let filters = parse_task_search_filters(params.filters.as_ref())?;
+    let mode = params.mode.unwrap_or_default();
     let has_filters = has_active_task_filters(&filters);
     let candidate_limit = if has_filters {
         params.k.saturating_mul(20).clamp(50, 1000)
@@ -2767,10 +3495,21 @@ pub async fn handle_artifact_search<S: Store>(
         params.k.saturating_mul(25).clamp(100, 1000)
     };
 
-    let chunk_ids = store
+    let mut chunk_ids = if mode != QueryMode::Generic {
+        candidate_chunk_ids_for_mode(store, &tenant_id, mode, &filters, candidate_limit).await?
+    } else {
+        Vec::new()
+    };
+    let base_chunk_ids = store
         .search_task_projection_chunk_ids(&tenant_id, &filters, candidate_limit)
         .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let mut seen = chunk_ids.iter().cloned().collect::<HashSet<_>>();
+    for chunk_id in base_chunk_ids {
+        if seen.insert(chunk_id.clone()) {
+            chunk_ids.push(chunk_id);
+        }
+    }
     let ranked = store
         .rerank_chunks_for_query(&tenant_id, &params.query, &chunk_ids, candidate_limit)
         .await
@@ -2840,7 +3579,134 @@ pub async fn handle_artifact_list_thread<S: Store>(
         .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
 
-    format_mcp_response(&ArtifactThreadResult { thread_id, artifacts })
+    format_mcp_response(&ArtifactThreadResult {
+        thread_id,
+        artifacts,
+    })
+}
+
+pub async fn handle_context_brief_project<S: Store>(
+    store: &S,
+    params: ProjectBriefParams,
+) -> Result<Value, McpError> {
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    validate_identifier("project_id", &params.project_id)?;
+    validate_search_k(params.k)?;
+
+    let (artifact, mut brief) = ensure_project_brief_digest(
+        store,
+        &tenant_id,
+        &params.project_id,
+        params.include_related_projects,
+    )
+    .await?;
+
+    if !params.query.trim().is_empty() {
+        sort_ranked_items(&mut brief.recent_failures, &params.query, |item| {
+            (item.summary.clone(), item.timestamp_created, false)
+        });
+        sort_ranked_items(&mut brief.recent_decisions, &params.query, |item| {
+            (item.summary.clone(), item.timestamp_created, item.explicit)
+        });
+        sort_ranked_items(&mut brief.evidence_highlights, &params.query, |item| {
+            (item.summary.clone(), item.timestamp_created, false)
+        });
+        brief.recent_failures.truncate(params.k.min(10));
+        brief.recent_decisions.truncate(params.k.min(10));
+        brief.evidence_highlights.truncate(params.k.min(10));
+    }
+
+    format_mcp_response(&ProjectBriefResult { artifact, brief })
+}
+
+pub async fn handle_task_resume<S: Store>(
+    store: &S,
+    params: TaskResumeParams,
+) -> Result<Value, McpError> {
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    validate_identifier("task_id", &params.task_id)?;
+    validate_search_k(params.k)?;
+
+    let (artifact, mut resume) =
+        ensure_task_resume_digest(store, &tenant_id, &params.task_id).await?;
+
+    if !params.query.trim().is_empty() {
+        sort_ranked_items(&mut resume.recent_runs, &params.query, |item| {
+            (
+                format!(
+                    "{} {} {}",
+                    item.tool_name.clone().unwrap_or_default(),
+                    item.command.clone().unwrap_or_default(),
+                    item.status.clone().unwrap_or_default()
+                ),
+                item.timestamp_created,
+                false,
+            )
+        });
+        resume.recent_runs.truncate(params.k.min(5));
+    }
+
+    format_mcp_response(&TaskResumeResult { artifact, resume })
+}
+
+pub async fn handle_artifact_find_failures<S: Store>(
+    store: &S,
+    params: ArtifactLibraryParams,
+) -> Result<Value, McpError> {
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    validate_search_k(params.k)?;
+    if let Some(project_id) = params.project_id.as_deref() {
+        validate_identifier("project_id", project_id)?;
+    }
+
+    let (artifact, mut results) =
+        ensure_failure_library_digest(store, &tenant_id, params.project_id.as_deref()).await?;
+    sort_ranked_items(&mut results, &params.query, |item| {
+        (item.summary.clone(), item.timestamp_created, false)
+    });
+    results.truncate(params.k);
+
+    format_mcp_response(&FailureSearchResult { artifact, results })
+}
+
+pub async fn handle_artifact_find_decisions<S: Store>(
+    store: &S,
+    params: ArtifactLibraryParams,
+) -> Result<Value, McpError> {
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    validate_search_k(params.k)?;
+    if let Some(project_id) = params.project_id.as_deref() {
+        validate_identifier("project_id", project_id)?;
+    }
+
+    let (artifact, mut results) =
+        ensure_decision_library_digest(store, &tenant_id, params.project_id.as_deref()).await?;
+    sort_ranked_items(&mut results, &params.query, |item| {
+        (item.summary.clone(), item.timestamp_created, item.explicit)
+    });
+    results.truncate(params.k);
+
+    format_mcp_response(&DecisionSearchViewResult { artifact, results })
+}
+
+pub async fn handle_artifact_find_evidence<S: Store>(
+    store: &S,
+    params: ArtifactLibraryParams,
+) -> Result<Value, McpError> {
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    validate_search_k(params.k)?;
+    if let Some(project_id) = params.project_id.as_deref() {
+        validate_identifier("project_id", project_id)?;
+    }
+
+    let (artifact, mut results) =
+        ensure_evidence_library_digest(store, &tenant_id, params.project_id.as_deref()).await?;
+    sort_ranked_items(&mut results, &params.query, |item| {
+        (item.summary.clone(), item.timestamp_created, false)
+    });
+    results.truncate(params.k);
+
+    format_mcp_response(&EvidenceSearchViewResult { artifact, results })
 }
 
 /// Handle memory.get tool call
@@ -3049,8 +3915,13 @@ pub async fn handle_memory_compact<S: Store>(
     info!(
         tenant_id = %tenant_id,
         force = params.force,
+        project_id = ?params.project_id,
+        force_digest_rebuild = params.force_digest_rebuild,
         "memory.compact"
     );
+
+    let digest_modes = params.digest_modes.clone().unwrap_or_default();
+    let should_rebuild_digests = params.force_digest_rebuild || !digest_modes.is_empty();
 
     if params.force {
         // Force compaction regardless of thresholds
@@ -3068,6 +3939,18 @@ pub async fn handle_memory_compact<S: Store>(
             "compaction completed (forced)"
         );
 
+        let digest_artifacts = if should_rebuild_digests {
+            rebuild_requested_digests(
+                store,
+                &tenant_id,
+                params.project_id.as_deref(),
+                &digest_modes,
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
+
         return format_mcp_response(&json!({
             "status": "completed",
             "tombstones_processed": result.tombstones_processed,
@@ -3082,9 +3965,10 @@ pub async fn handle_memory_compact<S: Store>(
                 "segments_after": r.segments_after,
                 "segments_merged": r.segments_merged,
                 "duration_ms": r.duration.as_millis()
-            })),
-            "cache_entries_invalidated": result.cache_entries_invalidated,
-            "duration_ms": result.duration.as_millis()
+                })),
+                "cache_entries_invalidated": result.cache_entries_invalidated,
+                "duration_ms": result.duration.as_millis(),
+                "digest_artifacts": digest_artifacts
         }));
     }
 
@@ -3100,6 +3984,18 @@ pub async fn handle_memory_compact<S: Store>(
                 duration_ms = result.duration.as_millis(),
                 "compaction completed"
             );
+
+            let digest_artifacts = if should_rebuild_digests {
+                rebuild_requested_digests(
+                    store,
+                    &tenant_id,
+                    params.project_id.as_deref(),
+                    &digest_modes,
+                )
+                .await?
+            } else {
+                Vec::new()
+            };
 
             format_mcp_response(&json!({
                 "status": "completed",
@@ -3117,15 +4013,29 @@ pub async fn handle_memory_compact<S: Store>(
                     "duration_ms": r.duration.as_millis()
                 })),
                 "cache_entries_invalidated": result.cache_entries_invalidated,
-                "duration_ms": result.duration.as_millis()
+                "duration_ms": result.duration.as_millis(),
+                "digest_artifacts": digest_artifacts
             }))
         }
         Ok(None) => {
             debug!(tenant_id = %tenant_id, "compaction skipped - thresholds not exceeded");
 
+            let digest_artifacts = if should_rebuild_digests {
+                rebuild_requested_digests(
+                    store,
+                    &tenant_id,
+                    params.project_id.as_deref(),
+                    &digest_modes,
+                )
+                .await?
+            } else {
+                Vec::new()
+            };
+
             format_mcp_response(&json!({
-                "status": "skipped",
-                "reason": "No compaction needed - all thresholds below limits"
+                "status": if digest_artifacts.is_empty() { "skipped" } else { "completed" },
+                "reason": if digest_artifacts.is_empty() { "No compaction needed - all thresholds below limits" } else { "Storage compaction skipped; digests refreshed" },
+                "digest_artifacts": digest_artifacts
             }))
         }
         Err(e) => Err(McpError::ToolError(e.to_string())),
@@ -3970,6 +4880,7 @@ mod tests {
             k: 10,
             filters: None,
             debug_tiers: None,
+            mode: None,
         };
 
         let result = handle_memory_search(&store, params).await.unwrap();
@@ -3990,6 +4901,7 @@ mod tests {
             k: 0,
             filters: None,
             debug_tiers: None,
+            mode: None,
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -4007,6 +4919,7 @@ mod tests {
             k: 101,
             filters: None,
             debug_tiers: None,
+            mode: None,
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -4107,6 +5020,7 @@ mod tests {
             k: 10,
             filters: None,
             debug_tiers: None,
+            mode: None,
         };
 
         let search_result = handle_memory_search(&store, search_params).await.unwrap();
@@ -4161,6 +5075,7 @@ mod tests {
                 k: 10,
                 filters: None,
                 debug_tiers: None,
+                mode: None,
             },
         )
         .await
@@ -4211,6 +5126,7 @@ mod tests {
                     time_range: None,
                 }),
                 debug_tiers: None,
+                mode: None,
             },
         )
         .await
@@ -4261,6 +5177,7 @@ mod tests {
                     }),
                 }),
                 debug_tiers: None,
+                mode: None,
             },
         )
         .await
@@ -4321,6 +5238,7 @@ mod tests {
                     time_range: None,
                 }),
                 debug_tiers: None,
+                mode: None,
             },
         )
         .await
@@ -4376,6 +5294,7 @@ mod tests {
                 k: 10,
                 filters: None,
                 debug_tiers: None,
+                mode: None,
             },
         )
         .await
@@ -4429,6 +5348,7 @@ mod tests {
                 k: 5,
                 filters: None,
                 debug_tiers: None,
+                mode: None,
             },
         )
         .await
@@ -4643,6 +5563,7 @@ mod tests {
             k: 10,
             filters: None,
             debug_tiers: None,
+            mode: None,
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -4708,6 +5629,7 @@ mod tests {
             k: 10,
             filters: None,
             debug_tiers: None,
+            mode: None,
         };
 
         let result = handle_memory_search(&store, search_params).await.unwrap();
@@ -4741,6 +5663,7 @@ mod tests {
             k: 10,
             filters: None,
             debug_tiers: Some(true),
+            mode: None,
         };
 
         let result = handle_memory_search(&store, search_params).await.unwrap();
@@ -5354,6 +6277,7 @@ mod tests {
                     verification_status: None,
                     relation_kind: None,
                 }),
+                mode: None,
             },
         )
         .await
@@ -5384,8 +6308,7 @@ mod tests {
                     goal: "Coordinate a shared artifact thread".to_string(),
                     motivation: "Multiple agents should reuse and critique the same record"
                         .to_string(),
-                    hypothesis: "Artifact-native collaboration reduces duplicated work"
-                        .to_string(),
+                    hypothesis: "Artifact-native collaboration reduces duplicated work".to_string(),
                     scientific_question: "How should critique flow through the shared thread?"
                         .to_string(),
                     dataset_refs: vec![TaskDatasetRefParams {
@@ -5425,15 +6348,18 @@ mod tests {
                     hypothesis: None,
                     scientific_question: None,
                     method_summary: None,
-                    summary: Some("Need a clearer review and verification path for artifacts"
-                        .to_string()),
+                    summary: Some(
+                        "Need a clearer review and verification path for artifacts".to_string(),
+                    ),
                     evidence_kind: None,
                     supports_claim: None,
                     blockers: vec![],
                     what_worked: vec![],
                     what_failed: vec!["Search still centers projection chunks".to_string()],
                     validation: vec![],
-                    uncertainty: vec!["Exact artifact exchange semantics are still thin".to_string()],
+                    uncertainty: vec![
+                        "Exact artifact exchange semantics are still thin".to_string()
+                    ],
                     followups: vec!["Add artifact.search and thread inspection".to_string()],
                     expected_outputs: vec![],
                     related_artifact_ids: vec![],
@@ -5481,10 +6407,19 @@ mod tests {
             .unwrap(),
         );
         let review_artifact = get_payload.artifact.expect("artifact should exist");
-        assert_eq!(review_artifact.challenge_id.as_deref(), Some("artifact_protocol"));
-        assert_eq!(review_artifact.reply_to_artifact_id.as_deref(), Some(start.artifact_id.as_str()));
+        assert_eq!(
+            review_artifact.challenge_id.as_deref(),
+            Some("artifact_protocol")
+        );
+        assert_eq!(
+            review_artifact.reply_to_artifact_id.as_deref(),
+            Some(start.artifact_id.as_str())
+        );
         assert_eq!(review_artifact.requested_action.as_deref(), Some("review"));
-        assert_eq!(review_artifact.verification_status.as_deref(), Some("pending"));
+        assert_eq!(
+            review_artifact.verification_status.as_deref(),
+            Some("pending")
+        );
         assert_eq!(review_artifact.thread_key(), start.task_id.as_str());
         assert_eq!(review_artifact.contributors.len(), 1);
 
@@ -5530,13 +6465,17 @@ mod tests {
                         verification_status: Some("pending".to_string()),
                         relation_kind: Some("reviews".to_string()),
                     }),
+                    mode: None,
                 },
             )
             .await
             .unwrap(),
         );
         assert_eq!(search_payload.results.len(), 1);
-        assert_eq!(search_payload.results[0].artifact.artifact_id, review.artifact_id);
+        assert_eq!(
+            search_payload.results[0].artifact.artifact_id,
+            review.artifact_id
+        );
 
         let task_search_payload: SearchResult = parse_tool_payload(
             &handle_task_search(
@@ -5565,6 +6504,7 @@ mod tests {
                         verification_status: Some("pending".to_string()),
                         relation_kind: Some("reviews".to_string()),
                     }),
+                    mode: None,
                 },
             )
             .await
@@ -5576,15 +6516,12 @@ mod tests {
             .iter()
             .all(|result| result.artifact.is_some()));
         assert_eq!(
-            task_search_payload
-                .results
-                .iter()
-                .find_map(|result| {
-                    result
-                        .artifact
-                        .as_ref()
-                        .and_then(|artifact| artifact.artifact_role.as_deref())
-                }),
+            task_search_payload.results.iter().find_map(|result| {
+                result
+                    .artifact
+                    .as_ref()
+                    .and_then(|artifact| artifact.artifact_role.as_deref())
+            }),
             Some("critique")
         );
     }
@@ -5652,6 +6589,7 @@ mod tests {
                 k: 10,
                 filters: None,
                 debug_tiers: None,
+                mode: None,
             },
         )
         .await
@@ -5716,6 +6654,7 @@ mod tests {
                 k: 10,
                 filters: None,
                 debug_tiers: None,
+                mode: None,
             },
         )
         .await
@@ -5757,5 +6696,233 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(McpError::InvalidParams(_))));
+    }
+
+    #[tokio::test]
+    async fn context_brief_project_generates_digest_artifact() {
+        let store = make_store();
+
+        let start = handle_task_start(
+            &store,
+            None,
+            TaskStartParams {
+                tenant_id: "tenant_a".to_string(),
+                project_id: Some("proj_alpha".to_string()),
+                parent_task_id: None,
+                agent_id: None,
+                session_id: None,
+                goal: "Ship the project brief".to_string(),
+                motivation: "New agents need a concise resume surface".to_string(),
+                hypothesis: "A persisted project brief will reduce context-search noise"
+                    .to_string(),
+                scientific_question: "Can a digest summarize current task state?".to_string(),
+                dataset_refs: vec![],
+                expected_outputs: vec!["brief artifact".to_string()],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        let start_payload: TaskArtifactResult = parse_tool_payload(&start);
+
+        handle_task_finish(
+            &store,
+            None,
+            TaskFinishParams {
+                tenant_id: "tenant_a".to_string(),
+                task_id: start_payload.task_id.clone(),
+                project_id: Some("proj_alpha".to_string()),
+                agent_id: None,
+                session_id: None,
+                status: None,
+                goal: None,
+                scientific_question: None,
+                dataset_refs: vec![],
+                entity_refs: vec![],
+                what_worked: vec!["Digest summarization reduced retrieval fan-out".to_string()],
+                what_failed: vec!["Raw chunk search alone was noisy".to_string()],
+                validation: vec!["Project brief response returned one active task".to_string()],
+                uncertainty: vec![],
+                followups: vec!["Bias memory.search toward project digests".to_string()],
+                confidence: 0.9,
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = handle_context_brief_project(
+            &store,
+            ProjectBriefParams {
+                tenant_id: "tenant_a".to_string(),
+                project_id: "proj_alpha".to_string(),
+                query: "".to_string(),
+                k: 10,
+                include_related_projects: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let payload: ProjectBriefResult = parse_tool_payload(&result);
+        assert_eq!(payload.artifact.artifact_kind, ArtifactKind::Digest);
+        assert_eq!(
+            payload.artifact.artifact_role.as_deref(),
+            Some(DIGEST_ROLE_PROJECT_BRIEF)
+        );
+        assert_eq!(payload.brief.project_id, "proj_alpha");
+        assert!(
+            !payload.brief.recent_completed_tasks.is_empty()
+                || !payload.brief.active_tasks.is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn artifact_find_failures_returns_library_and_failure_hits() {
+        let store = make_store();
+
+        let start = handle_task_start(
+            &store,
+            None,
+            TaskStartParams {
+                tenant_id: "tenant_b".to_string(),
+                project_id: Some("proj_beta".to_string()),
+                parent_task_id: None,
+                agent_id: None,
+                session_id: None,
+                goal: "Exercise failure library".to_string(),
+                motivation: "Need failure-first recall".to_string(),
+                hypothesis: "what_failed fields should be surfaced as reusable failures"
+                    .to_string(),
+                scientific_question: "Can failure digests summarize recent problems?".to_string(),
+                dataset_refs: vec![],
+                expected_outputs: vec!["failure library".to_string()],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        let start_payload: TaskArtifactResult = parse_tool_payload(&start);
+
+        handle_task_progress(
+            &store,
+            None,
+            TaskProgressParams {
+                tenant_id: "tenant_b".to_string(),
+                task_id: start_payload.task_id.clone(),
+                project_id: Some("proj_beta".to_string()),
+                agent_id: None,
+                session_id: None,
+                summary: "Compilation failed in the digest path".to_string(),
+                blockers: vec!["Digest query planner missing project brief candidates".to_string()],
+                failed_attempts: vec!["Raw search mode returned only generic chunks".to_string()],
+                next_step: "Add digest-aware candidate collection".to_string(),
+                dataset_refs: vec![],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = handle_artifact_find_failures(
+            &store,
+            ArtifactLibraryParams {
+                tenant_id: "tenant_b".to_string(),
+                project_id: Some("proj_beta".to_string()),
+                query: "digest planner".to_string(),
+                k: 10,
+            },
+        )
+        .await
+        .unwrap();
+
+        let payload: FailureSearchResult = parse_tool_payload(&result);
+        assert_eq!(payload.artifact.artifact_kind, ArtifactKind::Digest);
+        assert_eq!(
+            payload.artifact.artifact_role.as_deref(),
+            Some(DIGEST_ROLE_FAILURE_LIBRARY)
+        );
+        assert!(!payload.results.is_empty());
+        assert!(payload.results[0].summary.contains("Digest"));
+    }
+
+    #[tokio::test]
+    async fn memory_compact_can_refresh_digests_without_storage_compaction() {
+        let store = make_store();
+
+        let start = handle_task_start(
+            &store,
+            None,
+            TaskStartParams {
+                tenant_id: "tenant_c".to_string(),
+                project_id: Some("proj_gamma".to_string()),
+                parent_task_id: None,
+                agent_id: None,
+                session_id: None,
+                goal: "Prepare digest-only compaction".to_string(),
+                motivation: "Need on-demand digest refreshes".to_string(),
+                hypothesis:
+                    "memory.compact should rebuild digests even when storage compaction is skipped"
+                        .to_string(),
+                scientific_question: "Can digest rebuild run without tombstone thresholds?"
+                    .to_string(),
+                dataset_refs: vec![],
+                expected_outputs: vec!["digest rebuild".to_string()],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        let start_payload: TaskArtifactResult = parse_tool_payload(&start);
+
+        handle_task_finish(
+            &store,
+            None,
+            TaskFinishParams {
+                tenant_id: "tenant_c".to_string(),
+                task_id: start_payload.task_id,
+                project_id: Some("proj_gamma".to_string()),
+                agent_id: None,
+                session_id: None,
+                status: None,
+                goal: None,
+                scientific_question: None,
+                dataset_refs: vec![],
+                entity_refs: vec![],
+                what_worked: vec!["Digest rebuild can be triggered explicitly".to_string()],
+                what_failed: vec!["No storage compaction threshold was exceeded".to_string()],
+                validation: vec!["Compaction response returned digest artifact ids".to_string()],
+                uncertainty: vec![],
+                followups: vec![],
+                confidence: 0.8,
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = handle_memory_compact(
+            &store,
+            CompactParams {
+                tenant_id: "tenant_c".to_string(),
+                force: false,
+                project_id: Some("proj_gamma".to_string()),
+                digest_modes: Some(vec![QueryMode::BriefProject, QueryMode::FindFailures]),
+                force_digest_rebuild: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let payload: Value = parse_tool_payload(&result);
+        assert_eq!(payload["status"].as_str(), Some("completed"));
+        assert!(payload["digest_artifacts"]
+            .as_array()
+            .map(|items| !items.is_empty())
+            .unwrap_or(false));
     }
 }

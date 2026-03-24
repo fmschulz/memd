@@ -265,6 +265,33 @@ impl Default for ChunkStatus {
     }
 }
 
+/// Promotion state for chunks/artifacts in the retrieval hierarchy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PromotionState {
+    /// Raw source material with no higher-level synthesis.
+    #[default]
+    Raw,
+    /// Derived summaries and generated digests.
+    Summarized,
+    /// Canonical source-of-truth task/artifact records.
+    Canonical,
+    /// Canonical records or digests that have been explicitly verified.
+    Verified,
+}
+
+impl fmt::Display for PromotionState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            PromotionState::Raw => "raw",
+            PromotionState::Summarized => "summarized",
+            PromotionState::Canonical => "canonical",
+            PromotionState::Verified => "verified",
+        };
+        write!(f, "{}", s)
+    }
+}
+
 /// Source information for a chunk
 ///
 /// Tracks provenance: where the chunk content originated from.
@@ -339,6 +366,9 @@ pub struct MemoryChunk {
     pub chunk_type: ChunkType,
     /// Lifecycle status
     pub status: ChunkStatus,
+    /// Relative retrieval priority tier.
+    #[serde(default)]
+    pub promotion_state: PromotionState,
     /// Provenance information
     pub source: Source,
     /// The actual content
@@ -371,6 +401,7 @@ impl MemoryChunk {
             timestamp_observed: None,
             chunk_type,
             status: ChunkStatus::Final,
+            promotion_state: PromotionState::Raw,
             source: Source::empty(),
             text,
             tags: Vec::new(),
@@ -415,6 +446,12 @@ impl MemoryChunk {
     /// Builder method to set status
     pub fn with_status(mut self, status: ChunkStatus) -> Self {
         self.status = status;
+        self
+    }
+
+    /// Builder method to set promotion state
+    pub fn with_promotion_state(mut self, promotion_state: PromotionState) -> Self {
+        self.promotion_state = promotion_state;
         self
     }
 }

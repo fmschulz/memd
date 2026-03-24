@@ -15,7 +15,8 @@ use super::{
 };
 use crate::error::Result;
 use crate::task_memory::{
-    TaskArtifact, TaskArtifactWriteResult, TaskProjection, TaskSearchFilters,
+    ArtifactKind, TaskArtifact, TaskArtifactWriteResult, TaskProjection, TaskRecord,
+    TaskSearchFilters,
 };
 use crate::types::{ChunkId, ChunkStatus, MemoryChunk, TenantId};
 
@@ -240,6 +241,80 @@ impl Store for MemoryStore {
                 .then_with(|| left.artifact_id.cmp(&right.artifact_id))
         });
         Ok(artifacts)
+    }
+
+    async fn list_tasks(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TaskRecord>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let task_store = self.task_artifacts.read().unwrap();
+        let Some(artifacts) = task_store.get(tenant_id.as_str()) else {
+            return Ok(Vec::new());
+        };
+
+        let mut by_task: HashMap<String, TaskRecord> = HashMap::new();
+        for artifact in artifacts.values() {
+            if artifact.artifact_kind == ArtifactKind::Digest {
+                continue;
+            }
+            if let Some(project_id) = project_id {
+                if artifact.project_id.as_option() != Some(project_id) {
+                    continue;
+                }
+            }
+
+            let record = by_task
+                .entry(artifact.task_id.clone())
+                .or_insert_with(|| TaskRecord {
+                    task_id: artifact.task_id.clone(),
+                    tenant_id: artifact.tenant_id.clone(),
+                    project_id: artifact.project_id.clone(),
+                    status: artifact.status.clone(),
+                    goal: artifact.goal.clone(),
+                    scientific_question: artifact.scientific_question.clone(),
+                    hypothesis: artifact.hypothesis.clone(),
+                    last_artifact_id: artifact.artifact_id.clone(),
+                    started_at_ms: None,
+                    finished_at_ms: None,
+                    updated_at_ms: artifact.timestamp_created,
+                });
+
+            if record.project_id.as_option().is_none() && artifact.project_id.as_option().is_some()
+            {
+                record.project_id = artifact.project_id.clone();
+            }
+            if record.goal.is_none() {
+                record.goal = artifact.goal.clone();
+            }
+            if record.scientific_question.is_none() {
+                record.scientific_question = artifact.scientific_question.clone();
+            }
+            if record.hypothesis.is_none() {
+                record.hypothesis = artifact.hypothesis.clone();
+            }
+            if artifact.artifact_kind == ArtifactKind::TaskStart {
+                record.started_at_ms = Some(artifact.timestamp_created);
+            }
+            if artifact.artifact_kind == ArtifactKind::TaskFinish {
+                record.finished_at_ms = Some(artifact.timestamp_created);
+            }
+            if artifact.timestamp_created >= record.updated_at_ms {
+                record.updated_at_ms = artifact.timestamp_created;
+                record.last_artifact_id = artifact.artifact_id.clone();
+                record.status = artifact.status.clone().or_else(|| record.status.clone());
+            }
+        }
+
+        let mut tasks = by_task.into_values().collect::<Vec<_>>();
+        tasks.sort_by_key(|task| std::cmp::Reverse(task.updated_at_ms));
+        tasks.truncate(limit);
+        Ok(tasks)
     }
 
     async fn search_task_projection_chunk_ids(
