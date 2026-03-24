@@ -46,8 +46,14 @@ pub use structural::{
     SymbolKind, SymbolRecord,
 };
 pub use task_memory::{
-    build_task_projections, ArtifactKind, ContributorRef, DatasetRef, EntityRef, ProjectionKind,
-    TaskArtifact, TaskArtifactWriteResult, TaskProjection, TaskProvenance, TaskSearchFilters,
+    build_project_brief_digest_artifact, build_project_brief_view, build_task_projections,
+    build_task_resume_digest_artifact, build_task_resume_view, derive_artifact_promotion_state,
+    derive_chunk_promotion_state, infer_decision_items, infer_evidence_items, infer_failure_items,
+    ArtifactKind, ContributorRef, DatasetRef, DecisionViewItem, EntityRef, EvidenceViewItem,
+    FailureViewItem, ProjectBriefView, ProjectionKind, RunDigestItem, TaskArtifact,
+    TaskArtifactWriteResult, TaskProjection, TaskProvenance, TaskRecord, TaskResumeView,
+    TaskSearchFilters, DIGEST_ROLE_DECISION_LIBRARY, DIGEST_ROLE_EVIDENCE_LIBRARY,
+    DIGEST_ROLE_FAILURE_LIBRARY, DIGEST_ROLE_PROJECT_BRIEF, DIGEST_ROLE_TASK_RESUME,
 };
 pub use text::{CodeTokenizer, ProcessedSentence, Sentence, SentenceSplitter, TextProcessor};
 pub use tiered::{
@@ -55,4 +61,6 @@ pub use tiered::{
     CachedResult, HotTier, HotTierConfig, HotTierStats, PromotionScore, SemanticCache,
     SemanticCacheConfig,
 };
-pub use types::{ChunkId, ChunkStatus, ChunkType, MemoryChunk, ProjectId, Source, TenantId};
+pub use types::{
+    ChunkId, ChunkStatus, ChunkType, MemoryChunk, ProjectId, PromotionState, Source, TenantId,
+};

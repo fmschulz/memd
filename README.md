@@ -27,6 +27,16 @@ Use `artifact.*` for collaboration around that work:
 - contributor records
 - optional safety metadata for local prototypes
 
+For summary-first retrieval and onboarding, `memd` also persists digest artifacts and exposes dedicated briefing and library helpers:
+
+- `context.brief_project`
+- `task.resume`
+- `artifact.find_failures`
+- `artifact.find_decisions`
+- `artifact.find_evidence`
+
+`memory.search`, `task.search`, and `artifact.search` also accept `mode` with `brief_project`, `resume_task`, `find_failures`, `find_decisions`, or `find_evidence` to bias retrieval toward those persisted digests and canonical summaries.
+
 ## What You Need
 
 - Rust
@@ -152,6 +162,16 @@ Then record progress with:
 - `task.add_evidence`
 - `task.finish`
 
+For digest-backed summaries and summary-first retrieval, use:
+
+- `context.brief_project`
+- `task.resume`
+- `artifact.find_failures`
+- `artifact.find_decisions`
+- `artifact.find_evidence`
+
+`memory.search`, `task.search`, and `artifact.search` also accept `mode` so the same retrieval surfaces can prefer persisted briefs, task resumes, or failure/decision/evidence libraries when that is the intent.
+
 For collaboration around the same work, use:
 
 - `artifact.create`
@@ -164,6 +184,8 @@ For raw context, use:
 - `memory.add`
 - `memory.add_batch`
 - `memory.search`
+
+To refresh project brief and failure/decision/evidence digests explicitly, call `memory.compact` with `project_id` and, when needed, `digest_modes` plus `force_digest_rebuild`.
 
 Optional artifact safety metadata is supported through `artifact.create`:
 
