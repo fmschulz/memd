@@ -38,10 +38,11 @@ pub(crate) fn sanitize_tag_value(value: &str) -> String {
 pub use digests::{
     build_library_digest_artifact, build_project_brief_digest_artifact, build_project_brief_view,
     build_task_resume_digest_artifact, build_task_resume_view, infer_decision_items,
-    infer_evidence_items, infer_failure_items, stable_digest_identity, DecisionViewItem,
-    EvidenceViewItem, FailureViewItem, ProjectBriefView, RunDigestItem, TaskResumeView,
-    DIGEST_ROLE_DECISION_LIBRARY, DIGEST_ROLE_EVIDENCE_LIBRARY, DIGEST_ROLE_FAILURE_LIBRARY,
-    DIGEST_ROLE_PROJECT_BRIEF, DIGEST_ROLE_TASK_RESUME,
+    infer_evidence_items, infer_failure_items, infer_highlight_items, stable_digest_identity,
+    DecisionViewItem, EvidenceViewItem, FailureViewItem, HighlightViewItem, ProjectBriefView,
+    RunDigestItem, TaskResumeView, DIGEST_ROLE_DECISION_LIBRARY, DIGEST_ROLE_EVIDENCE_LIBRARY,
+    DIGEST_ROLE_FAILURE_LIBRARY, DIGEST_ROLE_HIGHLIGHT_LIBRARY, DIGEST_ROLE_PROJECT_BRIEF,
+    DIGEST_ROLE_TASK_RESUME,
 };
 
 fn join_lines(items: &[String]) -> String {

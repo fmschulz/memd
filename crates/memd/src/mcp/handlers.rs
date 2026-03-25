@@ -17,10 +17,11 @@ use crate::task_memory::{
     build_library_digest_artifact, build_project_brief_digest_artifact, build_project_brief_view,
     build_task_projections, build_task_resume_digest_artifact, build_task_resume_view,
     derive_artifact_promotion_state, infer_decision_items, infer_evidence_items,
-    infer_failure_items, ArtifactKind, ContributorRef, DatasetRef, DecisionViewItem, EntityRef,
-    EvidenceViewItem, FailureViewItem, ProjectBriefView, TaskArtifact, TaskProvenance,
-    TaskResumeView, TaskSearchFilters, DIGEST_ROLE_DECISION_LIBRARY, DIGEST_ROLE_EVIDENCE_LIBRARY,
-    DIGEST_ROLE_FAILURE_LIBRARY, DIGEST_ROLE_PROJECT_BRIEF, DIGEST_ROLE_TASK_RESUME,
+    infer_failure_items, infer_highlight_items, ArtifactKind, ContributorRef, DatasetRef,
+    DecisionViewItem, EntityRef, EvidenceViewItem, FailureViewItem, HighlightViewItem,
+    ProjectBriefView, TaskArtifact, TaskProvenance, TaskResumeView, TaskSearchFilters,
+    DIGEST_ROLE_DECISION_LIBRARY, DIGEST_ROLE_EVIDENCE_LIBRARY, DIGEST_ROLE_FAILURE_LIBRARY,
+    DIGEST_ROLE_HIGHLIGHT_LIBRARY, DIGEST_ROLE_PROJECT_BRIEF, DIGEST_ROLE_TASK_RESUME,
 };
 use crate::types::{ChunkId, ChunkType, MemoryChunk, ProjectId, Source, TenantId};
 
@@ -34,6 +35,7 @@ pub enum QueryMode {
     FindFailures,
     FindDecisions,
     FindEvidence,
+    FindHighlights,
 }
 
 // ---------- Request Types ----------
@@ -1003,6 +1005,12 @@ pub struct EvidenceSearchViewResult {
     pub results: Vec<EvidenceViewItem>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HighlightSearchViewResult {
+    pub artifact: TaskArtifact,
+    pub results: Vec<HighlightViewItem>,
+}
+
 /// Result of a delete operation
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeleteResult {
@@ -1912,8 +1920,47 @@ where
     });
 }
 
+fn sort_highlight_items(items: &mut [HighlightViewItem], query: &str) {
+    items.sort_by(|left, right| {
+        if query.trim().is_empty() {
+            return right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| right.timestamp_created.cmp(&left.timestamp_created));
+        }
+
+        let left_text = format!("{} {}", left.summary, left.rationale);
+        let right_text = format!("{} {}", right.summary, right.rationale);
+        let left_rank = score_text_candidate(query, &left_text, left.timestamp_created) + left.score;
+        let right_rank =
+            score_text_candidate(query, &right_text, right.timestamp_created) + right.score;
+        right_rank
+            .partial_cmp(&left_rank)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right.score.partial_cmp(&left.score).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| right.timestamp_created.cmp(&left.timestamp_created))
+    });
+}
+
 fn finalize_artifact_for_storage(artifact: &mut TaskArtifact) {
     artifact.promotion_state = derive_artifact_promotion_state(artifact);
+}
+
+fn digest_artifacts_equivalent(existing: &TaskArtifact, candidate: &TaskArtifact) -> bool {
+    if existing.artifact_kind != ArtifactKind::Digest
+        || candidate.artifact_kind != ArtifactKind::Digest
+    {
+        return false;
+    }
+
+    let mut lhs = existing.clone();
+    let mut rhs = candidate.clone();
+    lhs.timestamp_created = 0;
+    rhs.timestamp_created = 0;
+    lhs.timestamp_observed = None;
+    rhs.timestamp_observed = None;
+    lhs == rhs
 }
 
 async fn persist_digest_artifact<S: Store>(
@@ -1921,6 +1968,15 @@ async fn persist_digest_artifact<S: Store>(
     mut artifact: TaskArtifact,
 ) -> Result<TaskArtifact, McpError> {
     finalize_artifact_for_storage(&mut artifact);
+    if let Some(existing) = store
+        .get_task_artifact(&artifact.tenant_id, &artifact.artifact_id)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?
+    {
+        if digest_artifacts_equivalent(&existing, &artifact) {
+            return Ok(existing);
+        }
+    }
     let projections = build_task_projections(&artifact);
     store
         .add_task_artifact(artifact.clone(), projections)
@@ -2171,6 +2227,57 @@ async fn ensure_evidence_library_digest<S: Store>(
     Ok((artifact, evidence))
 }
 
+async fn ensure_highlight_library_digest<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    project_id: Option<&str>,
+) -> Result<(TaskArtifact, Vec<HighlightViewItem>), McpError> {
+    let artifacts = load_project_artifacts(store, tenant_id, project_id, 500).await?;
+    let highlights = infer_highlight_items(&artifacts);
+    let source_updated_at_ms = artifacts
+        .iter()
+        .map(|artifact| artifact.timestamp_created)
+        .max()
+        .unwrap_or(0);
+    let summary = format!(
+        "Highlight library for {} contains {} ranked lessons with future-agent uplift.",
+        project_id.unwrap_or(tenant_id.as_str()),
+        highlights.len()
+    );
+    let warning_highlights = highlights
+        .iter()
+        .filter(|item| item.category == "warning")
+        .map(|item| item.summary.clone())
+        .take(12)
+        .collect::<Vec<_>>();
+    let validated_highlights = highlights
+        .iter()
+        .filter(|item| item.category != "warning")
+        .map(|item| item.summary.clone())
+        .take(12)
+        .collect::<Vec<_>>();
+    let related_artifact_ids = highlights
+        .iter()
+        .flat_map(|item| item.supporting_artifact_ids.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let artifact = build_library_digest_artifact(
+        tenant_id.clone(),
+        project_id.map(|id| ProjectId::from(id)),
+        DIGEST_ROLE_HIGHLIGHT_LIBRARY,
+        &build_scope_key(project_id, tenant_id, DIGEST_ROLE_HIGHLIGHT_LIBRARY),
+        summary,
+        warning_highlights,
+        validated_highlights,
+        Vec::new(),
+        related_artifact_ids,
+        source_updated_at_ms,
+    );
+    let artifact = persist_digest_artifact(store, artifact).await?;
+    Ok((artifact, highlights))
+}
+
 async fn rebuild_requested_digests<S: Store>(
     store: &S,
     tenant_id: &TenantId,
@@ -2183,6 +2290,7 @@ async fn rebuild_requested_digests<S: Store>(
             QueryMode::FindFailures,
             QueryMode::FindDecisions,
             QueryMode::FindEvidence,
+            QueryMode::FindHighlights,
         ]
     } else {
         modes.to_vec()
@@ -2215,6 +2323,12 @@ async fn rebuild_requested_digests<S: Store>(
             ),
             QueryMode::FindEvidence => artifact_ids.push(
                 ensure_evidence_library_digest(store, tenant_id, project_id)
+                    .await?
+                    .0
+                    .artifact_id,
+            ),
+            QueryMode::FindHighlights => artifact_ids.push(
+                ensure_highlight_library_digest(store, tenant_id, project_id)
                     .await?
                     .0
                     .artifact_id,
@@ -2351,6 +2465,28 @@ async fn candidate_chunk_ids_for_mode<S: Store>(
                 });
             }
         }
+        QueryMode::FindHighlights => {
+            let _ = ensure_highlight_library_digest(store, tenant_id, filters.project_id.as_deref())
+                .await?;
+            filters_list.push(TaskSearchFilters {
+                artifact_kind: Some(ArtifactKind::Digest),
+                artifact_role: Some(DIGEST_ROLE_HIGHLIGHT_LIBRARY.to_string()),
+                project_id: filters.project_id.clone(),
+                ..Default::default()
+            });
+            for kind in [
+                ArtifactKind::TaskFinish,
+                ArtifactKind::Verification,
+                ArtifactKind::Decision,
+                ArtifactKind::Review,
+            ] {
+                filters_list.push(TaskSearchFilters {
+                    artifact_kind: Some(kind),
+                    project_id: filters.project_id.clone(),
+                    ..Default::default()
+                });
+            }
+        }
     }
 
     collect_candidate_chunk_ids(store, tenant_id, filters_list, limit).await
@@ -2372,6 +2508,7 @@ async fn summary_preferred_results<S: Store>(
             QueryMode::FindFailures,
             QueryMode::FindDecisions,
             QueryMode::FindEvidence,
+            QueryMode::FindHighlights,
         ]
     } else {
         Vec::new()
@@ -3707,6 +3844,24 @@ pub async fn handle_artifact_find_evidence<S: Store>(
     results.truncate(params.k);
 
     format_mcp_response(&EvidenceSearchViewResult { artifact, results })
+}
+
+pub async fn handle_artifact_find_highlights<S: Store>(
+    store: &S,
+    params: ArtifactLibraryParams,
+) -> Result<Value, McpError> {
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    validate_search_k(params.k)?;
+    if let Some(project_id) = params.project_id.as_deref() {
+        validate_identifier("project_id", project_id)?;
+    }
+
+    let (artifact, mut results) =
+        ensure_highlight_library_digest(store, &tenant_id, params.project_id.as_deref()).await?;
+    sort_highlight_items(&mut results, &params.query);
+    results.truncate(params.k);
+
+    format_mcp_response(&HighlightSearchViewResult { artifact, results })
 }
 
 /// Handle memory.get tool call
@@ -6779,6 +6934,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn context_brief_project_does_not_rewrite_unchanged_digest() {
+        let store = make_store();
+
+        let start = handle_task_start(
+            &store,
+            None,
+            TaskStartParams {
+                tenant_id: "tenant_a".to_string(),
+                project_id: Some("proj_alpha".to_string()),
+                parent_task_id: None,
+                agent_id: None,
+                session_id: None,
+                goal: "Ship the project brief".to_string(),
+                motivation: "New agents need a concise resume surface".to_string(),
+                hypothesis: "A persisted project brief will reduce context-search noise"
+                    .to_string(),
+                scientific_question: "Can a digest summarize current task state?".to_string(),
+                dataset_refs: vec![],
+                expected_outputs: vec!["brief artifact".to_string()],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        let start_payload: TaskArtifactResult = parse_tool_payload(&start);
+
+        handle_task_finish(
+            &store,
+            None,
+            TaskFinishParams {
+                tenant_id: "tenant_a".to_string(),
+                task_id: start_payload.task_id,
+                project_id: Some("proj_alpha".to_string()),
+                agent_id: None,
+                session_id: None,
+                status: None,
+                goal: None,
+                scientific_question: None,
+                dataset_refs: vec![],
+                entity_refs: vec![],
+                what_worked: vec!["Digest summarization reduced retrieval fan-out".to_string()],
+                what_failed: vec!["Raw chunk search alone was noisy".to_string()],
+                validation: vec!["Project brief response returned one active task".to_string()],
+                uncertainty: vec![],
+                followups: vec!["Bias memory.search toward project digests".to_string()],
+                confidence: 0.9,
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let first = handle_context_brief_project(
+            &store,
+            ProjectBriefParams {
+                tenant_id: "tenant_a".to_string(),
+                project_id: "proj_alpha".to_string(),
+                query: "".to_string(),
+                k: 10,
+                include_related_projects: true,
+            },
+        )
+            .await
+            .unwrap();
+        let first_payload: ProjectBriefResult = parse_tool_payload(&first);
+        let chunks_after_first = store
+            .stats(&TenantId::new("tenant_a").unwrap())
+            .await
+            .unwrap()
+            .total_chunks;
+
+        let second = handle_context_brief_project(
+            &store,
+            ProjectBriefParams {
+                tenant_id: "tenant_a".to_string(),
+                project_id: "proj_alpha".to_string(),
+                query: "".to_string(),
+                k: 10,
+                include_related_projects: true,
+            },
+        )
+        .await
+        .unwrap();
+        let second_payload: ProjectBriefResult = parse_tool_payload(&second);
+        let chunks_after_second = store
+            .stats(&TenantId::new("tenant_a").unwrap())
+            .await
+            .unwrap()
+            .total_chunks;
+
+        assert_eq!(first_payload.artifact.artifact_id, second_payload.artifact.artifact_id);
+        assert_eq!(
+            first_payload.artifact.timestamp_created,
+            second_payload.artifact.timestamp_created
+        );
+        assert_eq!(chunks_after_first, chunks_after_second);
+    }
+
+    #[tokio::test]
     async fn artifact_find_failures_returns_library_and_failure_hits() {
         let store = make_store();
 
@@ -6847,6 +7102,162 @@ mod tests {
         );
         assert!(!payload.results.is_empty());
         assert!(payload.results[0].summary.contains("Digest"));
+    }
+
+    #[tokio::test]
+    async fn artifact_find_highlights_returns_ranked_lessons_without_rewriting_unchanged_digest() {
+        let store = make_store();
+
+        let first = handle_task_start(
+            &store,
+            None,
+            TaskStartParams {
+                tenant_id: "tenant_h".to_string(),
+                project_id: Some("proj_highlight".to_string()),
+                parent_task_id: None,
+                agent_id: None,
+                session_id: None,
+                goal: "Capture reusable agent lessons".to_string(),
+                motivation: "Need a high-signal highlight library".to_string(),
+                hypothesis: "Validated repeated tactics should surface as highlights".to_string(),
+                scientific_question: "Can highlight digests rank future-agent lessons?".to_string(),
+                dataset_refs: vec![],
+                expected_outputs: vec!["highlight library".to_string()],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        let first_payload: TaskArtifactResult = parse_tool_payload(&first);
+
+        handle_task_finish(
+            &store,
+            None,
+            TaskFinishParams {
+                tenant_id: "tenant_h".to_string(),
+                task_id: first_payload.task_id,
+                project_id: Some("proj_highlight".to_string()),
+                agent_id: None,
+                session_id: None,
+                status: None,
+                goal: None,
+                scientific_question: None,
+                dataset_refs: vec![],
+                entity_refs: vec![],
+                what_worked: vec!["Use digest persistence idempotence".to_string()],
+                what_failed: vec!["Rewriting unchanged digests creates retrieval noise".to_string()],
+                validation: vec!["Repeated refreshes do not add chunks".to_string()],
+                uncertainty: vec![],
+                followups: vec![],
+                confidence: 0.85,
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let second = handle_task_start(
+            &store,
+            None,
+            TaskStartParams {
+                tenant_id: "tenant_h".to_string(),
+                project_id: Some("proj_highlight".to_string()),
+                parent_task_id: None,
+                agent_id: None,
+                session_id: None,
+                goal: "Reconfirm reusable agent lessons".to_string(),
+                motivation: "Need repetition for stronger promotion".to_string(),
+                hypothesis: "Repeated tactics should rank above one-off notes".to_string(),
+                scientific_question: "Do repeated successful lessons outrank one-offs?".to_string(),
+                dataset_refs: vec![],
+                expected_outputs: vec!["highlight library".to_string()],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        let second_payload: TaskArtifactResult = parse_tool_payload(&second);
+
+        handle_task_finish(
+            &store,
+            None,
+            TaskFinishParams {
+                tenant_id: "tenant_h".to_string(),
+                task_id: second_payload.task_id,
+                project_id: Some("proj_highlight".to_string()),
+                agent_id: None,
+                session_id: None,
+                status: None,
+                goal: None,
+                scientific_question: None,
+                dataset_refs: vec![],
+                entity_refs: vec![],
+                what_worked: vec!["Use digest persistence idempotence".to_string()],
+                what_failed: vec!["Rewriting unchanged digests creates retrieval noise".to_string()],
+                validation: vec!["Repeated refreshes do not add chunks".to_string()],
+                uncertainty: vec![],
+                followups: vec![],
+                confidence: 0.9,
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let first = handle_artifact_find_highlights(
+            &store,
+            ArtifactLibraryParams {
+                tenant_id: "tenant_h".to_string(),
+                project_id: Some("proj_highlight".to_string()),
+                query: "".to_string(),
+                k: 10,
+            },
+        )
+        .await
+        .unwrap();
+        let first_payload: HighlightSearchViewResult = parse_tool_payload(&first);
+        let chunks_after_first = store
+            .stats(&TenantId::new("tenant_h").unwrap())
+            .await
+            .unwrap()
+            .total_chunks;
+
+        let second = handle_artifact_find_highlights(
+            &store,
+            ArtifactLibraryParams {
+                tenant_id: "tenant_h".to_string(),
+                project_id: Some("proj_highlight".to_string()),
+                query: "".to_string(),
+                k: 10,
+            },
+        )
+        .await
+        .unwrap();
+        let second_payload: HighlightSearchViewResult = parse_tool_payload(&second);
+        let chunks_after_second = store
+            .stats(&TenantId::new("tenant_h").unwrap())
+            .await
+            .unwrap()
+            .total_chunks;
+
+        assert_eq!(first_payload.artifact.artifact_kind, ArtifactKind::Digest);
+        assert_eq!(
+            first_payload.artifact.artifact_role.as_deref(),
+            Some(DIGEST_ROLE_HIGHLIGHT_LIBRARY)
+        );
+        assert!(!first_payload.results.is_empty());
+        assert_eq!(first_payload.results[0].category, "tactic");
+        assert!(first_payload.results[0]
+            .summary
+            .contains("digest persistence idempotence"));
+        assert_eq!(first_payload.results[0].support_count, 2);
+        assert_eq!(
+            first_payload.artifact.timestamp_created,
+            second_payload.artifact.timestamp_created
+        );
+        assert_eq!(chunks_after_first, chunks_after_second);
     }
 
     #[tokio::test]
