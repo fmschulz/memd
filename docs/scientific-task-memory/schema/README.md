@@ -155,6 +155,7 @@ Persisted digest artifacts currently use these `artifact_role` values:
 - `failure_library`
 - `decision_library`
 - `evidence_library`
+- `highlight_library`
 
 These digests are stored as canonical `digest` artifacts and projected into ordinary retrieval chunks instead of being kept in a separate store.
 
@@ -191,9 +192,9 @@ The current implementation also tracks:
 
 These filters are resolved first, then the candidate set is reranked for retrieval.
 
-`memory.search`, `task.search`, and `artifact.search` also accept `mode` with `generic`, `brief_project`, `resume_task`, `find_failures`, `find_decisions`, and `find_evidence` to bias candidate planning toward the corresponding digests and canonical summaries.
+`memory.search`, `task.search`, and `artifact.search` also accept `mode` with `generic`, `brief_project`, `resume_task`, `find_failures`, `find_decisions`, `find_evidence`, and `find_highlights` to bias candidate planning toward the corresponding digests and canonical summaries.
 
-`memory.compact` can explicitly refresh project brief and failure/decision/evidence library digests through `project_id`, `digest_modes`, and `force_digest_rebuild`.
+`memory.compact` can explicitly refresh project brief and failure/decision/evidence/highlight library digests through `project_id`, `digest_modes`, and `force_digest_rebuild`.
 
 ## Durability
 
