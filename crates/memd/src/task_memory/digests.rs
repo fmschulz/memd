@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +10,7 @@ pub const DIGEST_ROLE_TASK_RESUME: &str = "task_resume";
 pub const DIGEST_ROLE_FAILURE_LIBRARY: &str = "failure_library";
 pub const DIGEST_ROLE_DECISION_LIBRARY: &str = "decision_library";
 pub const DIGEST_ROLE_EVIDENCE_LIBRARY: &str = "evidence_library";
+pub const DIGEST_ROLE_HIGHLIGHT_LIBRARY: &str = "highlight_library";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunDigestItem {
@@ -62,6 +63,22 @@ pub struct EvidenceViewItem {
     pub project_id: Option<String>,
     pub summary: String,
     pub supports_claim: Option<bool>,
+    pub promotion_state: PromotionState,
+    pub timestamp_created: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HighlightViewItem {
+    pub artifact_id: String,
+    pub task_id: String,
+    pub project_id: Option<String>,
+    pub summary: String,
+    pub category: String,
+    pub rationale: String,
+    pub confidence: f32,
+    pub score: f32,
+    pub support_count: usize,
+    pub supporting_artifact_ids: Vec<String>,
     pub promotion_state: PromotionState,
     pub timestamp_created: i64,
 }
@@ -317,6 +334,222 @@ pub fn infer_evidence_items(artifacts: &[TaskArtifact]) -> Vec<EvidenceViewItem>
     items
 }
 
+#[derive(Debug, Clone)]
+struct HighlightAggregate {
+    artifact_id: String,
+    task_id: String,
+    project_id: Option<String>,
+    summary: String,
+    category: String,
+    supporting_artifact_ids: BTreeSet<String>,
+    task_ids: BTreeSet<String>,
+    project_ids: BTreeSet<String>,
+    validated_count: usize,
+    promotion_state: PromotionState,
+    timestamp_created: i64,
+}
+
+fn highlight_category_weight(category: &str) -> f32 {
+    match category {
+        "decision" => 2.6,
+        "tactic" => 2.3,
+        "warning" => 1.7,
+        _ => 1.0,
+    }
+}
+
+fn highlight_promotion_bonus(promotion_state: PromotionState) -> f32 {
+    match promotion_state {
+        PromotionState::Verified => 1.6,
+        PromotionState::Canonical => 1.0,
+        PromotionState::Summarized => 0.4,
+        PromotionState::Raw => 0.0,
+    }
+}
+
+fn normalize_highlight_key(category: &str, summary: &str) -> String {
+    format!(
+        "{}::{}",
+        sanitize_tag_value(category),
+        sanitize_tag_value(summary)
+    )
+}
+
+fn record_highlight_candidate(
+    aggregates: &mut BTreeMap<String, HighlightAggregate>,
+    artifact: &TaskArtifact,
+    summary: &str,
+    category: &str,
+    validated: bool,
+) {
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    let key = normalize_highlight_key(category, trimmed);
+    let project_id = artifact.project_id.as_option().map(str::to_string);
+    let aggregate = aggregates.entry(key).or_insert_with(|| HighlightAggregate {
+        artifact_id: artifact.artifact_id.clone(),
+        task_id: artifact.task_id.clone(),
+        project_id: project_id.clone(),
+        summary: trimmed.to_string(),
+        category: category.to_string(),
+        supporting_artifact_ids: BTreeSet::new(),
+        task_ids: BTreeSet::new(),
+        project_ids: BTreeSet::new(),
+        validated_count: 0,
+        promotion_state: artifact.promotion_state,
+        timestamp_created: artifact.timestamp_created,
+    });
+
+    if artifact.timestamp_created >= aggregate.timestamp_created {
+        aggregate.artifact_id = artifact.artifact_id.clone();
+        aggregate.task_id = artifact.task_id.clone();
+        aggregate.project_id = project_id.clone();
+        aggregate.timestamp_created = artifact.timestamp_created;
+    }
+    aggregate
+        .supporting_artifact_ids
+        .insert(artifact.artifact_id.clone());
+    aggregate.task_ids.insert(artifact.task_id.clone());
+    if let Some(project_id) = project_id {
+        aggregate.project_ids.insert(project_id);
+    }
+    if validated {
+        aggregate.validated_count += 1;
+    }
+    aggregate.promotion_state = max_promotion([
+        aggregate.promotion_state,
+        artifact.promotion_state,
+    ]);
+}
+
+fn highlight_score(aggregate: &HighlightAggregate) -> f32 {
+    highlight_category_weight(&aggregate.category)
+        + highlight_promotion_bonus(aggregate.promotion_state)
+        + aggregate.validated_count as f32 * 1.1
+        + aggregate.task_ids.len().min(3) as f32 * 0.8
+        + aggregate.project_ids.len().min(3) as f32 * 1.0
+        + aggregate.supporting_artifact_ids.len().min(4) as f32 * 0.4
+}
+
+fn highlight_confidence(aggregate: &HighlightAggregate, score: f32) -> f32 {
+    let base = 0.35
+        + aggregate.validated_count.min(3) as f32 * 0.12
+        + aggregate.task_ids.len().min(3) as f32 * 0.08
+        + aggregate.project_ids.len().min(3) as f32 * 0.08
+        + match aggregate.promotion_state {
+            PromotionState::Verified => 0.12,
+            PromotionState::Canonical => 0.08,
+            PromotionState::Summarized => 0.03,
+            PromotionState::Raw => 0.0,
+        }
+        + (score * 0.03);
+    base.clamp(0.0, 0.95)
+}
+
+fn highlight_rationale(aggregate: &HighlightAggregate) -> String {
+    let mut parts = vec![format!(
+        "Backed by {} artifact(s) across {} task(s)",
+        aggregate.supporting_artifact_ids.len(),
+        aggregate.task_ids.len()
+    )];
+    if !aggregate.project_ids.is_empty() {
+        parts.push(format!("seen in {} project(s)", aggregate.project_ids.len()));
+    }
+    if aggregate.validated_count > 0 {
+        parts.push(format!("validated in {} artifact(s)", aggregate.validated_count));
+    }
+    parts.join("; ")
+}
+
+fn keep_highlight(aggregate: &HighlightAggregate, score: f32) -> bool {
+    match aggregate.category.as_str() {
+        "decision" => score >= 3.5,
+        "tactic" => score >= 3.2,
+        "warning" => aggregate.supporting_artifact_ids.len() > 1 || aggregate.validated_count > 0,
+        _ => score >= 3.5,
+    }
+}
+
+pub fn infer_highlight_items(artifacts: &[TaskArtifact]) -> Vec<HighlightViewItem> {
+    let mut aggregates = BTreeMap::new();
+
+    for artifact in artifacts {
+        let validated = !artifact.validation.is_empty()
+            || artifact.promotion_state == PromotionState::Verified
+            || matches!(artifact.artifact_kind, ArtifactKind::Verification);
+
+        for item in &artifact.what_worked {
+            record_highlight_candidate(&mut aggregates, artifact, item, "tactic", validated);
+        }
+
+        if artifact.artifact_kind == ArtifactKind::Decision {
+            if let Some(summary) = artifact.event_summary() {
+                record_highlight_candidate(
+                    &mut aggregates,
+                    artifact,
+                    &summary,
+                    "decision",
+                    true,
+                );
+            }
+        }
+
+        if matches!(
+            artifact.artifact_kind,
+            ArtifactKind::Verification | ArtifactKind::Review
+        ) {
+            for item in &artifact.validation {
+                record_highlight_candidate(&mut aggregates, artifact, item, "decision", true);
+            }
+        }
+
+        for item in &artifact.what_failed {
+            record_highlight_candidate(&mut aggregates, artifact, item, "warning", validated);
+        }
+    }
+
+    let mut items = aggregates
+        .into_values()
+        .filter_map(|aggregate| {
+            let score = highlight_score(&aggregate);
+            if !keep_highlight(&aggregate, score) {
+                return None;
+            }
+            let rationale = highlight_rationale(&aggregate);
+            let confidence = highlight_confidence(&aggregate, score);
+            Some(HighlightViewItem {
+                artifact_id: aggregate.artifact_id,
+                task_id: aggregate.task_id,
+                project_id: aggregate.project_id,
+                summary: aggregate.summary,
+                category: aggregate.category,
+                rationale,
+                confidence,
+                score,
+                support_count: aggregate.supporting_artifact_ids.len(),
+                supporting_artifact_ids: aggregate
+                    .supporting_artifact_ids
+                    .into_iter()
+                    .collect(),
+                promotion_state: aggregate.promotion_state,
+                timestamp_created: aggregate.timestamp_created,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    items.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right.timestamp_created.cmp(&left.timestamp_created))
+    });
+    items
+}
+
 pub fn build_task_resume_digest_artifact(view: &TaskResumeView) -> TaskArtifact {
     let scope_key = view.task.task_id.clone();
     let (artifact_id, _task_id, digest_key) =
@@ -505,5 +738,31 @@ mod tests {
             Some(DIGEST_ROLE_TASK_RESUME)
         );
         assert_eq!(artifact.promotion_state, PromotionState::Summarized);
+    }
+
+    #[test]
+    fn infer_highlight_items_prefers_validated_transferable_lessons() {
+        let tenant = TenantId::new("team").unwrap();
+
+        let mut first = TaskArtifact::new_task_finish(tenant.clone(), "task-1");
+        first.project_id = ProjectId::from(Some("proj".to_string()));
+        first.what_worked = vec!["Use digest persistence idempotence".to_string()];
+        first.validation = vec!["Repeated refreshes do not add chunks".to_string()];
+        first.promotion_state = PromotionState::Verified;
+        first.timestamp_created = 100;
+
+        let mut second = TaskArtifact::new_task_finish(tenant, "task-2");
+        second.project_id = ProjectId::from(Some("proj".to_string()));
+        second.what_worked = vec!["Use digest persistence idempotence".to_string()];
+        second.what_failed = vec!["Rewriting unchanged digests creates noise".to_string()];
+        second.promotion_state = PromotionState::Canonical;
+        second.timestamp_created = 200;
+
+        let items = infer_highlight_items(&[first, second]);
+        assert!(!items.is_empty());
+        assert_eq!(items[0].category, "tactic");
+        assert!(items[0].summary.contains("digest persistence idempotence"));
+        assert_eq!(items[0].support_count, 2);
+        assert!(items[0].confidence >= 0.7);
     }
 }
