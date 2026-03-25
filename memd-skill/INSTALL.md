@@ -144,7 +144,7 @@ Use `artifact.create`, `artifact.search`, `artifact.get`, and `artifact.list_thr
 Use the same `tenant_id` for agents that should share knowledge unless the user asks for a different memory scope.
 ```
 
-For summary-first retrieval, the same daemon should now expose `context.brief_project`, `task.resume`, `artifact.find_failures`, `artifact.find_decisions`, and `artifact.find_evidence`. `memory.search`, `task.search`, and `artifact.search` also accept `mode` to bias retrieval toward those digests. `memory.compact` can refresh project brief and failure/decision/evidence digests explicitly with `project_id`, `digest_modes`, and `force_digest_rebuild`.
+For summary-first retrieval, the same daemon should now expose `context.brief_project`, `task.resume`, `artifact.find_failures`, `artifact.find_decisions`, `artifact.find_evidence`, and `artifact.find_highlights`. `memory.search`, `task.search`, and `artifact.search` also accept `mode` to bias retrieval toward those digests. `memory.compact` can refresh project brief and failure/decision/evidence/highlight digests explicitly with `project_id`, `digest_modes`, and `force_digest_rebuild`.
 
 ### `~/.claude/CLAUDE.md`
 
@@ -221,6 +221,7 @@ After that, verify that `memd` exposes the current tool surface, especially:
 - `artifact.find_failures`
 - `artifact.find_decisions`
 - `artifact.find_evidence`
+- `artifact.find_highlights`
 - `artifact.list_thread`
 - `context.brief_project`
 

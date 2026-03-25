@@ -52,7 +52,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     },
                     "mode": {
                         "type": "string",
-                        "enum": ["generic", "brief_project", "resume_task", "find_failures", "find_decisions", "find_evidence"],
+                        "enum": ["generic", "brief_project", "resume_task", "find_failures", "find_decisions", "find_evidence", "find_highlights"],
                         "default": "generic",
                         "description": "Optional retrieval intent that biases results toward generated briefs or canonical task/artifact summaries"
                     },
@@ -695,7 +695,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     },
                     "mode": {
                         "type": "string",
-                        "enum": ["generic", "brief_project", "resume_task", "find_failures", "find_decisions", "find_evidence"],
+                        "enum": ["generic", "brief_project", "resume_task", "find_failures", "find_decisions", "find_evidence", "find_highlights"],
                         "default": "generic"
                     },
                     "filters": {
@@ -864,7 +864,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     },
                     "mode": {
                         "type": "string",
-                        "enum": ["generic", "brief_project", "resume_task", "find_failures", "find_decisions", "find_evidence"],
+                        "enum": ["generic", "brief_project", "resume_task", "find_failures", "find_decisions", "find_evidence", "find_highlights"],
                         "default": "generic"
                     },
                     "filters": {
@@ -970,6 +970,20 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
         ToolDefinition::new(
             "artifact.find_evidence",
             "Generate or refresh an evidence library digest and return ranked evidence highlights.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "query": {"type": "string", "default": ""},
+                    "k": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100}
+                },
+                "required": ["tenant_id"]
+            }),
+        ),
+        ToolDefinition::new(
+            "artifact.find_highlights",
+            "Generate or refresh a highlight library digest and return ranked, high-uplift lessons for future agents.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1297,7 +1311,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "type": "array",
                         "items": {
                             "type": "string",
-                            "enum": ["generic", "brief_project", "resume_task", "find_failures", "find_decisions", "find_evidence"]
+                            "enum": ["generic", "brief_project", "resume_task", "find_failures", "find_decisions", "find_evidence", "find_highlights"]
                         },
                         "description": "Optional digest modes to rebuild during compaction"
                     },
@@ -1554,6 +1568,7 @@ pub fn tool_names() -> Vec<&'static str> {
         "artifact.find_failures",
         "artifact.find_decisions",
         "artifact.find_evidence",
+        "artifact.find_highlights",
         "artifact.list_thread",
         "memory.get",
         "memory.delete",
@@ -1606,6 +1621,7 @@ mod tests {
         assert!(names.contains(&"artifact.create"));
         assert!(names.contains(&"artifact.get"));
         assert!(names.contains(&"artifact.search"));
+        assert!(names.contains(&"artifact.find_highlights"));
         assert!(names.contains(&"artifact.list_thread"));
         assert!(names.contains(&"memory.get"));
         assert!(names.contains(&"memory.delete"));
@@ -1777,7 +1793,7 @@ mod tests {
     #[test]
     fn tool_names_list() {
         let names = tool_names();
-        assert_eq!(names.len(), 39);
+        assert_eq!(names.len(), 40);
         assert!(names.contains(&"memory.search"));
         assert!(names.contains(&"memory.metrics"));
         assert!(names.contains(&"memory.feedback"));
@@ -1794,6 +1810,7 @@ mod tests {
         assert!(names.contains(&"artifact.create"));
         assert!(names.contains(&"artifact.get"));
         assert!(names.contains(&"artifact.search"));
+        assert!(names.contains(&"artifact.find_highlights"));
         assert!(names.contains(&"artifact.list_thread"));
         assert!(names.contains(&"context.list_subsystems"));
         assert!(names.contains(&"context.get_files_for_subsystem"));
