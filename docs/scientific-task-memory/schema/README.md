@@ -220,7 +220,7 @@ Agents should follow this contract:
 7. Use `artifact.create` when the important event is critique, revision, verification, or thread-level coordination rather than a task lifecycle step.
 8. Use `artifact.search` / `artifact.list_thread` when the artifact itself is the unit of exchange.
 
-This is how `memd` enforces consistent reporting across agents in the same tenant.
+This is how `memd` enforces consistent reporting across agents in the same tenant. For one trusted machine or trust domain, agents should prefer a stable shared `tenant_id` and use `project_id`, `thread_id`, and `task_id` for narrower scopes. The current MCP handlers also include a compatibility fallback for project-scoped retrieval across other local tenants on the same daemon when they already contain the same `project_id`, which helps recover older fragmented history.
 
 ## Documentation Status
 

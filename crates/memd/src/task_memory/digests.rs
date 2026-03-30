@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -349,6 +349,9 @@ struct HighlightAggregate {
     timestamp_created: i64,
 }
 
+const MAX_HIGHLIGHTS_PER_TASK: usize = 2;
+const MAX_HIGHLIGHTS_PER_PROJECT: usize = 4;
+
 fn highlight_category_weight(category: &str) -> f32 {
     match category {
         "decision" => 2.6,
@@ -365,6 +368,48 @@ fn highlight_promotion_bonus(promotion_state: PromotionState) -> f32 {
         PromotionState::Summarized => 0.4,
         PromotionState::Raw => 0.0,
     }
+}
+
+fn highlight_boilerplate_penalty(summary: &str) -> f32 {
+    let lower = summary.to_ascii_lowercase();
+    let mut penalty = 0.0f32;
+
+    for phrase in [
+        "covers all acceptance criteria",
+        "one-line descriptions",
+        "figure list table",
+        "key numbers table",
+        "table with",
+        "written with",
+        "lines covering",
+        "executive summary (",
+    ] {
+        if lower.contains(phrase) {
+            penalty += 1.1;
+        }
+    }
+
+    if (lower.contains(".md")
+        || lower.contains(".tsv")
+        || lower.contains(".json")
+        || lower.contains(".csv"))
+        && (lower.contains("written")
+            || lower.contains("updated")
+            || lower.contains("generated")
+            || lower.contains("covers"))
+    {
+        penalty += 1.2;
+    }
+
+    if lower.contains(" lines") && (lower.contains("written") || lower.contains("summary.md")) {
+        penalty += 1.0;
+    }
+
+    if lower.contains("tests pass") || lower.contains("quality gates pass") {
+        penalty += 0.5;
+    }
+
+    penalty.min(3.5)
 }
 
 fn normalize_highlight_key(category: &str, summary: &str) -> String {
@@ -425,6 +470,12 @@ fn record_highlight_candidate(
     ]);
 }
 
+fn tactic_has_recurrence(aggregate: &HighlightAggregate) -> bool {
+    aggregate.supporting_artifact_ids.len() > 1
+        || aggregate.task_ids.len() > 1
+        || aggregate.project_ids.len() > 1
+}
+
 fn highlight_score(aggregate: &HighlightAggregate) -> f32 {
     highlight_category_weight(&aggregate.category)
         + highlight_promotion_bonus(aggregate.promotion_state)
@@ -432,6 +483,7 @@ fn highlight_score(aggregate: &HighlightAggregate) -> f32 {
         + aggregate.task_ids.len().min(3) as f32 * 0.8
         + aggregate.project_ids.len().min(3) as f32 * 1.0
         + aggregate.supporting_artifact_ids.len().min(4) as f32 * 0.4
+        - highlight_boilerplate_penalty(&aggregate.summary)
 }
 
 fn highlight_confidence(aggregate: &HighlightAggregate, score: f32) -> f32 {
@@ -467,10 +519,73 @@ fn highlight_rationale(aggregate: &HighlightAggregate) -> String {
 fn keep_highlight(aggregate: &HighlightAggregate, score: f32) -> bool {
     match aggregate.category.as_str() {
         "decision" => score >= 3.5,
-        "tactic" => score >= 3.2,
+        "tactic" => tactic_has_recurrence(aggregate) && score >= 3.2,
         "warning" => aggregate.supporting_artifact_ids.len() > 1 || aggregate.validated_count > 0,
         _ => score >= 3.5,
     }
+}
+
+fn diversify_highlights(items: Vec<HighlightViewItem>) -> Vec<HighlightViewItem> {
+    let multi_project = items
+        .iter()
+        .filter_map(|item| item.project_id.as_ref())
+        .collect::<BTreeSet<_>>()
+        .len()
+        > 1;
+
+    let mut per_task = BTreeMap::new();
+    let mut per_project = BTreeMap::new();
+    let mut out = Vec::with_capacity(items.len());
+
+    for item in items {
+        let task_count = per_task.get(&item.task_id).copied().unwrap_or(0);
+        if task_count >= MAX_HIGHLIGHTS_PER_TASK {
+            continue;
+        }
+
+        if multi_project {
+            if let Some(project_id) = item.project_id.as_ref() {
+                let project_count = per_project.get(project_id).copied().unwrap_or(0);
+                if project_count >= MAX_HIGHLIGHTS_PER_PROJECT {
+                    continue;
+                }
+            }
+        }
+
+        *per_task.entry(item.task_id.clone()).or_insert(0usize) += 1;
+        if multi_project {
+            if let Some(project_id) = item.project_id.as_ref() {
+                *per_project.entry(project_id.clone()).or_insert(0usize) += 1;
+            }
+        }
+        out.push(item);
+    }
+
+    out
+}
+
+fn rebalance_highlights_by_category(items: Vec<HighlightViewItem>) -> Vec<HighlightViewItem> {
+    let mut tactics = VecDeque::new();
+    let mut warnings = VecDeque::new();
+
+    for item in items {
+        if item.category == "warning" {
+            warnings.push_back(item);
+        } else {
+            tactics.push_back(item);
+        }
+    }
+
+    let mut out = Vec::with_capacity(tactics.len() + warnings.len());
+    while !tactics.is_empty() || !warnings.is_empty() {
+        if let Some(item) = tactics.pop_front() {
+            out.push(item);
+        }
+        if let Some(item) = warnings.pop_front() {
+            out.push(item);
+        }
+    }
+    out
 }
 
 pub fn infer_highlight_items(artifacts: &[TaskArtifact]) -> Vec<HighlightViewItem> {
@@ -547,7 +662,7 @@ pub fn infer_highlight_items(artifacts: &[TaskArtifact]) -> Vec<HighlightViewIte
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| right.timestamp_created.cmp(&left.timestamp_created))
     });
-    items
+    rebalance_highlights_by_category(diversify_highlights(items))
 }
 
 pub fn build_task_resume_digest_artifact(view: &TaskResumeView) -> TaskArtifact {
@@ -764,5 +879,125 @@ mod tests {
         assert!(items[0].summary.contains("digest persistence idempotence"));
         assert_eq!(items[0].support_count, 2);
         assert!(items[0].confidence >= 0.7);
+    }
+
+    #[test]
+    fn infer_highlight_items_penalizes_boilerplate_against_transferable_lessons() {
+        let tenant = TenantId::new("team").unwrap();
+
+        let mut tactic_a = TaskArtifact::new_task_finish(tenant.clone(), "task-a");
+        tactic_a.project_id = ProjectId::from(Some("proj".to_string()));
+        tactic_a.what_worked = vec!["Validate the live runtime, not just the config".to_string()];
+        tactic_a.validation = vec!["Observed working endpoint responses".to_string()];
+        tactic_a.timestamp_created = 100;
+
+        let mut tactic_b = TaskArtifact::new_task_finish(tenant.clone(), "task-b");
+        tactic_b.project_id = ProjectId::from(Some("proj".to_string()));
+        tactic_b.what_worked = vec!["Validate the live runtime, not just the config".to_string()];
+        tactic_b.validation = vec!["Observed working endpoint responses".to_string()];
+        tactic_b.timestamp_created = 200;
+
+        let mut boiler_a = TaskArtifact::new_task_finish(tenant.clone(), "task-c");
+        boiler_a.project_id = ProjectId::from(Some("proj".to_string()));
+        boiler_a.what_worked = vec!["SUMMARY.md written with 63 lines covering all acceptance criteria".to_string()];
+        boiler_a.validation = vec!["Deliverable complete".to_string()];
+        boiler_a.timestamp_created = 300;
+
+        let mut boiler_b = TaskArtifact::new_task_finish(tenant, "task-d");
+        boiler_b.project_id = ProjectId::from(Some("proj".to_string()));
+        boiler_b.what_worked = vec!["SUMMARY.md written with 63 lines covering all acceptance criteria".to_string()];
+        boiler_b.validation = vec!["Deliverable complete".to_string()];
+        boiler_b.timestamp_created = 400;
+
+        let items = infer_highlight_items(&[boiler_a, tactic_a, boiler_b, tactic_b]);
+        assert!(!items.is_empty());
+        assert!(items[0].summary.contains("Validate the live runtime"));
+        assert!(items.iter().any(|item| item.summary.contains("SUMMARY.md")));
+        let tactic_score = items
+            .iter()
+            .find(|item| item.summary.contains("Validate the live runtime"))
+            .unwrap()
+            .score;
+        let boiler_score = items
+            .iter()
+            .find(|item| item.summary.contains("SUMMARY.md"))
+            .unwrap()
+            .score;
+        assert!(tactic_score > boiler_score);
+    }
+
+    #[test]
+    fn infer_highlight_items_limits_results_per_task() {
+        let tenant = TenantId::new("team").unwrap();
+
+        let mut task_one_a = TaskArtifact::new_task_finish(tenant.clone(), "task-1");
+        task_one_a.project_id = ProjectId::from(Some("proj".to_string()));
+        task_one_a.what_worked = vec![
+            "Validate runtime directly".to_string(),
+            "Use planner fallback routing".to_string(),
+            "Prefer deterministic digests".to_string(),
+        ];
+        task_one_a.validation = vec!["Checks passed".to_string()];
+        task_one_a.timestamp_created = 100;
+
+        let mut task_one_b = TaskArtifact::new_task_finish(tenant.clone(), "task-1");
+        task_one_b.project_id = ProjectId::from(Some("proj".to_string()));
+        task_one_b.what_worked = vec![
+            "Validate runtime directly".to_string(),
+            "Use planner fallback routing".to_string(),
+            "Prefer deterministic digests".to_string(),
+        ];
+        task_one_b.validation = vec!["Checks passed".to_string()];
+        task_one_b.timestamp_created = 200;
+
+        let mut task_two_a = TaskArtifact::new_task_finish(tenant.clone(), "task-2");
+        task_two_a.project_id = ProjectId::from(Some("proj".to_string()));
+        task_two_a.what_worked = vec!["Run notebooks end to end".to_string()];
+        task_two_a.validation = vec!["nbconvert passed".to_string()];
+        task_two_a.timestamp_created = 300;
+
+        let mut task_two_b = TaskArtifact::new_task_finish(tenant, "task-3");
+        task_two_b.project_id = ProjectId::from(Some("proj".to_string()));
+        task_two_b.what_worked = vec!["Run notebooks end to end".to_string()];
+        task_two_b.validation = vec!["nbconvert passed".to_string()];
+        task_two_b.timestamp_created = 400;
+
+        let items = infer_highlight_items(&[task_one_a, task_one_b, task_two_a, task_two_b]);
+        let task_one_count = items.iter().filter(|item| item.task_id == "task-1").count();
+        assert!(task_one_count <= MAX_HIGHLIGHTS_PER_TASK);
+    }
+
+    #[test]
+    fn infer_highlight_items_balances_tactics_and_warnings() {
+        let tenant = TenantId::new("team").unwrap();
+
+        let mut warning_one = TaskArtifact::new_task_finish(tenant.clone(), "task-w1");
+        warning_one.project_id = ProjectId::from(Some("proj".to_string()));
+        warning_one.what_failed = vec!["Raw completions endpoint is unusable".to_string()];
+        warning_one.validation = vec!["Confirmed through live prompt checks".to_string()];
+        warning_one.timestamp_created = 100;
+
+        let mut warning_two = TaskArtifact::new_task_finish(tenant.clone(), "task-w2");
+        warning_two.project_id = ProjectId::from(Some("proj".to_string()));
+        warning_two.what_failed = vec!["Raw completions endpoint is unusable".to_string()];
+        warning_two.validation = vec!["Confirmed through live prompt checks".to_string()];
+        warning_two.timestamp_created = 200;
+
+        let mut tactic_one = TaskArtifact::new_task_finish(tenant.clone(), "task-t1");
+        tactic_one.project_id = ProjectId::from(Some("proj".to_string()));
+        tactic_one.what_worked = vec!["Validate the live runtime, not just the config".to_string()];
+        tactic_one.validation = vec!["Observed working endpoint responses".to_string()];
+        tactic_one.timestamp_created = 300;
+
+        let mut tactic_two = TaskArtifact::new_task_finish(tenant, "task-t2");
+        tactic_two.project_id = ProjectId::from(Some("proj".to_string()));
+        tactic_two.what_worked = vec!["Validate the live runtime, not just the config".to_string()];
+        tactic_two.validation = vec!["Observed working endpoint responses".to_string()];
+        tactic_two.timestamp_created = 400;
+
+        let items = infer_highlight_items(&[warning_one, warning_two, tactic_one, tactic_two]);
+        assert!(items.len() >= 2);
+        assert_eq!(items[0].category, "tactic");
+        assert_eq!(items[1].category, "warning");
     }
 }
