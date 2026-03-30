@@ -163,6 +163,11 @@ pub trait Store: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// List tenants known to this store.
+    async fn list_tenants(&self) -> Result<Vec<TenantId>> {
+        Ok(Vec::new())
+    }
+
     /// Resolve candidate projection chunk IDs using exact task filters.
     async fn search_task_projection_chunk_ids(
         &self,

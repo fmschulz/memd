@@ -1205,6 +1205,14 @@ impl Store for PersistentStore {
         self.metadata.list_tasks(tenant_id, project_id, limit)
     }
 
+    async fn list_tenants(&self) -> Result<Vec<TenantId>> {
+        let tenants = self.tenants.read();
+        Ok(tenants
+            .keys()
+            .filter_map(|name| TenantId::new(name.clone()).ok())
+            .collect())
+    }
+
     async fn search_task_projection_chunk_ids(
         &self,
         tenant_id: &TenantId,

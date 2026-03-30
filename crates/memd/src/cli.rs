@@ -712,6 +712,9 @@ fn render_guardrail_block(scope_config: &TenantScopeConfig) -> String {
         scope_config.read_tenants.join(", ")
     ));
     out.push_str(
+        "- Preferred model: for one trusted machine or trust domain, use one stable shared write tenant and narrow retrieval with `project_id`, `thread_id`, and `task_id`.\n",
+    );
+    out.push_str(
         "- Hard rule: do not send a final answer without memory retrieval + memory write.\n\n",
     );
     out.push_str("### Mandatory Per-Task Protocol\n\n");
