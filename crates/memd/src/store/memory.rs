@@ -3,7 +3,7 @@
 //! Provides a working baseline store backed by a simple HashMap.
 //! This is used for development and testing before persistent storage.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::RwLock;
 
 use async_trait::async_trait;
@@ -315,6 +315,24 @@ impl Store for MemoryStore {
         tasks.sort_by_key(|task| std::cmp::Reverse(task.updated_at_ms));
         tasks.truncate(limit);
         Ok(tasks)
+    }
+
+    async fn list_tenants(&self) -> Result<Vec<TenantId>> {
+        let mut names = BTreeSet::new();
+        for key in self.chunks.read().unwrap().keys() {
+            names.insert(key.clone());
+        }
+        for key in self.task_artifacts.read().unwrap().keys() {
+            names.insert(key.clone());
+        }
+        for key in self.feedback.read().unwrap().keys() {
+            names.insert(key.clone());
+        }
+
+        Ok(names
+            .into_iter()
+            .filter_map(|name| TenantId::new(name).ok())
+            .collect())
     }
 
     async fn search_task_projection_chunk_ids(
