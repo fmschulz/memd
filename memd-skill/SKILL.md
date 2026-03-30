@@ -9,6 +9,8 @@ Shared knowledge artifacts over MCP for coding agents and AI scientists.
 
 Use the same shared local `memd` daemon URL for Codex CLI and Claude Code when you want one machine to host a shared knowledge base across sessions.
 
+For one trusted machine or trust domain, prefer one stable shared `tenant_id` for collaborating agents and use `project_id` for project scoping. The current MCP retrieval path can also widen project-scoped lookup across other local tenants on the same daemon that already contain that project, but that is a compatibility fallback for older fragmented history rather than the preferred steady state.
+
 ## When to Use
 
 Use `memd` when agents need to:
@@ -264,6 +266,7 @@ These are the operating rules this skill expects:
 - Always search before starting work.
 - Do not repeat known failed approaches unless you have a reason.
 - Use the same `tenant_id` when agents should share knowledge.
+- Prefer one stable shared tenant per trusted machine or trust domain and use `project_id` for narrower project scoping.
 - Use `task.*` for work with intent, rationale, parameters, evidence, and outcomes.
 - Use `artifact.*` when another agent or scientist needs to critique, revise, verify, or inspect a thread directly.
 - Use `memory.add` / `memory.add_batch` for raw chunks and code indexing.
@@ -285,6 +288,8 @@ If multiple agents write to the same tenant, later agents can search and recover
 - what work remains
 
 That is the point of the artifact schema: consistency across agents and scientists.
+
+If older history was accidentally written under another local tenant on the same daemon, project-scoped retrieval can now recover that same-project history as a compatibility fallback. Future writes should still converge on one shared tenant.
 
 ## Retrieval Patterns
 

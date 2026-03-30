@@ -23,6 +23,7 @@ use crate::task_memory::{
     DIGEST_ROLE_DECISION_LIBRARY, DIGEST_ROLE_EVIDENCE_LIBRARY, DIGEST_ROLE_FAILURE_LIBRARY,
     DIGEST_ROLE_HIGHLIGHT_LIBRARY, DIGEST_ROLE_PROJECT_BRIEF, DIGEST_ROLE_TASK_RESUME,
 };
+use crate::tiered::TieredTiming;
 use crate::types::{ChunkId, ChunkType, MemoryChunk, ProjectId, Source, TenantId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1843,27 +1844,29 @@ fn format_mcp_response<T: Serialize>(result: &T) -> Result<Value, McpError> {
     }))
 }
 
-async fn attach_artifacts_to_chunk_results<S: Store>(
+async fn resolve_artifacts_for_ranked_chunks<S: Store>(
     store: &S,
-    tenant_id: &TenantId,
-    results: &mut [ChunkResult],
-) -> Result<(), McpError> {
-    let chunk_ids = results
-        .iter()
-        .filter_map(|result| ChunkId::parse(&result.chunk_id).ok())
-        .collect::<Vec<_>>();
-    let artifacts = store
-        .resolve_artifacts_for_chunks(tenant_id, &chunk_ids)
-        .await
-        .map_err(|e| McpError::ToolError(e.to_string()))?;
-
-    for result in results {
-        if let Some(artifact) = artifacts.get(&result.chunk_id) {
-            result.artifact = Some(artifact.clone());
-        }
+    ranked: &[(MemoryChunk, f32)],
+) -> Result<HashMap<String, TaskArtifact>, McpError> {
+    let mut by_tenant: HashMap<String, (TenantId, Vec<ChunkId>)> = HashMap::new();
+    for (chunk, _) in ranked {
+        by_tenant
+            .entry(chunk.tenant_id.to_string())
+            .or_insert_with(|| (chunk.tenant_id.clone(), Vec::new()))
+            .1
+            .push(chunk.chunk_id.clone());
     }
 
-    Ok(())
+    let mut artifacts = HashMap::new();
+    for (_, (tenant_id, chunk_ids)) in by_tenant {
+        artifacts.extend(
+            store
+                .resolve_artifacts_for_chunks(&tenant_id, &chunk_ids)
+                .await
+                .map_err(|e| McpError::ToolError(e.to_string()))?,
+        );
+    }
+    Ok(artifacts)
 }
 
 fn default_status_for_artifact_kind(kind: ArtifactKind) -> &'static str {
@@ -1943,6 +1946,104 @@ fn sort_highlight_items(items: &mut [HighlightViewItem], query: &str) {
     });
 }
 
+async fn scoped_tenants_for_project<S: Store>(
+    store: &S,
+    primary_tenant: &TenantId,
+    project_id: Option<&str>,
+) -> Result<Vec<TenantId>, McpError> {
+    let Some(project_id) = project_id.filter(|value| !value.trim().is_empty()) else {
+        return Ok(vec![primary_tenant.clone()]);
+    };
+
+    let mut scoped = vec![primary_tenant.clone()];
+    let mut seen = HashSet::from([primary_tenant.to_string()]);
+    for tenant in store
+        .list_tenants()
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?
+    {
+        if !seen.insert(tenant.to_string()) {
+            continue;
+        }
+        let has_project = !store
+            .list_tasks(&tenant, Some(project_id), 1)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?
+            .is_empty();
+        if has_project {
+            scoped.push(tenant);
+        }
+    }
+    Ok(scoped)
+}
+
+fn merge_scored_chunk_lists(
+    scored_lists: Vec<Vec<(MemoryChunk, f32)>>,
+    limit: usize,
+) -> Vec<(MemoryChunk, f32)> {
+    let mut merged = scored_lists.into_iter().flatten().collect::<Vec<_>>();
+    merged.sort_by(|(left_chunk, left_score), (right_chunk, right_score)| {
+        right_score
+            .partial_cmp(left_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right_chunk.timestamp_created.cmp(&left_chunk.timestamp_created))
+    });
+    let mut seen = HashSet::new();
+    merged
+        .into_iter()
+        .filter(|(chunk, _)| seen.insert(chunk.chunk_id.clone()))
+        .take(limit)
+        .collect()
+}
+
+async fn search_with_scores_for_tenants<S: Store>(
+    store: &S,
+    tenants: &[TenantId],
+    query: &str,
+    fetch_k: usize,
+) -> Result<Vec<(MemoryChunk, f32)>, McpError> {
+    let mut lists = Vec::with_capacity(tenants.len());
+    for tenant in tenants {
+        lists.push(
+            store
+                .search_with_scores(tenant, query, fetch_k)
+                .await
+                .map_err(|e| McpError::ToolError(e.to_string()))?,
+        );
+    }
+    Ok(merge_scored_chunk_lists(
+        lists,
+        fetch_k.saturating_mul(tenants.len().max(1)),
+    ))
+}
+
+async fn search_with_tier_info_for_tenants<S: Store>(
+    store: &S,
+    tenants: &[TenantId],
+    query: &str,
+    fetch_k: usize,
+) -> Result<(Vec<(MemoryChunk, f32)>, Option<TieredTiming>), McpError> {
+    if tenants.len() == 1 {
+        return store
+            .search_with_tier_info(&tenants[0], query, fetch_k)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()));
+    }
+
+    let mut lists = Vec::with_capacity(tenants.len());
+    for tenant in tenants {
+        let (results, _) = store
+            .search_with_tier_info(tenant, query, fetch_k)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        lists.push(results);
+    }
+    Ok((
+        merge_scored_chunk_lists(lists, fetch_k.saturating_mul(tenants.len().max(1))),
+        None,
+    ))
+}
+
 fn finalize_artifact_for_storage(artifact: &mut TaskArtifact) {
     artifact.promotion_state = derive_artifact_promotion_state(artifact);
 }
@@ -1991,17 +2092,20 @@ async fn load_task_views<S: Store>(
     project_id: Option<&str>,
     limit: usize,
 ) -> Result<Vec<TaskResumeView>, McpError> {
-    let tasks = store
-        .list_tasks(tenant_id, project_id, limit)
-        .await
-        .map_err(|e| McpError::ToolError(e.to_string()))?;
-    let mut views = Vec::with_capacity(tasks.len());
-    for task in tasks {
-        let artifacts = store
-            .list_task_artifacts(tenant_id, &task.task_id)
+    let tenants = scoped_tenants_for_project(store, tenant_id, project_id).await?;
+    let mut views = Vec::new();
+    for tenant in tenants {
+        let tasks = store
+            .list_tasks(&tenant, project_id, limit)
             .await
             .map_err(|e| McpError::ToolError(e.to_string()))?;
-        views.push(build_task_resume_view(task, &artifacts));
+        for task in tasks {
+            let artifacts = store
+                .list_task_artifacts(&tenant, &task.task_id)
+                .await
+                .map_err(|e| McpError::ToolError(e.to_string()))?;
+            views.push(build_task_resume_view(task, &artifacts));
+        }
     }
     Ok(views)
 }
@@ -2012,18 +2116,21 @@ async fn load_project_artifacts<S: Store>(
     project_id: Option<&str>,
     limit: usize,
 ) -> Result<Vec<TaskArtifact>, McpError> {
-    let tasks = store
-        .list_tasks(tenant_id, project_id, limit)
-        .await
-        .map_err(|e| McpError::ToolError(e.to_string()))?;
     let mut artifacts = Vec::new();
-    for task in tasks {
-        artifacts.extend(
-            store
-                .list_task_artifacts(tenant_id, &task.task_id)
-                .await
-                .map_err(|e| McpError::ToolError(e.to_string()))?,
-        );
+    let tenants = scoped_tenants_for_project(store, tenant_id, project_id).await?;
+    for tenant in tenants {
+        let tasks = store
+            .list_tasks(&tenant, project_id, limit)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        for task in tasks {
+            artifacts.extend(
+                store
+                    .list_task_artifacts(&tenant, &task.task_id)
+                    .await
+                    .map_err(|e| McpError::ToolError(e.to_string()))?,
+            );
+        }
     }
     artifacts.sort_by_key(|artifact| std::cmp::Reverse(artifact.timestamp_created));
     Ok(artifacts)
@@ -2086,16 +2193,35 @@ async fn ensure_task_resume_digest<S: Store>(
     tenant_id: &TenantId,
     task_id: &str,
 ) -> Result<(TaskArtifact, TaskResumeView), McpError> {
-    let tasks = store
+    let mut task = store
         .list_tasks(tenant_id, None, 500)
         .await
-        .map_err(|e| McpError::ToolError(e.to_string()))?;
-    let task = tasks
+        .map_err(|e| McpError::ToolError(e.to_string()))?
         .into_iter()
-        .find(|task| task.task_id == task_id)
-        .ok_or_else(|| McpError::ToolError("task not found".to_string()))?;
+        .find(|task| task.task_id == task_id);
+    if task.is_none() {
+        for other_tenant in store
+            .list_tenants()
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?
+        {
+            if &other_tenant == tenant_id {
+                continue;
+            }
+            task = store
+                .list_tasks(&other_tenant, None, 500)
+                .await
+                .map_err(|e| McpError::ToolError(e.to_string()))?
+                .into_iter()
+                .find(|task| task.task_id == task_id);
+            if task.is_some() {
+                break;
+            }
+        }
+    }
+    let task = task.ok_or_else(|| McpError::ToolError("task not found".to_string()))?;
     let artifacts = store
-        .list_task_artifacts(tenant_id, task_id)
+        .list_task_artifacts(&task.tenant_id, task_id)
         .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
     let resume = build_task_resume_view(task, &artifacts);
@@ -2492,9 +2618,57 @@ async fn candidate_chunk_ids_for_mode<S: Store>(
     collect_candidate_chunk_ids(store, tenant_id, filters_list, limit).await
 }
 
+async fn candidate_chunk_ids_for_tenants_and_mode<S: Store>(
+    store: &S,
+    tenants: &[TenantId],
+    mode: QueryMode,
+    filters: &TaskSearchFilters,
+    limit: usize,
+) -> Result<Vec<ChunkId>, McpError> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for tenant in tenants {
+        let ids = candidate_chunk_ids_for_mode(store, tenant, mode, filters, limit).await?;
+        for id in ids {
+            if seen.insert(id.clone()) {
+                out.push(id);
+                if out.len() >= limit {
+                    return Ok(out);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+async fn search_task_projection_chunk_ids_for_tenants<S: Store>(
+    store: &S,
+    tenants: &[TenantId],
+    filters: &TaskSearchFilters,
+    limit: usize,
+) -> Result<Vec<ChunkId>, McpError> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for tenant in tenants {
+        let ids = store
+            .search_task_projection_chunk_ids(tenant, filters, limit)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        for id in ids {
+            if seen.insert(id.clone()) {
+                out.push(id);
+                if out.len() >= limit {
+                    return Ok(out);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 async fn summary_preferred_results<S: Store>(
     store: &S,
-    tenant_id: &TenantId,
+    tenants: &[TenantId],
     query: &str,
     project_id: Option<&str>,
     mode: QueryMode,
@@ -2521,9 +2695,9 @@ async fn summary_preferred_results<S: Store>(
     let mut all_ids = Vec::new();
     let mut seen = HashSet::new();
     for mode in modes {
-        let ids = candidate_chunk_ids_for_mode(
+        let ids = candidate_chunk_ids_for_tenants_and_mode(
             store,
-            tenant_id,
+            tenants,
             mode,
             &TaskSearchFilters {
                 project_id: project_id.map(|value| value.to_string()),
@@ -2539,10 +2713,19 @@ async fn summary_preferred_results<S: Store>(
         }
     }
 
-    store
-        .rerank_chunks_for_query(tenant_id, query, &all_ids, limit)
-        .await
-        .map_err(|e| McpError::ToolError(e.to_string()))
+    let mut lists = Vec::with_capacity(tenants.len());
+    for tenant in tenants {
+        lists.push(
+            store
+                .rerank_chunks_for_query(tenant, query, &all_ids, limit)
+                .await
+                .map_err(|e| McpError::ToolError(e.to_string()))?,
+        );
+    }
+    Ok(merge_scored_chunk_lists(
+        lists,
+        limit.saturating_mul(tenants.len().max(1)),
+    ))
 }
 
 fn merge_preferred_and_raw(
@@ -2667,6 +2850,20 @@ pub async fn handle_memory_search<S: Store>(
     let project_id_filter = params.project_id.as_deref();
     let has_filters = has_active_search_filters(project_id_filter, &parsed_filters);
     let fetch_k = adaptive_fetch_k(params.k, &params.query, has_filters);
+    let digest_tenants = scoped_tenants_for_project(store, &tenant_id, project_id_filter).await?;
+    let search_tenants = if project_id_filter.is_some() {
+        let all = store
+            .list_tenants()
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        if all.is_empty() {
+            vec![tenant_id.clone()]
+        } else {
+            all
+        }
+    } else {
+        vec![tenant_id.clone()]
+    };
 
     info!(
         tenant_id = %tenant_id,
@@ -2679,13 +2876,12 @@ pub async fn handle_memory_search<S: Store>(
 
     // Use search_with_tier_info if debug_tiers is requested
     if debug_tiers {
-        let (scored_chunks, timing) = store
-            .search_with_tier_info(&tenant_id, &params.query, fetch_k)
-            .await
-            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        let (scored_chunks, timing) =
+            search_with_tier_info_for_tenants(store, &search_tenants, &params.query, fetch_k)
+                .await?;
         let preferred = summary_preferred_results(
             store,
-            &tenant_id,
+            &digest_tenants,
             &params.query,
             project_id_filter,
             mode,
@@ -2703,10 +2899,13 @@ pub async fn handle_memory_search<S: Store>(
 
         if scored_chunks.is_empty() && !params.query.is_empty() {
             if let Some(repaired_query) = normalize_query_for_repair(&params.query) {
-                let (repair_scored, repair_timing) = store
-                    .search_with_tier_info(&tenant_id, &repaired_query, fetch_k)
-                    .await
-                    .map_err(|e| McpError::ToolError(e.to_string()))?;
+                let (repair_scored, repair_timing) = search_with_tier_info_for_tenants(
+                    store,
+                    &search_tenants,
+                    &repaired_query,
+                    fetch_k,
+                )
+                .await?;
                 let repaired_filtered = apply_search_filters(
                     repair_scored,
                     project_id_filter,
@@ -2775,13 +2974,11 @@ pub async fn handle_memory_search<S: Store>(
     }
 
     // Standard path without tier info
-    let scored_chunks = store
-        .search_with_scores(&tenant_id, &params.query, fetch_k)
-        .await
-        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let scored_chunks =
+        search_with_scores_for_tenants(store, &search_tenants, &params.query, fetch_k).await?;
     let preferred = summary_preferred_results(
         store,
-        &tenant_id,
+        &digest_tenants,
         &params.query,
         project_id_filter,
         mode,
@@ -2798,10 +2995,9 @@ pub async fn handle_memory_search<S: Store>(
 
     if scored_chunks.is_empty() && !params.query.is_empty() {
         if let Some(repaired_query) = normalize_query_for_repair(&params.query) {
-            let repair_scored = store
-                .search_with_scores(&tenant_id, &repaired_query, fetch_k)
-                .await
-                .map_err(|e| McpError::ToolError(e.to_string()))?;
+            let repair_scored =
+                search_with_scores_for_tenants(store, &search_tenants, &repaired_query, fetch_k)
+                    .await?;
             let repaired_filtered =
                 apply_search_filters(repair_scored, project_id_filter, &parsed_filters, params.k);
             let repaired = !repaired_filtered.is_empty();
@@ -3582,32 +3778,49 @@ pub async fn handle_task_search<S: Store>(
     } else {
         params.k.saturating_mul(25).clamp(100, 1000)
     };
+    let scoped_tenants =
+        scoped_tenants_for_project(store, &tenant_id, filters.project_id.as_deref()).await?;
 
     let mut chunk_ids = if mode != QueryMode::Generic {
-        candidate_chunk_ids_for_mode(store, &tenant_id, mode, &filters, candidate_limit).await?
+        candidate_chunk_ids_for_tenants_and_mode(
+            store,
+            &scoped_tenants,
+            mode,
+            &filters,
+            candidate_limit,
+        )
+        .await?
     } else {
         Vec::new()
     };
-    let base_chunk_ids = store
-        .search_task_projection_chunk_ids(&tenant_id, &filters, candidate_limit)
-        .await
-        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let base_chunk_ids =
+        search_task_projection_chunk_ids_for_tenants(store, &scoped_tenants, &filters, candidate_limit)
+            .await?;
     let mut seen = chunk_ids.iter().cloned().collect::<HashSet<_>>();
     for chunk_id in base_chunk_ids {
         if seen.insert(chunk_id.clone()) {
             chunk_ids.push(chunk_id);
         }
     }
-    let ranked = store
-        .rerank_chunks_for_query(&tenant_id, &params.query, &chunk_ids, params.k)
-        .await
-        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let mut ranked_lists = Vec::with_capacity(scoped_tenants.len());
+    for tenant in &scoped_tenants {
+        ranked_lists.push(
+            store
+                .rerank_chunks_for_query(tenant, &params.query, &chunk_ids, params.k)
+                .await
+                .map_err(|e| McpError::ToolError(e.to_string()))?,
+        );
+    }
+    let ranked = merge_scored_chunk_lists(ranked_lists, params.k);
+    let artifacts = resolve_artifacts_for_ranked_chunks(store, &ranked).await?;
     let results = ranked
         .iter()
-        .map(|(chunk, score)| chunk_to_result(chunk, *score, None))
+        .map(|(chunk, score)| {
+            let mut result = chunk_to_result(chunk, *score, None);
+            result.artifact = artifacts.get(&chunk.chunk_id.to_string()).cloned();
+            result
+        })
         .collect::<Vec<_>>();
-    let mut results = results;
-    attach_artifacts_to_chunk_results(store, &tenant_id, &mut results).await?;
 
     format_mcp_response(&SearchResult {
         results,
@@ -3631,34 +3844,41 @@ pub async fn handle_artifact_search<S: Store>(
     } else {
         params.k.saturating_mul(25).clamp(100, 1000)
     };
+    let scoped_tenants =
+        scoped_tenants_for_project(store, &tenant_id, filters.project_id.as_deref()).await?;
 
     let mut chunk_ids = if mode != QueryMode::Generic {
-        candidate_chunk_ids_for_mode(store, &tenant_id, mode, &filters, candidate_limit).await?
+        candidate_chunk_ids_for_tenants_and_mode(
+            store,
+            &scoped_tenants,
+            mode,
+            &filters,
+            candidate_limit,
+        )
+        .await?
     } else {
         Vec::new()
     };
-    let base_chunk_ids = store
-        .search_task_projection_chunk_ids(&tenant_id, &filters, candidate_limit)
-        .await
-        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let base_chunk_ids =
+        search_task_projection_chunk_ids_for_tenants(store, &scoped_tenants, &filters, candidate_limit)
+            .await?;
     let mut seen = chunk_ids.iter().cloned().collect::<HashSet<_>>();
     for chunk_id in base_chunk_ids {
         if seen.insert(chunk_id.clone()) {
             chunk_ids.push(chunk_id);
         }
     }
-    let ranked = store
-        .rerank_chunks_for_query(&tenant_id, &params.query, &chunk_ids, candidate_limit)
-        .await
-        .map_err(|e| McpError::ToolError(e.to_string()))?;
-    let ranked_chunk_ids = ranked
-        .iter()
-        .map(|(chunk, _)| chunk.chunk_id.clone())
-        .collect::<Vec<_>>();
-    let artifacts = store
-        .resolve_artifacts_for_chunks(&tenant_id, &ranked_chunk_ids)
-        .await
-        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let mut ranked_lists = Vec::with_capacity(scoped_tenants.len());
+    for tenant in &scoped_tenants {
+        ranked_lists.push(
+            store
+                .rerank_chunks_for_query(tenant, &params.query, &chunk_ids, candidate_limit)
+                .await
+                .map_err(|e| McpError::ToolError(e.to_string()))?,
+        );
+    }
+    let ranked = merge_scored_chunk_lists(ranked_lists, candidate_limit);
+    let artifacts = resolve_artifacts_for_ranked_chunks(store, &ranked).await?;
 
     let mut seen = HashSet::new();
     let mut results = Vec::new();
@@ -6444,6 +6664,125 @@ mod tests {
             .tags
             .iter()
             .any(|tag| tag.starts_with("task:kind:run_start")));
+    }
+
+    #[tokio::test]
+    async fn task_search_project_scope_spans_tenants() {
+        let store = make_store();
+
+        let start: TaskArtifactResult = parse_tool_payload(
+            &handle_task_start(
+                &store,
+                None,
+                TaskStartParams {
+                    tenant_id: "default".to_string(),
+                    project_id: Some("advanced_benchmark".to_string()),
+                    parent_task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    goal: "Record benchmark continuity".to_string(),
+                    motivation: "Later agents should recover this task across tenant aliases"
+                        .to_string(),
+                    hypothesis: "Project-scoped retrieval should bridge tenant mismatch".to_string(),
+                    scientific_question: "Can task search recover cross-tenant project history?"
+                        .to_string(),
+                    dataset_refs: vec![],
+                    expected_outputs: vec!["handoff".to_string()],
+                    entity_refs: vec![],
+                    provenance: None,
+                },
+            )
+            .await
+            .unwrap(),
+        );
+
+        handle_task_progress(
+            &store,
+            None,
+            TaskProgressParams {
+                tenant_id: "default".to_string(),
+                task_id: start.task_id,
+                project_id: Some("advanced_benchmark".to_string()),
+                agent_id: None,
+                session_id: None,
+                summary: "Recovered prior benchmark context".to_string(),
+                blockers: vec![],
+                failed_attempts: vec![],
+                next_step: "Continue strict reproduction".to_string(),
+                dataset_refs: vec![],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = handle_task_search(
+            &store,
+            TaskSearchParams {
+                tenant_id: "benchmark".to_string(),
+                query: "benchmark continuity".to_string(),
+                k: 5,
+                filters: Some(TaskSearchFiltersParams {
+                    project_id: Some("advanced_benchmark".to_string()),
+                    ..Default::default()
+                }),
+                mode: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let payload: SearchResult = parse_tool_payload(&result);
+        assert!(!payload.results.is_empty());
+        let artifact = payload.results[0]
+            .artifact
+            .clone()
+            .expect("artifact should be attached");
+        assert_eq!(artifact.tenant_id.as_str(), "default");
+        assert_eq!(artifact.project_id.as_option(), Some("advanced_benchmark"));
+    }
+
+    #[tokio::test]
+    async fn memory_search_project_scope_spans_tenants_for_raw_chunks() {
+        let store = make_store();
+
+        handle_memory_add(
+            &store,
+            None,
+            AddParams {
+                tenant_id: "default".to_string(),
+                text: "strict reproduction blocker for advanced benchmark".to_string(),
+                chunk_type: "summary".to_string(),
+                project_id: Some("advanced_benchmark".to_string()),
+                episode_id: None,
+                source: None,
+                tags: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = handle_memory_search(
+            &store,
+            SearchParams {
+                tenant_id: "benchmark".to_string(),
+                query: "strict reproduction blocker".to_string(),
+                project_id: Some("advanced_benchmark".to_string()),
+                k: 5,
+                filters: None,
+                debug_tiers: None,
+                mode: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let payload: SearchResult = parse_tool_payload(&result);
+        assert!(!payload.results.is_empty());
+        assert!(payload.results[0]
+            .text
+            .contains("strict reproduction blocker"));
     }
 
     #[tokio::test]

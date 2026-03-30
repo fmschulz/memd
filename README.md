@@ -130,6 +130,8 @@ Current boundary conditions:
 - cross-machine access is possible by exposing the HTTP endpoint over a private network or tunnel
 - `memd` does not yet provide built-in multi-user authentication or server-enforced account isolation
 - `tenant_id` is still caller-supplied logical partitioning, not an auth boundary
+- on one trusted machine or trust domain, prefer one stable shared `tenant_id` and use `project_id`, `thread_id`, and `task_id` for narrower retrieval scopes
+- when `project_id` is supplied, project-scoped retrieval can now widen across other local tenants on the same daemon that already contain that project; this is a compatibility fallback for older fragmented history, not the preferred steady state
 
 ## Basic Use
 
@@ -173,6 +175,8 @@ For digest-backed summaries and summary-first retrieval, use:
 - `artifact.find_highlights`
 
 `memory.search`, `task.search`, and `artifact.search` also accept `mode` so the same retrieval surfaces can prefer persisted briefs, task resumes, or failure/decision/evidence/highlight libraries when that is the intent.
+
+When `project_id` is supplied, project-scoped retrieval on the shared daemon can also recover same-project history that was previously written under a different local tenant. This reduces continuity loss from older fragmented writes, but future collaborating agents should still use one stable shared `tenant_id`.
 
 For collaboration around the same work, use:
 
