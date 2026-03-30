@@ -53,6 +53,17 @@ struct TenantScopeConfig {
     data_dir: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectScopeConfig {
+    tenant_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_id: Option<String>,
+    #[serde(default)]
+    read_tenants: Vec<String>,
+    memd_url: String,
+    project_dir: String,
+}
+
 /// CLI subcommands for memory operations
 #[derive(Debug, Clone, Subcommand)]
 pub enum CliCommand {
@@ -167,6 +178,10 @@ pub enum CliCommand {
         /// Project directory where guardrail files will be written
         #[arg(long, default_value = ".")]
         project_dir: PathBuf,
+
+        /// Explicit project identifier to pin for this repository
+        #[arg(long)]
+        project_id: Option<String>,
 
         /// Legacy stdio memd command retained for backward compatibility
         #[arg(long, default_value = "memd")]
@@ -395,6 +410,7 @@ pub async fn run_cli<S: Store>(
             scope,
             allow_tenants,
             project_dir,
+            project_id,
             memd_command: _memd_command,
             memd_data_dir,
             install_codex,
@@ -424,6 +440,14 @@ pub async fn run_cli<S: Store>(
             let claude_snippet_path = memd_dir.join("mcp_config_claude.json");
             let codex_snippet_path = memd_dir.join("mcp_config_codex.toml");
             let tenant_scope_path = memd_dir.join("tenant_scope.json");
+            let project_scope_path = memd_dir.join("project_scope.json");
+            let project_scope = ProjectScopeConfig {
+                tenant_id: tenant.to_string(),
+                project_id,
+                read_tenants: scope_config.read_tenants.clone(),
+                memd_url: memd_url.clone(),
+                project_dir: project_dir.display().to_string(),
+            };
 
             std::fs::write(&guardrail_path, &guardrail_block)?;
             std::fs::write(
@@ -437,6 +461,10 @@ pub async fn run_cli<S: Store>(
             std::fs::write(
                 &tenant_scope_path,
                 format!("{}\n", serde_json::to_string_pretty(&scope_config)?),
+            )?;
+            std::fs::write(
+                &project_scope_path,
+                format!("{}\n", serde_json::to_string_pretty(&project_scope)?),
             )?;
 
             let mut updated_files = Vec::new();
@@ -478,10 +506,11 @@ pub async fn run_cli<S: Store>(
                 "project_dir": project_dir,
                 "generated": {
                     "guardrail_markdown": guardrail_path,
-                    "claude_mcp_snippet": claude_snippet_path,
-                    "codex_mcp_snippet": codex_snippet_path,
-                    "tenant_scope": tenant_scope_path
-                },
+                        "claude_mcp_snippet": claude_snippet_path,
+                        "codex_mcp_snippet": codex_snippet_path,
+                        "tenant_scope": tenant_scope_path,
+                        "project_scope": project_scope_path
+                    },
                 "scope": scope_config,
                 "updated_files": updated_files,
                 "installed_mcp_configs": {
@@ -713,6 +742,9 @@ fn render_guardrail_block(scope_config: &TenantScopeConfig) -> String {
     ));
     out.push_str(
         "- Preferred model: for one trusted machine or trust domain, use one stable shared write tenant and narrow retrieval with `project_id`, `thread_id`, and `task_id`.\n",
+    );
+    out.push_str(
+        "- If `.memd/project_scope.json` exists, use its pinned `tenant_id` and `project_id` instead of inferring from the directory name.\n",
     );
     out.push_str(
         "- Hard rule: do not send a final answer without memory retrieval + memory write.\n\n",
@@ -1020,6 +1052,7 @@ mod tests {
                 scope: TenantScopeMode::Local,
                 allow_tenants: None,
                 project_dir: project_dir.clone(),
+                project_id: Some("demo_project".to_string()),
                 memd_command: "memd".to_string(),
                 memd_data_dir: Some(PathBuf::from("/tmp/memd-data")),
                 memd_url: "http://127.0.0.1:8787/mcp".to_string(),
@@ -1039,6 +1072,7 @@ mod tests {
         assert!(guardrails.contains("context.find_relevant_context"));
         assert!(guardrails.contains("memory.add"));
         assert!(guardrails.contains("Read scope mode: `local`"));
+        assert!(guardrails.contains(".memd/project_scope.json"));
 
         let tenant_scope: Value = serde_json::from_str(
             &std::fs::read_to_string(project_dir.join(".memd/tenant_scope.json")).unwrap(),
@@ -1046,6 +1080,13 @@ mod tests {
         .unwrap();
         assert_eq!(tenant_scope["scope"], "local");
         assert_eq!(tenant_scope["read_tenants"][0], "demo_tenant");
+
+        let project_scope: Value = serde_json::from_str(
+            &std::fs::read_to_string(project_dir.join(".memd/project_scope.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(project_scope["tenant_id"], "demo_tenant");
+        assert_eq!(project_scope["project_id"], "demo_project");
 
         let agents = std::fs::read_to_string(project_dir.join("AGENTS.md")).unwrap();
         assert!(agents.contains("memd-guardrails:start"));
@@ -1085,6 +1126,7 @@ mod tests {
                     scope: TenantScopeMode::Local,
                     allow_tenants: None,
                     project_dir: project_dir.clone(),
+                    project_id: Some("shared_project".to_string()),
                     memd_command: "memd".to_string(),
                     memd_data_dir: None,
                     memd_url: "http://127.0.0.1:8787/mcp".to_string(),
@@ -1120,6 +1162,7 @@ mod tests {
                 scope: TenantScopeMode::Allowlist,
                 allow_tenants: Some(vec!["tenant_a".to_string(), "tenant_b".to_string()]),
                 project_dir: project_dir.clone(),
+                project_id: Some("allowlist_project".to_string()),
                 memd_command: "memd".to_string(),
                 memd_data_dir: None,
                 memd_url: "http://127.0.0.1:8787/mcp".to_string(),
@@ -1163,6 +1206,7 @@ mod tests {
                 scope: TenantScopeMode::Global,
                 allow_tenants: None,
                 project_dir: project_dir.clone(),
+                project_id: Some("global_project".to_string()),
                 memd_command: "memd".to_string(),
                 memd_data_dir: Some(data_dir.clone()),
                 memd_url: "http://127.0.0.1:8787/mcp".to_string(),
