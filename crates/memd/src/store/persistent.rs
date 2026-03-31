@@ -523,7 +523,10 @@ impl PersistentStore {
 
             let mut results = Vec::with_capacity(hybrid_results.len());
             for result in hybrid_results {
-                if let Some(chunk) = self.get(tenant_id, &result.chunk_id).await? {
+                if let Some(chunk) = self
+                    .get_chunk_for_retrieval(tenant_id, &result.chunk_id, "search_with_tier_info")
+                    .await?
+                {
                     results.push((chunk, result.final_score));
                 }
             }
@@ -1236,7 +1239,10 @@ impl Store for PersistentStore {
 
         let mut chunks = Vec::with_capacity(chunk_ids.len());
         for chunk_id in chunk_ids {
-            if let Some(chunk) = self.get(tenant_id, chunk_id).await? {
+            if let Some(chunk) = self
+                .get_chunk_for_retrieval(tenant_id, chunk_id, "rerank_chunks_for_query")
+                .await?
+            {
                 chunks.push(chunk);
             }
         }
@@ -1850,6 +1856,28 @@ impl PersistentStore {
         }
     }
 
+    async fn get_chunk_for_retrieval(
+        &self,
+        tenant_id: &TenantId,
+        chunk_id: &ChunkId,
+        operation: &'static str,
+    ) -> Result<Option<MemoryChunk>> {
+        match self.get_chunk(tenant_id, chunk_id).await {
+            Ok(chunk) => Ok(chunk),
+            Err(MemdError::StorageError(error)) => {
+                warn!(
+                    tenant_id = %tenant_id,
+                    chunk_id = %chunk_id,
+                    operation,
+                    error = %error,
+                    "skipping unreadable chunk during retrieval"
+                );
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     async fn hybrid_search(
         &self,
         tenant_id: &TenantId,
@@ -1886,13 +1914,6 @@ impl PersistentStore {
         // Real search comes in Phase 3 with embeddings
         let metadata_list = self.metadata.list(tenant_id, k * 2, 0)?;
 
-        let tenant_str = tenant_id.to_string();
-        let tenant = match self.tenants.read().get(&tenant_str) {
-            Some(t) => Arc::clone(t),
-            None => return Ok(Vec::new()),
-        };
-
-        let segments = tenant.segments.read();
         let mut results = Vec::new();
 
         for meta in metadata_list {
@@ -1900,35 +1921,17 @@ impl PersistentStore {
                 continue;
             }
 
-            // Try active segment first
-            if let Some(bytes) = tenant.read_from_active_segment(meta.segment_id, meta.ordinal)? {
-                if let Ok(chunk) = serde_json::from_slice::<MemoryChunk>(&bytes) {
-                    // Basic text match
-                    if query.is_empty() || chunk.text.to_lowercase().contains(&query.to_lowercase())
-                    {
-                        results.push(chunk);
-                        if results.len() >= k {
-                            break;
-                        }
-                    }
-                }
+            let Some(chunk) = self
+                .get_chunk_for_retrieval(tenant_id, &meta.chunk_id, "text_fallback_search")
+                .await?
+            else {
                 continue;
-            }
+            };
 
-            // Try finalized segments
-            if let Some(reader) = segments.get(&meta.segment_id) {
-                if let Some(bytes) = reader.read_chunk(meta.ordinal)? {
-                    if let Ok(chunk) = serde_json::from_slice::<MemoryChunk>(&bytes) {
-                        // Basic text match
-                        if query.is_empty()
-                            || chunk.text.to_lowercase().contains(&query.to_lowercase())
-                        {
-                            results.push(chunk);
-                            if results.len() >= k {
-                                break;
-                            }
-                        }
-                    }
+            if query.is_empty() || chunk.text.to_lowercase().contains(&query.to_lowercase()) {
+                results.push(chunk);
+                if results.len() >= k {
+                    break;
                 }
             }
         }
@@ -1967,7 +1970,10 @@ impl PersistentStore {
                 Vec::with_capacity(hybrid_results.len());
 
             for result in hybrid_results {
-                if let Some(chunk) = self.get(tenant_id, &result.chunk_id).await? {
+                if let Some(chunk) = self
+                    .get_chunk_for_retrieval(tenant_id, &result.chunk_id, "hybrid_search")
+                    .await?
+                {
                     rerank_meta.push(ChunkMetaForRerank {
                         chunk_id: result.chunk_id.clone(),
                         rrf_score: result.final_score,
@@ -2041,7 +2047,10 @@ impl PersistentStore {
             let fetch_start = Instant::now();
             let mut results = Vec::with_capacity(dense_results.len());
             for result in dense_results {
-                if let Some(chunk) = self.get(tenant_id, &result.chunk_id).await? {
+                if let Some(chunk) = self
+                    .get_chunk_for_retrieval(tenant_id, &result.chunk_id, "dense_search")
+                    .await?
+                {
                     results.push((chunk, result.score));
                 } else {
                     warn!(chunk_id = %result.chunk_id, "FAILED to fetch chunk - get() returned None");
@@ -2143,10 +2152,12 @@ mod tests {
     use crate::retrieval::{RerankerConfig, RerankerMode};
     use crate::store::dense::{DenseSearchConfig, DenseSearcher};
     use crate::store::hybrid::{HybridConfig, HybridSearcher};
+    use crate::store::metadata::MetadataStore;
     use crate::store::Store;
     use crate::task_memory::{build_task_projections, TaskArtifact, TaskSearchFilters};
     use crate::types::{ChunkType, ProjectId};
     use rusqlite::Connection;
+    use std::fs;
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -2176,6 +2187,27 @@ mod tests {
         let sentence =
             "This is a long test sentence that should trigger document chunking behavior. ";
         sentence.repeat(40)
+    }
+
+    fn segment_payload_path(
+        base_dir: &std::path::Path,
+        tenant: &TenantId,
+        segment_id: u64,
+    ) -> std::path::PathBuf {
+        base_dir
+            .join("tenants")
+            .join(tenant.as_str())
+            .join("segments")
+            .join(format!("seg_{:06}", segment_id))
+            .join("payload.bin")
+    }
+
+    fn corrupt_segment_payload(base_dir: &std::path::Path, tenant: &TenantId, segment_id: u64) {
+        let payload_path = segment_payload_path(base_dir, tenant, segment_id);
+        let mut bytes = fs::read(&payload_path).unwrap();
+        assert!(!bytes.is_empty(), "payload file must not be empty");
+        bytes[0] ^= 0xFF;
+        fs::write(payload_path, bytes).unwrap();
     }
 
     #[test]
@@ -2356,6 +2388,115 @@ mod tests {
         // Not in search results
         let results = store.search(&tenant, "delete", 10).await.unwrap();
         assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn text_search_skips_crc_corrupted_active_chunk() {
+        let dir = tempdir().unwrap();
+        let config = PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            segment_max_chunks: 1,
+            wal_checkpoint_interval: 10,
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            ..Default::default()
+        };
+        let store = PersistentStore::open(config).unwrap();
+        let tenant = make_tenant();
+
+        let healthy_id = store
+            .add(make_chunk(&tenant, "healthy finalized chunk"))
+            .await
+            .unwrap();
+        let corrupted_id = store
+            .add(make_chunk(&tenant, "corrupted active chunk"))
+            .await
+            .unwrap();
+
+        let warmup = store.get(&tenant, &corrupted_id).await.unwrap();
+        assert!(warmup.is_some());
+
+        let corrupt_meta = store
+            .metadata
+            .get(&tenant, &corrupted_id)
+            .unwrap()
+            .expect("corrupted chunk metadata");
+        corrupt_segment_payload(dir.path(), &tenant, corrupt_meta.segment_id);
+
+        let results = store.search(&tenant, "chunk", 10).await.unwrap();
+        let result_ids = results
+            .into_iter()
+            .map(|chunk| chunk.chunk_id)
+            .collect::<Vec<_>>();
+
+        assert!(result_ids.contains(&healthy_id));
+        assert!(!result_ids.contains(&corrupted_id));
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_skips_crc_corrupted_active_chunk() {
+        let dir = tempdir().unwrap();
+        let config = PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            segment_max_chunks: 1,
+            wal_checkpoint_interval: 10,
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            ..Default::default()
+        };
+        let mut store = PersistentStore::open(config).unwrap();
+        let tenant = make_tenant();
+
+        let embedder = Arc::new(MockEmbedder::new());
+        let dense = Arc::new(DenseSearcher::with_embedder(
+            embedder,
+            DenseSearchConfig {
+                persist: false,
+                ..Default::default()
+            },
+        ));
+        let hybrid = HybridSearcher::new(
+            dense,
+            None,
+            HybridConfig {
+                enable_sparse: false,
+                enable_tiered: false,
+                reranker: RerankerConfig {
+                    mode: RerankerMode::Feature,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        store.hybrid_searcher = Some(Arc::new(hybrid));
+
+        let healthy_id = store
+            .add(make_chunk(&tenant, "healthy hybrid retrieval chunk"))
+            .await
+            .unwrap();
+        let corrupted_id = store
+            .add(make_chunk(&tenant, "corrupted hybrid retrieval chunk"))
+            .await
+            .unwrap();
+
+        let warmup = store.get(&tenant, &corrupted_id).await.unwrap();
+        assert!(warmup.is_some());
+
+        let corrupt_meta = store
+            .metadata
+            .get(&tenant, &corrupted_id)
+            .unwrap()
+            .expect("corrupted chunk metadata");
+        corrupt_segment_payload(dir.path(), &tenant, corrupt_meta.segment_id);
+
+        let results = store.search(&tenant, "retrieval", 10).await.unwrap();
+        let result_ids = results
+            .into_iter()
+            .map(|chunk| chunk.chunk_id)
+            .collect::<Vec<_>>();
+
+        assert!(result_ids.contains(&healthy_id));
+        assert!(!result_ids.contains(&corrupted_id));
     }
 
     #[tokio::test]
