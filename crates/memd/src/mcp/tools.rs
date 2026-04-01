@@ -50,6 +50,12 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "type": "string",
                         "description": "Optional project identifier to scope the search"
                     },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["generic", "brief_project", "resume_task", "find_failures", "find_decisions", "find_evidence", "find_highlights"],
+                        "default": "generic",
+                        "description": "Optional retrieval intent that biases results toward generated briefs or canonical task/artifact summaries"
+                    },
                     "k": {
                         "type": "integer",
                         "description": "Maximum number of results to return",
@@ -687,13 +693,18 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "minimum": 1,
                         "maximum": 100
                     },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["generic", "brief_project", "resume_task", "find_failures", "find_decisions", "find_evidence", "find_highlights"],
+                        "default": "generic"
+                    },
                     "filters": {
                         "type": "object",
                         "properties": {
                             "task_id": {"type": "string"},
                             "artifact_kind": {
                                 "type": "string",
-                                "enum": ["task_start", "task_progress", "run_start", "run_finish", "evidence", "review", "revision", "verification", "task_finish"]
+                                "enum": ["task_start", "task_progress", "run_start", "run_finish", "evidence", "review", "revision", "verification", "decision", "digest", "task_finish"]
                             },
                             "status": {"type": "string"},
                             "challenge_id": {"type": "string"},
@@ -726,7 +737,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "tenant_id": {"type": "string"},
                     "artifact_kind": {
                         "type": "string",
-                        "enum": ["task_start", "task_progress", "run_start", "run_finish", "evidence", "review", "revision", "verification", "task_finish"]
+                        "enum": ["task_start", "task_progress", "run_start", "run_finish", "evidence", "review", "revision", "verification", "decision", "digest", "task_finish"]
                     },
                     "task_id": {"type": "string"},
                     "project_id": {"type": "string"},
@@ -851,13 +862,18 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "minimum": 1,
                         "maximum": 100
                     },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["generic", "brief_project", "resume_task", "find_failures", "find_decisions", "find_evidence", "find_highlights"],
+                        "default": "generic"
+                    },
                     "filters": {
                         "type": "object",
                         "properties": {
                             "task_id": {"type": "string"},
                             "artifact_kind": {
                                 "type": "string",
-                                "enum": ["task_start", "task_progress", "run_start", "run_finish", "evidence", "review", "revision", "verification", "task_finish"]
+                                "enum": ["task_start", "task_progress", "run_start", "run_finish", "evidence", "review", "revision", "verification", "decision", "digest", "task_finish"]
                             },
                             "status": {"type": "string"},
                             "challenge_id": {"type": "string"},
@@ -890,6 +906,91 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "tenant_id": {"type": "string"},
                     "thread_id": {"type": "string"},
                     "artifact_id": {"type": "string"}
+                },
+                "required": ["tenant_id"]
+            }),
+        ),
+        ToolDefinition::new(
+            "context.brief_project",
+            "Generate or refresh a persisted project brief digest and return an actionable summary derived from task and artifact state.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "query": {"type": "string", "default": ""},
+                    "k": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100},
+                    "include_related_projects": {"type": "boolean", "default": true}
+                },
+                "required": ["tenant_id", "project_id"]
+            }),
+        ),
+        ToolDefinition::new(
+            "task.resume",
+            "Generate or refresh a persisted task resume digest and return the current task resume summary.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "query": {"type": "string", "default": ""},
+                    "k": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100}
+                },
+                "required": ["tenant_id", "task_id"]
+            }),
+        ),
+        ToolDefinition::new(
+            "artifact.find_failures",
+            "Generate or refresh a failure library digest and return ranked failure summaries from task/artifact state.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "query": {"type": "string", "default": ""},
+                    "k": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100}
+                },
+                "required": ["tenant_id"]
+            }),
+        ),
+        ToolDefinition::new(
+            "artifact.find_decisions",
+            "Generate or refresh a decision library digest and return explicit or inferred decisions.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "query": {"type": "string", "default": ""},
+                    "k": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100}
+                },
+                "required": ["tenant_id"]
+            }),
+        ),
+        ToolDefinition::new(
+            "artifact.find_evidence",
+            "Generate or refresh an evidence library digest and return ranked evidence highlights.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "query": {"type": "string", "default": ""},
+                    "k": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100}
+                },
+                "required": ["tenant_id"]
+            }),
+        ),
+        ToolDefinition::new(
+            "artifact.find_highlights",
+            "Generate or refresh a highlight library digest and return ranked, high-uplift lessons for future agents.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "query": {"type": "string", "default": ""},
+                    "k": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100}
                 },
                 "required": ["tenant_id"]
             }),
@@ -1201,6 +1302,23 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "type": "boolean",
                         "description": "Force compaction regardless of thresholds (default: false)",
                         "default": false
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional project identifier for digest compaction scope"
+                    },
+                    "digest_modes": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["generic", "brief_project", "resume_task", "find_failures", "find_decisions", "find_evidence", "find_highlights"]
+                        },
+                        "description": "Optional digest modes to rebuild during compaction"
+                    },
+                    "force_digest_rebuild": {
+                        "type": "boolean",
+                        "description": "Force digest regeneration even when storage compaction thresholds are not exceeded",
+                        "default": false
                     }
                 },
                 "required": ["tenant_id"]
@@ -1443,9 +1561,14 @@ pub fn tool_names() -> Vec<&'static str> {
         "task.finish",
         "task.get",
         "task.search",
+        "task.resume",
         "artifact.create",
         "artifact.get",
         "artifact.search",
+        "artifact.find_failures",
+        "artifact.find_decisions",
+        "artifact.find_evidence",
+        "artifact.find_highlights",
         "artifact.list_thread",
         "memory.get",
         "memory.delete",
@@ -1458,6 +1581,7 @@ pub fn tool_names() -> Vec<&'static str> {
         "context.get_files_for_subsystem",
         "context.search_context_documents",
         "context.find_relevant_context",
+        "context.brief_project",
         "context.suggest_agent",
         "context.get_hot_context",
         "code.find_definition",
@@ -1474,9 +1598,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn get_all_tools_returns_thirty_four() {
+    fn get_all_tools_returns_thirty_nine() {
         let tools = get_all_tools();
-        assert_eq!(tools.len(), 34);
+        assert_eq!(tools.len(), 39);
     }
 
     #[test]
@@ -1497,6 +1621,7 @@ mod tests {
         assert!(names.contains(&"artifact.create"));
         assert!(names.contains(&"artifact.get"));
         assert!(names.contains(&"artifact.search"));
+        assert!(names.contains(&"artifact.find_highlights"));
         assert!(names.contains(&"artifact.list_thread"));
         assert!(names.contains(&"memory.get"));
         assert!(names.contains(&"memory.delete"));
@@ -1668,7 +1793,7 @@ mod tests {
     #[test]
     fn tool_names_list() {
         let names = tool_names();
-        assert_eq!(names.len(), 34);
+        assert_eq!(names.len(), 40);
         assert!(names.contains(&"memory.search"));
         assert!(names.contains(&"memory.metrics"));
         assert!(names.contains(&"memory.feedback"));
@@ -1685,6 +1810,7 @@ mod tests {
         assert!(names.contains(&"artifact.create"));
         assert!(names.contains(&"artifact.get"));
         assert!(names.contains(&"artifact.search"));
+        assert!(names.contains(&"artifact.find_highlights"));
         assert!(names.contains(&"artifact.list_thread"));
         assert!(names.contains(&"context.list_subsystems"));
         assert!(names.contains(&"context.get_files_for_subsystem"));

@@ -9,6 +9,8 @@ Shared knowledge artifacts over MCP for coding agents and AI scientists.
 
 Use the same shared local `memd` daemon URL for Codex CLI and Claude Code when you want one machine to host a shared knowledge base across sessions.
 
+For one trusted machine or trust domain, prefer one stable shared `tenant_id` for collaborating agents and use `project_id` for project scoping. The current MCP retrieval path can also widen project-scoped lookup across other local tenants on the same daemon that already contain that project, but that is a compatibility fallback for older fragmented history rather than the preferred steady state.
+
 ## When to Use
 
 Use `memd` when agents need to:
@@ -62,9 +64,11 @@ For a stronger default install that upserts stricter `memd` usage rules into
 
 This distinction matters. `memory.add` is flexible. `task.*` captures task lifecycle. `artifact.*` captures the exchange layer around that work.
 
+For summary-first retrieval and onboarding, the current tool surface also persists digest artifacts and exposes dedicated read helpers. Use `context.brief_project`, `task.resume`, `artifact.find_failures`, `artifact.find_decisions`, `artifact.find_evidence`, and `artifact.find_highlights` when you want a project brief, task resume, or project/tenant library instead of only raw search hits. `memory.search`, `task.search`, and `artifact.search` also accept `mode` with `brief_project`, `resume_task`, `find_failures`, `find_decisions`, `find_evidence`, or `find_highlights` to bias retrieval toward those persisted digests.
+
 ## Tool Surface
 
-`memd` exposes 34 MCP tools.
+`memd` exposes 40 MCP tools.
 
 ### Generic Memory
 
@@ -89,12 +93,17 @@ This distinction matters. `memory.add` is flexible. `task.*` captures task lifec
 - `task.finish`
 - `task.get`
 - `task.search`
+- `task.resume`
 
 ### Canonical Artifacts
 
 - `artifact.create`
 - `artifact.get`
 - `artifact.search`
+- `artifact.find_failures`
+- `artifact.find_decisions`
+- `artifact.find_evidence`
+- `artifact.find_highlights`
 - `artifact.list_thread`
 
 ### Context
@@ -103,6 +112,7 @@ This distinction matters. `memory.add` is flexible. `task.*` captures task lifec
 - `context.get_files_for_subsystem`
 - `context.search_context_documents`
 - `context.find_relevant_context`
+- `context.brief_project`
 - `context.suggest_agent`
 - `context.get_hot_context`
 
@@ -203,10 +213,18 @@ Use:
 
 - `task.get` to inspect the canonical artifact history for one task
 - `task.search` to search across task artifacts with exact filters and linked canonical artifacts
+- `task.resume` to generate or refresh a persisted task resume digest
 - `artifact.get` to inspect one canonical artifact by `artifact_id`
 - `artifact.search` to search canonical artifacts rather than only retrieval chunks
+- `artifact.find_failures` to retrieve a digest-backed failure library
+- `artifact.find_decisions` to retrieve explicit and inferred decisions
+- `artifact.find_evidence` to retrieve digest-backed evidence highlights
+- `artifact.find_highlights` to retrieve ranked, high-uplift lessons for future agents
 - `artifact.list_thread` to inspect the full collaboration thread around an artifact
+- `context.brief_project` to generate or refresh a persisted project brief digest
 - `memory.search` to search broader raw memory and context
+
+`memory.compact` can also regenerate project brief and failure/decision/evidence/highlight digests explicitly via `project_id`, `digest_modes`, and `force_digest_rebuild`.
 
 ### 7. Record critique and verification explicitly
 
@@ -248,6 +266,7 @@ These are the operating rules this skill expects:
 - Always search before starting work.
 - Do not repeat known failed approaches unless you have a reason.
 - Use the same `tenant_id` when agents should share knowledge.
+- Prefer one stable shared tenant per trusted machine or trust domain and use `project_id` for narrower project scoping.
 - Use `task.*` for work with intent, rationale, parameters, evidence, and outcomes.
 - Use `artifact.*` when another agent or scientist needs to critique, revise, verify, or inspect a thread directly.
 - Use `memory.add` / `memory.add_batch` for raw chunks and code indexing.
@@ -269,6 +288,8 @@ If multiple agents write to the same tenant, later agents can search and recover
 - what work remains
 
 That is the point of the artifact schema: consistency across agents and scientists.
+
+If older history was accidentally written under another local tenant on the same daemon, project-scoped retrieval can now recover that same-project history as a compatibility fallback. Future writes should still converge on one shared tenant.
 
 ## Retrieval Patterns
 

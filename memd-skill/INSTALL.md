@@ -141,8 +141,12 @@ Use the `memd` MCP server as a shared knowledge base across sessions and agents.
 Before substantive work, search `memd` with the current `tenant_id`.
 For meaningful work, record `task.start`, `task.progress`, `task.run_start`, `task.run_finish`, `task.add_evidence`, and `task.finish`.
 Use `artifact.create`, `artifact.search`, `artifact.get`, and `artifact.list_thread` when critique, revision, verification, or thread inspection matters.
-Use the same `tenant_id` for agents that should share knowledge unless the user asks for a different memory scope.
+Use the same `tenant_id` for agents that should share knowledge unless the user asks for a different memory scope. On one trusted machine or trust domain, the preferred model is one stable shared tenant and narrower retrieval through `project_id`.
 ```
+
+For summary-first retrieval, the same daemon should now expose `context.brief_project`, `task.resume`, `artifact.find_failures`, `artifact.find_decisions`, `artifact.find_evidence`, and `artifact.find_highlights`. `memory.search`, `task.search`, and `artifact.search` also accept `mode` to bias retrieval toward those digests. `memory.compact` can refresh project brief and failure/decision/evidence/highlight digests explicitly with `project_id`, `digest_modes`, and `force_digest_rebuild`.
+
+When `project_id` is supplied, the MCP retrieval path can also widen across other local tenants on the same daemon that already contain that project. This helps recover older fragmented histories, but it should not replace a deliberate shared-tenant convention for future work.
 
 ### `~/.claude/CLAUDE.md`
 
@@ -152,7 +156,7 @@ Use the `memd` MCP server as a shared knowledge base across sessions and agents.
 Before substantive work, search `memd` with the current `tenant_id`.
 For meaningful work, record `task.start`, `task.progress`, `task.run_start`, `task.run_finish`, `task.add_evidence`, and `task.finish`.
 Use `artifact.create`, `artifact.search`, `artifact.get`, and `artifact.list_thread` when critique, revision, verification, or thread inspection matters.
-Use the same `tenant_id` for agents that should share knowledge unless the user asks for a different memory scope.
+Use the same `tenant_id` for agents that should share knowledge unless the user asks for a different memory scope. On one trusted machine or trust domain, the preferred model is one stable shared tenant and narrower retrieval through `project_id`.
 ```
 
 ## Verify the install
@@ -212,10 +216,16 @@ After that, verify that `memd` exposes the current tool surface, especially:
 - `task.finish`
 - `task.get`
 - `task.search`
+- `task.resume`
 - `artifact.create`
 - `artifact.get`
 - `artifact.search`
+- `artifact.find_failures`
+- `artifact.find_decisions`
+- `artifact.find_evidence`
+- `artifact.find_highlights`
 - `artifact.list_thread`
+- `context.brief_project`
 
 ## Troubleshooting
 
