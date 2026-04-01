@@ -3,12 +3,14 @@
 //! Keeps the canonical task artifact envelope separate from the retrieval
 //! projection chunks stored in the main search engine.
 
+mod digests;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::str::FromStr;
 use uuid::Uuid;
 
-use crate::types::{ChunkType, MemoryChunk, ProjectId, Source, TenantId};
+use crate::types::{ChunkType, MemoryChunk, ProjectId, PromotionState, Source, TenantId};
 
 fn current_time_ms() -> i64 {
     std::time::SystemTime::now()
@@ -21,7 +23,7 @@ fn new_v7_id() -> String {
     Uuid::now_v7().to_string()
 }
 
-fn sanitize_tag_value(value: &str) -> String {
+pub(crate) fn sanitize_tag_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
         if c.is_ascii_alphanumeric() {
@@ -32,6 +34,16 @@ fn sanitize_tag_value(value: &str) -> String {
     }
     out.trim_matches('_').to_string()
 }
+
+pub use digests::{
+    build_library_digest_artifact, build_project_brief_digest_artifact, build_project_brief_view,
+    build_task_resume_digest_artifact, build_task_resume_view, infer_decision_items,
+    infer_evidence_items, infer_failure_items, infer_highlight_items, stable_digest_identity,
+    DecisionViewItem, EvidenceViewItem, FailureViewItem, HighlightViewItem, ProjectBriefView,
+    RunDigestItem, TaskResumeView, DIGEST_ROLE_DECISION_LIBRARY, DIGEST_ROLE_EVIDENCE_LIBRARY,
+    DIGEST_ROLE_FAILURE_LIBRARY, DIGEST_ROLE_HIGHLIGHT_LIBRARY, DIGEST_ROLE_PROJECT_BRIEF,
+    DIGEST_ROLE_TASK_RESUME,
+};
 
 fn join_lines(items: &[String]) -> String {
     items.join("; ")
@@ -49,6 +61,8 @@ pub enum ArtifactKind {
     Review,
     Revision,
     Verification,
+    Decision,
+    Digest,
     TaskFinish,
 }
 
@@ -63,6 +77,8 @@ impl ArtifactKind {
             Self::Review => "review",
             Self::Revision => "revision",
             Self::Verification => "verification",
+            Self::Decision => "decision",
+            Self::Digest => "digest",
             Self::TaskFinish => "task_finish",
         }
     }
@@ -81,9 +97,11 @@ impl FromStr for ArtifactKind {
             "review" => Ok(Self::Review),
             "revision" => Ok(Self::Revision),
             "verification" => Ok(Self::Verification),
+            "decision" => Ok(Self::Decision),
+            "digest" => Ok(Self::Digest),
             "task_finish" => Ok(Self::TaskFinish),
             _ => Err(format!(
-                "invalid artifact_kind '{}', must be one of: task_start, task_progress, run_start, run_finish, evidence, review, revision, verification, task_finish",
+                "invalid artifact_kind '{}', must be one of: task_start, task_progress, run_start, run_finish, evidence, review, revision, verification, decision, digest, task_finish",
                 value
             )),
         }
@@ -97,6 +115,8 @@ pub enum ProjectionKind {
     TaskSummary,
     Run,
     Evidence,
+    Decision,
+    Digest,
     Worked,
     Failed,
     Validation,
@@ -109,6 +129,8 @@ impl ProjectionKind {
             Self::TaskSummary => "task_summary",
             Self::Run => "run",
             Self::Evidence => "evidence",
+            Self::Decision => "decision",
+            Self::Digest => "digest",
             Self::Worked => "worked",
             Self::Failed => "failed",
             Self::Validation => "validation",
@@ -314,6 +336,12 @@ pub struct TaskArtifact {
     pub allowed_tools: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub approval_state: Option<String>,
+    #[serde(default)]
+    pub promotion_state: PromotionState,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub digest_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source_updated_at_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "TaskProvenance::is_empty")]
     pub provenance: TaskProvenance,
     pub timestamp_created: i64,
@@ -385,6 +413,9 @@ impl TaskArtifact {
             policy_tags: Vec::new(),
             allowed_tools: Vec::new(),
             approval_state: None,
+            promotion_state: PromotionState::Raw,
+            digest_key: None,
+            source_updated_at_ms: None,
             provenance: TaskProvenance::default(),
             timestamp_created: now_ms,
             timestamp_observed: None,
@@ -443,6 +474,25 @@ impl TaskArtifact {
         artifact
     }
 
+    pub fn new_decision(tenant_id: TenantId, task_id: impl Into<String>) -> Self {
+        let mut artifact = Self::new(ArtifactKind::Decision, tenant_id, task_id);
+        artifact.status = Some("recorded".to_string());
+        artifact
+    }
+
+    pub fn new_digest(
+        tenant_id: TenantId,
+        task_id: impl Into<String>,
+        digest_key: impl Into<String>,
+        artifact_role: impl Into<String>,
+    ) -> Self {
+        let mut artifact = Self::new(ArtifactKind::Digest, tenant_id, task_id);
+        artifact.status = Some("generated".to_string());
+        artifact.artifact_role = Some(artifact_role.into());
+        artifact.digest_key = Some(digest_key.into());
+        artifact
+    }
+
     pub fn thread_key(&self) -> &str {
         self.thread_id.as_deref().unwrap_or(&self.task_id)
     }
@@ -465,6 +515,28 @@ impl TaskArtifact {
         }
         None
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRecord {
+    pub task_id: String,
+    pub tenant_id: TenantId,
+    #[serde(default)]
+    pub project_id: ProjectId,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub goal: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub scientific_question: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub hypothesis: Option<String>,
+    pub last_artifact_id: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub started_at_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub finished_at_ms: Option<i64>,
+    pub updated_at_ms: i64,
 }
 
 /// A retrieval chunk derived from the canonical artifact.
@@ -524,6 +596,7 @@ pub struct TaskSearchFilters {
 }
 
 fn base_projection_tags(artifact: &TaskArtifact) -> Vec<String> {
+    let artifact_promotion_state = derive_artifact_promotion_state(artifact);
     let mut tags = vec![
         format!("task:id:{}", sanitize_tag_value(&artifact.task_id)),
         format!(
@@ -531,6 +604,10 @@ fn base_projection_tags(artifact: &TaskArtifact) -> Vec<String> {
             sanitize_tag_value(&artifact.artifact_id)
         ),
         format!("task:kind:{}", artifact.artifact_kind.as_str()),
+        format!(
+            "task:promotion:{}",
+            sanitize_tag_value(&artifact_promotion_state.to_string())
+        ),
     ];
     if let Some(status) = artifact.status.as_ref().filter(|s| !s.trim().is_empty()) {
         tags.push(format!("task:status:{}", sanitize_tag_value(status)));
@@ -559,6 +636,13 @@ fn base_projection_tags(artifact: &TaskArtifact) -> Vec<String> {
     {
         tags.push(format!("task:role:{}", sanitize_tag_value(artifact_role)));
     }
+    if let Some(digest_key) = artifact
+        .digest_key
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        tags.push(format!("task:digest:{}", sanitize_tag_value(digest_key)));
+    }
     if let Some(verification_status) = artifact
         .verification_status
         .as_ref()
@@ -578,6 +662,79 @@ fn base_projection_tags(artifact: &TaskArtifact) -> Vec<String> {
     tags
 }
 
+fn is_verified_marker(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()),
+        Some(value)
+            if matches!(
+                value.as_str(),
+                "verified" | "accepted" | "approved" | "confirmed" | "complete" | "completed"
+            )
+    )
+}
+
+pub fn derive_artifact_promotion_state(artifact: &TaskArtifact) -> PromotionState {
+    if artifact.artifact_kind == ArtifactKind::Digest {
+        if is_verified_marker(artifact.verification_status.as_deref())
+            || is_verified_marker(artifact.status.as_deref())
+        {
+            return PromotionState::Verified;
+        }
+        return PromotionState::Summarized;
+    }
+
+    if artifact.artifact_kind == ArtifactKind::Verification
+        || is_verified_marker(artifact.verification_status.as_deref())
+        || is_verified_marker(artifact.approval_state.as_deref())
+    {
+        return PromotionState::Verified;
+    }
+
+    if artifact.artifact_kind == ArtifactKind::Decision
+        && (!artifact.validation.is_empty() || artifact.supports_claim == Some(true))
+    {
+        return PromotionState::Verified;
+    }
+
+    match artifact.artifact_kind {
+        ArtifactKind::TaskStart
+        | ArtifactKind::TaskProgress
+        | ArtifactKind::RunStart
+        | ArtifactKind::RunFinish
+        | ArtifactKind::Evidence
+        | ArtifactKind::Review
+        | ArtifactKind::Revision
+        | ArtifactKind::Verification
+        | ArtifactKind::Decision
+        | ArtifactKind::TaskFinish => PromotionState::Canonical,
+        ArtifactKind::Digest => PromotionState::Summarized,
+    }
+}
+
+pub fn derive_chunk_promotion_state(
+    artifact: &TaskArtifact,
+    projection_kind: ProjectionKind,
+) -> PromotionState {
+    match derive_artifact_promotion_state(artifact) {
+        PromotionState::Verified => match projection_kind {
+            ProjectionKind::Validation
+            | ProjectionKind::Evidence
+            | ProjectionKind::Decision
+            | ProjectionKind::Digest => PromotionState::Verified,
+            _ => PromotionState::Summarized,
+        },
+        PromotionState::Canonical => match projection_kind {
+            ProjectionKind::TaskGoal
+            | ProjectionKind::Run
+            | ProjectionKind::Evidence
+            | ProjectionKind::Decision => PromotionState::Canonical,
+            _ => PromotionState::Summarized,
+        },
+        PromotionState::Summarized => PromotionState::Summarized,
+        PromotionState::Raw => PromotionState::Raw,
+    }
+}
+
 fn build_projection_chunk(
     artifact: &TaskArtifact,
     kind: ProjectionKind,
@@ -594,7 +751,9 @@ fn build_projection_chunk(
             ArtifactKind::Evidence => "task.add_evidence".to_string(),
             ArtifactKind::Review
             | ArtifactKind::Revision
-            | ArtifactKind::Verification => "artifact.create".to_string(),
+            | ArtifactKind::Verification
+            | ArtifactKind::Decision => "artifact.create".to_string(),
+            ArtifactKind::Digest => "memory.compact".to_string(),
         })
     });
     let mut source = Source::from(&artifact.provenance);
@@ -602,7 +761,8 @@ fn build_projection_chunk(
 
     let mut chunk = MemoryChunk::new(artifact.tenant_id.clone(), text, chunk_type)
         .with_project(artifact.project_id.clone())
-        .with_source(source);
+        .with_source(source)
+        .with_promotion_state(derive_chunk_promotion_state(artifact, kind));
     if let Some(agent_id) = artifact.agent_id.as_deref() {
         chunk = chunk.with_agent(agent_id.to_string());
     }
@@ -678,6 +838,8 @@ pub fn build_task_projections(artifact: &TaskArtifact) -> Vec<TaskProjection> {
             ArtifactKind::TaskStart => ProjectionKind::TaskGoal,
             ArtifactKind::RunStart | ArtifactKind::RunFinish => ProjectionKind::Run,
             ArtifactKind::Evidence => ProjectionKind::Evidence,
+            ArtifactKind::Decision => ProjectionKind::Decision,
+            ArtifactKind::Digest => ProjectionKind::Digest,
             ArtifactKind::Verification => ProjectionKind::Validation,
             _ => ProjectionKind::TaskSummary,
         },
@@ -685,6 +847,8 @@ pub fn build_task_projections(artifact: &TaskArtifact) -> Vec<TaskProjection> {
             ArtifactKind::TaskStart => ChunkType::Plan,
             ArtifactKind::RunStart | ArtifactKind::RunFinish => ChunkType::Trace,
             ArtifactKind::Evidence => ChunkType::Research,
+            ArtifactKind::Decision => ChunkType::Decision,
+            ArtifactKind::Digest => ChunkType::Summary,
             ArtifactKind::Verification => ChunkType::Summary,
             _ => ChunkType::Summary,
         },
@@ -934,6 +1098,14 @@ mod tests {
             ArtifactKind::from_str("run_finish").unwrap(),
             ArtifactKind::RunFinish
         );
+        assert_eq!(
+            ArtifactKind::from_str("decision").unwrap(),
+            ArtifactKind::Decision
+        );
+        assert_eq!(
+            ArtifactKind::from_str("digest").unwrap(),
+            ArtifactKind::Digest
+        );
         assert!(ArtifactKind::from_str("unknown").is_err());
     }
 
@@ -957,5 +1129,34 @@ mod tests {
         assert!(evidence_projections
             .iter()
             .any(|p| p.kind == ProjectionKind::Evidence));
+    }
+
+    #[test]
+    fn decision_and_digest_artifacts_emit_specialized_projections() {
+        let tenant_id = TenantId::new("science_team").unwrap();
+
+        let mut decision = TaskArtifact::new_decision(tenant_id.clone(), "task-1");
+        decision.summary = Some("Adopt task-artifact digests for new-agent onboarding".to_string());
+        decision.validation =
+            vec!["Prototype query flow returned the expected task state".to_string()];
+        decision.promotion_state = derive_artifact_promotion_state(&decision);
+        let decision_projections = build_task_projections(&decision);
+        assert!(decision_projections
+            .iter()
+            .any(|p| p.kind == ProjectionKind::Decision));
+
+        let mut digest = TaskArtifact::new_digest(
+            tenant_id,
+            "task-1",
+            "digest::project".to_string(),
+            "project_brief".to_string(),
+        );
+        digest.summary = Some("Project brief for the current tenant".to_string());
+        digest.promotion_state = derive_artifact_promotion_state(&digest);
+        let digest_projections = build_task_projections(&digest);
+        assert!(digest_projections
+            .iter()
+            .any(|p| p.kind == ProjectionKind::Digest));
+        assert_eq!(digest.promotion_state, PromotionState::Summarized);
     }
 }

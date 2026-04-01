@@ -12,7 +12,7 @@ use rusqlite::Connection;
 use super::{ChunkMetadata, IndexState, MetadataStore};
 use crate::error::Result;
 use crate::store::{normalize_query, FeedbackEntry, RelevanceLabel};
-use crate::task_memory::{TaskArtifact, TaskSearchFilters};
+use crate::task_memory::{ArtifactKind, TaskArtifact, TaskRecord, TaskSearchFilters};
 use crate::types::{ChunkId, ChunkStatus, ChunkType, TenantId};
 
 /// SQLite-backed metadata store
@@ -153,6 +153,9 @@ impl SqliteMetadataStore {
                 tool_version TEXT,
                 requested_action TEXT,
                 verification_status TEXT,
+                promotion_state TEXT NOT NULL DEFAULT 'raw',
+                digest_key TEXT,
+                source_updated_at_ms INTEGER,
                 canonical_json TEXT NOT NULL,
                 timestamp_created INTEGER NOT NULL,
                 timestamp_observed INTEGER
@@ -428,6 +431,24 @@ impl SqliteMetadataStore {
             "verification_status",
             "ALTER TABLE task_artifacts ADD COLUMN verification_status TEXT",
         )?;
+        Self::ensure_index_column(
+            conn,
+            &column_names,
+            "promotion_state",
+            "ALTER TABLE task_artifacts ADD COLUMN promotion_state TEXT NOT NULL DEFAULT 'raw'",
+        )?;
+        Self::ensure_index_column(
+            conn,
+            &column_names,
+            "digest_key",
+            "ALTER TABLE task_artifacts ADD COLUMN digest_key TEXT",
+        )?;
+        Self::ensure_index_column(
+            conn,
+            &column_names,
+            "source_updated_at_ms",
+            "ALTER TABLE task_artifacts ADD COLUMN source_updated_at_ms INTEGER",
+        )?;
 
         Ok(())
     }
@@ -579,8 +600,9 @@ impl SqliteMetadataStore {
                 artifact_id, tenant_id, project_id, task_id, parent_task_id,
                 artifact_kind, status, artifact_role, challenge_id, thread_id, reply_to_artifact_id,
                 agent_id, session_id, goal, summary, tool_name, tool_version,
-                requested_action, verification_status, canonical_json, timestamp_created, timestamp_observed
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                requested_action, verification_status, promotion_state, digest_key, source_updated_at_ms,
+                canonical_json, timestamp_created, timestamp_observed
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
             rusqlite::params![
                 artifact.artifact_id.as_str(),
                 artifact.tenant_id.as_str(),
@@ -601,65 +623,70 @@ impl SqliteMetadataStore {
                 artifact.tool_version.as_deref(),
                 artifact.requested_action.as_deref(),
                 artifact.verification_status.as_deref(),
+                artifact.promotion_state.to_string(),
+                artifact.digest_key.as_deref(),
+                artifact.source_updated_at_ms,
                 canonical_json,
                 artifact.timestamp_created,
                 artifact.timestamp_observed,
             ],
         )?;
 
-        tx.execute(
-            "INSERT INTO tasks (
-                task_id, tenant_id, project_id, parent_task_id, agent_id, session_id,
-                status, goal, scientific_question, hypothesis, last_artifact_id,
-                started_at_ms, finished_at_ms, updated_at_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
-            ON CONFLICT(task_id) DO UPDATE SET
-                project_id = COALESCE(excluded.project_id, tasks.project_id),
-                parent_task_id = COALESCE(excluded.parent_task_id, tasks.parent_task_id),
-                agent_id = COALESCE(excluded.agent_id, tasks.agent_id),
-                session_id = COALESCE(excluded.session_id, tasks.session_id),
-                status = COALESCE(excluded.status, tasks.status),
-                goal = COALESCE(excluded.goal, tasks.goal),
-                scientific_question = COALESCE(excluded.scientific_question, tasks.scientific_question),
-                hypothesis = COALESCE(excluded.hypothesis, tasks.hypothesis),
-                last_artifact_id = excluded.last_artifact_id,
-                started_at_ms = COALESCE(tasks.started_at_ms, excluded.started_at_ms),
-                finished_at_ms = COALESCE(excluded.finished_at_ms, tasks.finished_at_ms),
-                updated_at_ms = excluded.updated_at_ms",
-            rusqlite::params![
-                artifact.task_id.as_str(),
-                artifact.tenant_id.as_str(),
-                project_id,
-                artifact.parent_task_id.as_deref(),
-                artifact.agent_id.as_deref(),
-                artifact.session_id.as_deref(),
-                status,
-                artifact.goal.as_deref(),
-                scientific_question,
-                hypothesis,
-                artifact.artifact_id.as_str(),
-                started_at_ms,
-                finished_at_ms,
-                artifact.timestamp_created,
-            ],
-        )?;
+        if artifact.artifact_kind != ArtifactKind::Digest {
+            tx.execute(
+                "INSERT INTO tasks (
+                    task_id, tenant_id, project_id, parent_task_id, agent_id, session_id,
+                    status, goal, scientific_question, hypothesis, last_artifact_id,
+                    started_at_ms, finished_at_ms, updated_at_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    project_id = COALESCE(excluded.project_id, tasks.project_id),
+                    parent_task_id = COALESCE(excluded.parent_task_id, tasks.parent_task_id),
+                    agent_id = COALESCE(excluded.agent_id, tasks.agent_id),
+                    session_id = COALESCE(excluded.session_id, tasks.session_id),
+                    status = COALESCE(excluded.status, tasks.status),
+                    goal = COALESCE(excluded.goal, tasks.goal),
+                    scientific_question = COALESCE(excluded.scientific_question, tasks.scientific_question),
+                    hypothesis = COALESCE(excluded.hypothesis, tasks.hypothesis),
+                    last_artifact_id = excluded.last_artifact_id,
+                    started_at_ms = COALESCE(tasks.started_at_ms, excluded.started_at_ms),
+                    finished_at_ms = COALESCE(excluded.finished_at_ms, tasks.finished_at_ms),
+                    updated_at_ms = excluded.updated_at_ms",
+                rusqlite::params![
+                    artifact.task_id.as_str(),
+                    artifact.tenant_id.as_str(),
+                    project_id,
+                    artifact.parent_task_id.as_deref(),
+                    artifact.agent_id.as_deref(),
+                    artifact.session_id.as_deref(),
+                    status,
+                    artifact.goal.as_deref(),
+                    scientific_question,
+                    hypothesis,
+                    artifact.artifact_id.as_str(),
+                    started_at_ms,
+                    finished_at_ms,
+                    artifact.timestamp_created,
+                ],
+            )?;
 
-        tx.execute(
-            "INSERT OR REPLACE INTO task_events (
-                artifact_id, tenant_id, task_id, artifact_kind, status, summary,
-                timestamp_created, timestamp_observed
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![
-                artifact.artifact_id.as_str(),
-                artifact.tenant_id.as_str(),
-                artifact.task_id.as_str(),
-                artifact.artifact_kind.as_str(),
-                status,
-                summary.as_deref(),
-                artifact.timestamp_created,
-                artifact.timestamp_observed,
-            ],
-        )?;
+            tx.execute(
+                "INSERT OR REPLACE INTO task_events (
+                    artifact_id, tenant_id, task_id, artifact_kind, status, summary,
+                    timestamp_created, timestamp_observed
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    artifact.artifact_id.as_str(),
+                    artifact.tenant_id.as_str(),
+                    artifact.task_id.as_str(),
+                    artifact.artifact_kind.as_str(),
+                    status,
+                    summary.as_deref(),
+                    artifact.timestamp_created,
+                    artifact.timestamp_observed,
+                ],
+            )?;
+        }
 
         if let Some(challenge_id) = artifact.challenge_id.as_deref() {
             tx.execute(
@@ -756,10 +783,7 @@ impl SqliteMetadataStore {
                     artifact.artifact_id.as_str(),
                     artifact.tenant_id.as_str(),
                     reply_to_artifact_id,
-                    artifact
-                        .relation_kind
-                        .as_deref()
-                        .unwrap_or("reply_to"),
+                    artifact.relation_kind.as_deref().unwrap_or("reply_to"),
                 ],
             )?;
         }
@@ -909,6 +933,62 @@ impl SqliteMetadataStore {
             artifacts.push(serde_json::from_str(&row?)?);
         }
         Ok(artifacts)
+    }
+
+    pub fn list_tasks(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TaskRecord>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let mut sql = String::from(
+            "SELECT task_id, tenant_id, project_id, status, goal, scientific_question,
+                    hypothesis, last_artifact_id, started_at_ms, finished_at_ms, updated_at_ms
+             FROM tasks
+             WHERE tenant_id = ?1",
+        );
+        let mut params = vec![rusqlite::types::Value::Text(tenant_id.as_str().to_string())];
+        if let Some(project_id) = project_id {
+            sql.push_str(" AND project_id = ?2");
+            params.push(rusqlite::types::Value::Text(project_id.to_string()));
+        }
+        sql.push_str(" ORDER BY updated_at_ms DESC");
+        sql.push_str(&format!(" LIMIT ?{}", params.len() + 1));
+        params.push(rusqlite::types::Value::Integer(limit as i64));
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            Ok(TaskRecord {
+                task_id: row.get(0)?,
+                tenant_id: TenantId::new(row.get::<usize, String>(1)?).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?,
+                project_id: crate::types::ProjectId::from(row.get::<usize, Option<String>>(2)?),
+                status: row.get(3)?,
+                goal: row.get(4)?,
+                scientific_question: row.get(5)?,
+                hypothesis: row.get(6)?,
+                last_artifact_id: row.get(7)?,
+                started_at_ms: row.get(8)?,
+                finished_at_ms: row.get(9)?,
+                updated_at_ms: row.get(10)?,
+            })
+        })?;
+
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(row?);
+        }
+        Ok(tasks)
     }
 
     /// Resolve projection chunk IDs for exact task filters.
