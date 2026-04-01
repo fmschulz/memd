@@ -40,6 +40,8 @@ Current artifact kinds:
 - `review`
 - `revision`
 - `verification`
+- `decision`
+- `digest`
 - `task_finish`
 
 Important canonical fields include:
@@ -84,6 +86,9 @@ Important canonical fields include:
 - `confidence`
 - `requested_action`
 - `verification_status`
+- `promotion_state`
+- `digest_key`
+- `source_updated_at_ms`
 - `compute_budget`
 - `cost_actual`
 - `data_access_level`
@@ -130,6 +135,8 @@ Current projection kinds:
 - `task_summary`
 - `run`
 - `evidence`
+- `decision`
+- `digest`
 - `worked`
 - `failed`
 - `validation`
@@ -138,6 +145,27 @@ The projection layer is intentionally separate from the canonical envelope:
 
 - canonical artifact = source of truth
 - retrieval chunk = search-optimized derived text
+
+## Summary-First Digests
+
+Persisted digest artifacts currently use these `artifact_role` values:
+
+- `project_brief`
+- `task_resume`
+- `failure_library`
+- `decision_library`
+- `evidence_library`
+- `highlight_library`
+
+These digests are stored as canonical `digest` artifacts and projected into ordinary retrieval chunks instead of being kept in a separate store.
+
+The current implementation also tracks:
+
+- `promotion_state` with values `raw`, `summarized`, `canonical`, and `verified`
+- stable digest identities keyed by role and scope
+- `source_updated_at_ms` so regenerated digests can reflect source freshness
+
+`task.resume` reuses the real `task_id` for its digest so `resume_task` retrieval stays aligned with canonical task filters.
 
 ## Exact Filters
 
@@ -164,6 +192,10 @@ The projection layer is intentionally separate from the canonical envelope:
 
 These filters are resolved first, then the candidate set is reranked for retrieval.
 
+`memory.search`, `task.search`, and `artifact.search` also accept `mode` with `generic`, `brief_project`, `resume_task`, `find_failures`, `find_decisions`, `find_evidence`, and `find_highlights` to bias candidate planning toward the corresponding digests and canonical summaries.
+
+`memory.compact` can explicitly refresh project brief and failure/decision/evidence/highlight library digests through `project_id`, `digest_modes`, and `force_digest_rebuild`.
+
 ## Durability
 
 Task artifacts are WAL-backed. The relevant implementation is in:
@@ -188,7 +220,7 @@ Agents should follow this contract:
 7. Use `artifact.create` when the important event is critique, revision, verification, or thread-level coordination rather than a task lifecycle step.
 8. Use `artifact.search` / `artifact.list_thread` when the artifact itself is the unit of exchange.
 
-This is how `memd` enforces consistent reporting across agents in the same tenant.
+This is how `memd` enforces consistent reporting across agents in the same tenant. For one trusted machine or trust domain, agents should prefer a stable shared `tenant_id` and use `project_id`, `thread_id`, and `task_id` for narrower scopes. The current MCP handlers also include a compatibility fallback for project-scoped retrieval across other local tenants on the same daemon when they already contain the same `project_id`, which helps recover older fragmented history.
 
 ## Documentation Status
 

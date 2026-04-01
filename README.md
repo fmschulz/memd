@@ -27,6 +27,17 @@ Use `artifact.*` for collaboration around that work:
 - contributor records
 - optional safety metadata for local prototypes
 
+For summary-first retrieval and onboarding, `memd` also persists digest artifacts and exposes dedicated briefing and library helpers:
+
+- `context.brief_project`
+- `task.resume`
+- `artifact.find_failures`
+- `artifact.find_decisions`
+- `artifact.find_evidence`
+- `artifact.find_highlights`
+
+`memory.search`, `task.search`, and `artifact.search` also accept `mode` with `brief_project`, `resume_task`, `find_failures`, `find_decisions`, `find_evidence`, or `find_highlights` to bias retrieval toward those persisted digests and canonical summaries.
+
 ## What You Need
 
 - Rust
@@ -119,6 +130,8 @@ Current boundary conditions:
 - cross-machine access is possible by exposing the HTTP endpoint over a private network or tunnel
 - `memd` does not yet provide built-in multi-user authentication or server-enforced account isolation
 - `tenant_id` is still caller-supplied logical partitioning, not an auth boundary
+- on one trusted machine or trust domain, prefer one stable shared `tenant_id` and use `project_id`, `thread_id`, and `task_id` for narrower retrieval scopes
+- when `project_id` is supplied, project-scoped retrieval can now widen across other local tenants on the same daemon that already contain that project; this is a compatibility fallback for older fragmented history, not the preferred steady state
 
 ## Basic Use
 
@@ -152,6 +165,19 @@ Then record progress with:
 - `task.add_evidence`
 - `task.finish`
 
+For digest-backed summaries and summary-first retrieval, use:
+
+- `context.brief_project`
+- `task.resume`
+- `artifact.find_failures`
+- `artifact.find_decisions`
+- `artifact.find_evidence`
+- `artifact.find_highlights`
+
+`memory.search`, `task.search`, and `artifact.search` also accept `mode` so the same retrieval surfaces can prefer persisted briefs, task resumes, or failure/decision/evidence/highlight libraries when that is the intent.
+
+When `project_id` is supplied, project-scoped retrieval on the shared daemon can also recover same-project history that was previously written under a different local tenant. This reduces continuity loss from older fragmented writes, but future collaborating agents should still use one stable shared `tenant_id`.
+
 For collaboration around the same work, use:
 
 - `artifact.create`
@@ -164,6 +190,8 @@ For raw context, use:
 - `memory.add`
 - `memory.add_batch`
 - `memory.search`
+
+To refresh project brief and failure/decision/evidence/highlight digests explicitly, call `memory.compact` with `project_id` and, when needed, `digest_modes` plus `force_digest_rebuild`.
 
 Optional artifact safety metadata is supported through `artifact.create`:
 
