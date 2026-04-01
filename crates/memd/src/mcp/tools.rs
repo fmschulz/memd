@@ -1598,9 +1598,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn get_all_tools_returns_thirty_nine() {
+    fn get_all_tools_returns_forty() {
         let tools = get_all_tools();
-        assert_eq!(tools.len(), 39);
+        assert_eq!(tools.len(), 40);
     }
 
     #[test]
