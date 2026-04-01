@@ -66,6 +66,7 @@ Then continue with:
 - `task.finish`
 - `task.get`
 - `task.search`
+- `task.resume`
 
 ## 5. Use `artifact.*` for critique, verification, and thread inspection
 
@@ -95,6 +96,9 @@ Then inspect or search the thread with:
 
 - `artifact.get`
 - `artifact.search`
+- `artifact.find_failures`
+- `artifact.find_decisions`
+- `artifact.find_evidence`
 - `artifact.list_thread`
 
 Optional safety metadata such as `compute_budget`, `cost_actual`,
@@ -124,7 +128,38 @@ Example:
 }
 ```
 
-## 7. Register clients and install the skill if needed
+## 7. Use summary-first retrieval when you need a briefing
+
+Example:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 21,
+  "method": "tools/call",
+  "params": {
+    "name": "context.brief_project",
+    "arguments": {
+      "tenant_id": "quickstart",
+      "project_id": "auth",
+      "query": "What changed most recently?"
+    }
+  }
+}
+```
+
+Other summary-first helpers:
+
+- `task.resume`
+- `artifact.find_failures`
+- `artifact.find_decisions`
+- `artifact.find_evidence`
+
+`memory.search`, `task.search`, and `artifact.search` also accept `mode` with `brief_project`, `resume_task`, `find_failures`, `find_decisions`, or `find_evidence`.
+
+To refresh project brief and library digests explicitly, call `memory.compact` with `project_id` and, when needed, `digest_modes` plus `force_digest_rebuild`.
+
+## 8. Register clients and install the skill if needed
 
 See:
 
@@ -148,7 +183,7 @@ If you want stronger habitual `memd` usage from both clients, run:
 ./memd-skill/install_memd_enforcement.sh
 ```
 
-## 8. Optional ONNX cross-encoder reranker
+## 9. Optional ONNX cross-encoder reranker
 
 ONNX here means the optional cross-encoder reranker, not the default embedding path.
 
