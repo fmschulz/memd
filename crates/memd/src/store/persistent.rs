@@ -1874,6 +1874,16 @@ impl PersistentStore {
                 );
                 Ok(None)
             }
+            Err(MemdError::IoError(error)) => {
+                warn!(
+                    tenant_id = %tenant_id,
+                    chunk_id = %chunk_id,
+                    operation,
+                    error = %error,
+                    "skipping unreadable chunk during retrieval"
+                );
+                Ok(None)
+            }
             Err(err) => Err(err),
         }
     }
@@ -2423,6 +2433,48 @@ mod tests {
             .expect("corrupted chunk metadata");
         corrupt_segment_payload(dir.path(), &tenant, corrupt_meta.segment_id);
 
+        let results = store.search(&tenant, "chunk", 10).await.unwrap();
+        let result_ids = results
+            .into_iter()
+            .map(|chunk| chunk.chunk_id)
+            .collect::<Vec<_>>();
+
+        assert!(result_ids.contains(&healthy_id));
+        assert!(!result_ids.contains(&corrupted_id));
+    }
+
+    #[tokio::test]
+    async fn text_search_skips_crc_corrupted_finalized_chunk() {
+        let dir = tempdir().unwrap();
+        let config = PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            segment_max_chunks: 1,
+            wal_checkpoint_interval: 10,
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            ..Default::default()
+        };
+        let tenant = make_tenant();
+        let corrupted_id;
+        let healthy_id;
+        let corrupted_segment_id;
+        let store = PersistentStore::open(config).unwrap();
+        corrupted_id = store
+            .add(make_chunk(&tenant, "corrupted finalized chunk"))
+            .await
+            .unwrap();
+        healthy_id = store
+            .add(make_chunk(&tenant, "healthy finalized chunk"))
+            .await
+            .unwrap();
+        corrupted_segment_id = store
+            .metadata
+            .get(&tenant, &corrupted_id)
+            .unwrap()
+            .expect("corrupted chunk metadata")
+            .segment_id;
+
+        corrupt_segment_payload(dir.path(), &tenant, corrupted_segment_id);
         let results = store.search(&tenant, "chunk", 10).await.unwrap();
         let result_ids = results
             .into_iter()
