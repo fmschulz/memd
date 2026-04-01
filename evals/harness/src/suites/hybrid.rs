@@ -106,7 +106,8 @@ pub fn run_hybrid_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestR
     let mut results = Vec::new();
 
     // Load dataset
-    let dataset_path = crate::resolve_dataset_path("evals/bench/datasets/retrieval/hybrid_test.json");
+    let dataset_path =
+        crate::resolve_dataset_path("evals/bench/datasets/retrieval/hybrid_test.json");
     let dataset = match load_dataset(dataset_path.as_path()) {
         Ok(d) => d,
         Err(e) => {
