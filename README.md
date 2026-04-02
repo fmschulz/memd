@@ -1,5 +1,7 @@
 # memd
 
+[![Version](https://img.shields.io/badge/version-0.2.0-blue)](https://github.com/fmschulz/memd/releases/tag/v0.2.0)
+
 `memd` is a local MCP server and shared knowledge base for coding agents and AI scientists.
 
 It does three things:
