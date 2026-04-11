@@ -3,7 +3,7 @@
 //! Provides persistent storage for symbols, call graph edges, import
 //! relationships, tool call traces, and stack traces.
 
-use rusqlite::{params, Connection, Result as SqliteResult};
+use rusqlite::{Connection, Result as SqliteResult, params};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -1595,9 +1595,11 @@ mod tests {
         let children = store.get_symbol_children(class_id).unwrap();
         assert_eq!(children.len(), 2);
         assert!(children.iter().all(|s| s.kind == SymbolKind::Method));
-        assert!(children
-            .iter()
-            .all(|s| s.parent_symbol_id == Some(class_id)));
+        assert!(
+            children
+                .iter()
+                .all(|s| s.parent_symbol_id == Some(class_id))
+        );
 
         // Verify ordering by line
         assert_eq!(children[0].name, "new");

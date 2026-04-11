@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
-use super::{sanitize_tag_value, ArtifactKind, TaskArtifact, TaskRecord};
+use super::{ArtifactKind, TaskArtifact, TaskRecord, sanitize_tag_value};
 use crate::types::{ProjectId, PromotionState, TenantId};
 
 pub const DIGEST_ROLE_PROJECT_BRIEF: &str = "project_brief";
@@ -464,10 +464,8 @@ fn record_highlight_candidate(
     if validated {
         aggregate.validated_count += 1;
     }
-    aggregate.promotion_state = max_promotion([
-        aggregate.promotion_state,
-        artifact.promotion_state,
-    ]);
+    aggregate.promotion_state =
+        max_promotion([aggregate.promotion_state, artifact.promotion_state]);
 }
 
 fn tactic_has_recurrence(aggregate: &HighlightAggregate) -> bool {
@@ -508,10 +506,16 @@ fn highlight_rationale(aggregate: &HighlightAggregate) -> String {
         aggregate.task_ids.len()
     )];
     if !aggregate.project_ids.is_empty() {
-        parts.push(format!("seen in {} project(s)", aggregate.project_ids.len()));
+        parts.push(format!(
+            "seen in {} project(s)",
+            aggregate.project_ids.len()
+        ));
     }
     if aggregate.validated_count > 0 {
-        parts.push(format!("validated in {} artifact(s)", aggregate.validated_count));
+        parts.push(format!(
+            "validated in {} artifact(s)",
+            aggregate.validated_count
+        ));
     }
     parts.join("; ")
 }
@@ -602,13 +606,7 @@ pub fn infer_highlight_items(artifacts: &[TaskArtifact]) -> Vec<HighlightViewIte
 
         if artifact.artifact_kind == ArtifactKind::Decision {
             if let Some(summary) = artifact.event_summary() {
-                record_highlight_candidate(
-                    &mut aggregates,
-                    artifact,
-                    &summary,
-                    "decision",
-                    true,
-                );
+                record_highlight_candidate(&mut aggregates, artifact, &summary, "decision", true);
             }
         }
 
@@ -645,10 +643,7 @@ pub fn infer_highlight_items(artifacts: &[TaskArtifact]) -> Vec<HighlightViewIte
                 confidence,
                 score,
                 support_count: aggregate.supporting_artifact_ids.len(),
-                supporting_artifact_ids: aggregate
-                    .supporting_artifact_ids
-                    .into_iter()
-                    .collect(),
+                supporting_artifact_ids: aggregate.supporting_artifact_ids.into_iter().collect(),
                 promotion_state: aggregate.promotion_state,
                 timestamp_created: aggregate.timestamp_created,
             })
@@ -899,13 +894,15 @@ mod tests {
 
         let mut boiler_a = TaskArtifact::new_task_finish(tenant.clone(), "task-c");
         boiler_a.project_id = ProjectId::from(Some("proj".to_string()));
-        boiler_a.what_worked = vec!["SUMMARY.md written with 63 lines covering all acceptance criteria".to_string()];
+        boiler_a.what_worked =
+            vec!["SUMMARY.md written with 63 lines covering all acceptance criteria".to_string()];
         boiler_a.validation = vec!["Deliverable complete".to_string()];
         boiler_a.timestamp_created = 300;
 
         let mut boiler_b = TaskArtifact::new_task_finish(tenant, "task-d");
         boiler_b.project_id = ProjectId::from(Some("proj".to_string()));
-        boiler_b.what_worked = vec!["SUMMARY.md written with 63 lines covering all acceptance criteria".to_string()];
+        boiler_b.what_worked =
+            vec!["SUMMARY.md written with 63 lines covering all acceptance criteria".to_string()];
         boiler_b.validation = vec!["Deliverable complete".to_string()];
         boiler_b.timestamp_created = 400;
 

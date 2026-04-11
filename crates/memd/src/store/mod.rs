@@ -28,7 +28,7 @@ use crate::task_memory::{
 use crate::tiered::TieredTiming;
 use crate::types::{ChunkId, MemoryChunk, TenantId};
 pub use feedback::{
-    apply_feedback_scores, normalize_query, FeedbackConfig, FeedbackEntry, RelevanceLabel,
+    FeedbackConfig, FeedbackEntry, RelevanceLabel, apply_feedback_scores, normalize_query,
 };
 
 /// Statistics for a tenant's store
@@ -229,7 +229,7 @@ pub trait Store: Send + Sync {
     /// The search is currently a simple substring match - real vector search
     /// comes in Phase 3.
     async fn search(&self, tenant_id: &TenantId, query: &str, k: usize)
-        -> Result<Vec<MemoryChunk>>;
+    -> Result<Vec<MemoryChunk>>;
 
     /// Search with scores (default: calls search with score 1.0)
     ///
@@ -341,6 +341,6 @@ pub use dense::{DenseSearchConfig, DenseSearchResult, DenseSearcher};
 pub use hybrid::{HybridConfig, HybridSearchResult, HybridSearcher, HybridTiming, SearchContext};
 pub use memory::MemoryStore;
 pub use persistent::{PersistentStore, PersistentStoreConfig, TieredStats};
-pub use shared_add::{split_for_add, ADD_CHUNK_THRESHOLD};
+pub use shared_add::{ADD_CHUNK_THRESHOLD, split_for_add};
 pub use tenant::TenantManager;
 pub use tombstone::TombstoneSet;

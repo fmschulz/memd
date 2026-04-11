@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use memmap2::{Mmap, MmapOptions};
 
-use super::format::{PayloadIndexRecord, SegmentMeta, SEGMENT_MAGIC};
+use super::format::{PayloadIndexRecord, SEGMENT_MAGIC, SegmentMeta};
 use crate::store::TombstoneSet;
 
 /// Reader for a finalized segment
