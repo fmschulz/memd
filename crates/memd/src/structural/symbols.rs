@@ -564,11 +564,7 @@ fn extract_signature(
                 }
             }
 
-            if sig.is_empty() {
-                None
-            } else {
-                Some(sig)
-            }
+            if sig.is_empty() { None } else { Some(sig) }
         }
         SupportedLanguage::Python => {
             // Look for parameters
@@ -596,11 +592,7 @@ fn extract_signature(
                 }
             }
 
-            if sig.is_empty() {
-                None
-            } else {
-                Some(sig)
-            }
+            if sig.is_empty() { None } else { Some(sig) }
         }
         SupportedLanguage::Go => {
             // Look for parameters and result

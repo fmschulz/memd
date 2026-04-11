@@ -12,5 +12,5 @@ pub mod tools;
 pub use error::McpError;
 pub use handlers::*;
 pub use protocol::{Request, RequestId, Response, RpcError};
-pub use server::{run_http_server, run_server, McpServer};
-pub use tools::{get_all_tools, get_tool, tool_names, ToolDefinition};
+pub use server::{McpServer, run_http_server, run_server};
+pub use tools::{ToolDefinition, get_all_tools, get_tool, tool_names};
