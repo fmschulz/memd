@@ -96,6 +96,7 @@ Then inspect or search the thread with:
 
 - `artifact.get`
 - `artifact.search`
+- `artifact.verify`
 - `artifact.find_failures`
 - `artifact.find_decisions`
 - `artifact.find_evidence`
@@ -105,6 +106,31 @@ Optional safety metadata such as `compute_budget`, `cost_actual`,
 `data_access_level`, `policy_tags`, `allowed_tools`, and `approval_state` can
 also be sent through `artifact.create`. They are optional in the current local
 prototype.
+
+When you need to trust a claim rather than only browse candidates, use the
+explicit grounding step:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 12,
+  "method": "tools/call",
+  "params": {
+    "name": "artifact.verify",
+    "arguments": {
+      "tenant_id": "quickstart",
+      "project_id": "auth",
+      "claim": "canonical artifacts are the trust anchor"
+    }
+  }
+}
+```
+
+The intended flow is:
+
+1. search for candidates
+2. verify the claim against canonical artifacts
+3. trust the grounded artifact IDs, not digest text by itself
 
 ## 6. Use `memory.*` for raw content
 
@@ -123,6 +149,30 @@ Example:
       "type": "code",
       "project_id": "backend",
       "tags": ["rust", "config"]
+    }
+  }
+}
+```
+
+For structural tools such as `code.find_definition` and `code.find_callers`,
+add code with a real `source.path` so `memd` can build the structural index.
+
+Example:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 20,
+  "method": "tools/call",
+  "params": {
+    "name": "memory.add",
+    "arguments": {
+      "tenant_id": "quickstart",
+      "text": "pub fn process_data(input: &str) -> String { input.to_string() }",
+      "type": "code",
+      "source": {
+        "path": "src/lib.rs"
+      }
     }
   }
 }

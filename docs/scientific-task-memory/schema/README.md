@@ -167,6 +167,21 @@ The current implementation also tracks:
 
 `task.resume` reuses the real `task_id` for its digest so `resume_task` retrieval stays aligned with canonical task filters.
 
+## Trust Boundary
+
+`memd` now exposes an explicit trust vocabulary at the MCP boundary:
+
+- `semantic_candidate`: retrieved by similarity without canonical artifact grounding
+- `canonical_record`: linked to a non-digest canonical artifact
+- `compiled_digest_hint`: linked to a digest artifact that still requires re-grounding
+- `verified_record`: linked to an explicit verification artifact or other verified record
+
+The intended workflow is:
+
+1. use semantic search or digest helpers to generate candidates
+2. use `artifact.verify` to ground a claim against canonical artifacts
+3. trust the supporting canonical artifact IDs, not digest text on its own
+
 ## Exact Filters
 
 `task.search` currently supports exact filters over the normalized side tables for:

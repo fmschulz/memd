@@ -7,6 +7,9 @@ use tracing::info;
 use memd::cli::{run_cli, CliCommand};
 use memd::embeddings::EmbeddingModel;
 use memd::store::HybridConfig;
+use memd::structural::{
+    CallGraphIndexer, StructuralStore, SymbolIndexer, SymbolQueryService, TraceQueryService,
+};
 use memd::{
     init_logging, load_config, MemoryStore, PersistentStore, PersistentStoreConfig, RerankerMode,
     TenantManager,
@@ -112,6 +115,21 @@ struct Args {
     command: Option<CliCommand>,
 }
 
+fn attach_structural_runtime<S: memd::store::Store>(
+    server: memd::mcp::McpServer<S>,
+    structural_store: Arc<StructuralStore>,
+) -> memd::mcp::McpServer<S> {
+    let symbol_query_service = Arc::new(SymbolQueryService::new(structural_store.clone()));
+    let trace_query_service = Arc::new(TraceQueryService::new(structural_store.clone()));
+    let symbol_indexer = Arc::new(SymbolIndexer::new(structural_store.clone()));
+    let call_graph_indexer = Arc::new(CallGraphIndexer::new(structural_store.clone()));
+
+    server
+        .with_symbol_query_service(symbol_query_service)
+        .with_trace_query_service(trace_query_service)
+        .with_structural_indexers(structural_store, symbol_indexer, call_graph_indexer)
+}
+
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
@@ -189,9 +207,16 @@ async fn main() {
             if args.in_memory {
                 info!("using in-memory store");
                 let store = Arc::new(MemoryStore::new());
+                let structural_store = Arc::new(StructuralStore::in_memory().unwrap_or_else(|e| {
+                    eprintln!("error: failed to create in-memory structural store: {}", e);
+                    std::process::exit(1);
+                }));
                 match server_transport.as_str() {
                     "http" => {
-                        let server = memd::mcp::McpServer::new(config.clone(), store);
+                        let server = attach_structural_runtime(
+                            memd::mcp::McpServer::new(config.clone(), store),
+                            structural_store.clone(),
+                        );
                         if let Err(e) =
                             memd::mcp::run_http_server(server, &http_bind, &http_path).await
                         {
@@ -200,7 +225,10 @@ async fn main() {
                         }
                     }
                     _ => {
-                        let mut server = memd::mcp::McpServer::new(config.clone(), store);
+                        let mut server = attach_structural_runtime(
+                            memd::mcp::McpServer::new(config.clone(), store),
+                            structural_store,
+                        );
                         if let Err(e) = server.run().await {
                             eprintln!("error: MCP server error: {}", e);
                             std::process::exit(1);
@@ -219,12 +247,23 @@ async fn main() {
                     Ok(store) => {
                         let metrics = store.metrics_arc();
                         let store = Arc::new(store);
+                        let structural_store = Arc::new(
+                            StructuralStore::open(&data_dir.join("structural.db")).unwrap_or_else(
+                                |e| {
+                                    eprintln!("error: failed to create structural store: {}", e);
+                                    std::process::exit(1);
+                                },
+                            ),
+                        );
                         match server_transport.as_str() {
                             "http" => {
-                                let server = memd::mcp::McpServer::with_metrics(
-                                    config.clone(),
-                                    store,
-                                    metrics,
+                                let server = attach_structural_runtime(
+                                    memd::mcp::McpServer::with_metrics(
+                                        config.clone(),
+                                        store,
+                                        metrics,
+                                    ),
+                                    structural_store.clone(),
                                 );
                                 if let Err(e) =
                                     memd::mcp::run_http_server(server, &http_bind, &http_path).await
@@ -234,10 +273,13 @@ async fn main() {
                                 }
                             }
                             _ => {
-                                let mut server = memd::mcp::McpServer::with_metrics(
-                                    config.clone(),
-                                    store,
-                                    metrics,
+                                let mut server = attach_structural_runtime(
+                                    memd::mcp::McpServer::with_metrics(
+                                        config.clone(),
+                                        store,
+                                        metrics,
+                                    ),
+                                    structural_store,
                                 );
                                 if let Err(e) = server.run().await {
                                     eprintln!("error: MCP server error: {}", e);
