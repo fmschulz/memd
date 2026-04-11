@@ -3,7 +3,7 @@
 //! Defines the memory tools exposed via MCP following the MCP tool schema format.
 //! Each tool has a name, description, and JSON Schema for input parameters.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::LazyLock;
 
 /// Definition of an MCP tool
@@ -898,6 +898,46 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
             }),
         ),
         ToolDefinition::new(
+            "artifact.verify",
+            "Ground a claim against canonical artifacts and optionally persist a verification artifact.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "claim": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "thread_id": {"type": "string"},
+                    "candidate_artifact_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional artifact ids to verify first before falling back to search"
+                    },
+                    "k": {
+                        "type": "integer",
+                        "default": 8,
+                        "minimum": 1,
+                        "maximum": 100
+                    },
+                    "include_digests": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Include consulted digest hints in the response even when canonical support exists"
+                    },
+                    "create_artifact": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Persist a verification artifact recording the grounding result"
+                    },
+                    "record_task_id": {
+                        "type": "string",
+                        "description": "Optional task id to own a persisted verification artifact"
+                    }
+                },
+                "required": ["tenant_id", "claim"]
+            }),
+        ),
+        ToolDefinition::new(
             "artifact.list_thread",
             "List canonical artifacts that belong to the same thread, addressed either by thread_id or by an existing artifact_id.",
             json!({
@@ -1565,6 +1605,7 @@ pub fn tool_names() -> Vec<&'static str> {
         "artifact.create",
         "artifact.get",
         "artifact.search",
+        "artifact.verify",
         "artifact.find_failures",
         "artifact.find_decisions",
         "artifact.find_evidence",
@@ -1600,7 +1641,7 @@ mod tests {
     #[test]
     fn get_all_tools_returns_forty() {
         let tools = get_all_tools();
-        assert_eq!(tools.len(), 40);
+        assert_eq!(tools.len(), 41);
     }
 
     #[test]
@@ -1621,6 +1662,7 @@ mod tests {
         assert!(names.contains(&"artifact.create"));
         assert!(names.contains(&"artifact.get"));
         assert!(names.contains(&"artifact.search"));
+        assert!(names.contains(&"artifact.verify"));
         assert!(names.contains(&"artifact.find_highlights"));
         assert!(names.contains(&"artifact.list_thread"));
         assert!(names.contains(&"memory.get"));
@@ -1769,11 +1811,12 @@ mod tests {
             .unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(required_strs.contains(&"tenant_id"));
-        assert!(tool
-            .input_schema
-            .get("properties")
-            .and_then(|props| props.get("filters"))
-            .is_some());
+        assert!(
+            tool.input_schema
+                .get("properties")
+                .and_then(|props| props.get("filters"))
+                .is_some()
+        );
     }
 
     #[test]
@@ -1791,9 +1834,23 @@ mod tests {
     }
 
     #[test]
+    fn artifact_verify_schema_has_required_fields() {
+        let tool = get_tool("artifact.verify").unwrap();
+        let required = tool
+            .input_schema
+            .get("required")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required_strs.contains(&"tenant_id"));
+        assert!(required_strs.contains(&"claim"));
+    }
+
+    #[test]
     fn tool_names_list() {
         let names = tool_names();
-        assert_eq!(names.len(), 40);
+        assert_eq!(names.len(), 41);
         assert!(names.contains(&"memory.search"));
         assert!(names.contains(&"memory.metrics"));
         assert!(names.contains(&"memory.feedback"));
@@ -1810,6 +1867,7 @@ mod tests {
         assert!(names.contains(&"artifact.create"));
         assert!(names.contains(&"artifact.get"));
         assert!(names.contains(&"artifact.search"));
+        assert!(names.contains(&"artifact.verify"));
         assert!(names.contains(&"artifact.find_highlights"));
         assert!(names.contains(&"artifact.list_thread"));
         assert!(names.contains(&"context.list_subsystems"));

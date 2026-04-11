@@ -146,6 +146,12 @@ Use the same `tenant_id` for agents that should share knowledge unless the user 
 
 For summary-first retrieval, the same daemon should now expose `context.brief_project`, `task.resume`, `artifact.find_failures`, `artifact.find_decisions`, `artifact.find_evidence`, and `artifact.find_highlights`. `memory.search`, `task.search`, and `artifact.search` also accept `mode` to bias retrieval toward those digests. `memory.compact` can refresh project brief and failure/decision/evidence/highlight digests explicitly with `project_id`, `digest_modes`, and `force_digest_rebuild`.
 
+For trust-sensitive workflows, use the explicit grounded path:
+
+1. search with `memory.search`, `task.search`, or `artifact.search`
+2. ground the claim with `artifact.verify`
+3. trust the supporting canonical artifact IDs rather than digest text alone
+
 When `project_id` is supplied, the MCP retrieval path can also widen across other local tenants on the same daemon that already contain that project. This helps recover older fragmented histories, but it should not replace a deliberate shared-tenant convention for future work.
 
 ### `~/.claude/CLAUDE.md`
@@ -220,6 +226,7 @@ After that, verify that `memd` exposes the current tool surface, especially:
 - `artifact.create`
 - `artifact.get`
 - `artifact.search`
+- `artifact.verify`
 - `artifact.find_failures`
 - `artifact.find_decisions`
 - `artifact.find_evidence`
