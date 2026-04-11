@@ -287,10 +287,12 @@ mod tests {
         let toml = r#"log_level = "invalid""#;
         let result = load_from_str(toml);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("invalid log_level"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid log_level")
+        );
     }
 
     #[test]
@@ -298,10 +300,12 @@ mod tests {
         let toml = r#"log_format = "xml""#;
         let result = load_from_str(toml);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("invalid log_format"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid log_format")
+        );
     }
 
     #[test]
@@ -341,9 +345,11 @@ mod tests {
 
         let result = load_from_str(toml);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("server.path must start with '/'"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("server.path must start with '/'")
+        );
     }
 }

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{MemdError, Result};
 
-use super::format::{PayloadIndexRecord, SegmentMeta, SEGMENT_MAGIC};
+use super::format::{PayloadIndexRecord, SEGMENT_MAGIC, SegmentMeta};
 
 /// Append-only writer for segment files
 ///
