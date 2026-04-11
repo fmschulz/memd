@@ -10,6 +10,15 @@ It does three things:
 - stores structured task history with `task.*`
 - stores canonical knowledge artifacts and collaboration threads with `artifact.*`
 
+It also exposes structural code-navigation and debug tools:
+
+- `code.find_definition`
+- `code.find_references`
+- `code.find_callers`
+- `code.find_imports`
+- `debug.find_tool_calls`
+- `debug.find_errors`
+
 Use `memory.*` for code, docs, notes, and indexed files.
 
 Use `task.*` for work that has:
@@ -39,6 +48,13 @@ For summary-first retrieval and onboarding, `memd` also persists digest artifact
 - `artifact.find_highlights`
 
 `memory.search`, `task.search`, and `artifact.search` also accept `mode` with `brief_project`, `resume_task`, `find_failures`, `find_decisions`, `find_evidence`, or `find_highlights` to bias retrieval toward those persisted digests and canonical summaries.
+
+Trust boundary:
+
+- `memory.search`, `task.search`, `artifact.search`, and digest helpers are candidate-generation surfaces
+- canonical non-digest artifacts are the trust anchor
+- persisted digests are compiled hints, not self-authenticating truth
+- use `artifact.verify` when a claim must be grounded against canonical artifacts before you trust it
 
 ## What You Need
 
@@ -185,6 +201,7 @@ For collaboration around the same work, use:
 - `artifact.create`
 - `artifact.get`
 - `artifact.search`
+- `artifact.verify`
 - `artifact.list_thread`
 
 For raw context, use:
@@ -193,7 +210,17 @@ For raw context, use:
 - `memory.add_batch`
 - `memory.search`
 
+For structural code navigation, index code chunks with a real `source.path`.
+Supported code chunks added through `memory.add` or `memory.add_batch` are now
+parsed into the structural index when `chunk_type=code` and `source.path` is present.
+
 To refresh project brief and failure/decision/evidence/highlight digests explicitly, call `memory.compact` with `project_id` and, when needed, `digest_modes` plus `force_digest_rebuild`.
+
+When a retrieved summary or search hit matters enough to trust, use the explicit grounded path:
+
+1. `memory.search` / `task.search` / `artifact.search`
+2. `artifact.verify`
+3. trust the grounded supporting artifact IDs, not the digest text alone
 
 Optional artifact safety metadata is supported through `artifact.create`:
 

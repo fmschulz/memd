@@ -7,21 +7,22 @@ use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 
 use super::error::McpError;
 use crate::metrics::{IndexStats, MetricsCollector};
 use crate::store::{FeedbackEntry, RelevanceLabel, Store, StoreStats, TenantManager};
 use crate::task_memory::{
-    build_library_digest_artifact, build_project_brief_digest_artifact, build_project_brief_view,
-    build_task_projections, build_task_resume_digest_artifact, build_task_resume_view,
-    derive_artifact_promotion_state, infer_decision_items, infer_evidence_items,
-    infer_failure_items, infer_highlight_items, ArtifactKind, ContributorRef, DatasetRef,
-    DecisionViewItem, EntityRef, EvidenceViewItem, FailureViewItem, HighlightViewItem,
-    ProjectBriefView, TaskArtifact, TaskProvenance, TaskResumeView, TaskSearchFilters,
-    DIGEST_ROLE_DECISION_LIBRARY, DIGEST_ROLE_EVIDENCE_LIBRARY, DIGEST_ROLE_FAILURE_LIBRARY,
-    DIGEST_ROLE_HIGHLIGHT_LIBRARY, DIGEST_ROLE_PROJECT_BRIEF, DIGEST_ROLE_TASK_RESUME,
+    ArtifactKind, ContributorRef, DIGEST_ROLE_DECISION_LIBRARY, DIGEST_ROLE_EVIDENCE_LIBRARY,
+    DIGEST_ROLE_FAILURE_LIBRARY, DIGEST_ROLE_HIGHLIGHT_LIBRARY, DIGEST_ROLE_PROJECT_BRIEF,
+    DIGEST_ROLE_TASK_RESUME, DatasetRef, DecisionViewItem, EntityRef, EvidenceViewItem,
+    FailureViewItem, HighlightViewItem, ProjectBriefView, TaskArtifact, TaskProvenance,
+    TaskResumeView, TaskSearchFilters, TrustTier, build_library_digest_artifact,
+    build_project_brief_digest_artifact, build_project_brief_view, build_task_projections,
+    build_task_resume_digest_artifact, build_task_resume_view, derive_artifact_promotion_state,
+    derive_artifact_trust_tier, derive_chunk_trust_tier, infer_decision_items,
+    infer_evidence_items, infer_failure_items, infer_highlight_items,
 };
 use crate::tiered::TieredTiming;
 use crate::types::{ChunkId, ChunkType, MemoryChunk, ProjectId, Source, TenantId};
@@ -565,6 +566,29 @@ pub struct ArtifactListThreadParams {
     pub artifact_id: Option<String>,
 }
 
+/// Parameters for artifact.verify
+#[derive(Debug, Deserialize)]
+pub struct ArtifactVerifyParams {
+    pub tenant_id: String,
+    pub claim: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub candidate_artifact_ids: Vec<String>,
+    #[serde(default = "default_verify_k")]
+    pub k: usize,
+    #[serde(default)]
+    pub include_digests: bool,
+    #[serde(default)]
+    pub create_artifact: bool,
+    #[serde(default)]
+    pub record_task_id: Option<String>,
+}
+
 /// Parameters for memory.get
 #[derive(Debug, Deserialize)]
 pub struct GetParams {
@@ -595,6 +619,10 @@ pub struct MetricsParams {
     /// Include tiered stats (cache, hot tier, promotions) - default true
     #[serde(default = "default_true")]
     pub include_tiered: bool,
+}
+
+fn default_verify_k() -> usize {
+    8
 }
 
 /// Parameters for memory.compact
@@ -854,6 +882,12 @@ pub struct ChunkResult {
     /// Provenance-first citation details for this result
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub citation: Option<CitationResult>,
+    #[serde(default)]
+    pub trust_tier: TrustTier,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub grounding_refs: Vec<GroundingRef>,
+    #[serde(default)]
+    pub verification_hint: VerificationHint,
     /// Which tier this result came from (only present when debug_tiers=true)
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub source_tier: Option<String>,
@@ -919,6 +953,27 @@ pub struct CitationResult {
     pub char_end: Option<usize>,
 }
 
+/// Canonical artifact pointer that can be used to ground a retrieved claim.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroundingRef {
+    pub artifact_id: String,
+    pub task_id: String,
+    pub thread_id: String,
+    pub artifact_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub artifact_role: Option<String>,
+    pub promotion_state: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub citation: Option<CitationResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct VerificationHint {
+    pub requires_verification: bool,
+    #[serde(default)]
+    pub reason: String,
+}
+
 /// Result of an add operation
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AddResult {
@@ -961,6 +1016,12 @@ pub struct ArtifactSearchHit {
     pub matched_chunk_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub matched_text: Option<String>,
+    #[serde(default)]
+    pub trust_tier: TrustTier,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub grounding_refs: Vec<GroundingRef>,
+    #[serde(default)]
+    pub verification_hint: VerificationHint,
 }
 
 /// Result of artifact.search.
@@ -980,36 +1041,95 @@ pub struct ArtifactThreadResult {
 pub struct ProjectBriefResult {
     pub artifact: TaskArtifact,
     pub brief: ProjectBriefView,
+    #[serde(default)]
+    pub trust_tier: TrustTier,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub grounding_refs: Vec<GroundingRef>,
+    #[serde(default)]
+    pub verification_hint: VerificationHint,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TaskResumeResult {
     pub artifact: TaskArtifact,
     pub resume: TaskResumeView,
+    #[serde(default)]
+    pub trust_tier: TrustTier,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub grounding_refs: Vec<GroundingRef>,
+    #[serde(default)]
+    pub verification_hint: VerificationHint,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FailureSearchResult {
     pub artifact: TaskArtifact,
     pub results: Vec<FailureViewItem>,
+    #[serde(default)]
+    pub trust_tier: TrustTier,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub grounding_refs: Vec<GroundingRef>,
+    #[serde(default)]
+    pub verification_hint: VerificationHint,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DecisionSearchViewResult {
     pub artifact: TaskArtifact,
     pub results: Vec<DecisionViewItem>,
+    #[serde(default)]
+    pub trust_tier: TrustTier,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub grounding_refs: Vec<GroundingRef>,
+    #[serde(default)]
+    pub verification_hint: VerificationHint,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EvidenceSearchViewResult {
     pub artifact: TaskArtifact,
     pub results: Vec<EvidenceViewItem>,
+    #[serde(default)]
+    pub trust_tier: TrustTier,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub grounding_refs: Vec<GroundingRef>,
+    #[serde(default)]
+    pub verification_hint: VerificationHint,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HighlightSearchViewResult {
     pub artifact: TaskArtifact,
     pub results: Vec<HighlightViewItem>,
+    #[serde(default)]
+    pub trust_tier: TrustTier,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub grounding_refs: Vec<GroundingRef>,
+    #[serde(default)]
+    pub verification_hint: VerificationHint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroundingStatus {
+    VerifiedRecord,
+    CanonicallyGrounded,
+    DigestOnly,
+    InsufficientGrounding,
+    Conflicted,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ArtifactVerifyResult {
+    pub claim: String,
+    pub grounding_status: GroundingStatus,
+    pub confidence: f32,
+    pub supporting_artifacts: Vec<GroundingRef>,
+    pub conflicting_artifacts: Vec<GroundingRef>,
+    pub consulted_digests: Vec<GroundingRef>,
+    pub notes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub verification_artifact: Option<TaskArtifact>,
 }
 
 /// Result of a delete operation
@@ -1437,6 +1557,236 @@ fn build_citation(chunk: &MemoryChunk) -> CitationResult {
     }
 }
 
+fn build_grounding_ref(artifact: &TaskArtifact, citation: Option<CitationResult>) -> GroundingRef {
+    GroundingRef {
+        artifact_id: artifact.artifact_id.clone(),
+        task_id: artifact.task_id.clone(),
+        thread_id: artifact.thread_key().to_string(),
+        artifact_kind: artifact.artifact_kind.as_str().to_string(),
+        artifact_role: artifact.artifact_role.clone(),
+        promotion_state: artifact.promotion_state.to_string(),
+        citation,
+    }
+}
+
+fn verification_hint_for_trust_tier(trust_tier: TrustTier) -> VerificationHint {
+    match trust_tier {
+        TrustTier::SemanticCandidate => VerificationHint {
+            requires_verification: true,
+            reason: "semantic candidate without canonical artifact grounding".to_string(),
+        },
+        TrustTier::CanonicalRecord => VerificationHint {
+            requires_verification: false,
+            reason: "linked to a canonical non-digest artifact".to_string(),
+        },
+        TrustTier::CompiledDigestHint => VerificationHint {
+            requires_verification: true,
+            reason:
+                "compiled digest hint; re-ground against canonical artifacts before trusting claims"
+                    .to_string(),
+        },
+        TrustTier::VerifiedRecord => VerificationHint {
+            requires_verification: false,
+            reason: "linked to an explicit verification or otherwise verified record".to_string(),
+        },
+    }
+}
+
+fn artifact_text_for_grounding(artifact: &TaskArtifact) -> String {
+    let mut parts = Vec::new();
+    if let Some(summary) = artifact
+        .summary
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(summary.clone());
+    }
+    if let Some(goal) = artifact
+        .goal
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(goal.clone());
+    }
+    if let Some(question) = artifact
+        .scientific_question
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(question.clone());
+    }
+    if let Some(method) = artifact
+        .method_summary
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(method.clone());
+    }
+    if let Some(command) = artifact
+        .command
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(command.clone());
+    }
+    parts.extend(artifact.validation.clone());
+    parts.extend(artifact.what_worked.clone());
+    parts.extend(artifact.what_failed.clone());
+    parts.extend(artifact.outputs.clone());
+    parts.extend(artifact.followups.clone());
+    if let Some(event_summary) = artifact.event_summary() {
+        parts.push(event_summary);
+    }
+    parts.join(" ")
+}
+
+fn artifact_claim_score(artifact: &TaskArtifact, claim: &str) -> f32 {
+    score_text_candidate(
+        claim,
+        &artifact_text_for_grounding(artifact),
+        artifact.timestamp_created,
+    )
+}
+
+fn artifact_has_negative_marker(artifact: &TaskArtifact) -> bool {
+    if artifact.supports_claim == Some(false) {
+        return true;
+    }
+
+    matches!(
+        artifact
+            .verification_status
+            .as_deref()
+            .map(|value| value.trim().to_ascii_lowercase()),
+        Some(value)
+            if matches!(
+                value.as_str(),
+                "rejected"
+                    | "failed"
+                    | "conflicted"
+                    | "unsupported"
+                    | "insufficient_grounding"
+                    | "invalid"
+            )
+    )
+}
+
+fn artifact_supports_claim(artifact: &TaskArtifact, claim: &str, score: f32) -> bool {
+    if matches!(
+        derive_artifact_trust_tier(artifact),
+        TrustTier::SemanticCandidate | TrustTier::CompiledDigestHint
+    ) {
+        return false;
+    }
+    if artifact_has_negative_marker(artifact) {
+        return false;
+    }
+
+    score > 0.0
+        || artifact_claim_score(artifact, claim) > 0.0
+        || artifact.supports_claim == Some(true)
+        || !artifact.validation.is_empty()
+}
+
+fn result_metadata(
+    artifact: Option<&TaskArtifact>,
+    citation: Option<CitationResult>,
+) -> (TrustTier, Vec<GroundingRef>, VerificationHint) {
+    let trust_tier = derive_chunk_trust_tier(artifact);
+    let grounding_refs = artifact
+        .map(|artifact| vec![build_grounding_ref(artifact, citation.clone())])
+        .unwrap_or_default();
+    let verification_hint = verification_hint_for_trust_tier(trust_tier);
+    (trust_tier, grounding_refs, verification_hint)
+}
+
+fn build_artifact_search_hit(
+    artifact: TaskArtifact,
+    score: f32,
+    matched_chunk: Option<&MemoryChunk>,
+) -> ArtifactSearchHit {
+    let trust_tier = derive_artifact_trust_tier(&artifact);
+    let grounding_refs = vec![build_grounding_ref(
+        &artifact,
+        matched_chunk.map(build_citation),
+    )];
+    ArtifactSearchHit {
+        artifact,
+        score,
+        matched_chunk_id: matched_chunk.map(|chunk| chunk.chunk_id.to_string()),
+        matched_text: matched_chunk.map(|chunk| chunk.text.clone()),
+        trust_tier,
+        grounding_refs,
+        verification_hint: verification_hint_for_trust_tier(trust_tier),
+    }
+}
+
+async fn artifact_lookup_tenants<S: Store>(
+    store: &S,
+    primary_tenant: &TenantId,
+    project_id: Option<&str>,
+) -> Result<Vec<TenantId>, McpError> {
+    if let Some(project_id) = project_id.filter(|value| !value.trim().is_empty()) {
+        return scoped_tenants_for_project(store, primary_tenant, Some(project_id)).await;
+    }
+
+    let mut tenants = vec![primary_tenant.clone()];
+    let mut seen = HashSet::from([primary_tenant.to_string()]);
+    for tenant in store
+        .list_tenants()
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?
+    {
+        if seen.insert(tenant.to_string()) {
+            tenants.push(tenant);
+        }
+    }
+    Ok(tenants)
+}
+
+async fn get_artifact_by_id_in_scope<S: Store>(
+    store: &S,
+    lookup_tenants: &[TenantId],
+    artifact_id: &str,
+) -> Result<Option<TaskArtifact>, McpError> {
+    for tenant in lookup_tenants {
+        if let Some(artifact) = store
+            .get_task_artifact(tenant, artifact_id)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?
+        {
+            return Ok(Some(artifact));
+        }
+    }
+    Ok(None)
+}
+
+async fn resolve_grounding_refs_by_artifact_ids<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    project_id: Option<&str>,
+    artifact_ids: &[String],
+    limit: usize,
+) -> Result<Vec<GroundingRef>, McpError> {
+    let lookup_tenants = artifact_lookup_tenants(store, tenant_id, project_id).await?;
+    let mut seen = HashSet::new();
+    let mut refs = Vec::new();
+    for artifact_id in artifact_ids {
+        if !seen.insert(artifact_id.clone()) {
+            continue;
+        }
+        if let Some(artifact) =
+            get_artifact_by_id_in_scope(store, &lookup_tenants, artifact_id).await?
+        {
+            refs.push(build_grounding_ref(&artifact, None));
+            if refs.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(refs)
+}
+
 const TAG_CTX_TIER_HOT: &str = "ctx:tier:hot";
 const TAG_CTX_TIER_COLD: &str = "ctx:tier:cold";
 const TAG_CTX_DOC: &str = "ctx:doc";
@@ -1498,7 +1848,15 @@ fn is_context_chunk(chunk: &MemoryChunk) -> bool {
     )
 }
 
-fn chunk_to_result(chunk: &MemoryChunk, score: f32, source_tier: Option<String>) -> ChunkResult {
+fn chunk_to_result(
+    chunk: &MemoryChunk,
+    score: f32,
+    source_tier: Option<String>,
+    artifact: Option<TaskArtifact>,
+) -> ChunkResult {
+    let citation = Some(build_citation(chunk));
+    let (trust_tier, grounding_refs, verification_hint) =
+        result_metadata(artifact.as_ref(), citation.clone());
     ChunkResult {
         chunk_id: chunk.chunk_id.to_string(),
         text: chunk.text.clone(),
@@ -1509,9 +1867,12 @@ fn chunk_to_result(chunk: &MemoryChunk, score: f32, source_tier: Option<String>)
         timestamp_created: chunk.timestamp_created,
         tags: chunk.tags.clone(),
         episode_id: extract_episode_id(&chunk.tags),
-        citation: Some(build_citation(chunk)),
+        citation,
+        trust_tier,
+        grounding_refs,
+        verification_hint,
         source_tier,
-        artifact: None,
+        artifact,
     }
 }
 
@@ -1659,7 +2020,7 @@ fn build_episode_summary_text(episode_id: &str, chunks: &[MemoryChunk]) -> Strin
 fn parse_chunk_type(s: &str) -> Result<ChunkType, McpError> {
     match s.to_lowercase().as_str() {
         "code" => Ok(ChunkType::Code),
-        "doc" | "scientific" => Ok(ChunkType::Doc),  // Map scientific documents to Doc type
+        "doc" | "scientific" => Ok(ChunkType::Doc), // Map scientific documents to Doc type
         "trace" => Ok(ChunkType::Trace),
         "decision" => Ok(ChunkType::Decision),
         "plan" => Ok(ChunkType::Plan),
@@ -1935,13 +2296,19 @@ fn sort_highlight_items(items: &mut [HighlightViewItem], query: &str) {
 
         let left_text = format!("{} {}", left.summary, left.rationale);
         let right_text = format!("{} {}", right.summary, right.rationale);
-        let left_rank = score_text_candidate(query, &left_text, left.timestamp_created) + left.score;
+        let left_rank =
+            score_text_candidate(query, &left_text, left.timestamp_created) + left.score;
         let right_rank =
             score_text_candidate(query, &right_text, right.timestamp_created) + right.score;
         right_rank
             .partial_cmp(&left_rank)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| right.score.partial_cmp(&left.score).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| {
+                right
+                    .score
+                    .partial_cmp(&left.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| right.timestamp_created.cmp(&left.timestamp_created))
     });
 }
@@ -1986,7 +2353,11 @@ fn merge_scored_chunk_lists(
         right_score
             .partial_cmp(left_score)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| right_chunk.timestamp_created.cmp(&left_chunk.timestamp_created))
+            .then_with(|| {
+                right_chunk
+                    .timestamp_created
+                    .cmp(&left_chunk.timestamp_created)
+            })
     });
     let mut seen = HashSet::new();
     merged
@@ -2592,8 +2963,9 @@ async fn candidate_chunk_ids_for_mode<S: Store>(
             }
         }
         QueryMode::FindHighlights => {
-            let _ = ensure_highlight_library_digest(store, tenant_id, filters.project_id.as_deref())
-                .await?;
+            let _ =
+                ensure_highlight_library_digest(store, tenant_id, filters.project_id.as_deref())
+                    .await?;
             filters_list.push(TaskSearchFilters {
                 artifact_kind: Some(ArtifactKind::Digest),
                 artifact_role: Some(DIGEST_ROLE_HIGHLIGHT_LIBRARY.to_string()),
@@ -2961,9 +3333,17 @@ pub async fn handle_memory_search<S: Store>(
         // If we have tier_info, derive per-result tier from overall timing
         let default_tier = tier_info.as_ref().map(|t| t.source_tier.clone());
 
+        let artifacts = resolve_artifacts_for_ranked_chunks(store, &scored_chunks).await?;
         let results: Vec<ChunkResult> = scored_chunks
             .iter()
-            .map(|(chunk, score)| chunk_to_result(chunk, *score, default_tier.clone()))
+            .map(|(chunk, score)| {
+                chunk_to_result(
+                    chunk,
+                    *score,
+                    default_tier.clone(),
+                    artifacts.get(&chunk.chunk_id.to_string()).cloned(),
+                )
+            })
             .collect();
 
         return format_mcp_response(&SearchResult {
@@ -3015,9 +3395,17 @@ pub async fn handle_memory_search<S: Store>(
 
     debug!(results_count = scored_chunks.len(), "search completed");
 
+    let artifacts = resolve_artifacts_for_ranked_chunks(store, &scored_chunks).await?;
     let results: Vec<ChunkResult> = scored_chunks
         .iter()
-        .map(|(chunk, score)| chunk_to_result(chunk, *score, None))
+        .map(|(chunk, score)| {
+            chunk_to_result(
+                chunk,
+                *score,
+                None,
+                artifacts.get(&chunk.chunk_id.to_string()).cloned(),
+            )
+        })
         .collect();
 
     format_mcp_response(&SearchResult {
@@ -3793,9 +4181,13 @@ pub async fn handle_task_search<S: Store>(
     } else {
         Vec::new()
     };
-    let base_chunk_ids =
-        search_task_projection_chunk_ids_for_tenants(store, &scoped_tenants, &filters, candidate_limit)
-            .await?;
+    let base_chunk_ids = search_task_projection_chunk_ids_for_tenants(
+        store,
+        &scoped_tenants,
+        &filters,
+        candidate_limit,
+    )
+    .await?;
     let mut seen = chunk_ids.iter().cloned().collect::<HashSet<_>>();
     for chunk_id in base_chunk_ids {
         if seen.insert(chunk_id.clone()) {
@@ -3816,9 +4208,12 @@ pub async fn handle_task_search<S: Store>(
     let results = ranked
         .iter()
         .map(|(chunk, score)| {
-            let mut result = chunk_to_result(chunk, *score, None);
-            result.artifact = artifacts.get(&chunk.chunk_id.to_string()).cloned();
-            result
+            chunk_to_result(
+                chunk,
+                *score,
+                None,
+                artifacts.get(&chunk.chunk_id.to_string()).cloned(),
+            )
         })
         .collect::<Vec<_>>();
 
@@ -3829,39 +4224,42 @@ pub async fn handle_task_search<S: Store>(
     })
 }
 
-/// Handle artifact.search tool call.
-pub async fn handle_artifact_search<S: Store>(
+async fn search_artifacts_internal<S: Store>(
     store: &S,
-    params: TaskSearchParams,
-) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
-    validate_search_k(params.k)?;
-    let filters = parse_task_search_filters(params.filters.as_ref())?;
-    let mode = params.mode.unwrap_or_default();
-    let has_filters = has_active_task_filters(&filters);
+    tenant_id: &TenantId,
+    query: &str,
+    k: usize,
+    filters: &TaskSearchFilters,
+    mode: QueryMode,
+) -> Result<Vec<ArtifactSearchHit>, McpError> {
+    let has_filters = has_active_task_filters(filters);
     let candidate_limit = if has_filters {
-        params.k.saturating_mul(20).clamp(50, 1000)
+        k.saturating_mul(20).clamp(50, 1000)
     } else {
-        params.k.saturating_mul(25).clamp(100, 1000)
+        k.saturating_mul(25).clamp(100, 1000)
     };
     let scoped_tenants =
-        scoped_tenants_for_project(store, &tenant_id, filters.project_id.as_deref()).await?;
+        scoped_tenants_for_project(store, tenant_id, filters.project_id.as_deref()).await?;
 
     let mut chunk_ids = if mode != QueryMode::Generic {
         candidate_chunk_ids_for_tenants_and_mode(
             store,
             &scoped_tenants,
             mode,
-            &filters,
+            filters,
             candidate_limit,
         )
         .await?
     } else {
         Vec::new()
     };
-    let base_chunk_ids =
-        search_task_projection_chunk_ids_for_tenants(store, &scoped_tenants, &filters, candidate_limit)
-            .await?;
+    let base_chunk_ids = search_task_projection_chunk_ids_for_tenants(
+        store,
+        &scoped_tenants,
+        filters,
+        candidate_limit,
+    )
+    .await?;
     let mut seen = chunk_ids.iter().cloned().collect::<HashSet<_>>();
     for chunk_id in base_chunk_ids {
         if seen.insert(chunk_id.clone()) {
@@ -3872,7 +4270,7 @@ pub async fn handle_artifact_search<S: Store>(
     for tenant in &scoped_tenants {
         ranked_lists.push(
             store
-                .rerank_chunks_for_query(tenant, &params.query, &chunk_ids, candidate_limit)
+                .rerank_chunks_for_query(tenant, query, &chunk_ids, candidate_limit)
                 .await
                 .map_err(|e| McpError::ToolError(e.to_string()))?,
         );
@@ -3889,16 +4287,27 @@ pub async fn handle_artifact_search<S: Store>(
         if !seen.insert(artifact.artifact_id.clone()) {
             continue;
         }
-        results.push(ArtifactSearchHit {
-            artifact,
-            score,
-            matched_chunk_id: Some(chunk.chunk_id.to_string()),
-            matched_text: Some(chunk.text),
-        });
-        if results.len() >= params.k {
+        results.push(build_artifact_search_hit(artifact, score, Some(&chunk)));
+        if results.len() >= k {
             break;
         }
     }
+
+    Ok(results)
+}
+
+/// Handle artifact.search tool call.
+pub async fn handle_artifact_search<S: Store>(
+    store: &S,
+    params: TaskSearchParams,
+) -> Result<Value, McpError> {
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    validate_search_k(params.k)?;
+    let filters = parse_task_search_filters(params.filters.as_ref())?;
+    let mode = params.mode.unwrap_or_default();
+    let results =
+        search_artifacts_internal(store, &tenant_id, &params.query, params.k, &filters, mode)
+            .await?;
 
     format_mcp_response(&ArtifactSearchResult { results })
 }
@@ -3942,6 +4351,433 @@ pub async fn handle_artifact_list_thread<S: Store>(
     })
 }
 
+fn dedupe_grounding_refs(refs: impl IntoIterator<Item = GroundingRef>) -> Vec<GroundingRef> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for reference in refs {
+        if seen.insert(reference.artifact_id.clone()) {
+            out.push(reference);
+        }
+    }
+    out
+}
+
+fn dedupe_strings(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if seen.insert(trimmed.to_string()) {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
+}
+
+fn grounding_status_label(status: GroundingStatus) -> &'static str {
+    match status {
+        GroundingStatus::VerifiedRecord => "verified_record",
+        GroundingStatus::CanonicallyGrounded => "canonically_grounded",
+        GroundingStatus::DigestOnly => "digest_only",
+        GroundingStatus::InsufficientGrounding => "insufficient_grounding",
+        GroundingStatus::Conflicted => "conflicted",
+    }
+}
+
+fn grounding_confidence(
+    status: GroundingStatus,
+    support_count: usize,
+    conflict_count: usize,
+) -> f32 {
+    let support_boost = (support_count.min(3) as f32) * 0.03;
+    match status {
+        GroundingStatus::VerifiedRecord => (0.92 + support_boost).min(0.99),
+        GroundingStatus::CanonicallyGrounded => (0.82 + support_boost).min(0.94),
+        GroundingStatus::DigestOnly => 0.45,
+        GroundingStatus::InsufficientGrounding => 0.12,
+        GroundingStatus::Conflicted => {
+            let penalty = (conflict_count.min(3) as f32) * 0.04;
+            (0.38 - penalty).max(0.18)
+        }
+    }
+}
+
+async fn digest_wrapper_metadata<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    artifact: &TaskArtifact,
+) -> Result<(TrustTier, Vec<GroundingRef>, VerificationHint), McpError> {
+    let trust_tier = derive_artifact_trust_tier(artifact);
+    let mut grounding_refs = resolve_grounding_refs_by_artifact_ids(
+        store,
+        tenant_id,
+        artifact.project_id.as_option(),
+        &artifact.related_artifact_ids,
+        12,
+    )
+    .await?;
+    if grounding_refs.is_empty() {
+        grounding_refs.push(build_grounding_ref(artifact, None));
+    }
+    let verification_hint = verification_hint_for_trust_tier(trust_tier);
+    Ok((trust_tier, grounding_refs, verification_hint))
+}
+
+fn artifact_matches_conflict_scope(
+    artifact: &TaskArtifact,
+    project_id: Option<&str>,
+    task_id: Option<&str>,
+    thread_id: Option<&str>,
+    support_task_ids: &HashSet<String>,
+    support_thread_ids: &HashSet<String>,
+) -> bool {
+    if let Some(project_id) = project_id {
+        if artifact.project_id.as_option() != Some(project_id) {
+            return false;
+        }
+    }
+    if let Some(task_id) = task_id {
+        return artifact.task_id == task_id;
+    }
+    if let Some(thread_id) = thread_id {
+        return artifact.thread_key() == thread_id;
+    }
+
+    support_task_ids.contains(&artifact.task_id)
+        || support_thread_ids.contains(artifact.thread_key())
+}
+
+async fn persist_verification_artifact<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    params: &ArtifactVerifyParams,
+    grounding_status: GroundingStatus,
+    confidence: f32,
+    supporting_artifacts: &[GroundingRef],
+    conflicting_artifacts: &[GroundingRef],
+    consulted_digests: &[GroundingRef],
+    notes: &[String],
+) -> Result<TaskArtifact, McpError> {
+    let task_id = params
+        .record_task_id
+        .clone()
+        .or_else(|| params.task_id.clone())
+        .or_else(|| supporting_artifacts.first().map(|reference| reference.task_id.clone()))
+        .or_else(|| conflicting_artifacts.first().map(|reference| reference.task_id.clone()))
+        .ok_or_else(|| {
+            McpError::InvalidParams(
+                "create_artifact=true requires record_task_id, task_id, or canonically grounded artifacts".to_string(),
+            )
+        })?;
+
+    let mut artifact = TaskArtifact::new_verification(tenant_id.clone(), task_id.clone());
+    artifact.project_id = ProjectId::from(params.project_id.clone());
+    artifact.artifact_role = Some("claim_grounding".to_string());
+    artifact.summary = Some(format!(
+        "Claim grounding status: {}. Claim: {}",
+        grounding_status_label(grounding_status),
+        params.claim
+    ));
+    artifact.validation = dedupe_strings(
+        supporting_artifacts
+            .iter()
+            .map(|reference| format!("Supporting artifact: {}", reference.artifact_id))
+            .chain(notes.iter().cloned()),
+    );
+    artifact.what_failed = dedupe_strings(
+        conflicting_artifacts
+            .iter()
+            .map(|reference| format!("Conflicting artifact: {}", reference.artifact_id))
+            .chain(match grounding_status {
+                GroundingStatus::DigestOnly => Some(
+                    "Only digest artifacts were found; no canonical artifact directly grounded the claim.".to_string(),
+                ),
+                GroundingStatus::InsufficientGrounding => Some(
+                    "No canonical artifact directly grounded the claim.".to_string(),
+                ),
+                _ => None,
+            }),
+    );
+    artifact.related_artifact_ids = dedupe_strings(
+        supporting_artifacts
+            .iter()
+            .map(|reference| reference.artifact_id.clone())
+            .chain(
+                conflicting_artifacts
+                    .iter()
+                    .map(|reference| reference.artifact_id.clone()),
+            )
+            .chain(
+                consulted_digests
+                    .iter()
+                    .map(|reference| reference.artifact_id.clone()),
+            ),
+    );
+    artifact.confidence = Some(confidence);
+    artifact.verification_status = Some(grounding_status_label(grounding_status).to_string());
+    artifact.thread_id = params
+        .thread_id
+        .clone()
+        .or_else(|| {
+            supporting_artifacts
+                .first()
+                .map(|reference| reference.thread_id.clone())
+        })
+        .or_else(|| {
+            conflicting_artifacts
+                .first()
+                .map(|reference| reference.thread_id.clone())
+        })
+        .or_else(|| Some(task_id.clone()));
+
+    finalize_artifact_for_storage(&mut artifact);
+    let projections = build_task_projections(&artifact);
+    store
+        .add_task_artifact(artifact.clone(), projections)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    Ok(artifact)
+}
+
+/// Handle artifact.verify tool call.
+pub async fn handle_artifact_verify<S: Store>(
+    store: &S,
+    params: ArtifactVerifyParams,
+) -> Result<Value, McpError> {
+    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    validate_search_k(params.k)?;
+    if params.claim.trim().is_empty() {
+        return Err(McpError::InvalidParams(
+            "claim must not be empty".to_string(),
+        ));
+    }
+    if let Some(project_id) = params.project_id.as_deref() {
+        validate_identifier("project_id", project_id)?;
+    }
+    if let Some(task_id) = params.task_id.as_deref() {
+        validate_identifier("task_id", task_id)?;
+    }
+    if let Some(thread_id) = params.thread_id.as_deref() {
+        validate_identifier("thread_id", thread_id)?;
+    }
+    if let Some(record_task_id) = params.record_task_id.as_deref() {
+        validate_identifier("record_task_id", record_task_id)?;
+    }
+    for artifact_id in &params.candidate_artifact_ids {
+        validate_identifier("candidate_artifact_ids", artifact_id)?;
+    }
+
+    let lookup_tenants =
+        artifact_lookup_tenants(store, &tenant_id, params.project_id.as_deref()).await?;
+    let mut seen_artifacts = HashSet::new();
+    let mut explicit_digest_candidate = false;
+    let candidate_hits = if params.candidate_artifact_ids.is_empty() {
+        let filters = TaskSearchFilters {
+            project_id: params.project_id.clone(),
+            task_id: params.task_id.clone(),
+            thread_id: params.thread_id.clone(),
+            ..Default::default()
+        };
+        search_artifacts_internal(
+            store,
+            &tenant_id,
+            &params.claim,
+            params.k,
+            &filters,
+            QueryMode::Generic,
+        )
+        .await?
+    } else {
+        let mut hits = Vec::new();
+        for artifact_id in &params.candidate_artifact_ids {
+            let Some(artifact) =
+                get_artifact_by_id_in_scope(store, &lookup_tenants, artifact_id).await?
+            else {
+                continue;
+            };
+            if !seen_artifacts.insert(artifact.artifact_id.clone()) {
+                continue;
+            }
+            if derive_artifact_trust_tier(&artifact) == TrustTier::CompiledDigestHint {
+                explicit_digest_candidate = true;
+            }
+            hits.push(build_artifact_search_hit(
+                artifact.clone(),
+                artifact_claim_score(&artifact, &params.claim),
+                None,
+            ));
+        }
+        hits
+    };
+
+    let mut canonical_hits = Vec::new();
+    let mut digest_hits = Vec::new();
+    for hit in candidate_hits {
+        if derive_artifact_trust_tier(&hit.artifact) == TrustTier::CompiledDigestHint {
+            digest_hits.push(hit);
+        } else {
+            canonical_hits.push(hit);
+        }
+    }
+
+    let mut notes = Vec::new();
+    if canonical_hits.is_empty() && !digest_hits.is_empty() {
+        let expanded_ids = digest_hits
+            .iter()
+            .flat_map(|hit| hit.artifact.related_artifact_ids.iter().cloned())
+            .collect::<Vec<_>>();
+        let expanded_refs = resolve_grounding_refs_by_artifact_ids(
+            store,
+            &tenant_id,
+            params.project_id.as_deref(),
+            &expanded_ids,
+            params.k.saturating_mul(2),
+        )
+        .await?;
+        if !expanded_refs.is_empty() {
+            notes.push(format!(
+                "Expanded {} canonical artifact references from digest candidates.",
+                expanded_refs.len()
+            ));
+        }
+        for reference in expanded_refs {
+            let Some(artifact) =
+                get_artifact_by_id_in_scope(store, &lookup_tenants, &reference.artifact_id).await?
+            else {
+                continue;
+            };
+            if seen_artifacts.insert(artifact.artifact_id.clone()) {
+                canonical_hits.push(build_artifact_search_hit(
+                    artifact.clone(),
+                    artifact_claim_score(&artifact, &params.claim),
+                    None,
+                ));
+            }
+        }
+    }
+
+    let supporting_hits = canonical_hits
+        .iter()
+        .filter(|hit| artifact_supports_claim(&hit.artifact, &params.claim, hit.score))
+        .collect::<Vec<_>>();
+    let support_task_ids = supporting_hits
+        .iter()
+        .map(|hit| hit.artifact.task_id.clone())
+        .collect::<HashSet<_>>();
+    let support_thread_ids = supporting_hits
+        .iter()
+        .map(|hit| hit.artifact.thread_key().to_string())
+        .collect::<HashSet<_>>();
+
+    let conflicting_hits = if supporting_hits.is_empty() {
+        Vec::new()
+    } else {
+        canonical_hits
+            .iter()
+            .filter(|hit| artifact_has_negative_marker(&hit.artifact))
+            .filter(|hit| {
+                artifact_matches_conflict_scope(
+                    &hit.artifact,
+                    params.project_id.as_deref(),
+                    params.task_id.as_deref(),
+                    params.thread_id.as_deref(),
+                    &support_task_ids,
+                    &support_thread_ids,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let supporting_artifacts = dedupe_grounding_refs(
+        supporting_hits
+            .iter()
+            .flat_map(|hit| hit.grounding_refs.clone()),
+    );
+    let conflicting_artifacts = dedupe_grounding_refs(
+        conflicting_hits
+            .iter()
+            .flat_map(|hit| hit.grounding_refs.clone()),
+    );
+    let consulted_digests =
+        if params.include_digests || supporting_artifacts.is_empty() || explicit_digest_candidate {
+            dedupe_grounding_refs(
+                digest_hits
+                    .iter()
+                    .flat_map(|hit| hit.grounding_refs.clone()),
+            )
+        } else {
+            Vec::new()
+        };
+
+    if !digest_hits.is_empty() {
+        notes.push(
+            "Digest artifacts were consulted as compiled hints and not counted as primary evidence."
+                .to_string(),
+        );
+    }
+    if !conflicting_artifacts.is_empty() {
+        notes.push(
+            "Conflict detection is intentionally narrow in v1 and only uses explicit same-scope negative markers."
+                .to_string(),
+        );
+    }
+
+    let grounding_status = if !supporting_artifacts.is_empty() && !conflicting_artifacts.is_empty()
+    {
+        GroundingStatus::Conflicted
+    } else if !supporting_artifacts.is_empty() {
+        if supporting_hits
+            .iter()
+            .any(|hit| derive_artifact_trust_tier(&hit.artifact) == TrustTier::VerifiedRecord)
+        {
+            GroundingStatus::VerifiedRecord
+        } else {
+            GroundingStatus::CanonicallyGrounded
+        }
+    } else if !consulted_digests.is_empty() {
+        GroundingStatus::DigestOnly
+    } else {
+        GroundingStatus::InsufficientGrounding
+    };
+    let confidence = grounding_confidence(
+        grounding_status,
+        supporting_artifacts.len(),
+        conflicting_artifacts.len(),
+    );
+    let verification_artifact = if params.create_artifact {
+        Some(
+            persist_verification_artifact(
+                store,
+                &tenant_id,
+                &params,
+                grounding_status,
+                confidence,
+                &supporting_artifacts,
+                &conflicting_artifacts,
+                &consulted_digests,
+                &notes,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    format_mcp_response(&ArtifactVerifyResult {
+        claim: params.claim,
+        grounding_status,
+        confidence,
+        supporting_artifacts,
+        conflicting_artifacts,
+        consulted_digests,
+        notes,
+        verification_artifact,
+    })
+}
+
 pub async fn handle_context_brief_project<S: Store>(
     store: &S,
     params: ProjectBriefParams,
@@ -3972,8 +4808,16 @@ pub async fn handle_context_brief_project<S: Store>(
         brief.recent_decisions.truncate(params.k.min(10));
         brief.evidence_highlights.truncate(params.k.min(10));
     }
+    let (trust_tier, grounding_refs, verification_hint) =
+        digest_wrapper_metadata(store, &tenant_id, &artifact).await?;
 
-    format_mcp_response(&ProjectBriefResult { artifact, brief })
+    format_mcp_response(&ProjectBriefResult {
+        artifact,
+        brief,
+        trust_tier,
+        grounding_refs,
+        verification_hint,
+    })
 }
 
 pub async fn handle_task_resume<S: Store>(
@@ -4002,8 +4846,16 @@ pub async fn handle_task_resume<S: Store>(
         });
         resume.recent_runs.truncate(params.k.min(5));
     }
+    let (trust_tier, grounding_refs, verification_hint) =
+        digest_wrapper_metadata(store, &tenant_id, &artifact).await?;
 
-    format_mcp_response(&TaskResumeResult { artifact, resume })
+    format_mcp_response(&TaskResumeResult {
+        artifact,
+        resume,
+        trust_tier,
+        grounding_refs,
+        verification_hint,
+    })
 }
 
 pub async fn handle_artifact_find_failures<S: Store>(
@@ -4022,8 +4874,16 @@ pub async fn handle_artifact_find_failures<S: Store>(
         (item.summary.clone(), item.timestamp_created, false)
     });
     results.truncate(params.k);
+    let (trust_tier, grounding_refs, verification_hint) =
+        digest_wrapper_metadata(store, &tenant_id, &artifact).await?;
 
-    format_mcp_response(&FailureSearchResult { artifact, results })
+    format_mcp_response(&FailureSearchResult {
+        artifact,
+        results,
+        trust_tier,
+        grounding_refs,
+        verification_hint,
+    })
 }
 
 pub async fn handle_artifact_find_decisions<S: Store>(
@@ -4042,8 +4902,16 @@ pub async fn handle_artifact_find_decisions<S: Store>(
         (item.summary.clone(), item.timestamp_created, item.explicit)
     });
     results.truncate(params.k);
+    let (trust_tier, grounding_refs, verification_hint) =
+        digest_wrapper_metadata(store, &tenant_id, &artifact).await?;
 
-    format_mcp_response(&DecisionSearchViewResult { artifact, results })
+    format_mcp_response(&DecisionSearchViewResult {
+        artifact,
+        results,
+        trust_tier,
+        grounding_refs,
+        verification_hint,
+    })
 }
 
 pub async fn handle_artifact_find_evidence<S: Store>(
@@ -4062,8 +4930,16 @@ pub async fn handle_artifact_find_evidence<S: Store>(
         (item.summary.clone(), item.timestamp_created, false)
     });
     results.truncate(params.k);
+    let (trust_tier, grounding_refs, verification_hint) =
+        digest_wrapper_metadata(store, &tenant_id, &artifact).await?;
 
-    format_mcp_response(&EvidenceSearchViewResult { artifact, results })
+    format_mcp_response(&EvidenceSearchViewResult {
+        artifact,
+        results,
+        trust_tier,
+        grounding_refs,
+        verification_hint,
+    })
 }
 
 pub async fn handle_artifact_find_highlights<S: Store>(
@@ -4080,8 +4956,16 @@ pub async fn handle_artifact_find_highlights<S: Store>(
         ensure_highlight_library_digest(store, &tenant_id, params.project_id.as_deref()).await?;
     sort_highlight_items(&mut results, &params.query);
     results.truncate(params.k);
+    let (trust_tier, grounding_refs, verification_hint) =
+        digest_wrapper_metadata(store, &tenant_id, &artifact).await?;
 
-    format_mcp_response(&HighlightSearchViewResult { artifact, results })
+    format_mcp_response(&HighlightSearchViewResult {
+        artifact,
+        results,
+        trust_tier,
+        grounding_refs,
+        verification_hint,
+    })
 }
 
 /// Handle memory.get tool call
@@ -4637,7 +5521,7 @@ pub async fn handle_context_search_documents<S: Store>(
         } else {
             None
         };
-        filtered.push(chunk_to_result(&chunk, score, source_tier));
+        filtered.push(chunk_to_result(&chunk, score, source_tier, None));
         if filtered.len() >= params.k {
             break;
         }
@@ -4691,7 +5575,7 @@ pub async fn handle_context_find_relevant_context<S: Store>(
             let id = chunk.chunk_id.to_string();
             if dedupe.insert(id) {
                 hot_included = true;
-                results.push(chunk_to_result(&chunk, 1.0, Some("hot".to_string())));
+                results.push(chunk_to_result(&chunk, 1.0, Some("hot".to_string()), None));
             }
         }
     }
@@ -4724,7 +5608,7 @@ pub async fn handle_context_find_relevant_context<S: Store>(
         } else {
             None
         };
-        results.push(chunk_to_result(&chunk, score, source_tier));
+        results.push(chunk_to_result(&chunk, score, source_tier, None));
         if results.len() >= params.k {
             break;
         }
@@ -4894,7 +5778,7 @@ pub async fn handle_context_get_hot_context<S: Store>(
     let results: Vec<ChunkResult> = chunks
         .iter()
         .take(params.k)
-        .map(|chunk| chunk_to_result(chunk, 1.0, Some("hot".to_string())))
+        .map(|chunk| chunk_to_result(chunk, 1.0, Some("hot".to_string()), None))
         .collect();
 
     format_mcp_response(&ContextGetHotContextResult { results })
@@ -5062,8 +5946,8 @@ fn import_info_to_result(info: ImportInfo) -> ImportInfoResult {
 // ---------- Trace Query Handlers ----------
 
 use crate::structural::{
-    parse_iso_datetime, ErrorResult, FrameInfo, TimeRange as StructuralTimeRange, ToolCallResult,
-    TraceQueryService,
+    ErrorResult, FrameInfo, TimeRange as StructuralTimeRange, ToolCallResult, TraceQueryService,
+    parse_iso_datetime,
 };
 
 /// Result type for debug.find_tool_calls
@@ -5510,10 +6394,12 @@ mod tests {
         let text = result["content"][0]["text"].as_str().unwrap();
         let search_response: SearchResult = serde_json::from_str(text).unwrap();
         assert_eq!(search_response.results.len(), 2);
-        assert!(search_response
-            .results
-            .iter()
-            .all(|r| matches!(r.chunk_type.as_str(), "doc" | "code")));
+        assert!(
+            search_response
+                .results
+                .iter()
+                .all(|r| matches!(r.chunk_type.as_str(), "doc" | "code"))
+        );
     }
 
     #[tokio::test]
@@ -6187,12 +7073,16 @@ mod tests {
         let payload: ContextGetFilesForSubsystemResult = parse_tool_payload(&result);
         assert_eq!(payload.subsystem_key, "storage");
         assert_eq!(payload.files.len(), 2);
-        assert!(payload
-            .files
-            .contains(&"crates/memd/src/store/mod.rs".to_string()));
-        assert!(payload
-            .files
-            .contains(&"crates/memd/src/store/hybrid.rs".to_string()));
+        assert!(
+            payload
+                .files
+                .contains(&"crates/memd/src/store/mod.rs".to_string())
+        );
+        assert!(
+            payload
+                .files
+                .contains(&"crates/memd/src/store/hybrid.rs".to_string())
+        );
     }
 
     #[tokio::test]
@@ -6500,14 +7390,18 @@ mod tests {
 
         let payload: TaskGetResult = parse_tool_payload(&result);
         assert_eq!(payload.artifacts.len(), 5);
-        assert!(payload
-            .artifacts
-            .iter()
-            .any(|artifact| artifact.artifact_kind == ArtifactKind::TaskStart));
-        assert!(payload
-            .artifacts
-            .iter()
-            .any(|artifact| artifact.artifact_kind == ArtifactKind::Evidence));
+        assert!(
+            payload
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.artifact_kind == ArtifactKind::TaskStart)
+        );
+        assert!(
+            payload
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.artifact_kind == ArtifactKind::Evidence)
+        );
     }
 
     #[tokio::test]
@@ -6660,10 +7554,12 @@ mod tests {
 
         let payload: SearchResult = parse_tool_payload(&result);
         assert_eq!(payload.results.len(), 1);
-        assert!(payload.results[0]
-            .tags
-            .iter()
-            .any(|tag| tag.starts_with("task:kind:run_start")));
+        assert!(
+            payload.results[0]
+                .tags
+                .iter()
+                .any(|tag| tag.starts_with("task:kind:run_start"))
+        );
     }
 
     #[tokio::test]
@@ -6683,7 +7579,8 @@ mod tests {
                     goal: "Record benchmark continuity".to_string(),
                     motivation: "Later agents should recover this task across tenant aliases"
                         .to_string(),
-                    hypothesis: "Project-scoped retrieval should bridge tenant mismatch".to_string(),
+                    hypothesis: "Project-scoped retrieval should bridge tenant mismatch"
+                        .to_string(),
                     scientific_question: "Can task search recover cross-tenant project history?"
                         .to_string(),
                     dataset_refs: vec![],
@@ -6780,9 +7677,11 @@ mod tests {
 
         let payload: SearchResult = parse_tool_payload(&result);
         assert!(!payload.results.is_empty());
-        assert!(payload.results[0]
-            .text
-            .contains("strict reproduction blocker"));
+        assert!(
+            payload.results[0]
+                .text
+                .contains("strict reproduction blocker")
+        );
     }
 
     #[tokio::test]
@@ -6852,7 +7751,7 @@ mod tests {
                     what_failed: vec!["Search still centers projection chunks".to_string()],
                     validation: vec![],
                     uncertainty: vec![
-                        "Exact artifact exchange semantics are still thin".to_string()
+                        "Exact artifact exchange semantics are still thin".to_string(),
                     ],
                     followups: vec!["Add artifact.search and thread inspection".to_string()],
                     expected_outputs: vec![],
@@ -6970,6 +7869,16 @@ mod tests {
             search_payload.results[0].artifact.artifact_id,
             review.artifact_id
         );
+        assert_eq!(
+            search_payload.results[0].trust_tier,
+            TrustTier::CanonicalRecord
+        );
+        assert!(!search_payload.results[0].grounding_refs.is_empty());
+        assert!(
+            !search_payload.results[0]
+                .verification_hint
+                .requires_verification
+        );
 
         let task_search_payload: SearchResult = parse_tool_payload(
             &handle_task_search(
@@ -7005,10 +7914,12 @@ mod tests {
             .unwrap(),
         );
         assert!(!task_search_payload.results.is_empty());
-        assert!(task_search_payload
-            .results
-            .iter()
-            .all(|result| result.artifact.is_some()));
+        assert!(
+            task_search_payload
+                .results
+                .iter()
+                .all(|result| result.artifact.is_some())
+        );
         assert_eq!(
             task_search_payload.results.iter().find_map(|result| {
                 result
@@ -7090,44 +8001,57 @@ mod tests {
         .unwrap();
         let search_payload: SearchResult = parse_tool_payload(&search);
         assert!(!search_payload.results.is_empty());
-        assert!(search_payload.results.iter().any(|result| result
-            .tags
-            .iter()
-            .any(|tag| tag.starts_with("task:kind:task_start"))));
+        assert!(search_payload.results.iter().any(|result| {
+            result
+                .tags
+                .iter()
+                .any(|tag| tag.starts_with("task:kind:task_start"))
+        }));
+        assert!(
+            search_payload
+                .results
+                .iter()
+                .any(|result| result.trust_tier == TrustTier::CanonicalRecord)
+        );
+        assert!(
+            search_payload
+                .results
+                .iter()
+                .any(|result| !result.grounding_refs.is_empty())
+        );
     }
 
     #[tokio::test]
     async fn task_finish_stores_failed_and_validation_projections() {
         let store = make_store();
 
-        let result =
-            handle_task_finish(
-                &store,
-                None,
-                TaskFinishParams {
-                    tenant_id: "test".to_string(),
-                    task_id: "task-123".to_string(),
-                    project_id: Some("proj_alpha".to_string()),
-                    agent_id: Some("agent-1".to_string()),
-                    session_id: Some("session-7".to_string()),
-                    status: Some("completed".to_string()),
-                    goal: Some("Quantify the stress-response regulon".to_string()),
-                    scientific_question: None,
-                    dataset_refs: vec![],
-                    entity_refs: vec![],
-                    what_worked: vec![
-                        "Re-running with stricter QC stabilized the hit list".to_string()
-                    ],
-                    what_failed: vec!["The first alignment preset over-trimmed reads".to_string()],
-                    validation: vec!["Independent replicate confirmed the top genes".to_string()],
-                    uncertainty: vec!["One replicate remains borderline".to_string()],
-                    followups: vec!["Collect an additional replicate".to_string()],
-                    confidence: 0.78,
-                    provenance: None,
-                },
-            )
-            .await
-            .unwrap();
+        let result = handle_task_finish(
+            &store,
+            None,
+            TaskFinishParams {
+                tenant_id: "test".to_string(),
+                task_id: "task-123".to_string(),
+                project_id: Some("proj_alpha".to_string()),
+                agent_id: Some("agent-1".to_string()),
+                session_id: Some("session-7".to_string()),
+                status: Some("completed".to_string()),
+                goal: Some("Quantify the stress-response regulon".to_string()),
+                scientific_question: None,
+                dataset_refs: vec![],
+                entity_refs: vec![],
+                what_worked: vec![
+                    "Re-running with stricter QC stabilized the hit list".to_string(),
+                ],
+                what_failed: vec!["The first alignment preset over-trimmed reads".to_string()],
+                validation: vec!["Independent replicate confirmed the top genes".to_string()],
+                uncertainty: vec!["One replicate remains borderline".to_string()],
+                followups: vec!["Collect an additional replicate".to_string()],
+                confidence: 0.78,
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
 
         let payload: TaskArtifactResult = parse_tool_payload(&result);
         let tenant = TenantId::new("test").unwrap();
@@ -7154,10 +8078,12 @@ mod tests {
         .await
         .unwrap();
         let search_payload: SearchResult = parse_tool_payload(&search);
-        assert!(search_payload.results.iter().any(|result| result
-            .tags
-            .iter()
-            .any(|tag| tag.starts_with("task:projection:failed"))));
+        assert!(search_payload.results.iter().any(|result| {
+            result
+                .tags
+                .iter()
+                .any(|tag| tag.starts_with("task:projection:failed"))
+        }));
     }
 
     #[tokio::test]
@@ -7266,10 +8192,369 @@ mod tests {
             Some(DIGEST_ROLE_PROJECT_BRIEF)
         );
         assert_eq!(payload.brief.project_id, "proj_alpha");
+        assert_eq!(payload.trust_tier, TrustTier::CompiledDigestHint);
+        assert!(payload.verification_hint.requires_verification);
+        assert!(!payload.grounding_refs.is_empty());
         assert!(
             !payload.brief.recent_completed_tasks.is_empty()
                 || !payload.brief.active_tasks.is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn artifact_verify_reports_canonical_support_and_can_persist_record() {
+        let store = make_store();
+
+        let start = handle_task_start(
+            &store,
+            None,
+            TaskStartParams {
+                tenant_id: "tenant_verify".to_string(),
+                project_id: Some("proj_verify".to_string()),
+                parent_task_id: None,
+                agent_id: None,
+                session_id: None,
+                goal: "Verify grounding boundary".to_string(),
+                motivation: "Need an explicit trust boundary".to_string(),
+                hypothesis: "Canonical artifacts should ground the claim".to_string(),
+                scientific_question: "Can artifact.verify recover direct canonical support?"
+                    .to_string(),
+                dataset_refs: vec![],
+                expected_outputs: vec!["verification result".to_string()],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        let start_payload: TaskArtifactResult = parse_tool_payload(&start);
+
+        handle_task_finish(
+            &store,
+            None,
+            TaskFinishParams {
+                tenant_id: "tenant_verify".to_string(),
+                task_id: start_payload.task_id.clone(),
+                project_id: Some("proj_verify".to_string()),
+                agent_id: None,
+                session_id: None,
+                status: None,
+                goal: None,
+                scientific_question: None,
+                dataset_refs: vec![],
+                entity_refs: vec![],
+                what_worked: vec![
+                    "Canonical artifacts are the trust anchor for grounded claims".to_string(),
+                ],
+                what_failed: vec![],
+                validation: vec![
+                    "Grounding should prefer canonical artifacts over digests".to_string(),
+                ],
+                uncertainty: vec![],
+                followups: vec![],
+                confidence: 0.9,
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = handle_artifact_verify(
+            &store,
+            ArtifactVerifyParams {
+                tenant_id: "tenant_verify".to_string(),
+                claim: "canonical artifacts are the trust anchor".to_string(),
+                project_id: Some("proj_verify".to_string()),
+                task_id: Some(start_payload.task_id.clone()),
+                thread_id: None,
+                candidate_artifact_ids: vec![],
+                k: 8,
+                include_digests: false,
+                create_artifact: true,
+                record_task_id: Some(start_payload.task_id.clone()),
+            },
+        )
+        .await
+        .unwrap();
+
+        let payload: ArtifactVerifyResult = parse_tool_payload(&result);
+        assert_eq!(
+            payload.grounding_status,
+            GroundingStatus::CanonicallyGrounded
+        );
+        assert!(!payload.supporting_artifacts.is_empty());
+        assert!(payload.conflicting_artifacts.is_empty());
+        let verification_artifact = payload
+            .verification_artifact
+            .expect("verification artifact should be persisted");
+        assert_eq!(
+            verification_artifact.artifact_kind,
+            ArtifactKind::Verification
+        );
+        assert_eq!(
+            verification_artifact.verification_status.as_deref(),
+            Some("canonically_grounded")
+        );
+    }
+
+    #[tokio::test]
+    async fn artifact_verify_returns_digest_only_when_only_unbacked_digest_matches() {
+        let store = make_store();
+
+        let digest = handle_artifact_create(
+            &store,
+            None,
+            ArtifactCreateParams {
+                tenant_id: "tenant_digest".to_string(),
+                artifact_kind: "digest".to_string(),
+                task_id: None,
+                project_id: Some("proj_digest".to_string()),
+                parent_task_id: None,
+                agent_id: None,
+                session_id: None,
+                status: None,
+                artifact_role: Some("project_brief".to_string()),
+                challenge_id: None,
+                thread_id: None,
+                reply_to_artifact_id: None,
+                relation_kind: None,
+                goal: None,
+                motivation: None,
+                hypothesis: None,
+                scientific_question: None,
+                method_summary: None,
+                summary: Some("Digest-only hint about an isolated semantic summary".to_string()),
+                evidence_kind: None,
+                supports_claim: None,
+                blockers: vec![],
+                what_worked: vec![],
+                what_failed: vec![],
+                validation: vec![],
+                uncertainty: vec![],
+                followups: vec![],
+                expected_outputs: vec![],
+                related_artifact_ids: vec![],
+                contributors: vec![],
+                dataset_refs: vec![],
+                entity_refs: vec![],
+                tool_name: None,
+                tool_version: None,
+                command: None,
+                parameters: None,
+                inputs: vec![],
+                outputs: vec![],
+                metrics: None,
+                why_chosen: None,
+                confidence: None,
+                requested_action: None,
+                verification_status: None,
+                compute_budget: None,
+                cost_actual: None,
+                data_access_level: None,
+                policy_tags: vec![],
+                allowed_tools: vec![],
+                approval_state: None,
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        let digest_payload: TaskArtifactResult = parse_tool_payload(&digest);
+
+        let result = handle_artifact_verify(
+            &store,
+            ArtifactVerifyParams {
+                tenant_id: "tenant_digest".to_string(),
+                claim: "isolated semantic summary".to_string(),
+                project_id: Some("proj_digest".to_string()),
+                task_id: None,
+                thread_id: None,
+                candidate_artifact_ids: vec![digest_payload.artifact_id],
+                k: 8,
+                include_digests: false,
+                create_artifact: false,
+                record_task_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let payload: ArtifactVerifyResult = parse_tool_payload(&result);
+        assert_eq!(payload.grounding_status, GroundingStatus::DigestOnly);
+        assert!(payload.supporting_artifacts.is_empty());
+        assert_eq!(payload.consulted_digests.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn artifact_verify_marks_same_task_negative_marker_as_conflict() {
+        let store = make_store();
+
+        let start = handle_task_start(
+            &store,
+            None,
+            TaskStartParams {
+                tenant_id: "tenant_conflict".to_string(),
+                project_id: Some("proj_conflict".to_string()),
+                parent_task_id: None,
+                agent_id: None,
+                session_id: None,
+                goal: "Exercise conflict detection".to_string(),
+                motivation: "Need narrow same-scope conflict checks".to_string(),
+                hypothesis: "Explicit negative markers should create a conflict".to_string(),
+                scientific_question: "Can artifact.verify detect obvious same-task disagreement?"
+                    .to_string(),
+                dataset_refs: vec![],
+                expected_outputs: vec!["conflict result".to_string()],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        let start_payload: TaskArtifactResult = parse_tool_payload(&start);
+
+        handle_artifact_create(
+            &store,
+            None,
+            ArtifactCreateParams {
+                tenant_id: "tenant_conflict".to_string(),
+                artifact_kind: "evidence".to_string(),
+                task_id: Some(start_payload.task_id.clone()),
+                project_id: Some("proj_conflict".to_string()),
+                parent_task_id: None,
+                agent_id: None,
+                session_id: None,
+                status: None,
+                artifact_role: None,
+                challenge_id: None,
+                thread_id: Some(start_payload.task_id.clone()),
+                reply_to_artifact_id: None,
+                relation_kind: None,
+                goal: None,
+                motivation: None,
+                hypothesis: None,
+                scientific_question: None,
+                method_summary: None,
+                summary: Some("The digest planner is reliable for scoped retrieval".to_string()),
+                evidence_kind: Some("integration_test".to_string()),
+                supports_claim: Some(true),
+                blockers: vec![],
+                what_worked: vec![],
+                what_failed: vec![],
+                validation: vec!["Scoped retrieval stayed stable".to_string()],
+                uncertainty: vec![],
+                followups: vec![],
+                expected_outputs: vec![],
+                related_artifact_ids: vec![],
+                contributors: vec![],
+                dataset_refs: vec![],
+                entity_refs: vec![],
+                tool_name: None,
+                tool_version: None,
+                command: None,
+                parameters: None,
+                inputs: vec![],
+                outputs: vec![],
+                metrics: None,
+                why_chosen: None,
+                confidence: None,
+                requested_action: None,
+                verification_status: None,
+                compute_budget: None,
+                cost_actual: None,
+                data_access_level: None,
+                policy_tags: vec![],
+                allowed_tools: vec![],
+                approval_state: None,
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        handle_artifact_create(
+            &store,
+            None,
+            ArtifactCreateParams {
+                tenant_id: "tenant_conflict".to_string(),
+                artifact_kind: "verification".to_string(),
+                task_id: Some(start_payload.task_id.clone()),
+                project_id: Some("proj_conflict".to_string()),
+                parent_task_id: None,
+                agent_id: None,
+                session_id: None,
+                status: None,
+                artifact_role: Some("claim_grounding".to_string()),
+                challenge_id: None,
+                thread_id: Some(start_payload.task_id.clone()),
+                reply_to_artifact_id: None,
+                relation_kind: None,
+                goal: None,
+                motivation: None,
+                hypothesis: None,
+                scientific_question: None,
+                method_summary: None,
+                summary: Some(
+                    "The digest planner is not reliable when validation is absent".to_string(),
+                ),
+                evidence_kind: None,
+                supports_claim: Some(false),
+                blockers: vec![],
+                what_worked: vec![],
+                what_failed: vec!["Missing validation breaks reliability".to_string()],
+                validation: vec![],
+                uncertainty: vec![],
+                followups: vec![],
+                expected_outputs: vec![],
+                related_artifact_ids: vec![],
+                contributors: vec![],
+                dataset_refs: vec![],
+                entity_refs: vec![],
+                tool_name: None,
+                tool_version: None,
+                command: None,
+                parameters: None,
+                inputs: vec![],
+                outputs: vec![],
+                metrics: None,
+                why_chosen: None,
+                confidence: None,
+                requested_action: None,
+                verification_status: Some("conflicted".to_string()),
+                compute_budget: None,
+                cost_actual: None,
+                data_access_level: None,
+                policy_tags: vec![],
+                allowed_tools: vec![],
+                approval_state: None,
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = handle_artifact_verify(
+            &store,
+            ArtifactVerifyParams {
+                tenant_id: "tenant_conflict".to_string(),
+                claim: "digest planner reliable".to_string(),
+                project_id: Some("proj_conflict".to_string()),
+                task_id: Some(start_payload.task_id),
+                thread_id: None,
+                candidate_artifact_ids: vec![],
+                k: 8,
+                include_digests: false,
+                create_artifact: false,
+                record_task_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let payload: ArtifactVerifyResult = parse_tool_payload(&result);
+        assert_eq!(payload.grounding_status, GroundingStatus::Conflicted);
+        assert!(!payload.supporting_artifacts.is_empty());
+        assert!(!payload.conflicting_artifacts.is_empty());
     }
 
     #[tokio::test]
@@ -7336,8 +8621,8 @@ mod tests {
                 include_related_projects: true,
             },
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let first_payload: ProjectBriefResult = parse_tool_payload(&first);
         let chunks_after_first = store
             .stats(&TenantId::new("tenant_a").unwrap())
@@ -7364,7 +8649,10 @@ mod tests {
             .unwrap()
             .total_chunks;
 
-        assert_eq!(first_payload.artifact.artifact_id, second_payload.artifact.artifact_id);
+        assert_eq!(
+            first_payload.artifact.artifact_id,
+            second_payload.artifact.artifact_id
+        );
         assert_eq!(
             first_payload.artifact.timestamp_created,
             second_payload.artifact.timestamp_created
@@ -7485,7 +8773,9 @@ mod tests {
                 dataset_refs: vec![],
                 entity_refs: vec![],
                 what_worked: vec!["Use digest persistence idempotence".to_string()],
-                what_failed: vec!["Rewriting unchanged digests creates retrieval noise".to_string()],
+                what_failed: vec![
+                    "Rewriting unchanged digests creates retrieval noise".to_string(),
+                ],
                 validation: vec!["Repeated refreshes do not add chunks".to_string()],
                 uncertainty: vec![],
                 followups: vec![],
@@ -7534,7 +8824,9 @@ mod tests {
                 dataset_refs: vec![],
                 entity_refs: vec![],
                 what_worked: vec!["Use digest persistence idempotence".to_string()],
-                what_failed: vec!["Rewriting unchanged digests creates retrieval noise".to_string()],
+                what_failed: vec![
+                    "Rewriting unchanged digests creates retrieval noise".to_string(),
+                ],
                 validation: vec!["Repeated refreshes do not add chunks".to_string()],
                 uncertainty: vec![],
                 followups: vec![],
@@ -7588,9 +8880,11 @@ mod tests {
         );
         assert!(!first_payload.results.is_empty());
         assert_eq!(first_payload.results[0].category, "tactic");
-        assert!(first_payload.results[0]
-            .summary
-            .contains("digest persistence idempotence"));
+        assert!(
+            first_payload.results[0]
+                .summary
+                .contains("digest persistence idempotence")
+        );
         assert_eq!(first_payload.results[0].support_count, 2);
         assert_eq!(
             first_payload.artifact.timestamp_created,
@@ -7670,9 +8964,11 @@ mod tests {
 
         let payload: Value = parse_tool_payload(&result);
         assert_eq!(payload["status"].as_str(), Some("completed"));
-        assert!(payload["digest_artifacts"]
-            .as_array()
-            .map(|items| !items.is_empty())
-            .unwrap_or(false));
+        assert!(
+            payload["digest_artifacts"]
+                .as_array()
+                .map(|items| !items.is_empty())
+                .unwrap_or(false)
+        );
     }
 }
