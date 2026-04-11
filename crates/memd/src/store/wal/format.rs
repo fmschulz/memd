@@ -392,10 +392,12 @@ mod tests {
 
         let result = WalRecord::decode_from_bytes(&bytes);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("invalid WAL magic"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid WAL magic")
+        );
     }
 
     #[test]
@@ -439,10 +441,12 @@ mod tests {
 
         let result = WalRecord::decode_from_bytes(&encoded);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("invalid WAL record type"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid WAL record type")
+        );
     }
 
     #[test]

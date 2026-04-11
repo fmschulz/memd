@@ -341,7 +341,9 @@ fn verify_file_size(path: &PathBuf, min_size: u64, file_type: &str) -> Result<()
     if metadata.len() < min_size {
         return Err(MemdError::StorageError(format!(
             "{} file too small ({} bytes), expected >= {} bytes. File may be corrupted, delete and retry.",
-            file_type, metadata.len(), min_size
+            file_type,
+            metadata.len(),
+            min_size
         )));
     }
 
@@ -390,11 +392,15 @@ mod tests {
 
     #[test]
     fn test_model_urls() {
-        assert!(EmbeddingModel::AllMiniLmL6V2
-            .model_url()
-            .contains("all-MiniLM-L6-v2"));
-        assert!(EmbeddingModel::Qwen3Embedding0_6B
-            .model_url()
-            .contains("Qwen3-Embedding"));
+        assert!(
+            EmbeddingModel::AllMiniLmL6V2
+                .model_url()
+                .contains("all-MiniLM-L6-v2")
+        );
+        assert!(
+            EmbeddingModel::Qwen3Embedding0_6B
+                .model_url()
+                .contains("Qwen3-Embedding")
+        );
     }
 }

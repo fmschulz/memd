@@ -2,14 +2,14 @@
 //!
 //! Pure Rust embeddings using Candle framework with model pooling for parallelism.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use candle_core::{Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config, DTYPE};
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType, api::sync::Api};
 use parking_lot::Mutex;
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 use tokio::sync::Semaphore;
@@ -21,7 +21,7 @@ const DEFAULT_MODEL: &str = "sentence-transformers/all-MiniLM-L6-v2";
 const DEFAULT_DIMENSION: usize = 384;
 const DEFAULT_MAX_LENGTH: usize = 512;
 const MODEL_POOL_SIZE: usize = 4; // 4 models for parallel inference
-                                  // MAX_CONCURRENT derived from MODEL_POOL_SIZE to avoid duplication
+// MAX_CONCURRENT derived from MODEL_POOL_SIZE to avoid duplication
 const MAX_CONCURRENT: usize = MODEL_POOL_SIZE;
 
 // Global counter for round-robin model selection

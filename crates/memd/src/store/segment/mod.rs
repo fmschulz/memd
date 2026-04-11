@@ -7,6 +7,6 @@ pub mod format;
 pub mod reader;
 pub mod writer;
 
-pub use format::{PayloadIndexRecord, SegmentMeta, SEGMENT_MAGIC};
+pub use format::{PayloadIndexRecord, SEGMENT_MAGIC, SegmentMeta};
 pub use reader::SegmentReader;
 pub use writer::SegmentWriter;

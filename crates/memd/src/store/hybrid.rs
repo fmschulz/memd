@@ -5,8 +5,8 @@
 //! Supports tiered search with cache/hot/warm fallback when enabled.
 //! Includes query routing for intent classification and structural search blending.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;

@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
-use super::format::{WalRecord, WalRecordType, WAL_HEADER_SIZE};
+use super::format::{WAL_HEADER_SIZE, WalRecord, WalRecordType};
 
 /// WAL reader
 pub struct WalReader {
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn recovery_replay_idempotent() {
-        use recovery::{replay, RecoveryHandler, RecoveryStats};
+        use recovery::{RecoveryHandler, RecoveryStats, replay};
 
         // Mock handler that tracks calls
         struct MockHandler {
@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn recovery_after_checkpoint() {
-        use recovery::{replay, RecoveryHandler};
+        use recovery::{RecoveryHandler, replay};
 
         struct CountingHandler {
             add_count: usize,

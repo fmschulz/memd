@@ -2,7 +2,7 @@
 //!
 //! Maps MCP error conditions to JSON-RPC error codes.
 
-use super::protocol::{error_codes, RpcError};
+use super::protocol::{RpcError, error_codes};
 
 /// MCP-specific error variants
 #[derive(Debug, Clone)]
