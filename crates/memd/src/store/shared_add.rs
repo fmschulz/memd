@@ -2,7 +2,7 @@
 //!
 //! Keeps `MemoryStore` and `PersistentStore` behavior consistent for long documents.
 
-use crate::chunking::{chunk_text, ChunkingConfig};
+use crate::chunking::{ChunkingConfig, chunk_text};
 use crate::types::MemoryChunk;
 
 /// Split threshold for long-document chunking.

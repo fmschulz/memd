@@ -4,8 +4,8 @@
 //! semantic cache (fastest) -> hot tier (fast) -> warm tier (standard).
 //! It automatically promotes frequently accessed chunks and demotes stale ones.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use parking_lot::RwLock;

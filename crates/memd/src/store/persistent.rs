@@ -20,7 +20,7 @@ use super::hybrid::{ChunkMetaForRerank, HybridConfig, HybridSearchResult, Hybrid
 use super::metadata::{ChunkMetadata, MetadataStore, SqliteMetadataStore};
 use crate::compaction::{CompactionConfig, CompactionMetrics, CompactionResult, CompactionRunner};
 use crate::metrics::TieredMetrics;
-use crate::store::{apply_feedback_scores, FeedbackConfig, FeedbackEntry};
+use crate::store::{FeedbackConfig, FeedbackEntry, apply_feedback_scores};
 use crate::task_memory::{
     TaskArtifact, TaskArtifactWriteResult, TaskProjection, TaskRecord, TaskSearchFilters,
 };
@@ -40,7 +40,7 @@ pub struct TieredStats {
 }
 use super::segment::{SegmentReader, SegmentWriter};
 use super::wal::{TaskArtifactWalPayload, WalReader, WalRecord, WalRecordType, WalWriter};
-use super::{rank_candidate_chunks, score_candidate_chunk, Store, StoreStats};
+use super::{Store, StoreStats, rank_candidate_chunks, score_candidate_chunk};
 use crate::embeddings::EmbeddingModel;
 use crate::error::{MemdError, Result};
 use crate::index::Bm25Index;
@@ -2160,11 +2160,11 @@ mod tests {
     use super::*;
     use crate::embeddings::MockEmbedder;
     use crate::retrieval::{RerankerConfig, RerankerMode};
+    use crate::store::Store;
     use crate::store::dense::{DenseSearchConfig, DenseSearcher};
     use crate::store::hybrid::{HybridConfig, HybridSearcher};
     use crate::store::metadata::MetadataStore;
-    use crate::store::Store;
-    use crate::task_memory::{build_task_projections, TaskArtifact, TaskSearchFilters};
+    use crate::task_memory::{TaskArtifact, TaskSearchFilters, build_task_projections};
     use crate::types::{ChunkType, ProjectId};
     use rusqlite::Connection;
     use std::fs;

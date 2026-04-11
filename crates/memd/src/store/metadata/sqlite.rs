@@ -11,7 +11,7 @@ use rusqlite::Connection;
 
 use super::{ChunkMetadata, IndexState, MetadataStore};
 use crate::error::Result;
-use crate::store::{normalize_query, FeedbackEntry, RelevanceLabel};
+use crate::store::{FeedbackEntry, RelevanceLabel, normalize_query};
 use crate::task_memory::{ArtifactKind, TaskArtifact, TaskRecord, TaskSearchFilters};
 use crate::types::{ChunkId, ChunkStatus, ChunkType, TenantId};
 

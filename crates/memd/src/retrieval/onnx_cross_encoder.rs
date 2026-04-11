@@ -1,12 +1,12 @@
 use super::onnx_runtime;
 use ndarray::{Array2, ArrayViewD, Axis};
-use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
+use ort::session::builder::GraphOptimizationLevel;
 use ort::value::TensorRef;
 use parking_lot::Mutex;
 use std::fs;
 use std::io;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex as StdMutex, OnceLock};
 use tokenizers::{EncodeInput, PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};

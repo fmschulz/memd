@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{ArgAction, Subcommand};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::info;
 
 use crate::error::Result;
