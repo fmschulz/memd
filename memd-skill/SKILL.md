@@ -66,9 +66,16 @@ This distinction matters. `memory.add` is flexible. `task.*` captures task lifec
 
 For summary-first retrieval and onboarding, the current tool surface also persists digest artifacts and exposes dedicated read helpers. Use `context.brief_project`, `task.resume`, `artifact.find_failures`, `artifact.find_decisions`, `artifact.find_evidence`, and `artifact.find_highlights` when you want a project brief, task resume, or project/tenant library instead of only raw search hits. `memory.search`, `task.search`, and `artifact.search` also accept `mode` with `brief_project`, `resume_task`, `find_failures`, `find_decisions`, `find_evidence`, or `find_highlights` to bias retrieval toward those persisted digests.
 
+Trust boundary:
+
+- semantic search and digest helpers produce candidates
+- canonical non-digest artifacts are the trust anchor
+- digest artifacts are compiled hints that still require re-grounding
+- `artifact.verify` is the explicit step that grounds a claim against canonical artifacts
+
 ## Tool Surface
 
-`memd` exposes 40 MCP tools.
+`memd` exposes 41 MCP tools.
 
 ### Generic Memory
 
@@ -100,6 +107,7 @@ For summary-first retrieval and onboarding, the current tool surface also persis
 - `artifact.create`
 - `artifact.get`
 - `artifact.search`
+- `artifact.verify`
 - `artifact.find_failures`
 - `artifact.find_decisions`
 - `artifact.find_evidence`
@@ -216,6 +224,7 @@ Use:
 - `task.resume` to generate or refresh a persisted task resume digest
 - `artifact.get` to inspect one canonical artifact by `artifact_id`
 - `artifact.search` to search canonical artifacts rather than only retrieval chunks
+- `artifact.verify` to ground a claim against canonical artifacts before trusting it
 - `artifact.find_failures` to retrieve a digest-backed failure library
 - `artifact.find_decisions` to retrieve explicit and inferred decisions
 - `artifact.find_evidence` to retrieve digest-backed evidence highlights

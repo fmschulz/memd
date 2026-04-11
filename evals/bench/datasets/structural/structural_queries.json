@@ -1,0 +1,109 @@
+{
+  "version": "1.0.0",
+  "description": "Minimal structural benchmark fixture for code navigation and intent classification",
+  "test_project": {
+    "name": "mini-structural-fixture",
+    "description": "Small mixed-language project covering definitions, callers, references, and imports",
+    "files": [
+      {
+        "path": "src/lib.rs",
+        "language": "rust",
+        "content": "pub fn process_data(input: &str) -> String {\n    helper(input)\n}\n\nfn helper(value: &str) -> String {\n    format!(\"processed:{value}\")\n}\n"
+      },
+      {
+        "path": "src/main.rs",
+        "language": "rust",
+        "content": "use crate::lib::process_data;\n\nfn main() {\n    let _value = process_data(\"demo\");\n}\n"
+      },
+      {
+        "path": "src/utils.py",
+        "language": "python",
+        "content": "import json\n\n\ndef encode_payload(payload):\n    return json.dumps(payload)\n"
+      },
+      {
+        "path": "src/serializer.py",
+        "language": "python",
+        "content": "from json import dumps as j\n\n\ndef encode_payload(payload):\n    return j(payload)\n"
+      }
+    ]
+  },
+  "queries": [
+    {
+      "id": "def_process_data",
+      "type": "find_definition",
+      "query": "process_data",
+      "expected": {
+        "file": "src/lib.rs",
+        "line_start": 1,
+        "kind": "function"
+      }
+    },
+    {
+      "id": "callers_process_data",
+      "type": "find_callers",
+      "query": "process_data",
+      "expected_callers": [
+        {
+          "function": "process_data",
+          "file": "src/main.rs",
+          "line": 4
+        }
+      ]
+    },
+    {
+      "id": "refs_process_data",
+      "type": "find_references",
+      "query": "process_data",
+      "expected_count": 2,
+      "expected_files": [
+        "src/lib.rs",
+        "src/main.rs"
+      ]
+    },
+    {
+      "id": "imports_json",
+      "type": "find_imports",
+      "query": "json",
+      "expected_importers": [
+        {
+          "file": "src/utils.py"
+        },
+        {
+          "file": "src/serializer.py",
+          "alias": "j"
+        }
+      ]
+    }
+  ],
+  "natural_language_queries": [
+    {
+      "id": "nl_definition",
+      "query": "where is process_data defined",
+      "expected_intent": "SymbolDefinition",
+      "expected_target": "process_data"
+    },
+    {
+      "id": "nl_callers",
+      "query": "who calls process_data",
+      "expected_intent": "SymbolCallers",
+      "expected_target": "process_data"
+    },
+    {
+      "id": "nl_references",
+      "query": "where is process_data used",
+      "expected_intent": "SymbolReferences",
+      "expected_target": "process_data"
+    },
+    {
+      "id": "nl_imports",
+      "query": "who imports json",
+      "expected_intent": "SymbolImports",
+      "expected_target": "json"
+    },
+    {
+      "id": "nl_semantic",
+      "query": "explain the payload encoding flow",
+      "expected_intent": "SemanticSearch"
+    }
+  ]
+}

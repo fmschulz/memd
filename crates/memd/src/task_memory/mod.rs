@@ -36,13 +36,13 @@ pub(crate) fn sanitize_tag_value(value: &str) -> String {
 }
 
 pub use digests::{
-    build_library_digest_artifact, build_project_brief_digest_artifact, build_project_brief_view,
+    DIGEST_ROLE_DECISION_LIBRARY, DIGEST_ROLE_EVIDENCE_LIBRARY, DIGEST_ROLE_FAILURE_LIBRARY,
+    DIGEST_ROLE_HIGHLIGHT_LIBRARY, DIGEST_ROLE_PROJECT_BRIEF, DIGEST_ROLE_TASK_RESUME,
+    DecisionViewItem, EvidenceViewItem, FailureViewItem, HighlightViewItem, ProjectBriefView,
+    RunDigestItem, TaskResumeView, build_library_digest_artifact,
+    build_project_brief_digest_artifact, build_project_brief_view,
     build_task_resume_digest_artifact, build_task_resume_view, infer_decision_items,
     infer_evidence_items, infer_failure_items, infer_highlight_items, stable_digest_identity,
-    DecisionViewItem, EvidenceViewItem, FailureViewItem, HighlightViewItem, ProjectBriefView,
-    RunDigestItem, TaskResumeView, DIGEST_ROLE_DECISION_LIBRARY, DIGEST_ROLE_EVIDENCE_LIBRARY,
-    DIGEST_ROLE_FAILURE_LIBRARY, DIGEST_ROLE_HIGHLIGHT_LIBRARY, DIGEST_ROLE_PROJECT_BRIEF,
-    DIGEST_ROLE_TASK_RESUME,
 };
 
 fn join_lines(items: &[String]) -> String {
@@ -136,6 +136,20 @@ impl ProjectionKind {
             Self::Validation => "validation",
         }
     }
+}
+
+/// Trust tier exposed at the MCP boundary.
+///
+/// Semantic retrieval can suggest candidates, but canonical artifacts remain
+/// the trust anchor and explicit verification artifacts sit above both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustTier {
+    #[default]
+    SemanticCandidate,
+    CanonicalRecord,
+    CompiledDigestHint,
+    VerifiedRecord,
 }
 
 /// Dataset reference attached to a task artifact.
@@ -673,6 +687,28 @@ fn is_verified_marker(value: Option<&str>) -> bool {
     )
 }
 
+pub fn derive_artifact_trust_tier(artifact: &TaskArtifact) -> TrustTier {
+    if artifact.artifact_kind == ArtifactKind::Verification
+        || artifact.promotion_state == PromotionState::Verified
+        || is_verified_marker(artifact.verification_status.as_deref())
+        || is_verified_marker(artifact.approval_state.as_deref())
+    {
+        return TrustTier::VerifiedRecord;
+    }
+
+    if artifact.artifact_kind == ArtifactKind::Digest {
+        return TrustTier::CompiledDigestHint;
+    }
+
+    TrustTier::CanonicalRecord
+}
+
+pub fn derive_chunk_trust_tier(artifact: Option<&TaskArtifact>) -> TrustTier {
+    artifact
+        .map(derive_artifact_trust_tier)
+        .unwrap_or(TrustTier::SemanticCandidate)
+}
+
 pub fn derive_artifact_promotion_state(artifact: &TaskArtifact) -> PromotionState {
     if artifact.artifact_kind == ArtifactKind::Digest {
         if is_verified_marker(artifact.verification_status.as_deref())
@@ -1070,9 +1106,11 @@ mod tests {
         let projections = build_task_projections(&artifact);
         assert!(projections.iter().any(|p| p.kind == ProjectionKind::Worked));
         assert!(projections.iter().any(|p| p.kind == ProjectionKind::Failed));
-        assert!(projections
-            .iter()
-            .any(|p| p.kind == ProjectionKind::Validation));
+        assert!(
+            projections
+                .iter()
+                .any(|p| p.kind == ProjectionKind::Validation)
+        );
     }
 
     #[test]
@@ -1116,9 +1154,11 @@ mod tests {
         run.tool_name = Some("mmseqs".to_string());
         run.command = Some("mmseqs search db query out tmp".to_string());
         let run_projections = build_task_projections(&run);
-        assert!(run_projections
-            .iter()
-            .any(|p| p.kind == ProjectionKind::Run));
+        assert!(
+            run_projections
+                .iter()
+                .any(|p| p.kind == ProjectionKind::Run)
+        );
 
         let mut evidence = TaskArtifact::new_evidence(tenant_id, "task-1");
         evidence.summary = Some("Top hit exceeded the threshold".to_string());
@@ -1126,9 +1166,11 @@ mod tests {
         evidence.supports_claim = Some(true);
         evidence.metrics = Some(serde_json::json!({"score": 0.93}));
         let evidence_projections = build_task_projections(&evidence);
-        assert!(evidence_projections
-            .iter()
-            .any(|p| p.kind == ProjectionKind::Evidence));
+        assert!(
+            evidence_projections
+                .iter()
+                .any(|p| p.kind == ProjectionKind::Evidence)
+        );
     }
 
     #[test]
@@ -1141,9 +1183,11 @@ mod tests {
             vec!["Prototype query flow returned the expected task state".to_string()];
         decision.promotion_state = derive_artifact_promotion_state(&decision);
         let decision_projections = build_task_projections(&decision);
-        assert!(decision_projections
-            .iter()
-            .any(|p| p.kind == ProjectionKind::Decision));
+        assert!(
+            decision_projections
+                .iter()
+                .any(|p| p.kind == ProjectionKind::Decision)
+        );
 
         let mut digest = TaskArtifact::new_digest(
             tenant_id,
@@ -1154,9 +1198,11 @@ mod tests {
         digest.summary = Some("Project brief for the current tenant".to_string());
         digest.promotion_state = derive_artifact_promotion_state(&digest);
         let digest_projections = build_task_projections(&digest);
-        assert!(digest_projections
-            .iter()
-            .any(|p| p.kind == ProjectionKind::Digest));
+        assert!(
+            digest_projections
+                .iter()
+                .any(|p| p.kind == ProjectionKind::Digest)
+        );
         assert_eq!(digest.promotion_state, PromotionState::Summarized);
     }
 }

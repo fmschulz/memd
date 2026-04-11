@@ -4,6 +4,7 @@
 //! This is the primary interface for agent integration.
 
 use std::io::{self, BufRead, Write};
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -21,31 +22,36 @@ use super::error::McpError;
 use super::handlers::{
     handle_artifact_create, handle_artifact_find_decisions, handle_artifact_find_evidence,
     handle_artifact_find_failures, handle_artifact_find_highlights, handle_artifact_get,
-    handle_artifact_list_thread, handle_artifact_search, handle_context_brief_project,
-    handle_context_find_relevant_context, handle_context_get_files_for_subsystem,
-    handle_context_get_hot_context, handle_context_list_subsystems,
-    handle_context_search_documents, handle_context_suggest_agent, handle_find_callers,
-    handle_find_definition, handle_find_errors, handle_find_imports, handle_find_references,
-    handle_find_tool_calls, handle_memory_add, handle_memory_add_batch, handle_memory_compact,
-    handle_memory_consolidate_episode, handle_memory_delete, handle_memory_feedback,
-    handle_memory_get, handle_memory_metrics, handle_memory_search, handle_memory_stats,
-    handle_task_add_evidence, handle_task_finish, handle_task_get, handle_task_progress,
-    handle_task_resume, handle_task_run_finish, handle_task_run_start, handle_task_search,
-    handle_task_start, AddBatchParams, AddParams, ArtifactCreateParams, ArtifactGetParams,
-    ArtifactLibraryParams, ArtifactListThreadParams, CompactParams, ConsolidateEpisodeParams,
-    ContextFindRelevantContextParams, ContextGetFilesForSubsystemParams,
-    ContextGetHotContextParams, ContextListSubsystemsParams, ContextSearchDocumentsParams,
-    ContextSuggestAgentParams, DeleteParams, FeedbackParams, FindCallersParams,
-    FindDefinitionParams, FindErrorsParams, FindImportsParams, FindReferencesParams,
-    FindToolCallsParams, GetParams, MetricsParams, ProjectBriefParams, SearchParams, StatsParams,
-    TaskAddEvidenceParams, TaskFinishParams, TaskGetParams, TaskProgressParams, TaskResumeParams,
-    TaskRunFinishParams, TaskRunStartParams, TaskSearchParams, TaskStartParams,
+    handle_artifact_list_thread, handle_artifact_search, handle_artifact_verify,
+    handle_context_brief_project, handle_context_find_relevant_context,
+    handle_context_get_files_for_subsystem, handle_context_get_hot_context,
+    handle_context_list_subsystems, handle_context_search_documents, handle_context_suggest_agent,
+    handle_find_callers, handle_find_definition, handle_find_errors, handle_find_imports,
+    handle_find_references, handle_find_tool_calls, handle_memory_add, handle_memory_add_batch,
+    handle_memory_compact, handle_memory_consolidate_episode, handle_memory_delete,
+    handle_memory_feedback, handle_memory_get, handle_memory_metrics, handle_memory_search,
+    handle_memory_stats, handle_task_add_evidence, handle_task_finish, handle_task_get,
+    handle_task_progress, handle_task_resume, handle_task_run_finish, handle_task_run_start,
+    handle_task_search, handle_task_start, AddBatchParams, AddParams, ArtifactCreateParams,
+    ArtifactGetParams, ArtifactLibraryParams, ArtifactListThreadParams, ArtifactVerifyParams,
+    CompactParams, ConsolidateEpisodeParams, ContextFindRelevantContextParams,
+    ContextGetFilesForSubsystemParams, ContextGetHotContextParams, ContextListSubsystemsParams,
+    ContextSearchDocumentsParams, ContextSuggestAgentParams, DeleteParams, FeedbackParams,
+    FindCallersParams, FindDefinitionParams, FindErrorsParams, FindImportsParams,
+    FindReferencesParams, FindToolCallsParams, GetParams, MetricsParams, ProjectBriefParams,
+    SearchParams, StatsParams, TaskAddEvidenceParams, TaskFinishParams, TaskGetParams,
+    TaskProgressParams, TaskResumeParams, TaskRunFinishParams, TaskRunStartParams,
+    TaskSearchParams, TaskStartParams,
 };
 use super::protocol::{Request, Response, RpcError};
 use super::tools::get_all_tools;
 use crate::metrics::MetricsCollector;
 use crate::store::{Store, TenantManager};
-use crate::structural::{SymbolQueryService, TraceQueryService};
+use crate::structural::{
+    CallGraphIndexer, CallGraphSymbolRecord, StructuralStore, SymbolIndexer, SymbolQueryService,
+    TraceQueryService,
+};
+use crate::types::TenantId;
 use crate::Config;
 
 /// Default MCP protocol version for the stdio path and legacy docs.
@@ -80,6 +86,9 @@ pub struct McpServer<S: Store> {
     store: Arc<S>,
     tenant_manager: Option<TenantManager>,
     metrics: Arc<MetricsCollector>,
+    structural_store: Option<Arc<StructuralStore>>,
+    symbol_indexer: Option<Arc<SymbolIndexer>>,
+    call_graph_indexer: Option<Arc<CallGraphIndexer>>,
     symbol_query_service: Option<Arc<SymbolQueryService>>,
     trace_query_service: Option<Arc<TraceQueryService>>,
     initialized: bool,
@@ -96,6 +105,9 @@ impl<S: Store> McpServer<S> {
             store,
             tenant_manager,
             metrics: Arc::new(MetricsCollector::default()),
+            structural_store: None,
+            symbol_indexer: None,
+            call_graph_indexer: None,
             symbol_query_service: None,
             trace_query_service: None,
             initialized: false,
@@ -111,10 +123,26 @@ impl<S: Store> McpServer<S> {
             store,
             tenant_manager,
             metrics,
+            structural_store: None,
+            symbol_indexer: None,
+            call_graph_indexer: None,
             symbol_query_service: None,
             trace_query_service: None,
             initialized: false,
         }
+    }
+
+    /// Set the structural store and indexers used to keep code navigation data current.
+    pub fn with_structural_indexers(
+        mut self,
+        store: Arc<StructuralStore>,
+        symbol_indexer: Arc<SymbolIndexer>,
+        call_graph_indexer: Arc<CallGraphIndexer>,
+    ) -> Self {
+        self.structural_store = Some(store);
+        self.symbol_indexer = Some(symbol_indexer);
+        self.call_graph_indexer = Some(call_graph_indexer);
+        self
     }
 
     /// Set the symbol query service for code navigation tools
@@ -127,6 +155,120 @@ impl<S: Store> McpServer<S> {
     pub fn with_trace_query_service(mut self, service: Arc<TraceQueryService>) -> Self {
         self.trace_query_service = Some(service);
         self
+    }
+
+    fn maybe_index_structural_chunk(
+        &self,
+        tenant_id: &str,
+        project_id: Option<&str>,
+        chunk_type: &str,
+        source_path: Option<&str>,
+        text: &str,
+    ) {
+        if !chunk_type.eq_ignore_ascii_case("code") {
+            return;
+        }
+        let Some(source_path) = source_path.filter(|value| !value.trim().is_empty()) else {
+            return;
+        };
+        let Some(structural_store) = self.structural_store.as_ref() else {
+            return;
+        };
+        let Some(symbol_indexer) = self.symbol_indexer.as_ref() else {
+            return;
+        };
+        let Some(call_graph_indexer) = self.call_graph_indexer.as_ref() else {
+            return;
+        };
+
+        let path = Path::new(source_path);
+        if crate::structural::detect_language(path).is_none() {
+            return;
+        }
+
+        let tenant_id = match TenantId::new(tenant_id) {
+            Ok(tenant_id) => tenant_id,
+            Err(error) => {
+                warn!(
+                    tenant_id = tenant_id,
+                    source_path = source_path,
+                    error = %error,
+                    "skipping structural indexing because tenant validation failed"
+                );
+                return;
+            }
+        };
+
+        let parsed = match crate::structural::parse_file(path, text) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                warn!(
+                    tenant_id = %tenant_id,
+                    source_path = source_path,
+                    error = %error,
+                    "skipping structural indexing because parsing failed"
+                );
+                return;
+            }
+        };
+
+        if let Err(error) = symbol_indexer.index_file(
+            &tenant_id,
+            project_id,
+            source_path,
+            &parsed.tree,
+            text.as_bytes(),
+            parsed.language,
+        ) {
+            warn!(
+                tenant_id = %tenant_id,
+                source_path = source_path,
+                error = %error,
+                "skipping structural indexing because symbol indexing failed"
+            );
+            return;
+        }
+
+        let file_symbols = match structural_store.find_symbols_by_file(&tenant_id, source_path) {
+            Ok(symbols) => symbols,
+            Err(error) => {
+                warn!(
+                    tenant_id = %tenant_id,
+                    source_path = source_path,
+                    error = %error,
+                    "skipping structural indexing because symbol lookup failed"
+                );
+                return;
+            }
+        };
+
+        let call_graph_symbols = file_symbols
+            .iter()
+            .filter_map(|symbol| {
+                symbol.symbol_id.map(|symbol_id| CallGraphSymbolRecord {
+                    symbol_id,
+                    name: symbol.name.clone(),
+                    start_line: symbol.line_start,
+                    end_line: symbol.line_end,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        if let Err(error) = call_graph_indexer.index_file(
+            &tenant_id,
+            source_path,
+            &parsed.tree,
+            text.as_bytes(),
+            parsed.language,
+            &call_graph_symbols,
+        ) {
+            warn!(
+                tenant_id = %tenant_id,
+                source_path = source_path,
+                error = %error,
+                "skipping structural indexing because call graph indexing failed"
+            );
+        }
     }
 
     /// Get reference to metrics collector
@@ -317,13 +459,56 @@ impl<S: Store> McpServer<S> {
             "memory.add" => {
                 let params: AddParams = serde_json::from_value(arguments)
                     .map_err(|e| McpError::InvalidParams(format!("invalid add params: {}", e)))?;
-                handle_memory_add(&*self.store, self.tenant_manager.as_ref(), params).await
+                let tenant_id = params.tenant_id.clone();
+                let project_id = params.project_id.clone();
+                let chunk_type = params.chunk_type.clone();
+                let source_path = params
+                    .source
+                    .as_ref()
+                    .and_then(|source| source.path.as_deref())
+                    .map(str::to_string);
+                let text = params.text.clone();
+                let response =
+                    handle_memory_add(&*self.store, self.tenant_manager.as_ref(), params).await?;
+                self.maybe_index_structural_chunk(
+                    &tenant_id,
+                    project_id.as_deref(),
+                    &chunk_type,
+                    source_path.as_deref(),
+                    &text,
+                );
+                Ok(response)
             }
             "memory.add_batch" => {
                 let params: AddBatchParams = serde_json::from_value(arguments).map_err(|e| {
                     McpError::InvalidParams(format!("invalid add_batch params: {}", e))
                 })?;
-                handle_memory_add_batch(&*self.store, self.tenant_manager.as_ref(), params).await
+                let tenant_id = params.tenant_id.clone();
+                let chunks_to_index = params
+                    .chunks
+                    .iter()
+                    .map(|chunk| {
+                        (
+                            chunk.project_id.clone(),
+                            chunk.chunk_type.clone(),
+                            chunk.source.as_ref().and_then(|source| source.path.clone()),
+                            chunk.text.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let response =
+                    handle_memory_add_batch(&*self.store, self.tenant_manager.as_ref(), params)
+                        .await?;
+                for (project_id, chunk_type, source_path, text) in chunks_to_index {
+                    self.maybe_index_structural_chunk(
+                        &tenant_id,
+                        project_id.as_deref(),
+                        &chunk_type,
+                        source_path.as_deref(),
+                        &text,
+                    );
+                }
+                Ok(response)
             }
             "task.start" => {
                 let params: TaskStartParams = serde_json::from_value(arguments).map_err(|e| {
@@ -401,6 +586,13 @@ impl<S: Store> McpServer<S> {
                     McpError::InvalidParams(format!("invalid artifact.search params: {}", e))
                 })?;
                 handle_artifact_search(&*self.store, params).await
+            }
+            "artifact.verify" => {
+                let params: ArtifactVerifyParams =
+                    serde_json::from_value(arguments).map_err(|e| {
+                        McpError::InvalidParams(format!("invalid artifact.verify params: {}", e))
+                    })?;
+                handle_artifact_verify(&*self.store, params).await
             }
             "artifact.find_failures" => {
                 let params: ArtifactLibraryParams =
@@ -744,7 +936,7 @@ async fn handle_http_post<S: Store + Send + Sync + 'static>(
                 StatusCode::BAD_REQUEST,
                 RpcError::parse_error(e.to_string()),
                 None,
-            )
+            );
         }
     };
 
@@ -763,7 +955,7 @@ async fn handle_http_post<S: Store + Send + Sync + 'static>(
                     StatusCode::BAD_REQUEST,
                     RpcError::invalid_request(e.to_string()),
                     protocol_version,
-                )
+                );
             }
         };
 
@@ -790,7 +982,7 @@ async fn handle_http_post<S: Store + Send + Sync + 'static>(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     RpcError::internal_error(e.to_string()),
                     protocol_version,
-                )
+                );
             }
         };
 
@@ -967,6 +1159,9 @@ mod tests {
             store,
             tenant_manager: None,
             metrics: Arc::new(MetricsCollector::default()),
+            structural_store: None,
+            symbol_indexer: None,
+            call_graph_indexer: None,
             symbol_query_service: None,
             trace_query_service: None,
             initialized: false,
