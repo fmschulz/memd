@@ -419,10 +419,12 @@ mod tests {
 
         let result = cache.insert(0, &wrong_embedding);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("dimension mismatch"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("dimension mismatch")
+        );
     }
 
     #[test]
@@ -451,10 +453,12 @@ mod tests {
         // Should fail with wrong dimension
         let result = cache.validate_consistency(256, 2);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("dimension mismatch"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("dimension mismatch")
+        );
 
         // Should fail with wrong count
         let result = cache.validate_consistency(384, 5);

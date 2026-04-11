@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 use super::{
-    apply_feedback_scores, split_for_add, FeedbackConfig, FeedbackEntry, Store, StoreStats,
+    FeedbackConfig, FeedbackEntry, Store, StoreStats, apply_feedback_scores, split_for_add,
 };
 use crate::error::Result;
 use crate::task_memory::{

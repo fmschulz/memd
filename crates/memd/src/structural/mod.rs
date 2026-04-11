@@ -18,11 +18,11 @@ pub use call_graph::{
     SymbolRecord as CallGraphSymbolRecord,
 };
 pub use parser::{
-    detect_language, parse_file, LanguageSupport, ParseError, ParseResult, SupportedLanguage,
+    LanguageSupport, ParseError, ParseResult, SupportedLanguage, detect_language, parse_file,
 };
 pub use queries::{
-    format_timestamp, parse_iso_datetime, CallerInfo, ErrorResult, ErrorSummary, FrameInfo,
-    ImportInfo, SymbolLocation, SymbolQueryService, ToolCallResult, TraceQueryService,
+    CallerInfo, ErrorResult, ErrorSummary, FrameInfo, ImportInfo, SymbolLocation,
+    SymbolQueryService, ToolCallResult, TraceQueryService, format_timestamp, parse_iso_datetime,
 };
 pub use router::{QueryIntent, QueryRouter, RouteResult};
 pub use storage::{
@@ -31,6 +31,6 @@ pub use storage::{
 };
 pub use symbols::{ExtractedSymbol, SymbolExtractor, SymbolIndexer};
 pub use traces::{
-    normalize_error_signature, DefaultTraceIndexer, ParsedFrame, StackTraceParser, TraceCapture,
-    TraceIndexer,
+    DefaultTraceIndexer, ParsedFrame, StackTraceParser, TraceCapture, TraceIndexer,
+    normalize_error_signature,
 };
