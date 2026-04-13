@@ -140,6 +140,38 @@ Trust boundary:
 
 Agents should follow this lifecycle whenever the work is substantive.
 
+### 0. Retrieve before refusal
+
+Before saying any of the following:
+
+- the task is impossible
+- the answer is not possible to determine
+- the work is blocked on missing context
+- you cannot proceed
+- you need to ask the user for information that might already exist in shared memory
+
+you MUST consult `memd` first.
+
+Minimum pre-refusal check:
+
+- if `project_id` is known and you need orientation, call `context.brief_project`
+- if `task_id` is known and you need task-local history, call `task.resume` or `task.get`
+- call at least one search surface appropriate to the question:
+  - `artifact.search` when prior artifacts or decisions are likely
+  - `task.search` when prior work structure matters
+  - `memory.search` when broader context is needed
+  - digest helpers such as `artifact.find_failures`, `artifact.find_decisions`, `artifact.find_evidence`, or `artifact.find_highlights` when the task matches those intents
+
+If the question is trust-sensitive, use `artifact.verify` before concluding that no grounded support exists.
+
+If `memd` returns nothing useful, say that explicitly:
+
+- checked `memd`
+- which surface you checked
+- that no relevant record was found
+
+If you have not checked `memd`, you are not allowed to conclude impossible, blocked, or unknowable for substantive work.
+
 ### 1. Start the task
 
 Use `task.start` before substantive work.

@@ -93,6 +93,31 @@ Optional wrapper install:
 ./memd-skill/install_memd_enforcement.sh --install-wrappers
 ```
 
+That installs:
+
+- `codex-memd` and `claude-memd` as lightweight convenience wrappers
+- `codex-memd-guard` and `claude-memd-guard` as stricter one-shot refusal guards
+- `memd-refusal-guard` as the shared helper used by the guarded wrappers
+
+Guarded wrapper scope:
+
+- `codex-memd-guard` is for `codex exec`-style one-shot runs
+- `claude-memd-guard` is for `claude -p` / `--print` one-shot runs
+- interactive sessions still rely on the instruction-level enforcement blocks
+
+Guarded wrapper environment:
+
+- `MEMD_URL` selects the memd HTTP endpoint to audit against
+- `MEMD_GUARD_TENANT_ID` selects the tenant used for the post-run tool-call audit
+
+Example:
+
+```bash
+MEMD_URL=http://127.0.0.1:8787/mcp \
+MEMD_GUARD_TENANT_ID=default \
+codex-memd-guard --skip-git-repo-check --ephemeral -C /path/to/repo "Investigate the failing benchmark"
+```
+
 ### Codex CLI
 
 ```bash
@@ -139,6 +164,7 @@ MCP registration makes the tools available. The instruction snippets below make 
 Use the `memd` MCP server as a shared knowledge base across sessions and agents.
 
 Before substantive work, search `memd` with the current `tenant_id`.
+Before saying the work is impossible, blocked, cannot be answered, or needs user context that might already exist in shared memory, consult `memd` first and say so explicitly if no relevant record is found.
 For meaningful work, record `task.start`, `task.progress`, `task.run_start`, `task.run_finish`, `task.add_evidence`, and `task.finish`.
 Use `artifact.create`, `artifact.search`, `artifact.get`, and `artifact.list_thread` when critique, revision, verification, or thread inspection matters.
 Use the same `tenant_id` for agents that should share knowledge unless the user asks for a different memory scope. On one trusted machine or trust domain, the preferred model is one stable shared tenant and narrower retrieval through `project_id`.
@@ -160,6 +186,7 @@ When `project_id` is supplied, the MCP retrieval path can also widen across othe
 Use the `memd` MCP server as a shared knowledge base across sessions and agents.
 
 Before substantive work, search `memd` with the current `tenant_id`.
+Before saying the work is impossible, blocked, cannot be answered, or needs user context that might already exist in shared memory, consult `memd` first and say so explicitly if no relevant record is found.
 For meaningful work, record `task.start`, `task.progress`, `task.run_start`, `task.run_finish`, `task.add_evidence`, and `task.finish`.
 Use `artifact.create`, `artifact.search`, `artifact.get`, and `artifact.list_thread` when critique, revision, verification, or thread inspection matters.
 Use the same `tenant_id` for agents that should share knowledge unless the user asks for a different memory scope. On one trusted machine or trust domain, the preferred model is one stable shared tenant and narrower retrieval through `project_id`.
@@ -205,9 +232,11 @@ claude mcp get memd
 That verifier checks:
 
 - the enforcement blocks exist in `~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`
+- the stronger pre-refusal memd-check rule exists in both files
 - `memd` is registered for both clients
 - Codex can write a task artifact into `memd`
 - Claude can recover that task artifact from the same shared tenant
+- if guarded wrappers are installed, a deliberate refusal-style one-shot response is blocked unless memd retrieval occurs first
 
 After that, verify that `memd` exposes the current tool surface, especially:
 

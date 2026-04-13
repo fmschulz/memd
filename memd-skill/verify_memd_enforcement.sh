@@ -10,6 +10,8 @@ CLAUDE_CONFIG="${TMP_DIR}/claude-mcp.json"
 MEMD_LOG="${TMP_DIR}/memd.log"
 CODEX_OUT="${TMP_DIR}/codex-out.txt"
 CLAUDE_OUT="${TMP_DIR}/claude-out.txt"
+GUARD_OUT="${TMP_DIR}/guard-out.txt"
+GUARD_ERR="${TMP_DIR}/guard-err.txt"
 
 cleanup() {
   if [[ -n "${MEMD_PID:-}" ]]; then
@@ -37,8 +39,18 @@ if ! grep -Fq "<!-- memd-enforcement:start -->" "${HOME}/.codex/AGENTS.md"; then
   exit 1
 fi
 
+if ! grep -Fq "Before saying the work is impossible, blocked, cannot be answered" "${HOME}/.codex/AGENTS.md"; then
+  echo "missing pre-refusal memd check rule in ~/.codex/AGENTS.md" >&2
+  exit 1
+fi
+
 if ! grep -Fq "<!-- memd-enforcement:start -->" "${HOME}/.claude/CLAUDE.md"; then
   echo "missing memd enforcement block in ~/.claude/CLAUDE.md" >&2
+  exit 1
+fi
+
+if ! grep -Fq "Before saying the work is impossible, blocked, cannot be answered" "${HOME}/.claude/CLAUDE.md"; then
+  echo "missing pre-refusal memd check rule in ~/.claude/CLAUDE.md" >&2
   exit 1
 fi
 
@@ -99,6 +111,32 @@ grep -Fqx 'Task task_start status in_progress for task' "${CLAUDE_OUT}" && {
 if ! grep -Fq 'verify memd enforcement' "${CLAUDE_OUT}"; then
   echo "Claude could not recover the Codex-written memd task artifact" >&2
   exit 1
+fi
+
+if command -v codex-memd-guard >/dev/null 2>&1; then
+  set +e
+  MEMD_URL="${URL}" MEMD_GUARD_TENANT_ID="${TENANT}" \
+    codex-memd-guard \
+      --skip-git-repo-check \
+      --ephemeral \
+      -C "${WORK_DIR}" \
+      "Answer exactly: I cannot proceed. Do not use any tools." \
+      >"${GUARD_OUT}" 2>"${GUARD_ERR}"
+  GUARD_STATUS=$?
+  set -e
+
+  if [[ "${GUARD_STATUS}" -ne 3 ]]; then
+    echo "codex-memd-guard did not block a refusal-style answer without memd retrieval" >&2
+    cat "${GUARD_OUT}" >&2 || true
+    cat "${GUARD_ERR}" >&2 || true
+    exit 1
+  fi
+
+  if ! grep -Fq 'memd refusal guard blocked the answer' "${GUARD_ERR}"; then
+    echo "codex-memd-guard exited 3 but did not emit the expected guard message" >&2
+    cat "${GUARD_ERR}" >&2 || true
+    exit 1
+  fi
 fi
 
 echo "Verified memd enforcement snippets, MCP registration, and cross-client shared task access over ${URL}"
