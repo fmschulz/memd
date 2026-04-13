@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MEMD_URL="${MEMD_URL:-http://127.0.0.1:8787/mcp}"
 INSTALL_WRAPPERS=0
 LOCAL_BIN="${HOME}/.local/bin"
@@ -14,7 +15,7 @@ Installs a stronger memd enforcement setup for Codex CLI and Claude Code by:
   - upserting stronger memd-usage instructions into:
       ~/.codex/AGENTS.md
       ~/.claude/CLAUDE.md
-  - optionally installing convenience wrappers in ~/.local/bin
+  - optionally installing convenience wrappers plus guarded one-shot wrappers in ~/.local/bin
 EOF
   exit 2
 }
@@ -89,6 +90,14 @@ install_wrapper() {
   chmod +x "$target"
 }
 
+install_file() {
+  local src="$1"
+  local target="$2"
+  mkdir -p "$LOCAL_BIN"
+  cp "$src" "$target"
+  chmod +x "$target"
+}
+
 require_cmd codex
 require_cmd claude
 
@@ -102,6 +111,8 @@ read -r -d '' ENFORCEMENT_SNIPPET <<'EOF' || true
 Mandatory `memd` contract for substantive technical and scientific work:
 
 - For any non-trivial engineering, debugging, analysis, literature review, benchmarking, or multi-step scientific work, you MUST search `memd` first using the current `tenant_id` and the available `project_id` / `challenge_id` when they exist.
+- Before saying the work is impossible, blocked, cannot be answered, or needs user context that might already exist in shared memory, you MUST consult `memd` first. At minimum, use the best-fit retrieval surface among `context.brief_project`, `task.resume` / `task.get`, `artifact.search`, `task.search`, `memory.search`, or the digest helpers. If trust matters, use `artifact.verify` before concluding that no grounded support exists.
+- If `memd` returns no relevant record, say that explicitly. If you have not checked `memd`, you are not allowed to give up on substantive work.
 - If the work changes understanding, runs tools, produces findings, or could matter to later sessions, you MUST record it in `memd`.
 - Use `task.start` before substantive work, `task.progress` for meaningful checkpoints, `task.run_start` / `task.run_finish` for substantive runs, `task.add_evidence` for concrete evidence, and `task.finish` at the stopping point.
 - Use `artifact.create`, `artifact.search`, `artifact.get`, and `artifact.list_thread` when critique, revision, verification, contributor tracking, or thread-level coordination matters.
@@ -123,6 +134,8 @@ upsert_block \
   "$ENFORCEMENT_SNIPPET"
 
 if [[ "$INSTALL_WRAPPERS" -eq 1 ]]; then
+  install_file "${SCRIPT_DIR}/memd_refusal_guard.py" "${LOCAL_BIN}/memd-refusal-guard"
+
   install_wrapper "${LOCAL_BIN}/codex-memd" "#!/usr/bin/env bash
 set -euo pipefail
 exec codex \"\$@\""
@@ -130,6 +143,14 @@ exec codex \"\$@\""
   install_wrapper "${LOCAL_BIN}/claude-memd" "#!/usr/bin/env bash
 set -euo pipefail
 exec claude \"\$@\""
+
+  install_wrapper "${LOCAL_BIN}/codex-memd-guard" "#!/usr/bin/env bash
+set -euo pipefail
+exec \"${LOCAL_BIN}/memd-refusal-guard\" codex \"\$@\""
+
+  install_wrapper "${LOCAL_BIN}/claude-memd-guard" "#!/usr/bin/env bash
+set -euo pipefail
+exec \"${LOCAL_BIN}/memd-refusal-guard\" claude \"\$@\""
 fi
 
 printf 'Installed memd enforcement for Codex CLI and Claude Code using %s\n' "$MEMD_URL"
@@ -137,5 +158,9 @@ printf 'Updated:\n'
 printf '  - %s\n' "${HOME}/.codex/AGENTS.md"
 printf '  - %s\n' "${HOME}/.claude/CLAUDE.md"
 if [[ "$INSTALL_WRAPPERS" -eq 1 ]]; then
-  printf 'Installed wrappers in %s\n' "$LOCAL_BIN"
+  printf 'Installed wrappers in %s:\n' "$LOCAL_BIN"
+  printf '  - %s\n' "${LOCAL_BIN}/codex-memd"
+  printf '  - %s\n' "${LOCAL_BIN}/claude-memd"
+  printf '  - %s\n' "${LOCAL_BIN}/codex-memd-guard"
+  printf '  - %s\n' "${LOCAL_BIN}/claude-memd-guard"
 fi
