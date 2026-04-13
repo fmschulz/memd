@@ -233,6 +233,15 @@ If you want stronger habitual `memd` usage from both clients, run:
 ./memd-skill/install_memd_enforcement.sh
 ```
 
+That stronger path now also injects a pre-refusal rule: for substantive work, agents must check `memd` before saying the task is impossible, blocked, or unknowable.
+
+If you also want runtime refusal guarding for one-shot runs, install wrappers and use:
+
+- `codex-memd-guard` for `codex exec`-style runs
+- `claude-memd-guard` for `claude -p` / `--print` runs
+
+Set `MEMD_URL` and `MEMD_GUARD_TENANT_ID` when the audited memd endpoint or tenant is not the default local setup.
+
 ## 9. Optional ONNX cross-encoder reranker
 
 ONNX here means the optional cross-encoder reranker, not the default embedding path.

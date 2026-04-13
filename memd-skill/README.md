@@ -12,6 +12,8 @@ It covers:
 - how multiple agents should share the same tenant
 - how Codex CLI and Claude Code connect to one shared local `memd` HTTP daemon
 - how to install stronger `memd`-usage enforcement into `~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`
+- how to require a pre-refusal `memd` check before agents say work is impossible or blocked
+- how to use guarded one-shot wrappers that fail closed on unsupported refusal-style outputs
 
 It also includes a bundled Linux binary:
 
