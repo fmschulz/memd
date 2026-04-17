@@ -380,25 +380,29 @@ impl DenseSearcher {
             .collect();
         drop(mapping);
 
-        // Use HnswRebuilder to create clean index
+        // Use HnswRebuilder to create a clean graph that excludes
+        // the deleted internal IDs.
         let rebuilder = HnswRebuilder::new();
-        let (_new_hnsw, result) = rebuilder.rebuild_clean(
+        let (new_hnsw, result) = rebuilder.rebuild_clean(
             existing_index,
             &deleted_internal_ids,
             existing_index.config(),
         )?;
 
-        // Note: Full integration would create a new HnswIndex with the
-        // rebuilt Hnsw graph and swap it into the indices map. This
-        // requires HnswIndex::from_rebuilt() constructor.
-        // For now, we return the rebuild result for metrics/logging.
+        // Phase 3.2: swap the new graph into the live HnswIndex AND
+        // mark the excluded IDs invalid in the embedding cache so
+        // save/load stay consistent with the rebuilt graph. Without
+        // the cache invalidation, a restart would resurrect the
+        // compacted-away points (the Codex-flagged durability gap).
+        existing_index.swap_graph(new_hnsw, &deleted_internal_ids);
 
         tracing::info!(
             tenant_id = %tenant_id,
             processed = result.embeddings_processed,
             included = result.embeddings_included,
             excluded = result.embeddings_excluded,
-            "HNSW rebuild completed for tenant"
+            duration_ms = result.duration.as_millis(),
+            "HNSW rebuild completed and swapped for tenant"
         );
 
         Ok(result)

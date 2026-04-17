@@ -73,6 +73,24 @@ impl EmbeddingCache {
         }
     }
 
+    /// Mark an internal_id as invalid. Subsequent `iter_valid` / `get`
+    /// calls ignore the slot.
+    ///
+    /// Phase 3.2 durability: the HNSW graph swap on compaction must
+    /// be persisted across restarts. Without this helper, `save()`
+    /// persisted the full embedding cache (including rows the new
+    /// graph excluded) and `load()` rebuilt the graph from the whole
+    /// cache — resurrecting compacted-away points. Callers flip the
+    /// valid bit here during swap so save/load reflects reality.
+    ///
+    /// Idempotent: marking an already-invalid slot is a no-op.
+    pub fn mark_invalid(&mut self, internal_id: usize) {
+        if internal_id < self.valid_ids.len() && self.valid_ids[internal_id] {
+            self.valid_ids[internal_id] = false;
+            self.count = self.count.saturating_sub(1);
+        }
+    }
+
     pub fn iter_valid(&self) -> impl Iterator<Item = (usize, &[f32])> + '_ {
         self.valid_ids
             .iter()
@@ -419,12 +437,10 @@ mod tests {
 
         let result = cache.insert(0, &wrong_embedding);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("dimension mismatch")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("dimension mismatch"));
     }
 
     #[test]
@@ -453,12 +469,10 @@ mod tests {
         // Should fail with wrong dimension
         let result = cache.validate_consistency(256, 2);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("dimension mismatch")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("dimension mismatch"));
 
         // Should fail with wrong count
         let result = cache.validate_consistency(384, 5);

@@ -118,6 +118,40 @@ pub struct HnswIndex {
 }
 
 impl HnswIndex {
+    /// Atomically replace the internal Hnsw graph with a rebuilt one
+    /// and mark the excluded entries invalid in the embedding cache.
+    ///
+    /// Phase 3.2: `rebuild_hnsw_for_tenant` used to compute a fresh
+    /// graph excluding deleted entries but then dropped it, leaving
+    /// the live index unchanged. This method closes that gap.
+    ///
+    /// Codex follow-up on 3.2: if we only replace the in-memory graph
+    /// and leave the embedding cache / mapping alone, a subsequent
+    /// `save()` persists the full cache, and on restart `load()`
+    /// rebuilds the graph from ALL cached embeddings — resurrecting
+    /// the points we just compacted away. To keep compaction durable
+    /// across restarts, `swap_graph` now also marks the excluded IDs
+    /// invalid in the embedding cache so `save` / `load` see the same
+    /// view as the live graph.
+    ///
+    /// The write-lock order is hnsw → embedding_cache; both are held
+    /// briefly and released before returning. Internal IDs remain
+    /// stable: we do NOT renumber, we just flip valid bits.
+    pub fn swap_graph(
+        &self,
+        new_hnsw: Hnsw<'static, f32, DistCosine>,
+        excluded_internal_ids: &std::collections::HashSet<usize>,
+    ) {
+        {
+            let mut guard = self.hnsw.write();
+            *guard = new_hnsw;
+        }
+        let mut cache = self.embedding_cache.write();
+        for id in excluded_internal_ids {
+            cache.mark_invalid(*id);
+        }
+    }
+
     /// Create a new empty HNSW index
     pub fn new(config: HnswConfig) -> Self {
         let hnsw = Hnsw::new(

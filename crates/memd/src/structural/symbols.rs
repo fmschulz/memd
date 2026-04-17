@@ -296,6 +296,21 @@ impl SymbolExtractor {
             }
 
             if let (Some(name), Some(node)) = (name, def_node) {
+                // Phase 3.7 parser hardening: drop symbols with empty
+                // names and symbols that live inside tree-sitter error
+                // recovery. Without this guard, a syntactically broken
+                // file would still feed truncated names and zero-span
+                // definitions into the structural index, which then
+                // surfaced as broken hits through code.find_definition
+                // / code.find_callers.
+                let trimmed_name = name.trim();
+                if trimmed_name.is_empty() {
+                    continue;
+                }
+                if node_has_error(node) {
+                    continue;
+                }
+
                 // Extract docstring from preceding comments
                 let docstring = extract_docstring(node, source, language);
 
@@ -309,7 +324,7 @@ impl SymbolExtractor {
                 let parent_name = find_parent_symbol(node, source, language);
 
                 symbols.push(ExtractedSymbol {
-                    name,
+                    name: trimmed_name.to_string(),
                     kind,
                     line_start: node.start_position().row as u32,
                     line_end: node.end_position().row as u32,
@@ -325,6 +340,31 @@ impl SymbolExtractor {
 
         symbols
     }
+}
+
+/// Return true when `node` itself or any ancestor is an error-recovery
+/// node produced by tree-sitter. Tree-sitter surfaces two kinds of
+/// problem nodes: `ERROR` nodes for unparseable regions, and `missing`
+/// nodes for implicit synthesizations. Either one means the symbol
+/// text is unreliable.
+fn node_has_error(mut node: tree_sitter::Node) -> bool {
+    if node.is_error() || node.is_missing() {
+        return true;
+    }
+    if node.has_error() {
+        // `has_error` is true for any subtree containing an ERROR
+        // node — use it on the definition node's range itself (not
+        // the whole tree), so unrelated errors elsewhere in the file
+        // do not kill otherwise-clean symbols.
+        return true;
+    }
+    while let Some(parent) = node.parent() {
+        if parent.is_error() || parent.is_missing() {
+            return true;
+        }
+        node = parent;
+    }
+    false
 }
 
 impl Default for SymbolExtractor {
@@ -564,7 +604,11 @@ fn extract_signature(
                 }
             }
 
-            if sig.is_empty() { None } else { Some(sig) }
+            if sig.is_empty() {
+                None
+            } else {
+                Some(sig)
+            }
         }
         SupportedLanguage::Python => {
             // Look for parameters
@@ -592,7 +636,11 @@ fn extract_signature(
                 }
             }
 
-            if sig.is_empty() { None } else { Some(sig) }
+            if sig.is_empty() {
+                None
+            } else {
+                Some(sig)
+            }
         }
         SupportedLanguage::Go => {
             // Look for parameters and result
@@ -1041,5 +1089,51 @@ fn helper() {}
         // Old symbols should be gone
         assert!(!found2.iter().any(|s| s.name == "foo"));
         assert!(!found2.iter().any(|s| s.name == "bar"));
+    }
+
+    /// Phase 3.7 regression: a source file with tree-sitter error
+    /// recovery (e.g. an unclosed function) must not bleed garbage
+    /// symbols into the index. Clean functions before and after the
+    /// broken region should still be extracted; the broken one must
+    /// be dropped.
+    #[test]
+    fn broken_rust_function_drops_error_span_symbol() {
+        use crate::structural::parser::parse_file;
+        use std::path::PathBuf;
+
+        // `process_data` is syntactically broken (unclosed brace +
+        // stray token). `process_before` and `process_after` are clean.
+        let source = "\
+fn process_before() -> u32 { 1 }
+
+fn process_data(input: &str) -> String {
+    let x =
+}
+
+fn process_after() -> u32 { 2 }
+";
+        let path = PathBuf::from("test.rs");
+        let result = parse_file(&path, source).expect("parser must not fail");
+        assert!(
+            result.has_errors(),
+            "test fixture must produce tree-sitter error recovery; \
+             if this assertion fires the fixture needs to be made more broken"
+        );
+
+        let extractor = SymbolExtractor::new();
+        let symbols =
+            extractor.extract(&result.tree, source.as_bytes(), result.language, "test.rs");
+
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"process_before"),
+            "clean function before broken region must index; got {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"process_after"),
+            "clean function after broken region must index; got {:?}",
+            names
+        );
     }
 }
