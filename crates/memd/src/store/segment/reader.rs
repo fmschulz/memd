@@ -6,13 +6,22 @@
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use memmap2::{Mmap, MmapOptions};
+use parking_lot::RwLock;
 
-use super::format::{PayloadIndexRecord, SEGMENT_MAGIC, SegmentMeta};
+use super::format::{PayloadIndexRecord, SegmentMeta, SEGMENT_MAGIC};
 use crate::store::TombstoneSet;
 
 /// Reader for a finalized segment
+///
+/// Phase 3.6: tombstones live behind `Arc<RwLock<TombstoneSet>>` so a
+/// delete no longer needs to take an exclusive lock on the enclosing
+/// `HashMap<u64, SegmentReader>`. Readers on other segments (and even
+/// reads on the same segment's payload bytes, which are mmap'd and
+/// immutable) can run concurrently with a tombstone update on this
+/// segment.
 pub struct SegmentReader {
     /// Segment identifier
     pub id: u64,
@@ -22,8 +31,10 @@ pub struct SegmentReader {
     payload_mmap: Mmap,
     /// Index records (offset, length, crc32)
     index: Vec<PayloadIndexRecord>,
-    /// Tombstone set for deleted ordinals
-    tombstones: TombstoneSet,
+    /// Tombstone set for deleted ordinals, shared behind an RwLock so
+    /// concurrent readers stay consistent with the latest persisted
+    /// delete without needing the enclosing segments map's write lock.
+    tombstones: Arc<RwLock<TombstoneSet>>,
 }
 
 impl SegmentReader {
@@ -53,7 +64,7 @@ impl SegmentReader {
             dir,
             payload_mmap,
             index,
-            tombstones,
+            tombstones: Arc::new(RwLock::new(tombstones)),
         })
     }
 
@@ -108,7 +119,7 @@ impl SegmentReader {
 
     /// Number of active (non-tombstoned) chunks
     pub fn active_count(&self) -> u32 {
-        self.chunk_count() - self.tombstones.deleted_count() as u32
+        self.chunk_count() - self.tombstones.read().deleted_count() as u32
     }
 
     /// Read chunk by ordinal, returns None if tombstoned or out of bounds
@@ -120,8 +131,9 @@ impl SegmentReader {
             return Ok(None);
         }
 
-        // Check tombstone
-        if self.tombstones.is_deleted(ordinal) {
+        // Check tombstone under a read lock so concurrent deletes on
+        // this segment stay consistent without blocking other readers.
+        if self.tombstones.read().is_deleted(ordinal) {
             return Ok(None);
         }
 
@@ -157,10 +169,15 @@ impl SegmentReader {
         Ok(Some(data.to_vec()))
     }
 
-    /// Mark ordinal as deleted (updates tombstone)
-    pub fn mark_deleted(&mut self, ordinal: u32) -> io::Result<()> {
-        self.tombstones.mark_deleted(ordinal);
-        self.tombstones
+    /// Mark ordinal as deleted (updates tombstone).
+    ///
+    /// Takes `&self` now (not `&mut self`) — the tombstone set has
+    /// interior mutability via `RwLock`, so callers no longer need to
+    /// take an exclusive lock on the enclosing segments map.
+    pub fn mark_deleted(&self, ordinal: u32) -> io::Result<()> {
+        let mut tombstones = self.tombstones.write();
+        tombstones.mark_deleted(ordinal);
+        tombstones
             .persist()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
     }
@@ -306,5 +323,50 @@ mod tests {
         assert_eq!(meta.id, 5);
         assert_eq!(meta.chunk_count, 1);
         assert!(meta.finalized);
+    }
+
+    /// Phase 3.6 regression: after `mark_deleted` returns Ok, any
+    /// subsequent `read_chunk` for the same ordinal — from any thread,
+    /// without re-acquiring the enclosing segments map's write lock —
+    /// must observe the deletion. Prior to this phase the tombstone
+    /// lived on the SegmentReader by value and only the `&mut self`
+    /// path could mutate it, so a reader holding a stale snapshot
+    /// could see `is_deleted == false` after a concurrent deleter
+    /// returned. The `Arc<RwLock<TombstoneSet>>` fix closes that gap.
+    #[test]
+    fn mark_deleted_is_visible_to_concurrent_reader() {
+        use std::sync::Arc;
+
+        let temp_dir = tempdir().unwrap();
+        let base_dir = temp_dir.path();
+
+        let mut writer = SegmentWriter::create(base_dir, 7).unwrap();
+        for i in 0..8u32 {
+            writer
+                .append_chunk(format!("chunk-{}", i).as_bytes())
+                .unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let seg_dir = base_dir.join("seg_000007");
+        let reader = Arc::new(SegmentReader::open(seg_dir).unwrap());
+
+        // Share the SAME SegmentReader across two threads. Thread A
+        // deletes ordinal 3, thread B reads ordinal 3 after A returns.
+        let reader_a = Arc::clone(&reader);
+        let t_a = std::thread::spawn(move || {
+            reader_a.mark_deleted(3).unwrap();
+        });
+        t_a.join().unwrap();
+
+        let read_result = reader.read_chunk(3).unwrap();
+        assert!(
+            read_result.is_none(),
+            "concurrent reader must observe the tombstone after mark_deleted returned"
+        );
+
+        // Untouched ordinals still read normally.
+        let ok = reader.read_chunk(5).unwrap();
+        assert_eq!(ok.as_deref(), Some(b"chunk-5".as_slice()));
     }
 }

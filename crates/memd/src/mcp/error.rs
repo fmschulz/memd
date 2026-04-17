@@ -2,7 +2,7 @@
 //!
 //! Maps MCP error conditions to JSON-RPC error codes.
 
-use super::protocol::{RpcError, error_codes};
+use super::protocol::{error_codes, RpcError};
 
 /// MCP-specific error variants
 #[derive(Debug, Clone)]
@@ -43,6 +43,19 @@ impl McpError {
             McpError::InvalidParams(msg) => msg,
             McpError::InternalError(msg) => msg,
             McpError::ToolError(msg) => msg,
+        }
+    }
+
+    /// Short kebab-case label describing the variant — used as the
+    /// `reason` bucket in Phase 4.4 rejection metrics.
+    pub fn reason_label(&self) -> &'static str {
+        match self {
+            McpError::ParseError(_) => "parse-error",
+            McpError::InvalidRequest(_) => "invalid-request",
+            McpError::MethodNotFound(_) => "method-not-found",
+            McpError::InvalidParams(_) => "invalid-params",
+            McpError::InternalError(_) => "internal-error",
+            McpError::ToolError(_) => "tool-error",
         }
     }
 }

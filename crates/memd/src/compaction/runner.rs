@@ -6,11 +6,11 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use crate::compaction::CompactionConfig;
 use crate::compaction::hnsw_rebuild::RebuildResult;
 use crate::compaction::metrics::CompactionMetrics;
 use crate::compaction::segment_merge::{MergeResult, SegmentMerger};
 use crate::compaction::throttle::{Throttle, ThrottleConfig};
+use crate::compaction::CompactionConfig;
 use crate::error::Result;
 use crate::index::Bm25Index;
 use crate::store::dense::DenseSearcher;

@@ -129,6 +129,24 @@ pub struct TieredQueryMetrics {
     pub hot_tier_hit: bool,
 }
 
+/// Per-(tool, reason) rejection counter.
+///
+/// Phase 4.4: every time a tool call surfaces an `McpError` (invalid
+/// params, method not found, internal error, etc.) we bump the
+/// matching counter. Operators can then see at a glance which tool
+/// is producing which kind of rejection — historically these errors
+/// flew straight back to the client with no aggregate visibility.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RejectionStats {
+    /// Total rejections across all tools/reasons.
+    pub total: u64,
+    /// Per-tool rejection counts, keyed by tool name (e.g. `"memory.search"`).
+    pub by_tool: HashMap<String, u64>,
+    /// Per-reason rejection counts, keyed by McpError variant name
+    /// (e.g. `"invalid_params"`, `"method_not_found"`).
+    pub by_reason: HashMap<String, u64>,
+}
+
 /// Complete metrics snapshot
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MetricsSnapshot {
@@ -142,6 +160,9 @@ pub struct MetricsSnapshot {
     pub recent_queries: Vec<QueryMetrics>,
     /// Tiered search metrics
     pub tiered: TieredMetrics,
+    /// Phase 4.4: per-tool / per-reason rejection counts.
+    #[serde(default)]
+    pub rejections: RejectionStats,
 }
 
 /// Metrics collector
@@ -165,6 +186,10 @@ pub struct MetricsCollector {
     tiered_demotions: AtomicU64,
     /// Recent tiered query metrics for latency averaging
     tiered_latencies: RwLock<Vec<TieredQueryMetrics>>,
+    /// Phase 4.4: per-tool and per-reason rejection counts.
+    rejections_total: AtomicU64,
+    rejections_by_tool: RwLock<HashMap<String, u64>>,
+    rejections_by_reason: RwLock<HashMap<String, u64>>,
 }
 
 impl Default for MetricsCollector {
@@ -189,6 +214,9 @@ impl Clone for MetricsCollector {
             tiered_promotions: AtomicU64::new(self.tiered_promotions.load(Ordering::Relaxed)),
             tiered_demotions: AtomicU64::new(self.tiered_demotions.load(Ordering::Relaxed)),
             tiered_latencies: RwLock::new(self.tiered_latencies.read().clone()),
+            rejections_total: AtomicU64::new(self.rejections_total.load(Ordering::Relaxed)),
+            rejections_by_tool: RwLock::new(self.rejections_by_tool.read().clone()),
+            rejections_by_reason: RwLock::new(self.rejections_by_reason.read().clone()),
         }
     }
 }
@@ -210,6 +238,39 @@ impl MetricsCollector {
             tiered_promotions: AtomicU64::new(0),
             tiered_demotions: AtomicU64::new(0),
             tiered_latencies: RwLock::new(Vec::with_capacity(max_history)),
+            rejections_total: AtomicU64::new(0),
+            rejections_by_tool: RwLock::new(HashMap::new()),
+            rejections_by_reason: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Phase 4.4: record a rejected tool call.
+    ///
+    /// `tool` is the MCP tool name (e.g. `"memory.search"`). `reason`
+    /// is a short kebab-case label like `"invalid-params"` or
+    /// `"method-not-found"` — typically derived from the `McpError`
+    /// variant. Cheap path: three atomic/lock ops, no allocation
+    /// beyond the HashMap entry when a new key is seen.
+    pub fn record_rejection(&self, tool: &str, reason: &str) {
+        self.rejections_total.fetch_add(1, Ordering::Relaxed);
+        *self
+            .rejections_by_tool
+            .write()
+            .entry(tool.to_string())
+            .or_insert(0) += 1;
+        *self
+            .rejections_by_reason
+            .write()
+            .entry(reason.to_string())
+            .or_insert(0) += 1;
+    }
+
+    /// Phase 4.4: read the current rejection aggregate.
+    pub fn get_rejection_stats(&self) -> RejectionStats {
+        RejectionStats {
+            total: self.rejections_total.load(Ordering::Relaxed),
+            by_tool: self.rejections_by_tool.read().clone(),
+            by_reason: self.rejections_by_reason.read().clone(),
         }
     }
 
@@ -355,6 +416,7 @@ impl MetricsCollector {
             latency: self.get_latency_stats(),
             recent_queries: self.get_recent_queries(10),
             tiered: self.get_tiered_stats(),
+            rejections: self.get_rejection_stats(),
         }
     }
 }
@@ -603,6 +665,28 @@ mod tests {
         assert_eq!(snapshot.tiered.cache_lookups, 1);
         assert_eq!(snapshot.tiered.cache_hits, 1);
         assert_eq!(snapshot.tiered.promotions, 1);
+    }
+
+    #[test]
+    fn rejection_stats_record_and_snapshot() {
+        let collector = MetricsCollector::new(100);
+
+        collector.record_rejection("memory.search", "invalid-params");
+        collector.record_rejection("memory.search", "invalid-params");
+        collector.record_rejection("memory.search", "tool-error");
+        collector.record_rejection("task.start", "invalid-params");
+
+        let stats = collector.get_rejection_stats();
+        assert_eq!(stats.total, 4);
+        assert_eq!(stats.by_tool.get("memory.search"), Some(&3));
+        assert_eq!(stats.by_tool.get("task.start"), Some(&1));
+        assert_eq!(stats.by_reason.get("invalid-params"), Some(&3));
+        assert_eq!(stats.by_reason.get("tool-error"), Some(&1));
+
+        // Rejection stats must also flow into the full snapshot.
+        let snapshot = collector.snapshot(HashMap::new());
+        assert_eq!(snapshot.rejections.total, 4);
+        assert_eq!(snapshot.rejections.by_tool.get("memory.search"), Some(&3));
     }
 
     #[test]

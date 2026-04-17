@@ -29,8 +29,18 @@ impl TenantId {
         Ok(Self(id))
     }
 
-    /// Validate a tenant id string
-    fn validate(id: &str) -> Result<()> {
+    /// Validate a tenant id string.
+    ///
+    /// `tenant_id` is used both as a storage directory name and as a
+    /// logical partition key. The allowed charset is intentionally narrow
+    /// — ASCII alphanumeric plus underscore — so that tenant values cannot
+    /// escape the storage root via `..` / path separators, cannot embed
+    /// null bytes, and cannot carry non-UTF-8 garbage.
+    ///
+    /// Exposed as `pub` (not module-private) so every boundary that turns
+    /// a caller-supplied string into a tenant path (MCP handlers,
+    /// `discover_and_recover_tenants`, …) can verify consistently.
+    pub fn validate(id: &str) -> Result<()> {
         if id.is_empty() {
             return Err(MemdError::ValidationError(
                 "tenant_id cannot be empty".to_string(),

@@ -1,159 +1,159 @@
 # memd
 
-[![Version](https://img.shields.io/badge/version-0.3.0-blue)](https://github.com/fmschulz/memd/releases/tag/v0.3.0)
+[![Version](https://img.shields.io/badge/version-0.4.0-blue)](https://github.com/fmschulz/memd/releases/tag/v0.4.0)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-`memd` is a local MCP server and shared knowledge base for coding agents and AI scientists.
+`memd` is a local MCP daemon that gives coding agents and AI scientists a single
+shared, persistent memory: raw searchable content, structured task history, and
+canonical collaboration artifacts — indexed by a hybrid dense + sparse retrieval
+stack and gated by an explicit trust boundary.
 
-It does three things:
+Every session on the same machine talks to one `memd` over HTTP, so task
+context, evidence, decisions, and digests carry across agents, models, and
+restarts without copy-paste.
 
-- stores raw searchable chunks with `memory.*`
-- stores structured task history with `task.*`
-- stores canonical knowledge artifacts and collaboration threads with `artifact.*`
+## Contents
 
-It also exposes structural code-navigation and debug tools:
+- [What it does](#what-it-does)
+- [Architecture](#architecture)
+- [Quick start](#quick-start)
+- [Tool surface](#tool-surface)
+- [Trust boundary](#trust-boundary)
+- [Shared topology](#shared-topology)
+- [Data layout](#data-layout)
+- [Configuration](#configuration)
+- [Observability](#observability)
+- [Benchmarks](#benchmarks)
+- [Optional ONNX cross-encoder](#optional-onnx-cross-encoder)
+- [Agent skill](#agent-skill)
+- [More](#more)
 
-- `code.find_definition`
-- `code.find_references`
-- `code.find_callers`
-- `code.find_imports`
-- `debug.find_tool_calls`
-- `debug.find_errors`
+## What it does
 
-Use `memory.*` for code, docs, notes, and indexed files.
+| Surface | Purpose | Primary tools |
+| --- | --- | --- |
+| `memory.*` | Raw searchable chunks (code, docs, notes, indexed files) | `memory.add`, `memory.add_batch`, `memory.search`, `memory.compact` |
+| `task.*` | Structured work history: goal, runs, evidence, outcomes | `task.start`, `task.progress`, `task.run_start`, `task.run_finish`, `task.add_evidence`, `task.finish`, `task.resume` |
+| `artifact.*` | Canonical collaboration: reviews, revisions, decisions, verifications, threads | `artifact.review`, `artifact.revision`, `artifact.decision`, `artifact.verification`, `artifact.list_thread`, `artifact.find_related` |
+| `code.*` | Structural navigation over indexed source | `code.find_definition`, `code.find_references`, `code.find_callers`, `code.find_imports` |
+| `context.*` | Summary-first briefing and retrieval | `context.brief_project`, `context.find_relevant_context`, `context.get_hot_context` |
+| `debug.*` | Post-hoc session introspection | `debug.find_tool_calls`, `debug.find_errors` |
 
-Use `task.*` for work that has:
+Use `memory.search`, `task.search`, or `artifact.search` with `mode` set to
+`brief_project`, `resume_task`, `find_failures`, `find_decisions`,
+`find_evidence`, or `find_highlights` to bias retrieval toward persisted
+digests and canonical summaries.
 
-- a goal
-- a reason
-- runs and parameters
-- evidence
-- what worked
-- what failed
+## Architecture
 
-Use `artifact.*` for collaboration around that work:
+```mermaid
+flowchart TB
+  subgraph Clients
+    direction LR
+    CA[Coding agent]
+    SA[AI scientist]
+    HU[Human via CLI]
+  end
 
-- critique and revision
-- verification and review state
-- shared threads and challenge spaces
-- contributor records
-- optional safety metadata for local prototypes
+  subgraph Transport
+    direction LR
+    HTTP[HTTP /mcp<br/>JSON-RPC 2.0]
+    STDIO[stdio JSON-RPC]
+  end
 
-For summary-first retrieval and onboarding, `memd` also persists digest artifacts and exposes dedicated briefing and library helpers:
+  subgraph Server[memd daemon]
+    direction TB
+    DISP[McpServer dispatcher<br/>Arc&lt;McpServer&gt;, &self handlers]
+    HND[Tool handlers<br/>memory / task / artifact / code / context / debug]
+    MET[MetricsCollector<br/>rejection + cache stats]
+    SWP[Background digest sweeper<br/>tokio::interval]
+  end
 
-- `context.brief_project`
-- `task.resume`
-- `artifact.find_failures`
-- `artifact.find_decisions`
-- `artifact.find_evidence`
-- `artifact.find_highlights`
+  subgraph Retrieval[Hybrid retrieval]
+    direction LR
+    HYB[HybridSearcher]
+    DEN[DenseSearcher<br/>HNSW + ArcSwap rebuild]
+    SPR[Bm25Index<br/>tantivy, open_or_create]
+    TIE[TieredSearcher<br/>hot + semantic cache]
+    XE[Optional ONNX<br/>cross-encoder reranker]
+  end
 
-`memory.search`, `task.search`, and `artifact.search` also accept `mode` with `brief_project`, `resume_task`, `find_failures`, `find_decisions`, `find_evidence`, or `find_highlights` to bias retrieval toward those persisted digests and canonical summaries.
+  subgraph Storage[Persistent store]
+    direction LR
+    POOL[SqliteConnectionPool<br/>bounded, WAL mode]
+    SEG[Segment writer<br/>flush_payload + fsync]
+    WAL[WAL<br/>checkpoint + replay]
+    STRUCT[Structural index<br/>tree-sitter symbols + edges]
+  end
 
-Trust boundary:
+  subgraph Disk[On-disk layout]
+    direction LR
+    DB[(metadata.db)]
+    SEGS[(tenants/&lt;t&gt;/segments/)]
+    WALF[(tenants/&lt;t&gt;/wal.log)]
+    SPI[(sparse_index/)]
+    WI[(warm_index/)]
+  end
 
-- `memory.search`, `task.search`, `artifact.search`, and digest helpers are candidate-generation surfaces
-- canonical non-digest artifacts are the trust anchor
-- persisted digests are compiled hints, not self-authenticating truth
-- use `artifact.verify` when a claim must be grounded against canonical artifacts before you trust it
+  CA --> HTTP
+  SA --> HTTP
+  HU --> STDIO
+  HTTP --> DISP
+  STDIO --> DISP
+  DISP --> HND
+  DISP --> MET
+  DISP --> SWP
+  HND --> HYB
+  HND --> POOL
+  HND --> STRUCT
+  HYB --> DEN
+  HYB --> SPR
+  HYB --> TIE
+  HYB --> XE
+  DEN --> WI
+  SPR --> SPI
+  POOL --> DB
+  HND --> SEG
+  SEG --> SEGS
+  SEG --> WAL
+  WAL --> WALF
+  STRUCT --> DB
+  SWP --> HND
+```
 
-## What You Need
+The runtime stack is designed so concurrent MCP requests are not serialized on
+a global mutex: handlers dispatch through `Arc<McpServer>` with `&self`, SQLite
+is accessed through a bounded connection pool under WAL-mode locking, and HNSW
+rebuilds swap atomically without blocking readers.
 
-- Rust
-- Python 3 for the benchmark scripts
-
-## Build
+## Quick start
 
 ```bash
 cargo build --release
 ./target/release/memd --version
 ```
 
-## Run
-
-For a shared local daemon that multiple agent, scientist, or human-guided sessions can use:
+Start the shared local daemon:
 
 ```bash
 ./target/release/memd --mode mcp --transport http --http-bind 127.0.0.1:8787
 ```
 
-For the legacy stdio subprocess mode:
+Legacy stdio subprocess mode:
 
 ```bash
 ./target/release/memd --mode mcp
 ```
 
-For a throwaway shared-daemon run:
+Ephemeral run (no persistence):
 
 ```bash
-./target/release/memd --mode mcp --transport http --http-bind 127.0.0.1:8787 --in-memory --data-dir /tmp/memd-demo
+./target/release/memd --mode mcp --transport http \
+  --http-bind 127.0.0.1:8787 --in-memory --data-dir /tmp/memd-demo
 ```
 
-## Shared Topology
-
-Recommended use is one local `memd` daemon per machine, with multiple coding-agent and AI-scientist sessions connecting to the same `/mcp` endpoint.
-
-```text
-+----------------------- Machine A: memd host -----------------------+
-| +---------------+   HTTP MCP   +-------------------------------+   |
-| | Coding agent  | -----------> |                               |   |
-| +---------------+              | memd daemon                   |   |
-| +---------------+   HTTP MCP   | 127.0.0.1:8787/mcp           |   |
-| | AI scientist  | -----------> |                               |   |
-| +---------------+              +---------------+---------------+   |
-|                                                |                   |
-|                                                | persistent store  |
-|                                                v                   |
-|                                  +-------------------------------+ |
-|                                  | metadata.db                   | |
-|                                  | tenants/<tenant>/wal.log      | |
-|                                  | tenants/<tenant>/segments/    | |
-|                                  | sparse_index/ + warm_index/   | |
-|                                  +-------------------------------+ |
-+--------------------------------------------------------------------+
-
-+---------------- Machine B: optional remote clients ----------------+
-| +---------------+                                  +-------------+ |
-| | Coding agent  | -- private network or tunnel --> | same /mcp  | |
-| | AI scientist  | -- private network or tunnel --> | endpoint    | |
-| +---------------+                                  +-------------+ |
-+--------------------------------------------------------------------+
-```
-
-Mermaid source for the same topology:
-
-```mermaid
-flowchart LR
-  subgraph MA[Machine A: memd host]
-    C1[Coding agent]
-    A1[AI scientist]
-    M[(memd HTTP MCP daemon\n127.0.0.1:8787/mcp)]
-    D[(metadata.db + tenant WAL + segments)]
-    C1 -->|HTTP MCP| M
-    A1 -->|HTTP MCP| M
-    M -->|persistent store| D
-  end
-
-  subgraph MB[Machine B: optional remote clients]
-    C2[Coding agent]
-    A2[AI scientist]
-  end
-
-  C2 -->|private network or tunnel| M
-  A2 -->|private network or tunnel| M
-```
-
-Current boundary conditions:
-
-- same-machine shared sessions are the primary supported path
-- cross-machine access is possible by exposing the HTTP endpoint over a private network or tunnel
-- `memd` does not yet provide built-in multi-user authentication or server-enforced account isolation
-- `tenant_id` is still caller-supplied logical partitioning, not an auth boundary
-- on one trusted machine or trust domain, prefer one stable shared `tenant_id` and use `project_id`, `thread_id`, and `task_id` for narrower retrieval scopes
-- when `project_id` is supplied, project-scoped retrieval can now widen across other local tenants on the same daemon that already contain that project; this is a compatibility fallback for older fragmented history, not the preferred steady state
-
-## Basic Use
-
-Start a task:
+Start a task — in v0.4+ only `goal` is required; `tenant_id` falls through
+`$MEMD_DEFAULT_TENANT` → `~/.memd/default_tenant` → `"default"`:
 
 ```json
 {
@@ -163,113 +163,201 @@ Start a task:
   "params": {
     "name": "task.start",
     "arguments": {
-      "tenant_id": "demo",
-      "project_id": "auth",
-      "goal": "Find the JWT bug",
-      "motivation": "Requests are failing in production",
-      "hypothesis": "Time handling is inconsistent",
-      "scientific_question": "Where does the timestamp skew happen?",
-      "expected_outputs": ["root cause", "fix"]
+      "goal": "Diagnose token validation failures",
+      "project_id": "auth"
     }
   }
 }
 ```
 
-Then record progress with:
+A focused artifact tool — `agent_id` is required for distinct-writer
+countersignatures:
 
-- `task.progress`
-- `task.run_start`
-- `task.run_finish`
-- `task.add_evidence`
-- `task.finish`
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+    "name": "artifact.verification",
+    "arguments": {
+      "reply_to_artifact_id": "01JABCXYZ...",
+      "agent_id": "reviewer-1",
+      "summary": "Reproduced the fix; token skew resolved",
+      "supports_claim": true
+    }
+  }
+}
+```
 
-For digest-backed summaries and summary-first retrieval, use:
+See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough.
 
-- `context.brief_project`
-- `task.resume`
-- `artifact.find_failures`
-- `artifact.find_decisions`
-- `artifact.find_evidence`
-- `artifact.find_highlights`
+## Tool surface
 
-`memory.search`, `task.search`, and `artifact.search` also accept `mode` so the same retrieval surfaces can prefer persisted briefs, task resumes, or failure/decision/evidence/highlight libraries when that is the intent.
+### `memory.*` — raw searchable content
 
-When `project_id` is supplied, project-scoped retrieval on the shared daemon can also recover same-project history that was previously written under a different local tenant. This reduces continuity loss from older fragmented writes, but future collaborating agents should still use one stable shared `tenant_id`.
+- `memory.add` — single chunk (code, doc, note; code chunks with a real
+  `source.path` are parsed into the structural index)
+- `memory.add_batch` — many chunks in one call
+- `memory.search` — hybrid retrieval with optional `mode` and `project_id`
+- `memory.get`, `memory.delete`, `memory.stats`, `memory.metrics`
+- `memory.compact` — explicit digest refresh; supports `digest_modes` and
+  `force_digest_rebuild`
 
-For collaboration around the same work, use:
+### `task.*` — structured work
 
-- `artifact.create`
-- `artifact.get`
-- `artifact.search`
-- `artifact.verify`
-- `artifact.list_thread`
+- `task.start` (only `goal` required), `task.progress`, `task.finish`
+- `task.run_start` / `task.run_finish` for substantive runs
+- `task.add_evidence` for concrete evidence against a task
+- `task.get`, `task.search`, `task.resume`
 
-For raw context, use:
+### `artifact.*` — focused collaboration tools (v0.4)
 
-- `memory.add`
-- `memory.add_batch`
-- `memory.search`
+The single 50-field `artifact.create` has been split into four focused tools
+with tight schemas:
 
-For structural code navigation, index code chunks with a real `source.path`.
-Supported code chunks added through `memory.add` or `memory.add_batch` are now
-parsed into the structural index when `chunk_type=code` and `source.path` is present.
+- `artifact.review` — request a review; attach summary and requested action
+- `artifact.revision` — supersede a prior artifact with `superseded_by` lineage
+- `artifact.decision` — choose between alternatives with `why_chosen`
+- `artifact.verification` — distinct-writer countersignature; with a different
+  `agent_id` than the parent's and `supports_claim = true` it promotes the
+  underlying claim to `VerifiedRecord` trust
 
-To refresh project brief and failure/decision/evidence/highlight digests explicitly, call `memory.compact` with `project_id` and, when needed, `digest_modes` plus `force_digest_rebuild`.
+Inspection and retrieval:
 
-When a retrieved summary or search hit matters enough to trust, use the explicit grounded path:
+- `artifact.get`, `artifact.search`, `artifact.list_thread`
+- `artifact.find_related` (retrieval helper; former `artifact.verify` alias is
+  deprecated but still works)
+- `artifact.find_failures`, `artifact.find_decisions`, `artifact.find_evidence`,
+  `artifact.find_highlights`
 
-1. `memory.search` / `task.search` / `artifact.search`
-2. `artifact.verify`
-3. trust the grounded supporting artifact IDs, not the digest text alone
+`artifact.create` remains registered for backwards compatibility with a
+deprecation warning. Digest artifacts are server-generated and cannot be forged
+through `artifact.create`.
 
-Optional artifact safety metadata is supported through `artifact.create`:
+### `code.*` — structural navigation
 
-- `compute_budget`
-- `cost_actual`
-- `data_access_level`
-- `policy_tags`
-- `allowed_tools`
-- `approval_state`
+`code.find_definition`, `code.find_references`, `code.find_callers`,
+`code.find_imports`. Index source by calling `memory.add` with
+`type = "code"` and a real `source.path`.
 
-Those fields are optional in the current local prototype.
+### `context.*` — summary-first retrieval
 
-## Data Location
+`context.brief_project`, `context.find_relevant_context`,
+`context.get_hot_context`, `context.get_files_for_subsystem`,
+`context.list_subsystems`, `context.suggest_agent`.
+
+## Trust boundary
+
+```mermaid
+flowchart LR
+  S[Candidate generation<br/>memory.search / task.search / artifact.search /<br/>digest helpers / artifact.find_related] --> R[Canonical artifacts<br/>Review / Revision / Decision / Verification]
+  R -->|distinct agent_id<br/>supports_claim = true| V[VerifiedRecord<br/>trust tier]
+  R -.single writer.-> C[CanonicalRecord<br/>trust tier]
+```
+
+- `memory.search`, `task.search`, `artifact.search`, and digest helpers are
+  **candidate-generation surfaces**.
+- Canonical non-digest artifacts are the **trust anchor**.
+- Persisted digests are **compiled hints**, not self-authenticating truth.
+- `artifact.find_related` retrieves canonical artifacts that overlap a claim;
+  a retrieval hit is only **supporting evidence**, not trust.
+- `VerifiedRecord` trust requires an **independent reviewer with a distinct
+  `agent_id`** submitting an `artifact.verification` with `supports_claim =
+  true`. A single agent cannot self-label as verified.
+
+## Shared topology
+
+The recommended deployment is one local `memd` per machine, with multiple
+coding-agent and AI-scientist sessions connecting to the same `/mcp` endpoint.
+
+```mermaid
+flowchart LR
+  subgraph MA[Machine A: memd host]
+    C1[Coding agent]
+    A1[AI scientist]
+    M[(memd HTTP MCP<br/>127.0.0.1:8787/mcp)]
+    D[(metadata.db +<br/>tenant WAL + segments)]
+    C1 -->|HTTP MCP| M
+    A1 -->|HTTP MCP| M
+    M --> D
+  end
+
+  subgraph MB[Machine B: optional remote clients]
+    C2[Coding agent]
+    A2[AI scientist]
+  end
+
+  C2 -->|private network / tunnel| M
+  A2 -->|private network / tunnel| M
+```
+
+Boundary conditions:
+
+- Same-machine shared sessions are the primary supported path.
+- Cross-machine access is possible by exposing the HTTP endpoint over a
+  private network or tunnel.
+- `memd` does **not** provide built-in multi-user authentication or
+  server-enforced account isolation.
+- `tenant_id` is caller-supplied logical partitioning, **not an authentication
+  boundary**. To serve multiple trust domains from one daemon, put the HTTP
+  endpoint behind a reverse proxy with real auth (mTLS, OAuth, basic auth) and
+  keep one `tenant_id` per trust domain.
+- Prefer one stable shared `tenant_id` per trust domain; use `project_id`,
+  `thread_id`, and `task_id` for narrower retrieval scopes.
+- The legacy cross-tenant `project_id` fallback is **off by default** in
+  v0.3.1+. Enable it only when consolidating mis-routed history by setting
+  `server.allow_cross_tenant_project_fallback = true`. Every widened hit
+  produces a warning log.
+
+## Data layout
 
 Persistent mode writes to:
 
-- `metadata.db`
-- `tenants/<tenant_id>/wal.log`
-- `tenants/<tenant_id>/segments/`
-- `tenants/<tenant_id>/warm_index/`
-- `sparse_index/`
-
-Default data dir: `~/.memd/data`
-
-## Skill
-
-The agent skill is in [memd-skill](memd-skill).
-
-It now includes a bundled Linux binary at [memd-skill/bin/linux-x64/memd](memd-skill/bin/linux-x64/memd).
-
-Start there if you want agents to use `memd` correctly:
-
-- [memd-skill/SKILL.md](memd-skill/SKILL.md)
-- [memd-skill/INSTALL.md](memd-skill/INSTALL.md)
-
-For shared local sessions with current client CLIs:
-
-- start `memd` once with `--transport http`
-- register Codex with `codex mcp add memd --url http://127.0.0.1:8787/mcp`
-- register Claude with `claude mcp add --transport http --scope user memd http://127.0.0.1:8787/mcp`
-- add the instruction snippet from [memd-skill/INSTALL.md](memd-skill/INSTALL.md) to `~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`
-
-For a stronger default that makes `memd` mandatory for substantive multi-step technical and scientific work:
-
-```bash
-./memd-skill/install_memd_enforcement.sh
+```
+~/.memd/data/
+├── metadata.db                       # SQLite metadata (WAL mode, pooled)
+├── sparse_index/                     # tantivy BM25 index (open_or_create)
+└── tenants/
+    └── <tenant_id>/
+        ├── wal.log                   # Append-only WAL; fsync before commit
+        ├── segments/                 # Immutable chunk segments + payload
+        └── warm_index/               # HNSW graph + valid_ids bitmap
 ```
 
-That is the strongest practical enforcement path available without modifying the client binaries themselves.
+Default data dir: `~/.memd/data`. Override with `--data-dir`.
+
+## Configuration
+
+Common environment variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MEMD_DEFAULT_TENANT` | `default` | Fallback tenant for tool calls without `tenant_id` |
+| `MEMD_SQLITE_POOL_MAX` | `16` | Max SQLite connections in the pool |
+| `MEMD_DIGEST_SWEEP_INTERVAL_SEC` | `10` | Background digest-sweeper interval; `0` disables |
+| `MEMD_CROSS_ENCODER_DISABLE` | unset | When `1`, skip ONNX cross-encoder init |
+| `ORT_DYLIB_PATH` | unset | Override ONNX Runtime shared library location |
+
+Config file: `~/.memd/config.toml`. Notable keys:
+
+```toml
+[server]
+allow_cross_tenant_project_fallback = false   # off by default in v0.3.1+
+
+[retrieval]
+search_variant = "hybrid"                     # or "hybrid-cross-encoder"
+```
+
+## Observability
+
+- `memory.metrics` surfaces per-tool, per-reason rejection counts, cache hit
+  rates, and HNSW state snapshots.
+- Every rejected tool call increments `MetricsCollector::record_rejection`.
+- `tracing` subscriber emits structured JSON logs when `RUST_LOG` is set.
+- Deprecation warnings for `artifact.create` (mega-schema),
+  `context.search_context_documents`, and the `artifact.verify` alias log at
+  `warn!` level so migration can be tracked.
 
 ## Benchmarks
 
@@ -279,60 +367,84 @@ Offline retrieval benchmark:
 ./evals/bench/scripts/run_offline_retrieval_benchmark.sh
 ```
 
-Task-memory benchmark:
+Task-memory benchmark (projection write-amplification, retrieval latency):
 
 ```bash
 ./evals/bench/scripts/run_task_memory_benchmark.sh
 ```
 
-## Optional ONNX Cross-Encoder
+## Optional ONNX cross-encoder
 
-ONNX in this repo is only for the optional cross-encoder reranker.
-
-The default embedding path is still Candle. A normal `cargo build` does not enable ONNX.
-
-Build and run the ONNX reranker path with:
+ONNX in this repo is **only** for the optional cross-encoder reranker. The
+default embedding path is Candle; a normal `cargo build` does not enable ONNX.
 
 ```bash
 cargo build --release --features cross-encoder-reranker
 ./target/release/memd --mode mcp --search-variant hybrid-cross-encoder
 ```
 
-Runtime behavior:
+Runtime behaviour:
 
-- `--search-variant hybrid-cross-encoder` selects the ONNX cross-encoder reranker for hybrid search
-- the scorer is initialized when the persistent store opens, not lazily on first query
-- if the feature is not compiled in, or ONNX initialization fails, `memd` logs a warning and falls back to the feature reranker
+- `--search-variant hybrid-cross-encoder` selects the ONNX reranker for hybrid
+  search.
+- The scorer is initialized when the persistent store opens, not lazily on
+  first query.
+- If the feature is not compiled in, or ONNX initialization fails, `memd`
+  logs a warning and falls back to the feature reranker.
 
 Model and runtime assets:
 
-- cross-encoder model: `Xenova/ms-marco-MiniLM-L-6-v2` ONNX
-- tokenizer: matching `tokenizer.json`
-- ONNX Runtime shared library: downloaded from GitHub releases on supported Linux targets
-- default cache dir: `~/.cache/memd/cross-encoder`
-- automatic runtime download currently supports `linux/x86_64` and `linux/aarch64`
+- Cross-encoder model: `Xenova/ms-marco-MiniLM-L-6-v2` ONNX
+- Tokenizer: matching `tokenizer.json`
+- ONNX Runtime shared library: downloaded from GitHub releases on supported
+  targets (`linux/x86_64`, `linux/aarch64`)
+- Default cache dir: `~/.cache/memd/cross-encoder`
 
-Useful environment variables:
-
-- `ORT_DYLIB_PATH`
-- `MEMD_CROSS_ENCODER_ORT_DYLIB_PATH`
-- `MEMD_CROSS_ENCODER_ORT_VERSION`
-- `MEMD_CROSS_ENCODER_ORT_URL`
-- `MEMD_CROSS_ENCODER_MODEL_PATH`
-- `MEMD_CROSS_ENCODER_TOKENIZER_PATH`
-- `MEMD_CROSS_ENCODER_CACHE_DIR`
-- `MEMD_CROSS_ENCODER_DISABLE=1`
-
-Real ONNX smoke test:
+Real ONNX smoke test (requires network on first run):
 
 ```bash
-cargo test -p memd --features cross-encoder-reranker smoke_real_onnx_scores_relevant_pair_higher -- --ignored --nocapture
+cargo test -p memd --features cross-encoder-reranker \
+  smoke_real_onnx_scores_relevant_pair_higher -- --ignored --nocapture
 ```
 
-That smoke test calls the ONNX scorer directly, so it does not go through the reranker fallback path.
+## Agent skill
+
+The agent skill lives in [memd-skill](memd-skill). It ships with a bundled
+Linux binary at [memd-skill/bin/linux-x64/memd](memd-skill/bin/linux-x64/memd).
+
+Start here to have agents use `memd` correctly:
+
+- [memd-skill/SKILL.md](memd-skill/SKILL.md)
+- [memd-skill/INSTALL.md](memd-skill/INSTALL.md)
+
+For shared local sessions with current client CLIs:
+
+```bash
+codex mcp add memd --url http://127.0.0.1:8787/mcp
+claude mcp add --transport http --scope user memd http://127.0.0.1:8787/mcp
+```
+
+Add the instruction snippet from `INSTALL.md` to `~/.codex/AGENTS.md` and
+`~/.claude/CLAUDE.md` so agents consistently consult and record into `memd`
+during substantive work.
+
+For a stronger default that makes `memd` mandatory for substantive multi-step
+technical and scientific work:
+
+```bash
+./memd-skill/install_memd_enforcement.sh
+```
+
+This also injects a pre-refusal rule: agents must check `memd` before
+declaring a task impossible, blocked, or unknowable. For one-shot runs you can
+install runtime refusal guards — `codex-memd-guard` (for `codex exec`-style
+runs) and `claude-memd-guard` (for `claude -p` / `--print` runs). Set
+`MEMD_URL` and `MEMD_GUARD_TENANT_ID` when the audited endpoint or tenant is
+not the default local setup.
 
 ## More
 
 - [QUICKSTART.md](QUICKSTART.md)
+- [CHANGELOG.md](CHANGELOG.md)
 - [docs/scientific-task-memory/schema/README.md](docs/scientific-task-memory/schema/README.md)
 - [docs/scientific-task-memory/benchmark-results/README.md](docs/scientific-task-memory/benchmark-results/README.md)

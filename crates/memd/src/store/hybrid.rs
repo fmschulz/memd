@@ -5,8 +5,8 @@
 //! Supports tiered search with cache/hot/warm fallback when enabled.
 //! Includes query routing for intent classification and structural search blending.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
@@ -481,6 +481,13 @@ impl HybridSearcher {
             }
         }
 
+        // Phase 3.5: bump the per-tenant memory version so the
+        // semantic cache invalidates any entry whose snapshot predates
+        // this write. Previously the version was only advertised via
+        // `WarmTierAdapter::get_version` but never incremented, so the
+        // cache never invalidated on add.
+        self.bump_tenant_memory_version(tenant_id);
+
         debug!(
             tenant_id = %tenant_id,
             chunk_count = chunks.len(),
@@ -488,6 +495,29 @@ impl HybridSearcher {
             "indexed batch in hybrid searcher"
         );
         Ok(())
+    }
+
+    /// Bump the per-tenant `memory_version` on the warm tier so cache
+    /// consumers can detect stale entries. Exposed on HybridSearcher
+    /// rather than inlined so the storage layer can call it from any
+    /// mutation path without reaching into private state.
+    pub fn bump_tenant_memory_version(&self, tenant_id: &TenantId) {
+        if let Some(searcher) = self.get_or_create_tiered_searcher(tenant_id) {
+            searcher.warm_tier().increment_version();
+        }
+    }
+
+    /// Current per-tenant `memory_version` from the warm tier.
+    /// Returns `None` when no tiered searcher has been created for
+    /// this tenant (e.g., tiered search disabled). Exposed primarily
+    /// for tests and diagnostics — production code should rely on the
+    /// cache's own staleness logic.
+    pub fn tenant_memory_version(&self, tenant_id: &TenantId) -> Option<u64> {
+        use crate::tiered::tiered_searcher::WarmTierSearch;
+        let searchers = self.tiered_searchers.read();
+        searchers
+            .get(tenant_id.as_str())
+            .map(|searcher| searcher.warm_tier().get_version())
     }
 
     /// Remove chunk from indexes
@@ -517,6 +547,10 @@ impl HybridSearcher {
         // Note: Dense index deletion is not currently supported by HnswIndex
         // The chunk will be orphaned but won't appear in results after
         // metadata is updated
+
+        // Phase 3.5: bump the per-tenant memory version so cache
+        // entries that predate this delete are invalidated.
+        self.bump_tenant_memory_version(tenant_id);
 
         debug!(
             tenant_id = %tenant_id,

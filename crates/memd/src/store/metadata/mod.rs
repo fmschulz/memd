@@ -3,8 +3,10 @@
 //! Handles chunk metadata queries with tenant isolation.
 //! Payloads are NOT stored here - only in segment files.
 
+pub mod pool;
 pub mod sqlite;
 
+pub use pool::{PooledConnection, SqliteConnectionPool};
 pub use sqlite::SqliteMetadataStore;
 
 use crate::error::Result;
@@ -58,7 +60,7 @@ pub trait MetadataStore: Send + Sync {
 
     /// List chunks for a tenant (non-deleted only)
     fn list(&self, tenant_id: &TenantId, limit: usize, offset: usize)
-    -> Result<Vec<ChunkMetadata>>;
+        -> Result<Vec<ChunkMetadata>>;
 
     /// Mark chunk as deleted (soft delete)
     fn mark_deleted(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<bool>;
