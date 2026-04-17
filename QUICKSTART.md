@@ -35,7 +35,9 @@ curl -sS -X POST http://127.0.0.1:8787/mcp \
 
 ## 4. Use `task.*` for real work
 
-Start a task:
+Start a task. In v0.4+ the only hard-required field is `goal`; `tenant_id` is
+optional and falls back to `$MEMD_DEFAULT_TENANT` / `~/.memd/default_tenant` /
+the literal `"default"`:
 
 ```json
 {
@@ -45,19 +47,16 @@ Start a task:
   "params": {
     "name": "task.start",
     "arguments": {
-      "tenant_id": "quickstart",
-      "project_id": "auth",
       "goal": "Diagnose token validation failures",
-      "motivation": "Production requests are failing",
-      "hypothesis": "Time handling is inconsistent",
-      "scientific_question": "Where does timestamp skew happen?",
-      "expected_outputs": ["root cause", "fix"]
+      "project_id": "auth"
     }
   }
 }
 ```
 
-Then continue with:
+You can still pass richer fields (`motivation`, `hypothesis`,
+`scientific_question`, `expected_outputs`, …) when you have them; they are
+optional now. Then continue with:
 
 - `task.progress`
 - `task.run_start`
@@ -68,9 +67,11 @@ Then continue with:
 - `task.search`
 - `task.resume`
 
-## 5. Use `artifact.*` for critique, verification, and thread inspection
+## 5. Use focused artifact tools for critique, revision, decisions, and verification
 
-Example:
+v0.4 replaces the single 50-field `artifact.create` schema with four focused
+tools, each with a tight schema. The legacy `artifact.create` remains for
+backwards compatibility.
 
 ```json
 {
@@ -78,59 +79,39 @@ Example:
   "id": 11,
   "method": "tools/call",
   "params": {
-    "name": "artifact.create",
+    "name": "artifact.review",
     "arguments": {
-      "tenant_id": "quickstart",
-      "artifact_kind": "review",
       "task_id": "reuse-the-task-id-from-task.start",
-      "artifact_role": "critique",
+      "agent_id": "reviewer-1",
       "summary": "Need a clearer verification path for this task",
-      "requested_action": "review",
-      "verification_status": "pending"
+      "requested_action": "review"
     }
   }
 }
 ```
 
-Then inspect or search the thread with:
+Sibling wrappers:
+
+- `artifact.revision` — supersede an earlier artifact
+- `artifact.decision` — choose between alternatives with `why_chosen`
+- `artifact.verification` — distinct-writer countersignature; with a different
+  `agent_id` than the parent's and `supports_claim = true` it promotes the
+  underlying claim to `VerifiedRecord` trust tier
+
+Inspect or search the thread:
 
 - `artifact.get`
 - `artifact.search`
-- `artifact.verify`
+- `artifact.find_related` (the `artifact.verify` alias still works)
 - `artifact.find_failures`
 - `artifact.find_decisions`
 - `artifact.find_evidence`
+- `artifact.find_highlights`
 - `artifact.list_thread`
 
-Optional safety metadata such as `compute_budget`, `cost_actual`,
-`data_access_level`, `policy_tags`, `allowed_tools`, and `approval_state` can
-also be sent through `artifact.create`. They are optional in the current local
-prototype.
-
-When you need to trust a claim rather than only browse candidates, use the
-explicit grounding step:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 12,
-  "method": "tools/call",
-  "params": {
-    "name": "artifact.verify",
-    "arguments": {
-      "tenant_id": "quickstart",
-      "project_id": "auth",
-      "claim": "canonical artifacts are the trust anchor"
-    }
-  }
-}
-```
-
-The intended flow is:
-
-1. search for candidates
-2. verify the claim against canonical artifacts
-3. trust the grounded artifact IDs, not digest text by itself
+`artifact.find_related` is a retrieval helper, not a trust primitive — it
+surfaces canonical artifacts that overlap a claim. Trust requires a
+countersignature from a different agent, not just retrieval overlap.
 
 ## 6. Use `memory.*` for raw content
 

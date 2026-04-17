@@ -203,6 +203,75 @@ mod tests {
         assert_eq!(result.embeddings_excluded, 2); // 1, 3 excluded
     }
 
+    /// Phase 3.2 regression: `HnswIndex::swap_graph` must actually
+    /// replace the live Hnsw graph so a search performed AFTER the
+    /// swap reflects the rebuilt set (i.e. excluded points are gone).
+    /// Before Phase 3.2, `rebuild_clean` computed a new graph but the
+    /// caller discarded it, so the live index continued to serve
+    /// deleted points (filtered downstream at the metadata layer).
+    #[test]
+    fn swap_graph_replaces_live_hnsw() {
+        let config = HnswConfig {
+            max_elements: 100,
+            dimension: 4,
+            ..Default::default()
+        };
+        let source = HnswIndex::new(config.clone());
+
+        // Insert 5 embeddings.
+        let mut chunk_ids = Vec::new();
+        for i in 0..5 {
+            let chunk_id = ChunkId::new();
+            let mut emb = vec![i as f32, (i + 1) as f32, (i + 2) as f32, (i + 3) as f32];
+            normalize(&mut emb);
+            source.insert(&chunk_id, &emb).unwrap();
+            chunk_ids.push(chunk_id);
+        }
+
+        // Baseline: searching with query near embedding 0 returns
+        // ChunkId 0 as top hit.
+        let mut query = vec![0.0, 1.0, 2.0, 3.0];
+        normalize(&mut query);
+        let before = source.search(&query, 5).unwrap();
+        assert!(
+            before.iter().any(|r| r.chunk_id == chunk_ids[0]),
+            "sanity: source graph must return chunk 0 before the swap"
+        );
+
+        // Mark chunk 0 as deleted and rebuild the graph without it.
+        let internal_id_0 = source
+            .get_mapping()
+            .read()
+            .get_internal_id(&chunk_ids[0])
+            .unwrap();
+        let mut deleted = HashSet::new();
+        deleted.insert(internal_id_0);
+
+        let rebuilder = HnswRebuilder::new();
+        let (new_hnsw, result) = rebuilder.rebuild_clean(&source, &deleted, &config).unwrap();
+        assert_eq!(result.embeddings_excluded, 1);
+        assert_eq!(result.embeddings_included, 4);
+
+        // Swap the rebuilt graph in atomically. The same
+        // `deleted` set is passed so the embedding cache's valid
+        // bits stay in sync with the live graph.
+        source.swap_graph(new_hnsw, &deleted);
+
+        // After the swap: the graph itself must not return chunk 0 as
+        // a hit for the close query. `search` also filters by the
+        // mapping's deleted-set if present; the rebuilt graph simply
+        // does not contain the point anymore, so the count of hits
+        // should drop by one relative to the pre-swap result.
+        let after = source.search(&query, 5).unwrap();
+        assert!(
+            !after.iter().any(|r| r.chunk_id == chunk_ids[0]),
+            "after swap_graph, the rebuilt graph must not surface the excluded chunk; \
+             got hits: {:?}",
+            after.iter().map(|r| r.chunk_id.clone()).collect::<Vec<_>>()
+        );
+        assert!(after.len() <= 4, "only four points remain in the graph");
+    }
+
     #[test]
     fn test_rebuild_result_duration() {
         let config = HnswConfig {

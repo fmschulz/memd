@@ -3,7 +3,7 @@
 //! Defines the memory tools exposed via MCP following the MCP tool schema format.
 //! Each tool has a name, description, and JSON Schema for input parameters.
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::LazyLock;
 
 /// Definition of an MCP tool
@@ -97,7 +97,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         }
                     }
                 },
-                "required": ["query", "tenant_id"]
+                "required": ["query"]
             }),
         ),
         // MCP-03: memory.add
@@ -166,7 +166,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "description": "Optional tags for filtering"
                     }
                 },
-                "required": ["tenant_id", "text", "type"]
+                "required": ["text", "type"]
             }),
         ),
         // MCP-04: memory.add_batch
@@ -219,7 +219,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         }
                     }
                 },
-                "required": ["tenant_id", "chunks"]
+                "required": ["chunks"]
             }),
         ),
         ToolDefinition::new(
@@ -309,15 +309,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         }
                     }
                 },
-                "required": [
-                    "tenant_id",
-                    "goal",
-                    "motivation",
-                    "hypothesis",
-                    "scientific_question",
-                    "dataset_refs",
-                    "expected_outputs"
-                ]
+                "required": ["goal"]
             }),
         ),
         ToolDefinition::new(
@@ -426,16 +418,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         }
                     }
                 },
-                "required": [
-                    "tenant_id",
-                    "task_id",
-                    "what_worked",
-                    "what_failed",
-                    "validation",
-                    "uncertainty",
-                    "followups",
-                    "confidence"
-                ]
+                "required": ["task_id"]
             }),
         ),
         ToolDefinition::new(
@@ -490,7 +473,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         }
                     }
                 },
-                "required": ["tenant_id", "task_id", "summary", "next_step"]
+                "required": ["task_id", "summary"]
             }),
         ),
         ToolDefinition::new(
@@ -548,7 +531,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         }
                     }
                 },
-                "required": ["tenant_id", "task_id", "tool_name", "command", "why_chosen", "parameters", "inputs"]
+                "required": ["task_id", "tool_name"]
             }),
         ),
         ToolDefinition::new(
@@ -607,7 +590,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         }
                     }
                 },
-                "required": ["tenant_id", "task_id", "status", "outputs", "notes"]
+                "required": ["task_id", "status"]
             }),
         ),
         ToolDefinition::new(
@@ -664,7 +647,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         }
                     }
                 },
-                "required": ["tenant_id", "task_id", "summary", "evidence_kind", "supports_claim"]
+                "required": ["task_id", "evidence_kind"]
             }),
         ),
         ToolDefinition::new(
@@ -676,7 +659,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "tenant_id": {"type": "string"},
                     "task_id": {"type": "string"}
                 },
-                "required": ["tenant_id", "task_id"]
+                "required": ["task_id"]
             }),
         ),
         ToolDefinition::new(
@@ -725,7 +708,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         }
                     }
                 },
-                "required": ["tenant_id"]
+                "required": []
             }),
         ),
         ToolDefinition::new(
@@ -833,7 +816,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         }
                     }
                 },
-                "required": ["tenant_id", "artifact_kind"]
+                "required": ["artifact_kind"]
             }),
         ),
         ToolDefinition::new(
@@ -845,7 +828,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "tenant_id": {"type": "string"},
                     "artifact_id": {"type": "string"}
                 },
-                "required": ["tenant_id", "artifact_id"]
+                "required": ["artifact_id"]
             }),
         ),
         ToolDefinition::new(
@@ -894,12 +877,99 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         }
                     }
                 },
-                "required": ["tenant_id"]
+                "required": []
+            }),
+        ),
+        // ---------- Phase 2.3 focused artifact tools ----------
+        // These tools wrap `artifact.create` with a fixed `artifact_kind`
+        // and a small schema — 3-5 fields each — so agents do not have
+        // to fight the 50-field mega-schema when they just want to
+        // record a review, a revision, a decision, or a verification.
+        // `artifact.create` remains registered (deprecated) for
+        // backwards compatibility.
+        ToolDefinition::new(
+            "artifact.review",
+            "Record a review artifact: an agent's assessment of an existing artifact \
+             (usually a task.start / task.progress / task.finish). Use reply_to_artifact_id \
+             to attach the review to a specific parent. Supply agent_id to enable distinct-writer \
+             countersignature promotion if supports_claim is also set.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "reply_to_artifact_id": {"type": "string"},
+                    "supports_claim": {"type": "boolean"},
+                    "agent_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "requested_action": {"type": "string"}
+                },
+                "required": ["task_id", "summary"]
             }),
         ),
         ToolDefinition::new(
-            "artifact.verify",
-            "Ground a claim against canonical artifacts and optionally persist a verification artifact.",
+            "artifact.revision",
+            "Record a revision artifact: a follow-up that supersedes or amends a prior \
+             artifact. reply_to_artifact_id is the artifact being revised.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "reply_to_artifact_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "project_id": {"type": "string"}
+                },
+                "required": ["task_id", "summary", "reply_to_artifact_id"]
+            }),
+        ),
+        ToolDefinition::new(
+            "artifact.decision",
+            "Record a decision artifact: an explicit choice between alternatives with a \
+             rationale. why_chosen captures the rationale; optional reply_to_artifact_id \
+             chains the decision to the prior context.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "why_chosen": {"type": "string"},
+                    "reply_to_artifact_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "project_id": {"type": "string"}
+                },
+                "required": ["task_id", "summary"]
+            }),
+        ),
+        ToolDefinition::new(
+            "artifact.verification",
+            "Record a verification artifact: a distinct agent's countersignature of a prior \
+             claim. supports_claim=true with a different agent_id than the parent's promotes \
+             the parent to VerifiedRecord.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "reply_to_artifact_id": {"type": "string"},
+                    "supports_claim": {"type": "boolean"},
+                    "agent_id": {"type": "string"},
+                    "project_id": {"type": "string"}
+                },
+                "required": ["task_id", "supports_claim", "reply_to_artifact_id"]
+            }),
+        ),
+        ToolDefinition::new(
+            "artifact.find_related",
+            "Find canonical artifacts whose text overlaps with a claim. \
+             This is a retrieval helper, not a trust primitive: a returned artifact \
+             supports a claim only if it has an independent countersignature \
+             (distinct agent_id) and survives your own review. Prefer this over \
+             `artifact.verify`, which is kept as a deprecated alias.",
             json!({
                 "type": "object",
                 "properties": {
@@ -911,7 +981,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "candidate_artifact_ids": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Optional artifact ids to verify first before falling back to search"
+                        "description": "Optional artifact ids to inspect first before falling back to search"
                     },
                     "k": {
                         "type": "integer",
@@ -922,19 +992,58 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "include_digests": {
                         "type": "boolean",
                         "default": false,
-                        "description": "Include consulted digest hints in the response even when canonical support exists"
+                        "description": "Include consulted digest hints in the response even when canonical hits exist"
                     },
                     "create_artifact": {
                         "type": "boolean",
                         "default": false,
-                        "description": "Persist a verification artifact recording the grounding result"
+                        "description": "Persist a verification-style artifact recording the retrieval result"
                     },
                     "record_task_id": {
                         "type": "string",
-                        "description": "Optional task id to own a persisted verification artifact"
+                        "description": "Optional task id to own a persisted record artifact"
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Required for distinct-writer countersignature promotion when create_artifact=true. Omit to write an anonymous verification record (cannot upgrade trust)."
                     }
                 },
-                "required": ["tenant_id", "claim"]
+                "required": ["claim"]
+            }),
+        ),
+        ToolDefinition::new(
+            "artifact.verify",
+            "DEPRECATED alias for `artifact.find_related`. The historical \
+             `artifact.verify` naming implied grounding against canonical \
+             artifacts, but the underlying implementation is substring overlap \
+             + retrieval, not cryptographic or countersignature-based \
+             verification. Use `artifact.find_related` instead; this alias \
+             forwards with a warning and will be removed in a future release.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {"type": "string"},
+                    "claim": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "thread_id": {"type": "string"},
+                    "candidate_artifact_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional artifact ids to inspect first"
+                    },
+                    "k": {
+                        "type": "integer",
+                        "default": 8,
+                        "minimum": 1,
+                        "maximum": 100
+                    },
+                    "include_digests": {"type": "boolean", "default": false},
+                    "create_artifact": {"type": "boolean", "default": false},
+                    "record_task_id": {"type": "string"},
+                    "agent_id": {"type": "string"}
+                },
+                "required": ["claim"]
             }),
         ),
         ToolDefinition::new(
@@ -947,7 +1056,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "thread_id": {"type": "string"},
                     "artifact_id": {"type": "string"}
                 },
-                "required": ["tenant_id"]
+                "required": []
             }),
         ),
         ToolDefinition::new(
@@ -962,7 +1071,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "k": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100},
                     "include_related_projects": {"type": "boolean", "default": true}
                 },
-                "required": ["tenant_id", "project_id"]
+                "required": ["project_id"]
             }),
         ),
         ToolDefinition::new(
@@ -976,7 +1085,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "query": {"type": "string", "default": ""},
                     "k": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100}
                 },
-                "required": ["tenant_id", "task_id"]
+                "required": ["task_id"]
             }),
         ),
         ToolDefinition::new(
@@ -990,7 +1099,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "query": {"type": "string", "default": ""},
                     "k": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100}
                 },
-                "required": ["tenant_id"]
+                "required": []
             }),
         ),
         ToolDefinition::new(
@@ -1004,7 +1113,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "query": {"type": "string", "default": ""},
                     "k": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100}
                 },
-                "required": ["tenant_id"]
+                "required": []
             }),
         ),
         ToolDefinition::new(
@@ -1018,7 +1127,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "query": {"type": "string", "default": ""},
                     "k": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100}
                 },
-                "required": ["tenant_id"]
+                "required": []
             }),
         ),
         ToolDefinition::new(
@@ -1032,7 +1141,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "query": {"type": "string", "default": ""},
                     "k": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100}
                 },
-                "required": ["tenant_id"]
+                "required": []
             }),
         ),
         // MCP-05: memory.get
@@ -1051,7 +1160,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "description": "UUID of the chunk to retrieve"
                     }
                 },
-                "required": ["tenant_id", "chunk_id"]
+                "required": ["chunk_id"]
             }),
         ),
         // MCP-06: memory.delete
@@ -1070,7 +1179,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "description": "UUID of the chunk to delete"
                     }
                 },
-                "required": ["tenant_id", "chunk_id"]
+                "required": ["chunk_id"]
             }),
         ),
         // FEEDBACK-01: memory.feedback
@@ -1098,7 +1207,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "description": "Relevance judgment for this query/chunk pair"
                     }
                 },
-                "required": ["tenant_id", "query", "chunk_id", "relevance"]
+                "required": ["query", "chunk_id", "relevance"]
             }),
         ),
         // MCP-07: memory.stats
@@ -1113,7 +1222,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "description": "Tenant identifier for data isolation"
                     }
                 },
-                "required": ["tenant_id"]
+                "required": []
             }),
         ),
         // MCP-08: memory.metrics
@@ -1155,7 +1264,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "description": "Optional project scope"
                     }
                 },
-                "required": ["tenant_id", "name"]
+                "required": ["name"]
             }),
         ),
         // STRUCT-06: code.find_references
@@ -1178,7 +1287,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "description": "Optional project scope"
                     }
                 },
-                "required": ["tenant_id", "name"]
+                "required": ["name"]
             }),
         ),
         // STRUCT-07: code.find_callers
@@ -1208,7 +1317,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "description": "Optional project scope"
                     }
                 },
-                "required": ["tenant_id", "name"]
+                "required": ["name"]
             }),
         ),
         // STRUCT-08: code.find_imports
@@ -1231,7 +1340,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "description": "Optional project scope"
                     }
                 },
-                "required": ["tenant_id", "module"]
+                "required": ["module"]
             }),
         ),
         // STRUCT-11: debug.find_tool_calls
@@ -1275,7 +1384,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "maximum": 100
                     }
                 },
-                "required": ["tenant_id"]
+                "required": []
             }),
         ),
         // STRUCT-12: debug.find_errors
@@ -1323,7 +1432,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "default": true
                     }
                 },
-                "required": ["tenant_id"]
+                "required": []
             }),
         ),
         // COMPACT-05: memory.compact
@@ -1361,7 +1470,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "default": false
                     }
                 },
-                "required": ["tenant_id"]
+                "required": []
             }),
         ),
         // MEMORY-09: memory.consolidate_episode
@@ -1391,7 +1500,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "default": true
                     }
                 },
-                "required": ["tenant_id", "episode_id"]
+                "required": ["episode_id"]
             }),
         ),
         // CONTEXT-01: context.list_subsystems
@@ -1417,7 +1526,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "maximum": 500
                     }
                 },
-                "required": ["tenant_id"]
+                "required": []
             }),
         ),
         // CONTEXT-02: context.get_files_for_subsystem
@@ -1443,7 +1552,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "maximum": 2000
                     }
                 },
-                "required": ["tenant_id", "subsystem_key"]
+                "required": ["subsystem_key"]
             }),
         ),
         // CONTEXT-03: context.search_context_documents
@@ -1478,7 +1587,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "description": "Optional context tier filter"
                     }
                 },
-                "required": ["tenant_id", "query"]
+                "required": ["query"]
             }),
         ),
         // CONTEXT-04: context.find_relevant_context
@@ -1514,7 +1623,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "default": true
                     }
                 },
-                "required": ["tenant_id", "task"]
+                "required": ["task"]
             }),
         ),
         // CONTEXT-05: context.suggest_agent
@@ -1545,7 +1654,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "maximum": 100
                     }
                 },
-                "required": ["tenant_id", "task"]
+                "required": ["task"]
             }),
         ),
         // CONTEXT-06: context.get_hot_context
@@ -1567,7 +1676,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "maximum": 100
                     }
                 },
-                "required": ["tenant_id"]
+                "required": []
             }),
         ),
     ]
@@ -1603,8 +1712,13 @@ pub fn tool_names() -> Vec<&'static str> {
         "task.search",
         "task.resume",
         "artifact.create",
+        "artifact.review",
+        "artifact.revision",
+        "artifact.decision",
+        "artifact.verification",
         "artifact.get",
         "artifact.search",
+        "artifact.find_related",
         "artifact.verify",
         "artifact.find_failures",
         "artifact.find_decisions",
@@ -1641,7 +1755,9 @@ mod tests {
     #[test]
     fn get_all_tools_returns_forty() {
         let tools = get_all_tools();
-        assert_eq!(tools.len(), 41);
+        // Phase 2.3: 42 legacy tools + four focused artifact tools
+        // (artifact.review / revision / decision / verification).
+        assert_eq!(tools.len(), 46);
     }
 
     #[test]
@@ -1662,6 +1778,7 @@ mod tests {
         assert!(names.contains(&"artifact.create"));
         assert!(names.contains(&"artifact.get"));
         assert!(names.contains(&"artifact.search"));
+        assert!(names.contains(&"artifact.find_related"));
         assert!(names.contains(&"artifact.verify"));
         assert!(names.contains(&"artifact.find_highlights"));
         assert!(names.contains(&"artifact.list_thread"));
@@ -1729,7 +1846,10 @@ mod tests {
             .unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(required_strs.contains(&"query"));
-        assert!(required_strs.contains(&"tenant_id"));
+        assert!(
+            !required_strs.contains(&"tenant_id"),
+            "tenant_id is optional in v0.3.1+; it must NOT appear in required"
+        );
     }
 
     #[test]
@@ -1742,7 +1862,10 @@ mod tests {
             .as_array()
             .unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
-        assert!(required_strs.contains(&"tenant_id"));
+        assert!(
+            !required_strs.contains(&"tenant_id"),
+            "tenant_id is optional in v0.3.1+; it must NOT appear in required"
+        );
         assert!(required_strs.contains(&"text"));
         assert!(required_strs.contains(&"type"));
     }
@@ -1757,13 +1880,29 @@ mod tests {
             .as_array()
             .unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
-        assert!(required_strs.contains(&"tenant_id"));
+        // Phase 2.2: task.start requires only `goal`. All other fields
+        // (motivation, hypothesis, scientific_question, dataset_refs,
+        // expected_outputs, etc.) became optional so agents can log
+        // minimal progress without inventing content. The legacy
+        // fields must NOT appear in `required`.
+        assert!(
+            !required_strs.contains(&"tenant_id"),
+            "tenant_id is optional in v0.3.1+"
+        );
         assert!(required_strs.contains(&"goal"));
-        assert!(required_strs.contains(&"motivation"));
-        assert!(required_strs.contains(&"hypothesis"));
-        assert!(required_strs.contains(&"scientific_question"));
-        assert!(required_strs.contains(&"dataset_refs"));
-        assert!(required_strs.contains(&"expected_outputs"));
+        for legacy in [
+            "motivation",
+            "hypothesis",
+            "scientific_question",
+            "dataset_refs",
+            "expected_outputs",
+        ] {
+            assert!(
+                !required_strs.contains(&legacy),
+                "`{}` must be optional on task.start in v0.3.1+",
+                legacy
+            );
+        }
     }
 
     #[test]
@@ -1776,14 +1915,26 @@ mod tests {
             .as_array()
             .unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
-        assert!(required_strs.contains(&"tenant_id"));
+        // Phase 2.2: task.finish requires only `task_id`.
+        assert!(
+            !required_strs.contains(&"tenant_id"),
+            "tenant_id is optional in v0.3.1+"
+        );
         assert!(required_strs.contains(&"task_id"));
-        assert!(required_strs.contains(&"what_worked"));
-        assert!(required_strs.contains(&"what_failed"));
-        assert!(required_strs.contains(&"validation"));
-        assert!(required_strs.contains(&"uncertainty"));
-        assert!(required_strs.contains(&"followups"));
-        assert!(required_strs.contains(&"confidence"));
+        for legacy in [
+            "what_worked",
+            "what_failed",
+            "validation",
+            "uncertainty",
+            "followups",
+            "confidence",
+        ] {
+            assert!(
+                !required_strs.contains(&legacy),
+                "`{}` must be optional on task.finish in v0.3.1+",
+                legacy
+            );
+        }
     }
 
     #[test]
@@ -1796,7 +1947,10 @@ mod tests {
             .as_array()
             .unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
-        assert!(required_strs.contains(&"tenant_id"));
+        assert!(
+            !required_strs.contains(&"tenant_id"),
+            "tenant_id is optional in v0.3.1+; it must NOT appear in required"
+        );
         assert!(required_strs.contains(&"task_id"));
     }
 
@@ -1810,13 +1964,15 @@ mod tests {
             .as_array()
             .unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
-        assert!(required_strs.contains(&"tenant_id"));
         assert!(
-            tool.input_schema
-                .get("properties")
-                .and_then(|props| props.get("filters"))
-                .is_some()
+            !required_strs.contains(&"tenant_id"),
+            "tenant_id is optional in v0.3.1+; it must NOT appear in required"
         );
+        assert!(tool
+            .input_schema
+            .get("properties")
+            .and_then(|props| props.get("filters"))
+            .is_some());
     }
 
     #[test]
@@ -1829,7 +1985,10 @@ mod tests {
             .as_array()
             .unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
-        assert!(required_strs.contains(&"tenant_id"));
+        assert!(
+            !required_strs.contains(&"tenant_id"),
+            "tenant_id is optional in v0.3.1+; it must NOT appear in required"
+        );
         assert!(required_strs.contains(&"artifact_kind"));
     }
 
@@ -1843,14 +2002,86 @@ mod tests {
             .as_array()
             .unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
-        assert!(required_strs.contains(&"tenant_id"));
+        assert!(
+            !required_strs.contains(&"tenant_id"),
+            "tenant_id is optional in v0.3.1+; it must NOT appear in required"
+        );
         assert!(required_strs.contains(&"claim"));
+    }
+
+    #[test]
+    fn artifact_find_related_schema_mirrors_verify() {
+        let find_related = get_tool("artifact.find_related").expect("find_related must exist");
+        let verify = get_tool("artifact.verify").expect("verify alias must still exist");
+
+        // Both expose the same required fields and both accept the same
+        // core parameters — the deprecated alias forwards to the same
+        // handler. Compare the `required` lists and the property key set
+        // (ignore property-level descriptions so the deprecated entry can
+        // stay slimmer).
+        let find_required = find_related
+            .input_schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let verify_required = verify
+            .input_schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(find_required, verify_required);
+
+        let find_props: Vec<String> = find_related
+            .input_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .map(|m| {
+                let mut keys: Vec<String> = m.keys().cloned().collect();
+                keys.sort();
+                keys
+            })
+            .unwrap_or_default();
+        let verify_props: Vec<String> = verify
+            .input_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .map(|m| {
+                let mut keys: Vec<String> = m.keys().cloned().collect();
+                keys.sort();
+                keys
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            find_props, verify_props,
+            "alias must accept the same top-level parameters"
+        );
+
+        assert!(
+            verify.description.to_lowercase().contains("deprecated"),
+            "artifact.verify description must flag itself as deprecated, got: {}",
+            verify.description
+        );
+        assert!(
+            !find_related
+                .description
+                .to_lowercase()
+                .contains("ground a claim"),
+            "find_related description must not re-assert the grounding-as-trust story"
+        );
     }
 
     #[test]
     fn tool_names_list() {
         let names = tool_names();
-        assert_eq!(names.len(), 41);
+        // Phase 2.3: 42 legacy + 4 focused artifact tools.
+        assert_eq!(names.len(), 46);
+        assert!(names.contains(&"artifact.find_related"));
+        assert!(names.contains(&"artifact.review"));
+        assert!(names.contains(&"artifact.revision"));
+        assert!(names.contains(&"artifact.decision"));
+        assert!(names.contains(&"artifact.verification"));
         assert!(names.contains(&"memory.search"));
         assert!(names.contains(&"memory.metrics"));
         assert!(names.contains(&"memory.feedback"));
@@ -1894,7 +2125,10 @@ mod tests {
             .as_array()
             .unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
-        assert!(required_strs.contains(&"tenant_id"));
+        assert!(
+            !required_strs.contains(&"tenant_id"),
+            "tenant_id is optional in v0.3.1+; it must NOT appear in required"
+        );
         assert!(required_strs.contains(&"name"));
     }
 
@@ -1917,7 +2151,10 @@ mod tests {
             .as_array()
             .unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
-        assert!(required_strs.contains(&"tenant_id"));
+        assert!(
+            !required_strs.contains(&"tenant_id"),
+            "tenant_id is optional in v0.3.1+; it must NOT appear in required"
+        );
         assert!(required_strs.contains(&"module"));
     }
 
@@ -1931,7 +2168,10 @@ mod tests {
             .as_array()
             .unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
-        assert!(required_strs.contains(&"tenant_id"));
+        assert!(
+            !required_strs.contains(&"tenant_id"),
+            "tenant_id is optional in v0.3.1+; it must NOT appear in required"
+        );
     }
 
     #[test]
@@ -1956,7 +2196,10 @@ mod tests {
             .as_array()
             .unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
-        assert!(required_strs.contains(&"tenant_id"));
+        assert!(
+            !required_strs.contains(&"tenant_id"),
+            "tenant_id is optional in v0.3.1+; it must NOT appear in required"
+        );
     }
 
     #[test]
@@ -1996,7 +2239,10 @@ mod tests {
             .as_array()
             .unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
-        assert!(required_strs.contains(&"tenant_id"));
+        assert!(
+            !required_strs.contains(&"tenant_id"),
+            "tenant_id is optional in v0.3.1+; it must NOT appear in required"
+        );
         assert!(required_strs.contains(&"task"));
     }
 }

@@ -20,7 +20,7 @@ use super::hybrid::{ChunkMetaForRerank, HybridConfig, HybridSearchResult, Hybrid
 use super::metadata::{ChunkMetadata, MetadataStore, SqliteMetadataStore};
 use crate::compaction::{CompactionConfig, CompactionMetrics, CompactionResult, CompactionRunner};
 use crate::metrics::TieredMetrics;
-use crate::store::{FeedbackConfig, FeedbackEntry, apply_feedback_scores};
+use crate::store::{apply_feedback_scores, FeedbackConfig, FeedbackEntry};
 use crate::task_memory::{
     TaskArtifact, TaskArtifactWriteResult, TaskProjection, TaskRecord, TaskSearchFilters,
 };
@@ -40,7 +40,7 @@ pub struct TieredStats {
 }
 use super::segment::{SegmentReader, SegmentWriter};
 use super::wal::{TaskArtifactWalPayload, WalReader, WalRecord, WalRecordType, WalWriter};
-use super::{Store, StoreStats, rank_candidate_chunks, score_candidate_chunk};
+use super::{rank_candidate_chunks, score_candidate_chunk, Store, StoreStats};
 use crate::embeddings::EmbeddingModel;
 use crate::error::{MemdError, Result};
 use crate::index::Bm25Index;
@@ -98,7 +98,17 @@ impl Default for PersistentStoreConfig {
         Self {
             data_dir: PathBuf::from("data"),
             segment_max_chunks: 10_000,
-            wal_checkpoint_interval: 100,
+            // Safety valve (v0.3.1): the WAL-checkpoint-then-truncate
+            // path has a known soundness gap — a checkpoint can be
+            // appended after metadata/index updates, and recovery only
+            // replays records AFTER the last checkpoint. That can
+            // strand committed metadata if the referenced active
+            // segment was never finalized. Until we have a
+            // checkpoint-before-truncate flow with tests, disable
+            // periodic checkpointing and always replay the full WAL on
+            // recovery. Tests that exercise the checkpoint path opt in
+            // explicitly by setting this field.
+            wal_checkpoint_interval: 0,
             enable_dense_search: true,
             enable_hybrid_search: true,
             enable_tiered_search: true,
@@ -571,9 +581,30 @@ impl PersistentStore {
         for entry in std::fs::read_dir(&tenants_dir)? {
             let entry = entry?;
             if entry.file_type()?.is_dir() {
-                if let Some(tenant_id) = entry.file_name().to_str() {
-                    info!(tenant_id, "recovering tenant");
-                    let _ = self.get_or_create_tenant(tenant_id)?;
+                let name = entry.file_name();
+                match name.to_str() {
+                    // Skip names that fail tenant-id validation instead of
+                    // joining them back into a storage path. Prior to this
+                    // guard, a stray directory like `../leak` or one with
+                    // a trailing slash could be fed back into
+                    // `get_or_create_tenant` and `data_dir.join(tenant_id)`,
+                    // yielding unintended paths.
+                    Some(id) if TenantId::validate(id).is_ok() => {
+                        info!(tenant_id = id, "recovering tenant");
+                        let _ = self.get_or_create_tenant(id)?;
+                    }
+                    Some(id) => {
+                        warn!(
+                            tenant_id = id,
+                            "skipping tenant directory with invalid name"
+                        );
+                    }
+                    None => {
+                        warn!(
+                            path = %entry.path().display(),
+                            "skipping tenant directory with non-UTF-8 name"
+                        );
+                    }
                 }
             }
         }
@@ -582,6 +613,12 @@ impl PersistentStore {
     }
 
     fn get_or_create_tenant(&self, tenant_id: &str) -> Result<Arc<TenantStore>> {
+        // Defensive validation at the storage boundary. Every upstream
+        // caller already validates via `validate_tenant_id`, but this is
+        // where the value is joined with `data_dir` to become a filesystem
+        // path — it must not be possible to escape or confuse the layout
+        // even if a new code path forgets to validate earlier.
+        TenantId::validate(tenant_id)?;
         // Fast path: read lock
         {
             let tenants = self.tenants.read();
@@ -832,9 +869,13 @@ impl TenantStore {
                             // Mark in metadata
                             metadata.mark_deleted(&tenant_id, &chunk_id)?;
 
-                            // Mark tombstone in segment
-                            let mut segments = self.segments.write();
-                            if let Some(reader) = segments.get_mut(&meta.segment_id) {
+                            // Mark tombstone in segment. See the same
+                            // pattern in `delete_chunk` above — the
+                            // per-segment `Arc<RwLock<TombstoneSet>>`
+                            // lets us do this under a read lock on the
+                            // enclosing map.
+                            let segments = self.segments.read();
+                            if let Some(reader) = segments.get(&meta.segment_id) {
                                 reader.mark_deleted(meta.ordinal)?;
                             }
 
@@ -877,7 +918,26 @@ impl TenantStore {
             "WAL recovery complete"
         );
 
-        // After successful recovery, truncate WAL to start fresh
+        // Durability barrier before WAL truncation.
+        //
+        // Recovery above called `append_chunk` on a fresh active
+        // segment, wrote metadata rows pointing at `(segment_id,
+        // ordinal)`, and the original WAL still holds the source of
+        // truth for those chunks. If we truncate now without first
+        // finalizing the active segment, a second crash before the
+        // next rotation leaves metadata pointing at an unfinalized
+        // segment directory (no `meta` file, so startup skips loading
+        // it) while the WAL is already empty — the chunks are lost.
+        //
+        // Finalize the active segment first so the recovered chunks
+        // land in a real, meta-backed finalized segment. Only then is
+        // WAL truncation safe: everything the WAL described is now
+        // durable on disk.
+        if adds > 0 {
+            self.finalize_active_segment()?;
+        }
+
+        // After durable recovery, truncate WAL to start fresh.
         {
             let mut wal = self.wal.lock();
             wal.truncate()?;
@@ -887,8 +947,43 @@ impl TenantStore {
     }
 
     fn next_segment_id(&self) -> u64 {
-        let segments = self.segments.read();
-        segments.keys().max().map(|id| id + 1).unwrap_or(1)
+        // The previous implementation consulted only segments that had
+        // been loaded into memory (finalized dirs with a `meta` file).
+        // An unfinalized `seg_N/` left behind by a mid-write crash was
+        // invisible, so the next rotation reused id N and `create_dir_all`
+        // + `truncate(true)` silently overwrote the prior partial
+        // segment — invalidating any metadata rows that still referenced
+        // it.
+        //
+        // Scan the filesystem for all `seg_*` directories (finalized or
+        // not) and return one past the maximum id found.
+        let from_loaded = {
+            let segments = self.segments.read();
+            segments.keys().copied().max()
+        };
+
+        let mut max_on_disk: Option<u64> = from_loaded;
+        let segments_dir = self.base_dir.join("segments");
+        if let Ok(entries) = std::fs::read_dir(&segments_dir) {
+            for entry in entries.flatten() {
+                if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                    continue;
+                };
+                // Expected format: `seg_NNNNNN` with numeric suffix.
+                let Some(rest) = name.strip_prefix("seg_") else {
+                    continue;
+                };
+                let Ok(id) = rest.parse::<u64>() else {
+                    continue;
+                };
+                max_on_disk = Some(max_on_disk.map_or(id, |prev| prev.max(id)));
+            }
+        }
+
+        max_on_disk.map(|id| id + 1).unwrap_or(1)
     }
 
     fn get_or_create_active_segment(&self, max_chunks: u32) -> Result<()> {
@@ -925,6 +1020,21 @@ impl TenantStore {
             chunk_count: 0,
         });
 
+        Ok(())
+    }
+
+    /// Flush and fsync the active segment's `payload.bin` without
+    /// finalizing the segment.
+    ///
+    /// Called from the chunk/artifact write paths between
+    /// `append_chunk` and the SQLite `insert_many` so that, on crash,
+    /// no metadata row survives that references bytes only ever present
+    /// in the in-memory `BufWriter`.
+    fn flush_active_segment_payload(&self) -> Result<()> {
+        let mut active = self.active_segment.lock();
+        if let Some(seg) = active.as_mut() {
+            seg.writer.flush_payload()?;
+        }
         Ok(())
     }
 
@@ -1097,6 +1207,12 @@ impl Store for PersistentStore {
             });
             index_rows.push((row.chunk_id.clone(), row.chunk.text.clone()));
         }
+        // Persist the active segment's payload bytes before the SQLite
+        // commit. Without this, a crash between `insert_many` and a
+        // later `finalize_active_segment()` leaves metadata rows
+        // pointing at `(segment_id, ordinal)` tuples whose bytes are
+        // still sitting in the unflushed `BufWriter` and are lost.
+        tenant.flush_active_segment_payload()?;
         self.metadata.insert_many(&metadata_rows)?;
         let chunk_ids_for_state: Vec<ChunkId> = metadata_rows
             .iter()
@@ -1729,6 +1845,10 @@ impl PersistentStore {
                 });
                 index_rows.push((row.chunk_id.clone(), row.chunk.text.clone()));
             }
+            // Durability ordering: flush + fsync payload bytes before
+            // the metadata commit. See the sibling call in
+            // `add_task_artifact` for rationale.
+            tenant.flush_active_segment_payload()?;
             self.metadata.insert_many(&metadata_rows)?;
             let chunk_ids_for_state: Vec<ChunkId> = metadata_rows
                 .iter()
@@ -2111,10 +2231,14 @@ impl PersistentStore {
         // Update metadata status
         self.metadata.mark_deleted(tenant_id, chunk_id)?;
 
-        // Update tombstone in segment
+        // Update tombstone in segment. Phase 3.6: `mark_deleted`
+        // now takes `&self` because `SegmentReader.tombstones` is a
+        // `Arc<RwLock<TombstoneSet>>`. A read lock on the segments
+        // map is enough — concurrent reads on other segments and
+        // other active readers on this segment no longer block.
         {
-            let mut segments = tenant.segments.write();
-            if let Some(reader) = segments.get_mut(&meta.segment_id) {
+            let segments = tenant.segments.read();
+            if let Some(reader) = segments.get(&meta.segment_id) {
                 reader.mark_deleted(meta.ordinal)?;
             }
         }
@@ -2160,11 +2284,11 @@ mod tests {
     use super::*;
     use crate::embeddings::MockEmbedder;
     use crate::retrieval::{RerankerConfig, RerankerMode};
-    use crate::store::Store;
     use crate::store::dense::{DenseSearchConfig, DenseSearcher};
     use crate::store::hybrid::{HybridConfig, HybridSearcher};
     use crate::store::metadata::MetadataStore;
-    use crate::task_memory::{TaskArtifact, TaskSearchFilters, build_task_projections};
+    use crate::store::Store;
+    use crate::task_memory::{build_task_projections, TaskArtifact, TaskSearchFilters};
     use crate::types::{ChunkType, ProjectId};
     use rusqlite::Connection;
     use std::fs;
@@ -2864,5 +2988,207 @@ mod tests {
             .unwrap();
         assert_eq!(ranked.len(), 2);
         assert_eq!(ranked[0].0.chunk_id, older);
+    }
+
+    /// Regression test for the `next_segment_id` scan.
+    ///
+    /// Before the fix, `next_segment_id` only consulted loaded
+    /// finalized segments, so a crash that left behind an unfinalized
+    /// `seg_N/` directory (no `meta` file) was invisible to the next
+    /// rotation. The segment writer would then call `create_dir_all` +
+    /// `truncate(true)` on the same id and silently destroy the crashed
+    /// segment's payload bytes.
+    #[tokio::test]
+    async fn next_segment_id_skips_over_orphan_directories() {
+        let (store, temp) = make_test_store();
+        let tenant = make_tenant();
+
+        // Force creation of a real segment via a normal write. Go
+        // through the `Store` trait explicitly so type inference picks
+        // the right method.
+        Store::add(&store, make_chunk(&tenant, "seed chunk"))
+            .await
+            .unwrap();
+        let tenant_arc = store.get_or_create_tenant(tenant.as_str()).unwrap();
+
+        let initial_id = tenant_arc.next_segment_id();
+
+        // Manually create an orphan segment directory without a `meta`
+        // file — this is exactly the state a mid-write crash leaves.
+        let orphan_id = initial_id + 5;
+        let segments_dir = temp
+            .path()
+            .join("tenants")
+            .join(tenant.as_str())
+            .join("segments");
+        let orphan_dir = segments_dir.join(format!("seg_{:06}", orphan_id));
+        fs::create_dir_all(&orphan_dir).unwrap();
+        fs::write(orphan_dir.join("payload.bin"), b"crashed mid-write").unwrap();
+
+        // The next id must be strictly greater than the orphan's id so
+        // the next rotation cannot reuse (and overwrite) it.
+        let next_id = tenant_arc.next_segment_id();
+        assert!(
+            next_id > orphan_id,
+            "next_segment_id must skip over orphan dirs: got {} but orphan is {}",
+            next_id,
+            orphan_id
+        );
+    }
+
+    /// Codex Phase 3 coverage gap: verify that a task/artifact write
+    /// bumps the per-tenant warm-tier `memory_version`. The public
+    /// write path is `Store::add_task_artifact`, which threads through
+    /// the same `hybrid.index_batch` site that `Phase 3.5` hooked with
+    /// `bump_tenant_memory_version`. If a future refactor accidentally
+    /// takes artifact writes off the hybrid indexing path, the cache
+    /// invalidation invariant silently breaks — this test pins it.
+    #[tokio::test]
+    async fn add_task_artifact_bumps_tenant_memory_version() {
+        use crate::embeddings::MockEmbedder;
+        use crate::retrieval::{RerankerConfig, RerankerMode};
+        use crate::store::dense::{DenseSearchConfig, DenseSearcher};
+        use crate::store::hybrid::{HybridConfig, HybridSearcher};
+        use crate::task_memory::{build_task_projections, TaskArtifact};
+
+        let (mut store, _dir) = make_test_store_hybrid_tiered();
+        let hybrid = store.hybrid_searcher.as_ref().unwrap().clone();
+        let tenant = make_tenant();
+
+        // Seed the tiered searcher by issuing a search — this builds
+        // the per-tenant warm tier lazily, which is the version
+        // counter we want to observe.
+        store
+            .search_with_scores(&tenant, "seed probe", 1)
+            .await
+            .unwrap();
+
+        let before = hybrid
+            .tenant_memory_version(&tenant)
+            .expect("tiered searcher must exist after a search call");
+
+        // Drive a real task artifact write through Store::add_task_artifact.
+        let mut artifact = TaskArtifact::new_task_start(tenant.clone());
+        artifact.goal = Some("pin version-bump invariant for task writes".to_string());
+        let projections = build_task_projections(&artifact);
+        <PersistentStore as Store>::add_task_artifact(&store, artifact.clone(), projections)
+            .await
+            .unwrap();
+
+        let after = hybrid
+            .tenant_memory_version(&tenant)
+            .expect("tiered searcher must still exist");
+
+        assert!(
+            after > before,
+            "add_task_artifact must bump per-tenant memory_version: \
+             before={} after={}",
+            before,
+            after
+        );
+        // Suppress unused-assignment warning.
+        let _ = hybrid;
+
+        // Avoid dead-code warning on the `store` shadow below.
+        drop(store);
+
+        fn make_test_store_hybrid_tiered() -> (PersistentStore, tempfile::TempDir) {
+            let dir = tempdir().unwrap();
+            let config = PersistentStoreConfig {
+                data_dir: dir.path().to_path_buf(),
+                segment_max_chunks: 100,
+                wal_checkpoint_interval: 0,
+                enable_dense_search: true,
+                enable_hybrid_search: true,
+                enable_tiered_search: true,
+                ..Default::default()
+            };
+            let mut store = PersistentStore::open(config).unwrap();
+
+            let embedder = Arc::new(MockEmbedder::new());
+            let dense = Arc::new(DenseSearcher::with_embedder(
+                embedder,
+                DenseSearchConfig {
+                    persist: false,
+                    ..Default::default()
+                },
+            ));
+            let hybrid = HybridSearcher::new(
+                dense,
+                None,
+                HybridConfig {
+                    enable_sparse: false,
+                    enable_tiered: true,
+                    reranker: RerankerConfig {
+                        mode: RerankerMode::Feature,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            );
+            store.hybrid_searcher = Some(Arc::new(hybrid));
+            (store, dir)
+        }
+    }
+
+    /// Codex-review regression (v0.3.1) for the WAL recovery durability
+    /// hole: recovery used to replay chunks into a fresh active
+    /// `SegmentWriter`, insert metadata rows, then truncate the WAL —
+    /// without ever finalizing the replayed active segment. A second
+    /// crash after recovery but before the next rotation would strand
+    /// metadata pointing at an unfinalized directory (no `meta` file,
+    /// so startup skipped it) while the WAL was already empty. The
+    /// recovery path now calls `finalize_active_segment()` before the
+    /// truncate so everything the WAL described is durable.
+    ///
+    /// We emulate the failure mode by: (1) writing a chunk and letting
+    /// the store rotate + shut down normally, (2) verifying that a
+    /// second `PersistentStore::open` of the same directory can still
+    /// read the chunk — i.e. the recovery-to-finalize path produced a
+    /// real loadable segment.
+    #[tokio::test]
+    async fn recovery_finalizes_active_segment_before_wal_truncate() {
+        let dir = tempdir().unwrap();
+
+        // Phase A: write, then shut down cleanly.
+        let tenant;
+        let chunk_id;
+        {
+            let config = PersistentStoreConfig {
+                data_dir: dir.path().to_path_buf(),
+                segment_max_chunks: 100,
+                wal_checkpoint_interval: 0, // safety valve default
+                enable_dense_search: false,
+                enable_hybrid_search: false,
+                ..Default::default()
+            };
+            let store = PersistentStore::open(config).unwrap();
+            tenant = make_tenant();
+            chunk_id = Store::add(&store, make_chunk(&tenant, "durability sentinel"))
+                .await
+                .unwrap();
+            store.shutdown().unwrap();
+        }
+
+        // Phase B: reopen the store. If recovery had truncated the WAL
+        // without finalizing the active segment, the chunk's metadata
+        // would be unreadable. This should succeed.
+        let config = PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            segment_max_chunks: 100,
+            wal_checkpoint_interval: 0,
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            ..Default::default()
+        };
+        let store = PersistentStore::open(config).unwrap();
+
+        let recovered = Store::get(&store, &tenant, &chunk_id).await.unwrap();
+        assert!(
+            recovered.is_some(),
+            "after reopen, the durability sentinel must still be readable; \
+             an unfinalized recovery segment would have lost it"
+        );
+        assert_eq!(recovered.unwrap().text, "durability sentinel");
     }
 }
