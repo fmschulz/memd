@@ -392,15 +392,11 @@ mod tests {
 
     #[test]
     fn test_model_urls() {
-        assert!(
-            EmbeddingModel::AllMiniLmL6V2
-                .model_url()
-                .contains("all-MiniLM-L6-v2")
-        );
-        assert!(
-            EmbeddingModel::Qwen3Embedding0_6B
-                .model_url()
-                .contains("Qwen3-Embedding")
-        );
+        assert!(EmbeddingModel::AllMiniLmL6V2
+            .model_url()
+            .contains("all-MiniLM-L6-v2"));
+        assert!(EmbeddingModel::Qwen3Embedding0_6B
+            .model_url()
+            .contains("Qwen3-Embedding"));
     }
 }

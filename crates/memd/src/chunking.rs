@@ -203,23 +203,37 @@ pub fn chunk_text(text: &str, config: &ChunkingConfig) -> Vec<Chunk> {
             chunk_index,
         });
     } else if !chunks.is_empty() {
-        // Merge too-small final chunk with previous chunk
+        // Merge too-small final chunk into the previous chunk.
+        //
+        // `current_chunk_sentences` may include overlap sentences that are
+        // already part of the previous chunk's text — those have an offset
+        // that falls before `last_chunk.end_char`. If we concatenated the
+        // full list we would duplicate the overlap region. Skip overlap
+        // sentences and append only the sentences that follow the previous
+        // chunk's range.
+        //
+        // `end_char` is updated with `max()`: the overlap-only tail case
+        // would otherwise shrink the previous chunk's range because the
+        // last retained sentence may sit before the original chunk end.
         if let Some(last_chunk) = chunks.last_mut() {
-            let additional_text: String = current_chunk_sentences
+            let new_sentences: Vec<&crate::text::Sentence> = current_chunk_sentences
+                .iter()
+                .filter(|s| s.offset >= last_chunk.end_char)
+                .collect();
+
+            let additional_text: String = new_sentences
                 .iter()
                 .map(|s| s.text.as_str())
                 .collect::<Vec<_>>()
                 .join("");
 
-            // Calculate actual end position based on last sentence
-            let end_char = if let Some(last_sent) = current_chunk_sentences.last() {
-                last_sent.offset + last_sent.text.len()
-            } else {
-                chunk_start + current_length
-            };
+            let new_end = new_sentences
+                .last()
+                .map(|s| s.offset + s.text.len())
+                .unwrap_or(last_chunk.end_char);
 
             last_chunk.text.push_str(&additional_text);
-            last_chunk.end_char = end_char;
+            last_chunk.end_char = last_chunk.end_char.max(new_end);
         }
     }
 
@@ -405,5 +419,86 @@ mod tests {
         // Verify complete coverage
         assert_eq!(chunks[0].start_char, 0);
         assert_eq!(chunks.last().unwrap().end_char, text.len());
+    }
+
+    /// Regression test for the merge-too-small-final-chunk path.
+    ///
+    /// Before the fix, when the tail of a document produced a final chunk
+    /// smaller than `min_chunk_size`, the merge branch appended the overlap
+    /// sentences (already part of the previous chunk) back onto
+    /// `last_chunk.text`, duplicating characters. It also overwrote
+    /// `last_chunk.end_char` with the new value, which could shrink the
+    /// chunk's range when only overlap sentences were present.
+    #[test]
+    fn test_merge_final_chunk_does_not_duplicate_overlap() {
+        // Pick sentence counts that produce exactly the merge scenario:
+        // one full chunk + a residual that is below min_chunk_size.
+        let sentence = "Alpha beta gamma delta epsilon zeta. ";
+        let text = sentence.repeat(40);
+
+        let config = ChunkingConfig {
+            chunk_size: 400,
+            overlap: 80,
+            min_chunk_size: 150,
+        };
+        let chunks = chunk_text(&text, &config);
+
+        assert!(
+            chunks.len() >= 2,
+            "Expected at least two chunks for merge scenario, got {}",
+            chunks.len()
+        );
+
+        let last = chunks.last().unwrap();
+
+        // After the fix, the last chunk's text length must not exceed the
+        // range it claims to cover (bytes since its `start_char`). A
+        // duplicate overlap inflates `text.len()` past that window.
+        let window = last.end_char.saturating_sub(last.start_char);
+        assert!(
+            last.text.len() <= window,
+            "last chunk text ({} chars) must not exceed claimed range ({} chars); \
+             duplicated overlap would violate this",
+            last.text.len(),
+            window,
+        );
+    }
+
+    #[test]
+    fn test_merge_final_chunk_does_not_shrink_end_char() {
+        // Text where the final chunk is guaranteed to be merged and
+        // current_chunk_sentences contains only overlap content.
+        let sentence = "Short one. ";
+        let text = sentence.repeat(60);
+
+        let config = ChunkingConfig {
+            chunk_size: 300,
+            overlap: 100,
+            min_chunk_size: 500, // force merge for anything non-full
+        };
+        let chunks = chunk_text(&text, &config);
+
+        // Every chunk's end_char must be monotonically non-decreasing.
+        for pair in chunks.windows(2) {
+            assert!(
+                pair[1].end_char >= pair[0].end_char,
+                "chunk end_char must not decrease across the list"
+            );
+            assert!(
+                pair[1].start_char >= pair[0].start_char,
+                "chunk start_char must not decrease across the list"
+            );
+        }
+
+        // The overall last end_char should still reach into the document
+        // beyond the first chunk (it started at 0).
+        let last = chunks.last().unwrap();
+        assert!(last.end_char > 0);
+        assert!(
+            last.end_char <= text.len(),
+            "end_char {} must not exceed input length {}",
+            last.end_char,
+            text.len()
+        );
     }
 }

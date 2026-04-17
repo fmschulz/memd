@@ -1,12 +1,12 @@
 use super::onnx_runtime;
 use ndarray::{Array2, ArrayViewD, Axis};
-use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
+use ort::session::Session;
 use ort::value::TensorRef;
 use parking_lot::Mutex;
 use std::fs;
 use std::io;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex as StdMutex, OnceLock};
 use tokenizers::{EncodeInput, PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
@@ -211,28 +211,82 @@ impl OnnxCrossEncoderScorer {
     }
 }
 
+/// Convert a raw logits tensor from the cross-encoder into a `[0, 1]`
+/// relevance score per input pair.
+///
+/// Supported shapes (last-dim `C` is the number of classes):
+/// - `C == 1` — regression head: sigmoid(logit).
+/// - `C == 2` — classification head with `[not_relevant, relevant]`:
+///   softmax and take the relevance probability. The previous
+///   implementation read column 0 (the *not-relevant* score), which
+///   silently inverted ranking for any 2-class export.
+/// - other — unsupported; warn once per call and fall back to
+///   sigmoid(column 0) so the pipeline stays available.
 fn logits_to_scores(logits: ArrayViewD<'_, f32>) -> Vec<f32> {
     if logits.ndim() == 1 {
         return logits.iter().copied().map(sigmoid).collect();
     }
     if logits.ndim() >= 2 {
-        return (0..logits.shape()[0])
-            .map(|row| {
-                let value = logits
-                    .index_axis(Axis(0), row)
-                    .iter()
-                    .copied()
-                    .next()
-                    .unwrap_or(0.0);
-                sigmoid(value)
-            })
-            .collect();
+        let last_dim = *logits.shape().last().unwrap_or(&0);
+        let rows = logits.shape()[0];
+        match last_dim {
+            0 => vec![0.0; rows],
+            1 => (0..rows)
+                .map(|row| {
+                    let v = logits
+                        .index_axis(Axis(0), row)
+                        .iter()
+                        .copied()
+                        .next()
+                        .unwrap_or(0.0);
+                    sigmoid(v)
+                })
+                .collect(),
+            2 => (0..rows)
+                .map(|row| {
+                    let view = logits.index_axis(Axis(0), row);
+                    let values: Vec<f32> = view.iter().copied().collect();
+                    // Binary classification heads conventionally emit
+                    // [not_relevant, relevant]. Softmax the pair and
+                    // return the relevance probability.
+                    softmax_relevant(values[0], values[1])
+                })
+                .collect(),
+            other => {
+                tracing::warn!(
+                    last_dim = other,
+                    ndim = logits.ndim(),
+                    "unrecognised cross-encoder output shape; falling back to sigmoid(column 0)"
+                );
+                (0..rows)
+                    .map(|row| {
+                        let v = logits
+                            .index_axis(Axis(0), row)
+                            .iter()
+                            .copied()
+                            .next()
+                            .unwrap_or(0.0);
+                        sigmoid(v)
+                    })
+                    .collect()
+            }
+        }
+    } else {
+        vec![0.0]
     }
-    vec![0.0]
 }
 
 fn sigmoid(value: f32) -> f32 {
     1.0 / (1.0 + (-value).exp())
+}
+
+/// Softmax for a 2-class logits pair, returning the probability of the
+/// second class (conventionally "relevant").
+fn softmax_relevant(not_relevant: f32, relevant: f32) -> f32 {
+    let max = not_relevant.max(relevant);
+    let e_not = (not_relevant - max).exp();
+    let e_rel = (relevant - max).exp();
+    e_rel / (e_not + e_rel)
 }
 
 fn resolve_model_path(cache_root: &Path) -> Result<PathBuf, String> {
@@ -300,7 +354,8 @@ fn verify_existing_file(path: &Path, min_bytes: u64, label: &str) -> Result<Path
 
 #[cfg(test)]
 mod tests {
-    use super::score_pairs;
+    use super::{logits_to_scores, score_pairs, softmax_relevant};
+    use ndarray::{Array1, Array2};
 
     #[test]
     #[ignore = "requires real ONNX runtime/model initialization and may download assets"]
@@ -319,5 +374,63 @@ mod tests {
             scores[0] > scores[1],
             "expected relevant doc to outrank distractor, got scores {scores:?}"
         );
+    }
+
+    /// Regression test: for a 2-class head that emits
+    /// `[not_relevant, relevant]`, the previous implementation read the
+    /// first column (the *not-relevant* logit) and sigmoided it — which
+    /// silently inverted ranking. The fix softmaxes the pair and returns
+    /// the relevance probability.
+    #[test]
+    fn logits_to_scores_handles_two_class_head() {
+        // Row 0: strongly "relevant". Row 1: strongly "not relevant".
+        let logits = Array2::from_shape_vec((2, 2), vec![-2.0, 3.0, 3.0, -2.0]).unwrap();
+        let scores = logits_to_scores(logits.view().into_dyn());
+
+        assert_eq!(scores.len(), 2);
+        assert!(
+            scores[0] > 0.5,
+            "relevant row should produce score > 0.5, got {}",
+            scores[0]
+        );
+        assert!(
+            scores[1] < 0.5,
+            "not-relevant row should produce score < 0.5, got {}",
+            scores[1]
+        );
+        assert!(
+            scores[0] > scores[1],
+            "the relevant row must outrank the not-relevant row"
+        );
+    }
+
+    #[test]
+    fn logits_to_scores_handles_regression_head_1d() {
+        let logits = Array1::from_vec(vec![2.0, -2.0]);
+        let scores = logits_to_scores(logits.view().into_dyn());
+
+        assert_eq!(scores.len(), 2);
+        assert!(scores[0] > 0.5);
+        assert!(scores[1] < 0.5);
+    }
+
+    #[test]
+    fn logits_to_scores_handles_regression_head_2d_single_column() {
+        let logits = Array2::from_shape_vec((3, 1), vec![3.0, 0.0, -3.0]).unwrap();
+        let scores = logits_to_scores(logits.view().into_dyn());
+
+        assert_eq!(scores.len(), 3);
+        assert!(scores[0] > scores[1] && scores[1] > scores[2]);
+        assert!((scores[1] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn softmax_relevant_is_monotonic_in_the_margin() {
+        let low = softmax_relevant(1.0, -1.0);
+        let mid = softmax_relevant(0.0, 0.0);
+        let high = softmax_relevant(-1.0, 1.0);
+
+        assert!(low < mid && mid < high);
+        assert!((mid - 0.5).abs() < 1e-6);
     }
 }

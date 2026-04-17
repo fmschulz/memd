@@ -4,16 +4,17 @@
 //! keyword-based retrieval. Uses CodeTokenizer for code-aware tokenization.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use tantivy::collector::TopDocs;
+use tantivy::directory::MmapDirectory;
 use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
 use tantivy::schema::{
-    Field, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing, TextOptions, Value,
+    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING,
 };
 use tantivy::tokenizer::TextAnalyzer;
-use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, Term, doc};
+use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, Term};
 
 use crate::error::{MemdError, Result};
 use crate::index::sparse::{SparseIndex, SparseSearchResult};
@@ -117,12 +118,18 @@ impl Bm25Index {
 
         let schema = schema_builder.build();
 
-        // Create index
+        // Create or reopen the index. `Index::create_in_dir` fails when the
+        // directory already contains a tantivy index, which would silently
+        // disable hybrid search on restart. Use `open_or_create` via an
+        // `MmapDirectory` so the same code path works for fresh and existing
+        // directories.
         let index = match path {
             Some(p) => {
                 std::fs::create_dir_all(&p)?;
-                Index::create_in_dir(&p, schema.clone())
-                    .map_err(|e| MemdError::StorageError(format!("create index: {}", e)))?
+                let directory = MmapDirectory::open(&p)
+                    .map_err(|e| MemdError::StorageError(format!("open index directory: {}", e)))?;
+                Index::open_or_create(directory, schema.clone())
+                    .map_err(|e| MemdError::StorageError(format!("open_or_create index: {}", e)))?
             }
             None => Index::create_in_ram(schema.clone()),
         };
@@ -634,5 +641,41 @@ mod tests {
 
         let results = index.search(&tenant, "\"identity verification", 10);
         assert!(results.is_ok(), "unbalanced quote query should not error");
+    }
+
+    /// Regression test for the "Index already exists" silent-failure bug:
+    /// `Bm25Index::with_path` used to call `Index::create_in_dir`
+    /// unconditionally, so restarting a daemon that had persisted a sparse
+    /// index always failed and silently disabled hybrid search.
+    #[test]
+    fn test_persistent_index_reopens_without_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("bm25");
+
+        let tenant = create_test_tenant();
+        let chunk_id = ChunkId::new();
+
+        {
+            let index = Bm25Index::with_path(Some(path.clone())).unwrap();
+            index
+                .insert(
+                    &tenant,
+                    &chunk_id,
+                    &["persistent bm25 reopen sentinel".to_string()],
+                )
+                .unwrap();
+            index.commit().unwrap();
+            // drop the index; writer lock released
+        }
+
+        // Reopen the same directory. Before the fix this call returned
+        // "Index already exists" and the caller disabled hybrid search.
+        let reopened = Bm25Index::with_path(Some(path.clone()))
+            .expect("reopening an existing bm25 directory must succeed");
+        let results = reopened.search(&tenant, "sentinel", 10).unwrap();
+        assert!(
+            !results.is_empty(),
+            "reopened index must retain previously indexed documents"
+        );
     }
 }
