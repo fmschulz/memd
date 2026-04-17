@@ -219,38 +219,32 @@ impl SymbolQueryService {
                 }
                 visited.insert(edge.caller_symbol_id);
 
-                // Look up caller symbol to get name and kind
-                let caller_symbols = self
+                // Resolve the CALLER's symbol by its row id (not the
+                // callee name, which was the previous bug). This gives
+                // us the correct caller name and project_id for both
+                // the output record and the multi-hop queue.
+                let caller_symbol = self
                     .store
-                    .find_symbols_by_name(tenant_id, &edge.callee_name);
+                    .get_symbol_by_id(tenant_id, edge.caller_symbol_id)
+                    .ok()
+                    .flatten();
 
-                // Get caller info from symbol if available
-                let (caller_name, caller_kind) = if let Ok(symbols) = &caller_symbols {
-                    if let Some(sym) = symbols.first() {
-                        (sym.name.clone(), sym.kind)
-                    } else {
-                        // Fallback: use edge info
-                        (
-                            format!("caller_{}", edge.caller_symbol_id),
-                            SymbolKind::Function,
-                        )
-                    }
-                } else {
-                    (
+                let (caller_name, caller_kind, caller_project_id) = match caller_symbol {
+                    Some(sym) => (sym.name, sym.kind, sym.project_id),
+                    None => (
+                        // Fallback: synthesize a name from the row id so
+                        // consumers at least see a stable identifier.
                         format!("caller_{}", edge.caller_symbol_id),
                         SymbolKind::Function,
-                    )
+                        None,
+                    ),
                 };
 
-                // Filter by project_id if specified
+                // Filter by project_id when requested — use the caller
+                // symbol's own project_id to match, not the callee's.
                 if let Some(proj_id) = project_id {
-                    if let Ok(symbols) = &caller_symbols {
-                        let matches_project = symbols
-                            .iter()
-                            .any(|s| s.project_id.as_deref() == Some(proj_id));
-                        if !matches_project {
-                            continue;
-                        }
+                    if caller_project_id.as_deref() != Some(proj_id) {
+                        continue;
                     }
                 }
 
@@ -263,7 +257,8 @@ impl SymbolQueryService {
                     depth,
                 });
 
-                // Queue for next depth level
+                // Queue the CALLER name for next depth level so the
+                // traversal walks up the call graph correctly.
                 if depth < max_depth {
                     to_visit.push((caller_name, depth + 1));
                 }
@@ -297,14 +292,84 @@ impl SymbolQueryService {
         Ok(infos)
     }
 
-    /// Attempt to resolve unresolved callee_symbol_id by matching names.
+    /// Attempt to resolve unresolved `callee_symbol_id` by matching on
+    /// `callee_name`. Call-edge rows are written with `callee_symbol_id =
+    /// NULL` when the target symbol had not been indexed yet (typical
+    /// for cross-file calls). A second indexing pass can now populate
+    /// the missing ids, which also lets `find_callers_by_symbol` answer
+    /// cross-file caller queries.
     ///
-    /// Called after indexing new files to link call edges to their targets.
-    /// Returns the count of newly linked edges.
-    pub fn link_callees(&self, _tenant_id: &TenantId) -> Result<usize> {
-        // This would require additional store methods to update call edges
-        // For now, return 0 as the linking is a future enhancement
-        Ok(0)
+    /// When multiple symbols share the same name, we prefer callables
+    /// (Function / Method) over types, scope to the provided tenant,
+    /// and — if a call-edge and candidate symbol share the same
+    /// `project_id` — prefer that project match. Ambiguous ties are
+    /// skipped so we do not silently mis-link.
+    ///
+    /// Returns the number of edges newly linked.
+    pub fn link_callees(&self, tenant_id: &TenantId) -> Result<usize> {
+        let edges = self.store.list_unresolved_call_edges(tenant_id)?;
+        let mut linked = 0usize;
+
+        for edge in edges {
+            let Some(edge_id) = edge.edge_id else {
+                continue;
+            };
+
+            let candidates = self
+                .store
+                .find_symbols_by_name(tenant_id, &edge.callee_name)?;
+            if candidates.is_empty() {
+                continue;
+            }
+
+            // Prefer project-matched candidates when we can infer the
+            // caller's project from the call edge's caller_symbol_id.
+            let caller_project_id = self
+                .store
+                .get_symbol_by_id(tenant_id, edge.caller_symbol_id)
+                .ok()
+                .flatten()
+                .and_then(|s| s.project_id);
+
+            let mut pool: Vec<&SymbolRecord> = candidates
+                .iter()
+                .filter(|s| match &caller_project_id {
+                    Some(pid) => s.project_id.as_deref() == Some(pid.as_str()),
+                    None => true,
+                })
+                .collect();
+            if pool.is_empty() {
+                // Fall back to the full candidate list rather than
+                // silently dropping the edge.
+                pool = candidates.iter().collect();
+            }
+
+            // Rank by kind priority (functions/methods first), skip
+            // ambiguous name collisions across non-callable kinds.
+            pool.sort_by_key(|s| kind_priority(&s.kind));
+
+            // If the top two candidates tie on priority AND sit in
+            // different files, we refuse to guess.
+            if pool.len() >= 2
+                && kind_priority(&pool[0].kind) == kind_priority(&pool[1].kind)
+                && pool[0].file_path != pool[1].file_path
+            {
+                continue;
+            }
+
+            let Some(best) = pool.first() else {
+                continue;
+            };
+            let Some(symbol_id) = best.symbol_id else {
+                continue;
+            };
+            let updated = self.store.update_call_edge_callee(edge_id, symbol_id)?;
+            if updated > 0 {
+                linked += 1;
+            }
+        }
+
+        Ok(linked)
     }
 }
 
@@ -987,6 +1052,161 @@ mod tests {
         assert_eq!(callers[0].caller_file, "src/main.rs");
         assert_eq!(callers[0].call_line, 15);
         assert_eq!(callers[0].depth, 1);
+    }
+
+    /// Regression test for the caller-lookup bug at queries.rs:225 —
+    /// `find_callers` used to look up symbols by `edge.callee_name`
+    /// instead of `edge.caller_symbol_id`, so the returned
+    /// `caller_name` was either the callee's name (for a single-symbol
+    /// match) or a synthesized placeholder (for multi-match or
+    /// unresolved lookups). The fix resolves the caller by its stored
+    /// symbol id.
+    #[test]
+    fn test_find_callers_returns_actual_caller_name_not_callee() {
+        let store = Arc::new(StructuralStore::in_memory().unwrap());
+        let query_service = SymbolQueryService::new(store.clone());
+        let tenant = test_tenant();
+
+        let caller_id = store
+            .insert_symbol(&create_test_symbol(
+                "render_response",
+                SymbolKind::Function,
+                "src/server.rs",
+            ))
+            .unwrap();
+
+        store
+            .insert_call_edge(&CallEdgeRecord {
+                edge_id: None,
+                tenant_id: tenant.clone(),
+                caller_symbol_id: caller_id,
+                callee_name: "serialize_json".to_string(),
+                callee_symbol_id: None,
+                call_file: "src/server.rs".to_string(),
+                call_line: 42,
+                call_col: 4,
+                call_type: CallType::Direct,
+            })
+            .unwrap();
+
+        let callers = query_service
+            .find_callers(&tenant, "serialize_json", 1, None)
+            .unwrap();
+
+        assert_eq!(callers.len(), 1);
+        // Before the fix this was "serialize_json" (the callee) or a
+        // `caller_<id>` fallback.
+        assert_eq!(callers[0].caller_name, "render_response");
+        assert_eq!(callers[0].caller_file, "src/server.rs");
+    }
+
+    /// Regression test for `link_callees`: cross-file edges written with
+    /// `callee_symbol_id = None` are resolved after the referenced
+    /// symbol appears in a later indexing pass.
+    #[test]
+    fn test_link_callees_resolves_cross_file_edges() {
+        let store = Arc::new(StructuralStore::in_memory().unwrap());
+        let query_service = SymbolQueryService::new(store.clone());
+        let tenant = test_tenant();
+
+        let caller_id = store
+            .insert_symbol(&create_test_symbol(
+                "handler",
+                SymbolKind::Function,
+                "src/handler.rs",
+            ))
+            .unwrap();
+
+        // Edge written before the callee was indexed — callee_symbol_id
+        // is None.
+        store
+            .insert_call_edge(&CallEdgeRecord {
+                edge_id: None,
+                tenant_id: tenant.clone(),
+                caller_symbol_id: caller_id,
+                callee_name: "compute_response".to_string(),
+                callee_symbol_id: None,
+                call_file: "src/handler.rs".to_string(),
+                call_line: 7,
+                call_col: 4,
+                call_type: CallType::Direct,
+            })
+            .unwrap();
+
+        // Before linking: zero resolved edges, but find_callers on the
+        // callee name still works via the name-based index.
+        let before = store.list_unresolved_call_edges(&tenant).unwrap();
+        assert_eq!(before.len(), 1);
+
+        // Now index the callee (second pass).
+        let callee_id = store
+            .insert_symbol(&create_test_symbol(
+                "compute_response",
+                SymbolKind::Function,
+                "src/compute.rs",
+            ))
+            .unwrap();
+
+        let linked = query_service.link_callees(&tenant).unwrap();
+        assert_eq!(linked, 1, "one edge should be newly linked");
+
+        let after = store.list_unresolved_call_edges(&tenant).unwrap();
+        assert!(after.is_empty(), "no unresolved edges should remain");
+
+        // `find_callers_by_symbol` (resolved-id path) should now work.
+        let by_symbol = store.find_callers_by_symbol(callee_id).unwrap();
+        assert_eq!(by_symbol.len(), 1);
+        assert_eq!(by_symbol[0].caller_symbol_id, caller_id);
+    }
+
+    /// Ambiguity guard: when two candidate symbols match the callee
+    /// name in different files and both are callable, link_callees
+    /// refuses to guess and leaves the edge unresolved.
+    #[test]
+    fn test_link_callees_skips_ambiguous_matches() {
+        let store = Arc::new(StructuralStore::in_memory().unwrap());
+        let query_service = SymbolQueryService::new(store.clone());
+        let tenant = test_tenant();
+
+        let caller_id = store
+            .insert_symbol(&create_test_symbol(
+                "caller",
+                SymbolKind::Function,
+                "src/a.rs",
+            ))
+            .unwrap();
+        store
+            .insert_call_edge(&CallEdgeRecord {
+                edge_id: None,
+                tenant_id: tenant.clone(),
+                caller_symbol_id: caller_id,
+                callee_name: "shared_name".to_string(),
+                callee_symbol_id: None,
+                call_file: "src/a.rs".to_string(),
+                call_line: 1,
+                call_col: 1,
+                call_type: CallType::Direct,
+            })
+            .unwrap();
+
+        // Two callable candidates in different files.
+        store
+            .insert_symbol(&create_test_symbol(
+                "shared_name",
+                SymbolKind::Function,
+                "src/x.rs",
+            ))
+            .unwrap();
+        store
+            .insert_symbol(&create_test_symbol(
+                "shared_name",
+                SymbolKind::Function,
+                "src/y.rs",
+            ))
+            .unwrap();
+
+        let linked = query_service.link_callees(&tenant).unwrap();
+        assert_eq!(linked, 0, "ambiguous matches must not be linked");
     }
 
     #[test]

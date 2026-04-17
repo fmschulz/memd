@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
-use super::{ArtifactKind, TaskArtifact, TaskRecord, sanitize_tag_value};
+use super::{sanitize_tag_value, ArtifactKind, TaskArtifact, TaskRecord};
 use crate::types::{ProjectId, PromotionState, TenantId};
 
 pub const DIGEST_ROLE_PROJECT_BRIEF: &str = "project_brief";

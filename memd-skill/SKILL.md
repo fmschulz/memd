@@ -69,9 +69,13 @@ For summary-first retrieval and onboarding, the current tool surface also persis
 Trust boundary:
 
 - semantic search and digest helpers produce candidates
-- canonical non-digest artifacts are the trust anchor
-- digest artifacts are compiled hints that still require re-grounding
-- `artifact.verify` is the explicit step that grounds a claim against canonical artifacts
+- canonical non-digest artifacts are the default anchor for retrieval
+- digest artifacts are compiled hints that still require independent review
+- `artifact.find_related` is a retrieval helper that surfaces canonical
+  artifacts overlapping a claim — it does NOT itself establish trust. A
+  hit is only supporting evidence after an independent reviewer (distinct
+  `agent_id`) confirms it. The legacy `artifact.verify` alias is
+  deprecated and forwards to `artifact.find_related` with a warning.
 
 ## Tool Surface
 
@@ -107,7 +111,7 @@ Trust boundary:
 - `artifact.create`
 - `artifact.get`
 - `artifact.search`
-- `artifact.verify`
+- `artifact.find_related` (formerly `artifact.verify` — the alias still works but is deprecated)
 - `artifact.find_failures`
 - `artifact.find_decisions`
 - `artifact.find_evidence`
@@ -162,7 +166,7 @@ Minimum pre-refusal check:
   - `memory.search` when broader context is needed
   - digest helpers such as `artifact.find_failures`, `artifact.find_decisions`, `artifact.find_evidence`, or `artifact.find_highlights` when the task matches those intents
 
-If the question is trust-sensitive, use `artifact.verify` before concluding that no grounded support exists.
+If the question is trust-sensitive, use `artifact.find_related` to surface candidate supporting artifacts before concluding that no record exists — then review them yourself. A retrieval hit is not grounding.
 
 If `memd` returns nothing useful, say that explicitly:
 
@@ -256,7 +260,7 @@ Use:
 - `task.resume` to generate or refresh a persisted task resume digest
 - `artifact.get` to inspect one canonical artifact by `artifact_id`
 - `artifact.search` to search canonical artifacts rather than only retrieval chunks
-- `artifact.verify` to ground a claim against canonical artifacts before trusting it
+- `artifact.find_related` to surface canonical artifacts overlapping a claim; review the matched artifacts yourself before trusting the claim (the legacy `artifact.verify` alias still works)
 - `artifact.find_failures` to retrieve a digest-backed failure library
 - `artifact.find_decisions` to retrieve explicit and inferred decisions
 - `artifact.find_evidence` to retrieve digest-backed evidence highlights
@@ -334,31 +338,39 @@ If older history was accidentally written under another local tenant on the same
 
 ## Retrieval Patterns
 
-### Use `task.search` when you know the shape of the answer
+### Start with `memory.search` (the primary surface)
+
+`memory.search` is the default search entry point. It accepts a `mode`
+parameter that biases results:
+
+- `generic` — unbiased hybrid (dense + sparse + reranker)
+- `brief_project` — favour project briefs and onboarding summaries
+- `resume_task` — favour task-resume digests
+- `find_failures` / `find_decisions` / `find_evidence` / `find_highlights` — bias toward that library digest
 
 Examples:
 
-- “Find failed MMseqs runs for this task”
-- “Show evidence artifacts for dataset `rna_seq`”
-- “Find tasks where tool `blast` was used”
-- “Show completed tasks in project `oncogene_screen` with uncertainty about replicate quality”
+- "Find architecture notes about auth middleware" → `memory.search`
+- "What went wrong on this project?" → `memory.search` with `mode=find_failures`
+- "Summarise the last week of work on project X" → `memory.search` with `mode=brief_project`
 
-### Use `artifact.search` when the artifact itself is the answer
+### Reach for `task.search` / `artifact.search` when the *shape* matters
 
-Examples:
+These tools return the same underlying hits but with enriched output
+structures (task/artifact bodies, thread links, grounding refs). Prefer
+them when your downstream code needs that shape:
 
-- “Find critique artifacts for this thread”
-- “Show pending verification artifacts in challenge `artifact_protocol`”
-- “Find revisions replying to a given artifact”
-- “Show thread artifacts contributed by the PI”
+- `task.search` — task-centric filtering (by tool name, dataset, status, confidence)
+- `artifact.search` — artifact-native filtering (by role, kind, reply-to, challenge)
 
-### Use `memory.search` when you want broader context
+If you just want "find the thing that matches my query", stick with
+`memory.search`.
 
-Examples:
+### `context.search_context_documents` is deprecated
 
-- “Find architecture notes about auth middleware”
-- “Show indexed code related to PostgreSQL connection handling”
-- “Search codified context docs for incident response”
+It still works and still returns context-document-specific metadata, but
+`memory.search` with appropriate tag filters covers the same ground. New
+integrations should skip it.
 
 ## Minimal Example
 
