@@ -3,7 +3,7 @@
 //! Provides JSON or pretty-formatted logging output.
 //! In MCP mode, logs go to stderr to avoid interfering with JSON-RPC on stdout.
 
-use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 /// Initialize the logging system
 ///

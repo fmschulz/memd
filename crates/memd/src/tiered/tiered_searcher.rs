@@ -4,8 +4,8 @@
 //! semantic cache (fastest) -> hot tier (fast) -> warm tier (standard).
 //! It automatically promotes frequently accessed chunks and demotes stale ones.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use parking_lot::RwLock;
@@ -196,6 +196,13 @@ impl<W: WarmTierSearch> TieredSearcher<W> {
             query_counter: AtomicU64::new(0),
             last_demotion_check: AtomicU64::new(current_time_ms() as u64),
         }
+    }
+
+    /// Expose the warm tier (used by storage layer to bump its version
+    /// counter on writes; see Phase 3.5). Returning `Arc` preserves
+    /// the trait-object abstraction.
+    pub fn warm_tier(&self) -> Arc<W> {
+        Arc::clone(&self.warm_tier)
     }
 
     /// Get the current configuration

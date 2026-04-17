@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{MemdError, Result};
 
-use super::format::{PayloadIndexRecord, SEGMENT_MAGIC, SegmentMeta};
+use super::format::{PayloadIndexRecord, SegmentMeta, SEGMENT_MAGIC};
 
 /// Append-only writer for segment files
 ///
@@ -118,6 +118,26 @@ impl SegmentWriter {
 
         // Return ordinal (0-indexed)
         Ok((self.index_records.len() - 1) as u32)
+    }
+
+    /// Flush buffered writes to the underlying file AND fsync the
+    /// payload to disk, without finalizing the segment.
+    ///
+    /// Callers use this before committing SQLite metadata rows that
+    /// reference `(segment_id, ordinal)` coordinates. Prior to this, a
+    /// crash between metadata INSERT and segment `finalize()` could
+    /// leave metadata pointing at bytes that had not been persisted
+    /// past the `BufWriter`, so recovery would see dangling `(seg_N,
+    /// ord)` references.
+    pub fn flush_payload(&mut self) -> Result<()> {
+        self.payload_writer
+            .flush()
+            .map_err(|e| MemdError::StorageError(format!("failed to flush payload: {}", e)))?;
+        self.payload_writer
+            .get_ref()
+            .sync_data()
+            .map_err(|e| MemdError::StorageError(format!("failed to fsync payload: {}", e)))?;
+        Ok(())
     }
 
     /// Finalize the segment

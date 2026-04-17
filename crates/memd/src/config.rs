@@ -54,6 +54,18 @@ pub struct ServerConfig {
     /// Endpoint path for the HTTP MCP server
     #[serde(default = "default_path")]
     pub path: String,
+    /// Opt-in to the legacy cross-tenant `project_id` fallback.
+    ///
+    /// When true, any retrieval that carries a `project_id` widens its
+    /// search across all tenants on the daemon that contain that project
+    /// string. This is a compatibility shim for older fragmented history
+    /// — it silently leaks data across tenant boundaries and should stay
+    /// off unless you are deliberately consolidating writes that were
+    /// misrouted. `tenant_id` is a logical partition only and not an
+    /// authentication boundary; put HTTP behind a reverse proxy with real
+    /// auth if you need multi-user isolation.
+    #[serde(default)]
+    pub allow_cross_tenant_project_fallback: bool,
 }
 
 fn default_transport() -> String {
@@ -85,6 +97,7 @@ impl Default for ServerConfig {
             transport: default_transport(),
             bind: default_bind(),
             path: default_path(),
+            allow_cross_tenant_project_fallback: false,
         }
     }
 }
@@ -287,12 +300,10 @@ mod tests {
         let toml = r#"log_level = "invalid""#;
         let result = load_from_str(toml);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("invalid log_level")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid log_level"));
     }
 
     #[test]
@@ -300,12 +311,10 @@ mod tests {
         let toml = r#"log_format = "xml""#;
         let result = load_from_str(toml);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("invalid log_format")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid log_format"));
     }
 
     #[test]
@@ -345,11 +354,9 @@ mod tests {
 
         let result = load_from_str(toml);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("server.path must start with '/'")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("server.path must start with '/'"));
     }
 }

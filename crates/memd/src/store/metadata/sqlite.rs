@@ -5,58 +5,41 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
 
 use rusqlite::Connection;
 
+use super::pool::SqliteConnectionPool;
 use super::{ChunkMetadata, IndexState, MetadataStore};
 use crate::error::Result;
-use crate::store::{FeedbackEntry, RelevanceLabel, normalize_query};
+use crate::store::{normalize_query, FeedbackEntry, RelevanceLabel};
 use crate::task_memory::{ArtifactKind, TaskArtifact, TaskRecord, TaskSearchFilters};
 use crate::types::{ChunkId, ChunkStatus, ChunkType, TenantId};
 
-/// SQLite-backed metadata store
+/// SQLite-backed metadata store.
 ///
-/// Uses WAL mode for crash safety and concurrent readers.
-/// Single writer protected by Mutex.
+/// Phase 4.3: swapped from `Mutex<Connection>` to
+/// `SqliteConnectionPool`. Each call acquires a pooled connection
+/// (RAII-returned on drop) so readers no longer serialize against
+/// each other; writers still serialize naturally at SQLite's own
+/// WAL-mode locking.
 pub struct SqliteMetadataStore {
-    conn: Mutex<Connection>,
+    pool: SqliteConnectionPool,
 }
 
 impl SqliteMetadataStore {
-    /// Open or create a SQLite metadata store
-    ///
-    /// Configures WAL mode, busy timeout, and initializes schema.
+    /// Open or create a SQLite metadata store. The pool warms one
+    /// connection eagerly; subsequent connections grow on demand up
+    /// to `MEMD_SQLITE_POOL_MAX` (default 16).
     pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)?;
-
-        // Enable WAL mode for crash safety + concurrent readers
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-
-        // NORMAL synchronous is safe with WAL mode
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
-
-        // 5 second busy timeout to prevent SQLITE_BUSY errors
-        conn.pragma_update(None, "busy_timeout", 5000)?;
-
-        // 64MB cache for better read performance
-        conn.pragma_update(None, "cache_size", -64000)?;
-
-        // Enable foreign keys for referential integrity
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-
-        let store = Self {
-            conn: Mutex::new(conn),
-        };
-
+        let pool = SqliteConnectionPool::open(path)?;
+        let store = Self { pool };
         store.init_schema()?;
-
         Ok(store)
     }
 
     /// Initialize the database schema
     fn init_schema(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get();
 
         // Create chunks table
         conn.execute(
@@ -509,7 +492,7 @@ impl SqliteMetadataStore {
 
     /// Insert one feedback event.
     pub fn insert_feedback(&self, feedback: &FeedbackEntry) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get();
         conn.execute(
             "INSERT INTO feedback (tenant_id, query, chunk_id, relevance, timestamp_ms)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -536,7 +519,7 @@ impl SqliteMetadataStore {
             return Ok(Vec::new());
         }
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get();
         let mut stmt = conn.prepare(
             "SELECT query, chunk_id, relevance, timestamp_ms
              FROM feedback
@@ -592,7 +575,7 @@ impl SqliteMetadataStore {
         let finished_at_ms = (artifact.artifact_kind.as_str() == "task_finish")
             .then_some(artifact.timestamp_created);
 
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.pool.get();
         let tx = conn.transaction()?;
 
         tx.execute(
@@ -866,7 +849,7 @@ impl SqliteMetadataStore {
         tenant_id: &TenantId,
         artifact_id: &str,
     ) -> Result<Option<TaskArtifact>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get();
         let mut stmt = conn.prepare(
             "SELECT canonical_json
              FROM task_artifacts
@@ -890,7 +873,7 @@ impl SqliteMetadataStore {
         tenant_id: &TenantId,
         task_id: &str,
     ) -> Result<Vec<TaskArtifact>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get();
         let mut stmt = conn.prepare(
             "SELECT canonical_json
              FROM task_artifacts
@@ -915,7 +898,7 @@ impl SqliteMetadataStore {
         tenant_id: &TenantId,
         thread_id: &str,
     ) -> Result<Vec<TaskArtifact>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get();
         let mut stmt = conn.prepare(
             "SELECT canonical_json
              FROM task_artifacts
@@ -945,7 +928,7 @@ impl SqliteMetadataStore {
             return Ok(Vec::new());
         }
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get();
         let mut sql = String::from(
             "SELECT task_id, tenant_id, project_id, status, goal, scientific_question,
                     hypothesis, last_artifact_id, started_at_ms, finished_at_ms, updated_at_ms
@@ -1183,7 +1166,7 @@ impl SqliteMetadataStore {
         sql.push_str(&format!(" LIMIT ?{}", idx));
         params.push(SqlValue::Integer(limit as i64));
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
             row.get::<usize, String>(0)
@@ -1231,7 +1214,7 @@ impl SqliteMetadataStore {
             params.push(rusqlite::types::Value::Text(chunk_id.to_string()));
         }
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
             Ok((row.get::<usize, String>(0)?, row.get::<usize, String>(1)?))
@@ -1330,7 +1313,7 @@ impl MetadataStore for SqliteMetadataStore {
             return Ok(());
         }
 
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.pool.get();
         let tx = conn.transaction()?;
 
         {
@@ -1361,7 +1344,7 @@ impl MetadataStore for SqliteMetadataStore {
     }
 
     fn get(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<Option<ChunkMetadata>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get();
 
         let mut stmt = conn.prepare(
             "SELECT chunk_id, tenant_id, project_id, segment_id, ordinal,
@@ -1388,7 +1371,7 @@ impl MetadataStore for SqliteMetadataStore {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<ChunkMetadata>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get();
 
         let mut stmt = conn.prepare(
             "SELECT chunk_id, tenant_id, project_id, segment_id, ordinal,
@@ -1413,7 +1396,7 @@ impl MetadataStore for SqliteMetadataStore {
     }
 
     fn mark_deleted(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get();
 
         let rows_affected = conn.execute(
             "UPDATE chunks SET status = 'deleted'
@@ -1425,7 +1408,7 @@ impl MetadataStore for SqliteMetadataStore {
     }
 
     fn get_by_segment(&self, segment_id: u64) -> Result<Vec<ChunkMetadata>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get();
 
         let mut stmt = conn.prepare(
             "SELECT chunk_id, tenant_id, project_id, segment_id, ordinal,
@@ -1448,7 +1431,7 @@ impl MetadataStore for SqliteMetadataStore {
     }
 
     fn count_by_status(&self, tenant_id: &TenantId) -> Result<(usize, usize)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get();
 
         let mut stmt = conn.prepare(
             "SELECT status, COUNT(*) as cnt
@@ -1479,7 +1462,7 @@ impl MetadataStore for SqliteMetadataStore {
     }
 
     fn get_deleted_chunk_ids(&self, tenant_id: &TenantId) -> Result<Vec<ChunkId>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get();
 
         let mut stmt = conn
             .prepare("SELECT chunk_id FROM chunks WHERE tenant_id = ?1 AND status = 'deleted'")?;
@@ -1510,7 +1493,7 @@ impl MetadataStore for SqliteMetadataStore {
             return Ok(());
         }
 
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.pool.get();
         let tx = conn.transaction()?;
         {
             let mut stmt = tx.prepare(
@@ -1540,7 +1523,7 @@ impl MetadataStore for SqliteMetadataStore {
             return Ok(());
         }
 
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.pool.get();
         let tx = conn.transaction()?;
         {
             let mut stmt = tx.prepare(
@@ -1571,7 +1554,7 @@ impl MetadataStore for SqliteMetadataStore {
         error: &str,
         now_ms: i64,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get();
         conn.execute(
             "UPDATE chunks
              SET index_state = ?3,
@@ -1598,7 +1581,7 @@ impl MetadataStore for SqliteMetadataStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get();
         let mut stmt = conn.prepare(
             "SELECT chunk_id
              FROM chunks
@@ -1626,7 +1609,7 @@ impl MetadataStore for SqliteMetadataStore {
     }
 
     fn count_by_index_state(&self, tenant_id: &TenantId) -> Result<(usize, usize, usize)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get();
         let mut stmt = conn.prepare(
             "SELECT index_state, COUNT(*) as cnt
              FROM chunks
@@ -1895,7 +1878,7 @@ mod tests {
         assert!(db_path.exists());
 
         // Check WAL mode via PRAGMA
-        let conn = store.conn.lock().unwrap();
+        let conn = store.pool.get();
         let journal_mode: String = conn
             .pragma_query_value(None, "journal_mode", |row| row.get(0))
             .unwrap();
@@ -1998,7 +1981,7 @@ mod tests {
         assert_eq!(loaded.goal, artifact.goal);
         assert_eq!(loaded.dataset_refs, artifact.dataset_refs);
 
-        let conn = store.conn.lock().unwrap();
+        let conn = store.pool.get();
         let link_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM artifact_links WHERE artifact_id = ?1",
@@ -2101,7 +2084,7 @@ mod tests {
         drop(conn);
 
         let store = SqliteMetadataStore::open(&db_path).unwrap();
-        let conn = store.conn.lock().unwrap();
+        let conn = store.pool.get();
         let mut stmt = conn.prepare("PRAGMA table_info(chunks)").unwrap();
         let rows = stmt
             .query_map([], |row| row.get::<usize, String>(1))

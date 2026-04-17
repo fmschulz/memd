@@ -3,7 +3,7 @@
 //! Provides persistent storage for symbols, call graph edges, import
 //! relationships, tool call traces, and stack traces.
 
-use rusqlite::{Connection, Result as SqliteResult, params};
+use rusqlite::{params, Connection, Result as SqliteResult};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -555,6 +555,36 @@ impl StructuralStore {
         Ok(ids)
     }
 
+    /// Look up a single symbol by its stored row id, scoped to a tenant.
+    ///
+    /// Used by `QueryRouter::find_callers` to resolve the *caller* side
+    /// of a call edge — previous code looked up the callee name, which
+    /// returned the wrong symbol when resolving multi-hop callers.
+    pub fn get_symbol_by_id(
+        &self,
+        tenant_id: &TenantId,
+        symbol_id: i64,
+    ) -> Result<Option<SymbolRecord>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn.prepare(
+            "SELECT symbol_id, tenant_id, project_id, file_path, name, kind,
+                    line_start, line_end, col_start, col_end,
+                    parent_symbol_id, signature, docstring, visibility, language
+             FROM symbols
+             WHERE symbol_id = ?1 AND tenant_id = ?2",
+        )?;
+
+        let mut rows = stmt.query_map(params![symbol_id, tenant_id.as_str()], |row| {
+            Self::row_to_symbol(row)
+        })?;
+
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
     /// Find symbols by exact name match.
     pub fn find_symbols_by_name(
         &self,
@@ -836,6 +866,44 @@ impl StructuralStore {
         conn.execute(
             "DELETE FROM call_edges WHERE tenant_id = ?1 AND call_file = ?2",
             params![tenant_id.as_str(), file_path],
+        )
+    }
+
+    /// Return every call edge whose `callee_symbol_id` is still NULL
+    /// (cross-file calls that were not resolvable at index time).
+    /// `QueryRouter::link_callees` consumes this list to fill in the
+    /// missing ids after a second indexing pass.
+    pub fn list_unresolved_call_edges(
+        &self,
+        tenant_id: &TenantId,
+    ) -> SqliteResult<Vec<CallEdgeRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT edge_id, tenant_id, caller_symbol_id, callee_name, callee_symbol_id,
+                    call_file, call_line, call_col, call_type
+             FROM call_edges
+             WHERE tenant_id = ?1 AND callee_symbol_id IS NULL",
+        )?;
+
+        let rows = stmt.query_map(params![tenant_id.as_str()], |row| {
+            self.row_to_call_edge(row)
+        })?;
+
+        rows.collect()
+    }
+
+    /// Resolve a previously-unlinked call edge by pointing its
+    /// `callee_symbol_id` at a discovered symbol row id. Returns the
+    /// number of rows updated (0 or 1).
+    pub fn update_call_edge_callee(
+        &self,
+        edge_id: i64,
+        callee_symbol_id: i64,
+    ) -> SqliteResult<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE call_edges SET callee_symbol_id = ?1 WHERE edge_id = ?2",
+            params![callee_symbol_id, edge_id],
         )
     }
 
@@ -1595,11 +1663,9 @@ mod tests {
         let children = store.get_symbol_children(class_id).unwrap();
         assert_eq!(children.len(), 2);
         assert!(children.iter().all(|s| s.kind == SymbolKind::Method));
-        assert!(
-            children
-                .iter()
-                .all(|s| s.parent_symbol_id == Some(class_id))
-        );
+        assert!(children
+            .iter()
+            .all(|s| s.parent_symbol_id == Some(class_id)));
 
         // Verify ordering by line
         assert_eq!(children[0].name, "new");

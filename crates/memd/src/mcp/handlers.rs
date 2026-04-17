@@ -5,24 +5,71 @@
 
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tracing::{debug, info, warn};
+
+/// Whether retrieval that carries a `project_id` may widen across every
+/// tenant on this daemon that contains the same project string.
+///
+/// Off by default: tenant isolation is the expected behavior, the
+/// fallback is a migration shim only. `McpServer::new` sets this from
+/// `ServerConfig.allow_cross_tenant_project_fallback`.
+static ALLOW_CROSS_TENANT_PROJECT_FALLBACK: AtomicBool = AtomicBool::new(false);
+
+/// Enable or disable the cross-tenant project fallback. Called from
+/// `McpServer::new` / `McpServer::with_metrics` to honour the server
+/// config. Exposed as `pub(crate)` so integration tests can flip it.
+pub(crate) fn set_cross_tenant_project_fallback(enabled: bool) {
+    ALLOW_CROSS_TENANT_PROJECT_FALLBACK.store(enabled, Ordering::Relaxed);
+}
+
+fn cross_tenant_project_fallback_enabled() -> bool {
+    ALLOW_CROSS_TENANT_PROJECT_FALLBACK.load(Ordering::Relaxed)
+}
+
+/// Resolve an `agent_id` for an artifact write from an explicit param.
+///
+/// Rationale — the v0.3.0 prototype maintained a process-global default
+/// derived from `initialize.clientInfo` in a `static RwLock<Option<String>>`.
+/// That was unsound: `McpServer` is shared across every HTTP client
+/// behind `Arc<AsyncMutex<_>>`, and `handle_initialize` rewrote the
+/// default on each call. One session could overwrite another's
+/// identity and bypass the distinct-writer countersignature rule, or a
+/// single client could reinitialize as a different persona between
+/// writes and forge a false countersignature.
+///
+/// v0.3.1 therefore keeps agent identity **explicit**: callers supply
+/// `agent_id` on artifact writes when they want countersignature
+/// promotion. The trust-tier check in `promote_if_countersigned` already
+/// requires both the current and the parent artifact to have a
+/// non-empty `agent_id`, so anonymous writes simply cannot produce a
+/// false `VerifiedRecord`.
+///
+/// Per-session auto-population (without the bleed hazard) lands in
+/// Phase 2 alongside the HTTP session model.
+pub(crate) fn resolved_agent_id(explicit: Option<&str>) -> Option<String> {
+    explicit
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
 
 use super::error::McpError;
 use crate::metrics::{IndexStats, MetricsCollector};
 use crate::store::{FeedbackEntry, RelevanceLabel, Store, StoreStats, TenantManager};
 use crate::task_memory::{
-    ArtifactKind, ContributorRef, DIGEST_ROLE_DECISION_LIBRARY, DIGEST_ROLE_EVIDENCE_LIBRARY,
-    DIGEST_ROLE_FAILURE_LIBRARY, DIGEST_ROLE_HIGHLIGHT_LIBRARY, DIGEST_ROLE_PROJECT_BRIEF,
-    DIGEST_ROLE_TASK_RESUME, DatasetRef, DecisionViewItem, EntityRef, EvidenceViewItem,
-    FailureViewItem, HighlightViewItem, ProjectBriefView, TaskArtifact, TaskProvenance,
-    TaskResumeView, TaskSearchFilters, TrustTier, build_library_digest_artifact,
-    build_project_brief_digest_artifact, build_project_brief_view, build_task_projections,
-    build_task_resume_digest_artifact, build_task_resume_view, derive_artifact_promotion_state,
-    derive_artifact_trust_tier, derive_chunk_trust_tier, infer_decision_items,
-    infer_evidence_items, infer_failure_items, infer_highlight_items,
+    build_library_digest_artifact, build_project_brief_digest_artifact, build_project_brief_view,
+    build_task_projections, build_task_projections_minimal, build_task_resume_digest_artifact,
+    build_task_resume_view, derive_artifact_promotion_state, derive_artifact_trust_tier,
+    derive_chunk_trust_tier, infer_decision_items, infer_evidence_items, infer_failure_items,
+    infer_highlight_items, ArtifactKind, ContributorRef, DatasetRef, DecisionViewItem, EntityRef,
+    EvidenceViewItem, FailureViewItem, HighlightViewItem, ProjectBriefView, TaskArtifact,
+    TaskProvenance, TaskResumeView, TaskSearchFilters, TrustTier, DIGEST_ROLE_DECISION_LIBRARY,
+    DIGEST_ROLE_EVIDENCE_LIBRARY, DIGEST_ROLE_FAILURE_LIBRARY, DIGEST_ROLE_HIGHLIGHT_LIBRARY,
+    DIGEST_ROLE_PROJECT_BRIEF, DIGEST_ROLE_TASK_RESUME,
 };
 use crate::tiered::TieredTiming;
 use crate::types::{ChunkId, ChunkType, MemoryChunk, ProjectId, Source, TenantId};
@@ -45,6 +92,7 @@ pub enum QueryMode {
 /// Parameters for memory.search
 #[derive(Debug, Deserialize)]
 pub struct SearchParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub query: String,
     #[serde(default)]
@@ -85,6 +133,7 @@ pub struct TimeRange {
 /// Parameters for memory.add
 #[derive(Debug, Deserialize)]
 pub struct AddParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub text: String,
     #[serde(rename = "type")]
@@ -129,6 +178,7 @@ pub struct BatchChunkParams {
 /// Parameters for memory.add_batch
 #[derive(Debug, Deserialize)]
 pub struct AddBatchParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub chunks: Vec<BatchChunkParams>,
 }
@@ -186,6 +236,7 @@ pub struct TaskProvenanceParams {
 /// Parameters for task.start
 #[derive(Debug, Deserialize)]
 pub struct TaskStartParams {
+    #[serde(default)]
     pub tenant_id: String,
     #[serde(default)]
     pub project_id: Option<String>,
@@ -195,11 +246,21 @@ pub struct TaskStartParams {
     pub agent_id: Option<String>,
     #[serde(default)]
     pub session_id: Option<String>,
+    /// The only hard-required field — everything else is an optional
+    /// enrichment that the agent can backfill when it has the
+    /// information. Phase 2.2 shrinks the required surface so callers
+    /// are not forced to invent fields like `hypothesis` just to log
+    /// "I started work on X".
     pub goal: String,
+    #[serde(default)]
     pub motivation: String,
+    #[serde(default)]
     pub hypothesis: String,
+    #[serde(default)]
     pub scientific_question: String,
+    #[serde(default)]
     pub dataset_refs: Vec<TaskDatasetRefParams>,
+    #[serde(default)]
     pub expected_outputs: Vec<String>,
     #[serde(default)]
     pub entity_refs: Vec<TaskEntityRefParams>,
@@ -210,6 +271,7 @@ pub struct TaskStartParams {
 /// Parameters for task.finish
 #[derive(Debug, Deserialize)]
 pub struct TaskFinishParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub task_id: String,
     #[serde(default)]
@@ -228,12 +290,21 @@ pub struct TaskFinishParams {
     pub dataset_refs: Vec<TaskDatasetRefParams>,
     #[serde(default)]
     pub entity_refs: Vec<TaskEntityRefParams>,
+    // Phase 2.2: the summary fields are now optional. Agents that just
+    // want to close a task can do so without inventing content for
+    // every axis; richer finishes populate what they know.
+    #[serde(default)]
     pub what_worked: Vec<String>,
+    #[serde(default)]
     pub what_failed: Vec<String>,
+    #[serde(default)]
     pub validation: Vec<String>,
+    #[serde(default)]
     pub uncertainty: Vec<String>,
+    #[serde(default)]
     pub followups: Vec<String>,
-    pub confidence: f32,
+    #[serde(default)]
+    pub confidence: Option<f32>,
     #[serde(default)]
     pub provenance: Option<TaskProvenanceParams>,
 }
@@ -241,6 +312,7 @@ pub struct TaskFinishParams {
 /// Parameters for task.progress
 #[derive(Debug, Deserialize)]
 pub struct TaskProgressParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub task_id: String,
     #[serde(default)]
@@ -254,6 +326,7 @@ pub struct TaskProgressParams {
     pub blockers: Vec<String>,
     #[serde(default)]
     pub failed_attempts: Vec<String>,
+    #[serde(default)]
     pub next_step: String,
     #[serde(default)]
     pub dataset_refs: Vec<TaskDatasetRefParams>,
@@ -266,6 +339,7 @@ pub struct TaskProgressParams {
 /// Parameters for task.run_start
 #[derive(Debug, Deserialize)]
 pub struct TaskRunStartParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub task_id: String,
     #[serde(default)]
@@ -277,9 +351,13 @@ pub struct TaskRunStartParams {
     pub tool_name: String,
     #[serde(default)]
     pub tool_version: Option<String>,
+    #[serde(default)]
     pub command: String,
+    #[serde(default)]
     pub why_chosen: String,
+    #[serde(default)]
     pub parameters: Value,
+    #[serde(default)]
     pub inputs: Vec<String>,
     #[serde(default)]
     pub summary: Option<String>,
@@ -294,6 +372,7 @@ pub struct TaskRunStartParams {
 /// Parameters for task.run_finish
 #[derive(Debug, Deserialize)]
 pub struct TaskRunFinishParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub task_id: String,
     #[serde(default)]
@@ -309,9 +388,11 @@ pub struct TaskRunFinishParams {
     pub tool_version: Option<String>,
     #[serde(default)]
     pub command: Option<String>,
+    #[serde(default)]
     pub outputs: Vec<String>,
     #[serde(default)]
     pub metrics: Option<Value>,
+    #[serde(default)]
     pub notes: String,
     #[serde(default)]
     pub validation: Vec<String>,
@@ -326,6 +407,7 @@ pub struct TaskRunFinishParams {
 /// Parameters for task.add_evidence
 #[derive(Debug, Deserialize)]
 pub struct TaskAddEvidenceParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub task_id: String,
     #[serde(default)]
@@ -334,9 +416,11 @@ pub struct TaskAddEvidenceParams {
     pub agent_id: Option<String>,
     #[serde(default)]
     pub session_id: Option<String>,
+    #[serde(default)]
     pub summary: String,
     pub evidence_kind: String,
-    pub supports_claim: bool,
+    #[serde(default)]
+    pub supports_claim: Option<bool>,
     #[serde(default)]
     pub metric_name: Option<String>,
     #[serde(default)]
@@ -354,6 +438,7 @@ pub struct TaskAddEvidenceParams {
 /// Parameters for task.get
 #[derive(Debug, Deserialize)]
 pub struct TaskGetParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub task_id: String,
 }
@@ -402,6 +487,7 @@ pub struct TaskSearchFiltersParams {
 /// Parameters for task.search
 #[derive(Debug, Deserialize)]
 pub struct TaskSearchParams {
+    #[serde(default)]
     pub tenant_id: String,
     #[serde(default)]
     pub query: String,
@@ -415,6 +501,7 @@ pub struct TaskSearchParams {
 
 #[derive(Debug, Deserialize)]
 pub struct ProjectBriefParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub project_id: String,
     #[serde(default)]
@@ -427,6 +514,7 @@ pub struct ProjectBriefParams {
 
 #[derive(Debug, Deserialize)]
 pub struct TaskResumeParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub task_id: String,
     #[serde(default)]
@@ -437,6 +525,7 @@ pub struct TaskResumeParams {
 
 #[derive(Debug, Deserialize)]
 pub struct ArtifactLibraryParams {
+    #[serde(default)]
     pub tenant_id: String,
     #[serde(default)]
     pub project_id: Option<String>,
@@ -449,6 +538,7 @@ pub struct ArtifactLibraryParams {
 /// Parameters for artifact.create
 #[derive(Debug, Deserialize)]
 pub struct ArtifactCreateParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub artifact_kind: String,
     #[serde(default)]
@@ -552,6 +642,7 @@ pub struct ArtifactCreateParams {
 /// Parameters for artifact.get
 #[derive(Debug, Deserialize)]
 pub struct ArtifactGetParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub artifact_id: String,
 }
@@ -559,6 +650,7 @@ pub struct ArtifactGetParams {
 /// Parameters for artifact.list_thread
 #[derive(Debug, Deserialize)]
 pub struct ArtifactListThreadParams {
+    #[serde(default)]
     pub tenant_id: String,
     #[serde(default)]
     pub thread_id: Option<String>,
@@ -566,9 +658,10 @@ pub struct ArtifactListThreadParams {
     pub artifact_id: Option<String>,
 }
 
-/// Parameters for artifact.verify
+/// Parameters for artifact.verify / artifact.find_related.
 #[derive(Debug, Deserialize)]
 pub struct ArtifactVerifyParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub claim: String,
     #[serde(default)]
@@ -587,11 +680,19 @@ pub struct ArtifactVerifyParams {
     pub create_artifact: bool,
     #[serde(default)]
     pub record_task_id: Option<String>,
+    /// Optional `agent_id` for the verification record produced when
+    /// `create_artifact = true`. Supplying this is required for
+    /// distinct-writer countersignature promotion (see trust-tier
+    /// rules) — anonymous verification artifacts can never upgrade
+    /// trust, by design.
+    #[serde(default)]
+    pub agent_id: Option<String>,
 }
 
 /// Parameters for memory.get
 #[derive(Debug, Deserialize)]
 pub struct GetParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub chunk_id: String,
 }
@@ -599,6 +700,7 @@ pub struct GetParams {
 /// Parameters for memory.delete
 #[derive(Debug, Deserialize)]
 pub struct DeleteParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub chunk_id: String,
 }
@@ -606,6 +708,7 @@ pub struct DeleteParams {
 /// Parameters for memory.stats
 #[derive(Debug, Deserialize)]
 pub struct StatsParams {
+    #[serde(default)]
     pub tenant_id: String,
 }
 
@@ -628,6 +731,7 @@ fn default_verify_k() -> usize {
 /// Parameters for memory.compact
 #[derive(Debug, Deserialize)]
 pub struct CompactParams {
+    #[serde(default)]
     pub tenant_id: String,
     #[serde(default)]
     pub force: bool,
@@ -642,6 +746,7 @@ pub struct CompactParams {
 /// Parameters for memory.feedback
 #[derive(Debug, Deserialize)]
 pub struct FeedbackParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub query: String,
     pub chunk_id: String,
@@ -651,6 +756,7 @@ pub struct FeedbackParams {
 /// Parameters for memory.consolidate_episode
 #[derive(Debug, Deserialize)]
 pub struct ConsolidateEpisodeParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub episode_id: String,
     #[serde(default = "default_episode_limit")]
@@ -662,6 +768,7 @@ pub struct ConsolidateEpisodeParams {
 /// Parameters for context.list_subsystems
 #[derive(Debug, Deserialize)]
 pub struct ContextListSubsystemsParams {
+    #[serde(default)]
     pub tenant_id: String,
     #[serde(default)]
     pub prefix: Option<String>,
@@ -672,6 +779,7 @@ pub struct ContextListSubsystemsParams {
 /// Parameters for context.get_files_for_subsystem
 #[derive(Debug, Deserialize)]
 pub struct ContextGetFilesForSubsystemParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub subsystem_key: String,
     #[serde(default = "default_limit")]
@@ -681,6 +789,7 @@ pub struct ContextGetFilesForSubsystemParams {
 /// Parameters for context.search_context_documents
 #[derive(Debug, Deserialize)]
 pub struct ContextSearchDocumentsParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub query: String,
     #[serde(default = "default_context_limit")]
@@ -695,6 +804,7 @@ pub struct ContextSearchDocumentsParams {
 /// Parameters for context.find_relevant_context
 #[derive(Debug, Deserialize)]
 pub struct ContextFindRelevantContextParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub task: String,
     #[serde(default = "default_context_limit")]
@@ -708,6 +818,7 @@ pub struct ContextFindRelevantContextParams {
 /// Parameters for context.suggest_agent
 #[derive(Debug, Deserialize)]
 pub struct ContextSuggestAgentParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub task: String,
     #[serde(default)]
@@ -719,6 +830,7 @@ pub struct ContextSuggestAgentParams {
 /// Parameters for context.get_hot_context
 #[derive(Debug, Deserialize)]
 pub struct ContextGetHotContextParams {
+    #[serde(default)]
     pub tenant_id: String,
     #[serde(default = "default_context_limit")]
     pub k: usize,
@@ -747,6 +859,7 @@ fn default_depth() -> u32 {
 /// Parameters for code.find_definition
 #[derive(Debug, Deserialize)]
 pub struct FindDefinitionParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub name: String,
     #[serde(default)]
@@ -756,6 +869,7 @@ pub struct FindDefinitionParams {
 /// Parameters for code.find_references
 #[derive(Debug, Deserialize)]
 pub struct FindReferencesParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub name: String,
     #[serde(default)]
@@ -765,6 +879,7 @@ pub struct FindReferencesParams {
 /// Parameters for code.find_callers
 #[derive(Debug, Deserialize)]
 pub struct FindCallersParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub name: String,
     #[serde(default = "default_depth")]
@@ -776,6 +891,7 @@ pub struct FindCallersParams {
 /// Parameters for code.find_imports
 #[derive(Debug, Deserialize)]
 pub struct FindImportsParams {
+    #[serde(default)]
     pub tenant_id: String,
     pub module: String,
     #[serde(default)]
@@ -789,6 +905,7 @@ fn default_limit() -> usize {
 /// Parameters for debug.find_tool_calls
 #[derive(Debug, Deserialize)]
 pub struct FindToolCallsParams {
+    #[serde(default)]
     pub tenant_id: String,
     #[serde(default)]
     pub tool_name: Option<String>,
@@ -807,6 +924,7 @@ pub struct FindToolCallsParams {
 /// Parameters for debug.find_errors
 #[derive(Debug, Deserialize)]
 pub struct FindErrorsParams {
+    #[serde(default)]
     pub tenant_id: String,
     #[serde(default)]
     pub error_signature: Option<String>,
@@ -1730,6 +1848,14 @@ async fn artifact_lookup_tenants<S: Store>(
         return scoped_tenants_for_project(store, primary_tenant, Some(project_id)).await;
     }
 
+    // Without a project_id filter, looking up an artifact by id normally
+    // stays within the caller's tenant. The daemon-wide sweep is only
+    // available when the operator has opted into the cross-tenant
+    // compatibility fallback.
+    if !cross_tenant_project_fallback_enabled() {
+        return Ok(vec![primary_tenant.clone()]);
+    }
+
     let mut tenants = vec![primary_tenant.clone()];
     let mut seen = HashSet::from([primary_tenant.to_string()]);
     for tenant in store
@@ -2035,9 +2161,67 @@ fn parse_chunk_type(s: &str) -> Result<ChunkType, McpError> {
     }
 }
 
-/// Validate tenant_id and return TenantId
+/// Resolve and validate `tenant_id` from a tool call.
+///
+/// Resolution order — the first non-empty value wins:
+///   1. explicit value from the call params
+///   2. `$MEMD_DEFAULT_TENANT` environment variable
+///   3. `~/.memd/default_tenant` file (single line, trimmed)
+///   4. the literal string `"default"`
+///
+/// This is the Phase 2.1 adoption fix: `tenant_id` became optional on
+/// every tool schema, and agents that do not know their tenant
+/// (typical: a fresh Claude Code session) still end up writing to a
+/// stable local tenant instead of failing the call. Operators who run
+/// one daemon for multiple logical spaces can pin the default via the
+/// env var or file.
+///
+/// The returned `TenantId` is always validated against
+/// `TenantId::validate`, so even operator-supplied defaults cannot
+/// escape the storage layout.
+fn resolve_tenant_id(explicit: &str) -> Result<TenantId, McpError> {
+    fn try_build(value: &str, source: &'static str) -> Option<Result<TenantId, McpError>> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some(TenantId::new(trimmed).map_err(|e| {
+            McpError::InvalidParams(format!("invalid tenant_id from {}: {}", source, e))
+        }))
+    }
+
+    if let Some(result) = try_build(explicit, "call params") {
+        return result;
+    }
+
+    if let Ok(env_value) = std::env::var("MEMD_DEFAULT_TENANT") {
+        if let Some(result) = try_build(&env_value, "$MEMD_DEFAULT_TENANT") {
+            return result;
+        }
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        let pinned = std::path::PathBuf::from(home)
+            .join(".memd")
+            .join("default_tenant");
+        if let Ok(contents) = std::fs::read_to_string(&pinned) {
+            if let Some(result) = try_build(&contents, "~/.memd/default_tenant") {
+                return result;
+            }
+        }
+    }
+
+    // Final fallback: a literal "default" tenant. Always valid per
+    // `TenantId::validate` (ASCII alphanumeric).
+    TenantId::new("default").map_err(|e| McpError::InvalidParams(e.to_string()))
+}
+
+/// Legacy alias. Kept so older call sites that want the strict "caller
+/// supplied a tenant_id" semantics do not accidentally pick up the
+/// file/env/default fallback. Prefer `resolve_tenant_id` for new code.
+#[allow(dead_code)]
 fn validate_tenant_id(tenant_id: &str) -> Result<TenantId, McpError> {
-    TenantId::new(tenant_id).map_err(|e| McpError::InvalidParams(e.to_string()))
+    resolve_tenant_id(tenant_id)
 }
 
 /// Validate chunk_id and return ChunkId
@@ -2322,6 +2506,13 @@ async fn scoped_tenants_for_project<S: Store>(
         return Ok(vec![primary_tenant.clone()]);
     };
 
+    // Default behavior: tenant isolation. Only widen when the operator
+    // has explicitly opted into the cross-tenant fallback via
+    // `server.allow_cross_tenant_project_fallback = true`.
+    if !cross_tenant_project_fallback_enabled() {
+        return Ok(vec![primary_tenant.clone()]);
+    }
+
     let mut scoped = vec![primary_tenant.clone()];
     let mut seen = HashSet::from([primary_tenant.to_string()]);
     for tenant in store
@@ -2338,6 +2529,12 @@ async fn scoped_tenants_for_project<S: Store>(
             .map_err(|e| McpError::ToolError(e.to_string()))?
             .is_empty();
         if has_project {
+            warn!(
+                primary_tenant = %primary_tenant,
+                extra_tenant = %tenant,
+                project_id,
+                "cross-tenant project fallback widened retrieval beyond the caller's tenant"
+            );
             scoped.push(tenant);
         }
     }
@@ -2417,6 +2614,103 @@ async fn search_with_tier_info_for_tenants<S: Store>(
 
 fn finalize_artifact_for_storage(artifact: &mut TaskArtifact) {
     artifact.promotion_state = derive_artifact_promotion_state(artifact);
+}
+
+/// Promote an artifact to `PromotionState::Verified` when, and only when,
+/// it countersigns a prior artifact written by a distinct agent.
+///
+/// The rules:
+/// 1. The artifact must be of a review-style kind (`Review`, `Revision`,
+///    `Verification`, or `Decision`). Other kinds stay `Canonical`.
+/// 2. It must reply to a canonical parent artifact (`reply_to_artifact_id`
+///    resolves, and the parent is NOT a digest).
+/// 3. The current artifact's `agent_id` must be non-empty AND differ
+///    from the parent's `agent_id`. This is the "distinct writer"
+///    requirement — it prevents a single agent from stamping its own
+///    work as verified.
+/// 4. The current artifact must explicitly support the parent's claim
+///    (`supports_claim = Some(true)`). `supports_claim = Some(false)`
+///    (an explicit rejection) or `None` (no opinion) does NOT promote.
+///
+/// When all four hold, set `promotion_state = Verified` so
+/// `derive_artifact_trust_tier` returns `VerifiedRecord`. Otherwise
+/// leave the canonical tier that `finalize_artifact_for_storage`
+/// assigned.
+pub(crate) async fn promote_if_countersigned<S: Store>(
+    store: &S,
+    artifact: &mut TaskArtifact,
+) -> Result<(), McpError> {
+    use crate::types::PromotionState;
+
+    // Rule 1: only review-style kinds are even eligible.
+    let eligible = matches!(
+        artifact.artifact_kind,
+        ArtifactKind::Review
+            | ArtifactKind::Revision
+            | ArtifactKind::Verification
+            | ArtifactKind::Decision
+    );
+    if !eligible {
+        return Ok(());
+    }
+
+    // Rule 4: explicit support is required.
+    if artifact.supports_claim != Some(true) {
+        return Ok(());
+    }
+
+    // Rule 3a: current writer must be identified.
+    let Some(my_agent) = artifact
+        .agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(());
+    };
+
+    // Rule 2: the reply-to parent must resolve.
+    let Some(reply_to) = artifact.reply_to_artifact_id.as_deref() else {
+        return Ok(());
+    };
+
+    let parent = store
+        .get_task_artifact(&artifact.tenant_id, reply_to)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let Some(parent) = parent else {
+        return Ok(());
+    };
+
+    // Rule 2 (cont): digest parents do not count as canonical trust anchors.
+    if parent.artifact_kind == ArtifactKind::Digest {
+        return Ok(());
+    }
+
+    // Rule 3b: distinct writer.
+    let parent_agent = parent
+        .agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match parent_agent {
+        Some(other) if other != my_agent => {
+            artifact.promotion_state = PromotionState::Verified;
+            info!(
+                artifact_id = %artifact.artifact_id,
+                parent_id = %parent.artifact_id,
+                my_agent,
+                parent_agent = other,
+                "promoted artifact to VerifiedRecord via distinct-writer countersignature"
+            );
+        }
+        _ => {
+            // Either parent is anonymous, or it's the same writer.
+            // Neither case promotes trust.
+        }
+    }
+
+    Ok(())
 }
 
 fn digest_artifacts_equivalent(existing: &TaskArtifact, candidate: &TaskArtifact) -> bool {
@@ -2570,7 +2864,12 @@ async fn ensure_task_resume_digest<S: Store>(
         .map_err(|e| McpError::ToolError(e.to_string()))?
         .into_iter()
         .find(|task| task.task_id == task_id);
-    if task.is_none() {
+    // Fall back to a daemon-wide scan ONLY when the cross-tenant fallback
+    // is explicitly enabled. Otherwise a missing task in the caller's
+    // tenant means "not found here" — the previous unconditional sweep
+    // leaked the existence (and full 500-task listing) of every other
+    // tenant on the daemon whenever a task_id was unknown.
+    if task.is_none() && cross_tenant_project_fallback_enabled() {
         for other_tenant in store
             .list_tenants()
             .await
@@ -2586,6 +2885,12 @@ async fn ensure_task_resume_digest<S: Store>(
                 .into_iter()
                 .find(|task| task.task_id == task_id);
             if task.is_some() {
+                warn!(
+                    primary_tenant = %tenant_id,
+                    extra_tenant = %other_tenant,
+                    task_id,
+                    "task.resume digest resolved via cross-tenant fallback"
+                );
                 break;
             }
         }
@@ -2773,6 +3078,106 @@ async fn ensure_highlight_library_digest<S: Store>(
     );
     let artifact = persist_digest_artifact(store, artifact).await?;
     Ok((artifact, highlights))
+}
+
+/// Phase 3.4 sweeper: drain the writer-side dirty tracker and
+/// regenerate the flagged digests. Returns the number of (scope,
+/// role) pairs successfully regenerated. Errors for individual
+/// scopes are logged but do not abort the whole sweep — they stay
+/// flagged as dirty by virtue of having been drained, so a future
+/// sweep will pick them up once the caller re-marks.
+///
+/// Called from `memory.compact` so operators have an explicit way to
+/// force the refresh. A future phase can run this from a background
+/// task on a timer.
+pub(crate) async fn sweep_dirty_digests<S: Store>(store: &S) -> usize {
+    let drained = crate::task_memory::digest_dirty::global().drain_dirty();
+    if drained.is_empty() {
+        return 0;
+    }
+    info!(pending = drained.len(), "Phase 3.4: sweeping dirty digests");
+
+    let mut rebuilt = 0usize;
+    for key in drained {
+        let tenant = match TenantId::new(&key.tenant_id) {
+            Ok(t) => t,
+            Err(err) => {
+                warn!(
+                    tenant_id = %key.tenant_id,
+                    error = %err,
+                    "skipping dirty digest: invalid tenant_id"
+                );
+                continue;
+            }
+        };
+
+        let result = match key.role.as_str() {
+            crate::task_memory::DIGEST_ROLE_EVIDENCE_LIBRARY => {
+                ensure_evidence_library_digest(store, &tenant, key.project_id.as_deref())
+                    .await
+                    .map(|_| ())
+            }
+            crate::task_memory::DIGEST_ROLE_DECISION_LIBRARY => {
+                ensure_decision_library_digest(store, &tenant, key.project_id.as_deref())
+                    .await
+                    .map(|_| ())
+            }
+            crate::task_memory::DIGEST_ROLE_FAILURE_LIBRARY => {
+                ensure_failure_library_digest(store, &tenant, key.project_id.as_deref())
+                    .await
+                    .map(|_| ())
+            }
+            crate::task_memory::DIGEST_ROLE_HIGHLIGHT_LIBRARY => {
+                ensure_highlight_library_digest(store, &tenant, key.project_id.as_deref())
+                    .await
+                    .map(|_| ())
+            }
+            crate::task_memory::DIGEST_ROLE_PROJECT_BRIEF => match key.project_id.as_deref() {
+                Some(project_id) => ensure_project_brief_digest(store, &tenant, project_id, true)
+                    .await
+                    .map(|_| ()),
+                None => {
+                    warn!(
+                        role = %key.role,
+                        tenant_id = %tenant,
+                        "project_brief digest requires project_id; skipping"
+                    );
+                    continue;
+                }
+            },
+            _ => {
+                warn!(role = %key.role, "unknown digest role in dirty tracker");
+                continue;
+            }
+        };
+
+        match result {
+            Ok(_) => rebuilt += 1,
+            Err(err) => {
+                // Codex follow-up on 3.4 retry semantics: a failed
+                // regeneration used to be silently lost when the
+                // drain consumed the key. Re-mark the key so the
+                // next sweep will retry; otherwise a transient error
+                // (temporary lock contention, disk blip) would leave
+                // the digest stale forever.
+                warn!(
+                    role = %key.role,
+                    tenant_id = %tenant,
+                    project_id = ?key.project_id,
+                    error = %err,
+                    "digest sweeper failed to regenerate; re-marking for retry"
+                );
+                crate::task_memory::digest_dirty::global().mark_dirty(
+                    crate::task_memory::digest_dirty::DigestDirtyKey {
+                        tenant_id: key.tenant_id.clone(),
+                        project_id: key.project_id.clone(),
+                        role: key.role.clone(),
+                    },
+                );
+            }
+        }
+    }
+    rebuilt
 }
 
 async fn rebuild_requested_digests<S: Store>(
@@ -3214,7 +3619,7 @@ pub async fn handle_memory_search<S: Store>(
     store: &S,
     params: SearchParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_search_k(params.k)?;
     let parsed_filters = parse_search_filters(params.filters.as_ref())?;
     let debug_tiers = params.debug_tiers.unwrap_or(false);
@@ -3421,7 +3826,7 @@ pub async fn handle_memory_add<S: Store>(
     tenant_manager: Option<&TenantManager>,
     params: AddParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     let chunk_type = parse_chunk_type(&params.chunk_type)?;
 
     info!(
@@ -3477,7 +3882,7 @@ pub async fn handle_memory_add_batch<S: Store>(
     tenant_manager: Option<&TenantManager>,
     params: AddBatchParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
 
     info!(
         tenant_id = %tenant_id,
@@ -3537,11 +3942,12 @@ pub async fn handle_task_start<S: Store>(
     tenant_manager: Option<&TenantManager>,
     params: TaskStartParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
+    // `goal` remains the only hard-required field on task.start in
+    // v0.3.1+ (see Phase 2.2). motivation/hypothesis/scientific_question
+    // became optional — they can be empty strings when the caller has
+    // nothing to say; richer task records still fill them in.
     validate_identifier("goal", &params.goal)?;
-    validate_identifier("motivation", &params.motivation)?;
-    validate_identifier("hypothesis", &params.hypothesis)?;
-    validate_identifier("scientific_question", &params.scientific_question)?;
     if let Some(parent_task_id) = params.parent_task_id.as_deref() {
         validate_identifier("parent_task_id", parent_task_id)?;
     }
@@ -3561,7 +3967,7 @@ pub async fn handle_task_start<S: Store>(
     artifact.thread_id = Some(artifact.task_id.clone());
     artifact.project_id = ProjectId::from(params.project_id);
     artifact.parent_task_id = params.parent_task_id;
-    artifact.agent_id = params.agent_id;
+    artifact.agent_id = resolved_agent_id(params.agent_id.as_deref());
     artifact.session_id = params.session_id;
     artifact.goal = Some(params.goal);
     artifact.motivation = Some(params.motivation);
@@ -3594,9 +4000,12 @@ pub async fn handle_task_finish<S: Store>(
     tenant_manager: Option<&TenantManager>,
     params: TaskFinishParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_identifier("task_id", &params.task_id)?;
-    validate_confidence(params.confidence)?;
+    // Confidence is optional in v0.3.1+; only validate when supplied.
+    if let Some(confidence) = params.confidence {
+        validate_confidence(confidence)?;
+    }
 
     info!(
         tenant_id = %tenant_id,
@@ -3612,7 +4021,7 @@ pub async fn handle_task_finish<S: Store>(
     let mut artifact = TaskArtifact::new_task_finish(tenant_id, params.task_id);
     artifact.thread_id = Some(artifact.task_id.clone());
     artifact.project_id = ProjectId::from(params.project_id);
-    artifact.agent_id = params.agent_id;
+    artifact.agent_id = resolved_agent_id(params.agent_id.as_deref());
     artifact.session_id = params.session_id;
     artifact.status = Some(params.status.unwrap_or_else(|| "completed".to_string()));
     artifact.goal = params.goal;
@@ -3624,17 +4033,28 @@ pub async fn handle_task_finish<S: Store>(
     artifact.validation = params.validation;
     artifact.uncertainty = params.uncertainty;
     artifact.followups = params.followups;
-    artifact.confidence = Some(params.confidence);
+    // `confidence` is optional in v0.3.1+; only attach when the caller
+    // actually asserted a value.
+    artifact.confidence = params.confidence;
     artifact.provenance = params_to_task_provenance(params.provenance);
     artifact.tool_name = artifact.provenance.tool_name.clone();
     artifact.tool_version = artifact.provenance.tool_version.clone();
 
     finalize_artifact_for_storage(&mut artifact);
     let projections = build_task_projections(&artifact);
+    // Capture scope for the dirty-digest hook before `artifact` moves
+    // into the store.
+    let tenant_for_dirty = artifact.tenant_id.clone();
+    let project_for_dirty = artifact.project_id.as_option().map(str::to_string);
     let result = store
         .add_task_artifact(artifact, projections)
         .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    // Phase 3.4: task.finish rolls up what_worked / what_failed /
+    // validation, which are exactly the inputs to the failure,
+    // highlight, and project_brief digests.
+    mark_task_finish_digests_dirty(&tenant_for_dirty, project_for_dirty.as_deref());
 
     format_mcp_response(&TaskArtifactResult {
         task_id: result.task_id,
@@ -3649,7 +4069,7 @@ pub async fn handle_task_progress<S: Store>(
     tenant_manager: Option<&TenantManager>,
     params: TaskProgressParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_identifier("task_id", &params.task_id)?;
     validate_identifier("summary", &params.summary)?;
     validate_identifier("next_step", &params.next_step)?;
@@ -3668,7 +4088,7 @@ pub async fn handle_task_progress<S: Store>(
     let mut artifact = TaskArtifact::new_task_progress(tenant_id, params.task_id);
     artifact.thread_id = Some(artifact.task_id.clone());
     artifact.project_id = ProjectId::from(params.project_id);
-    artifact.agent_id = params.agent_id;
+    artifact.agent_id = resolved_agent_id(params.agent_id.as_deref());
     artifact.session_id = params.session_id;
     artifact.summary = Some(params.summary);
     artifact.blockers = params.blockers;
@@ -3682,7 +4102,14 @@ pub async fn handle_task_progress<S: Store>(
 
     finalize_artifact_for_storage(&mut artifact);
     let result = store
-        .add_task_artifact(artifact.clone(), build_task_projections(&artifact))
+        .add_task_artifact(
+            artifact.clone(),
+            // Phase 2.5: high-frequency task.* handlers emit one
+            // projection per call (the base summary) instead of the
+            // legacy 4-7 fanout. See
+            // `build_task_projections_minimal` for rationale.
+            build_task_projections_minimal(&artifact),
+        )
         .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
 
@@ -3699,7 +4126,7 @@ pub async fn handle_task_run_start<S: Store>(
     tenant_manager: Option<&TenantManager>,
     params: TaskRunStartParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_identifier("task_id", &params.task_id)?;
     validate_identifier("tool_name", &params.tool_name)?;
     validate_identifier("command", &params.command)?;
@@ -3725,7 +4152,7 @@ pub async fn handle_task_run_start<S: Store>(
     let mut artifact = TaskArtifact::new_run_start(tenant_id, params.task_id);
     artifact.thread_id = Some(artifact.task_id.clone());
     artifact.project_id = ProjectId::from(params.project_id);
-    artifact.agent_id = params.agent_id;
+    artifact.agent_id = resolved_agent_id(params.agent_id.as_deref());
     artifact.session_id = params.session_id;
     artifact.summary = params.summary;
     artifact.tool_name = Some(params.tool_name);
@@ -3745,6 +4172,9 @@ pub async fn handle_task_run_start<S: Store>(
     }
 
     finalize_artifact_for_storage(&mut artifact);
+    // run_start keeps full projections because the separate Run
+    // projection carries tool/command/parameters content that
+    // retrieval filters rely on (see task_search_filters_exactly_by_tool_and_dataset).
     let result = store
         .add_task_artifact(artifact.clone(), build_task_projections(&artifact))
         .await
@@ -3763,7 +4193,7 @@ pub async fn handle_task_run_finish<S: Store>(
     tenant_manager: Option<&TenantManager>,
     params: TaskRunFinishParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_identifier("task_id", &params.task_id)?;
     validate_identifier("status", &params.status)?;
     validate_identifier("notes", &params.notes)?;
@@ -3783,7 +4213,7 @@ pub async fn handle_task_run_finish<S: Store>(
     let mut artifact = TaskArtifact::new_run_finish(tenant_id, params.task_id);
     artifact.thread_id = Some(artifact.task_id.clone());
     artifact.project_id = ProjectId::from(params.project_id);
-    artifact.agent_id = params.agent_id;
+    artifact.agent_id = resolved_agent_id(params.agent_id.as_deref());
     artifact.session_id = params.session_id;
     artifact.status = Some(params.status);
     artifact.tool_name = params.tool_name;
@@ -3804,6 +4234,8 @@ pub async fn handle_task_run_finish<S: Store>(
     }
 
     finalize_artifact_for_storage(&mut artifact);
+    // run_finish keeps full projections so tool/outputs/metrics are
+    // still indexed as retrievable text for tool-name filters.
     let result = store
         .add_task_artifact(artifact.clone(), build_task_projections(&artifact))
         .await
@@ -3822,7 +4254,7 @@ pub async fn handle_task_add_evidence<S: Store>(
     tenant_manager: Option<&TenantManager>,
     params: TaskAddEvidenceParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_identifier("task_id", &params.task_id)?;
     validate_identifier("summary", &params.summary)?;
     validate_identifier("evidence_kind", &params.evidence_kind)?;
@@ -3839,14 +4271,18 @@ pub async fn handle_task_add_evidence<S: Store>(
             .map_err(|e| McpError::ToolError(e.to_string()))?;
     }
 
-    let mut artifact = TaskArtifact::new_evidence(tenant_id, params.task_id);
+    // Keep `tenant_id` available for the post-write dirty-digest hook.
+    let mut artifact = TaskArtifact::new_evidence(tenant_id.clone(), params.task_id);
     artifact.thread_id = Some(artifact.task_id.clone());
     artifact.project_id = ProjectId::from(params.project_id);
-    artifact.agent_id = params.agent_id;
+    artifact.agent_id = resolved_agent_id(params.agent_id.as_deref());
     artifact.session_id = params.session_id;
-    artifact.summary = Some(params.summary);
+    // Summary is optional in v0.3.1+; only set when non-empty so
+    // downstream `score_text_candidate` does not index a bogus empty
+    // string.
+    artifact.summary = (!params.summary.is_empty()).then_some(params.summary);
     artifact.evidence_kind = Some(params.evidence_kind);
-    artifact.supports_claim = Some(params.supports_claim);
+    artifact.supports_claim = params.supports_claim;
     artifact.metrics = match (params.metric_name, params.metric_value, params.metrics) {
         (_, _, Some(metrics)) => Some(metrics),
         (Some(metric_name), Some(metric_value), None) => Some(json!({
@@ -3863,9 +4299,21 @@ pub async fn handle_task_add_evidence<S: Store>(
 
     finalize_artifact_for_storage(&mut artifact);
     let result = store
-        .add_task_artifact(artifact.clone(), build_task_projections(&artifact))
+        .add_task_artifact(
+            artifact.clone(),
+            // Phase 2.5: high-frequency task.* handlers emit one
+            // projection per call (the base summary) instead of the
+            // legacy 4-7 fanout. See
+            // `build_task_projections_minimal` for rationale.
+            build_task_projections_minimal(&artifact),
+        )
         .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    // Phase 3.4: evidence writes invalidate the evidence library,
+    // highlight library (which ranks evidence-backed lessons), and
+    // project brief (which summarizes evidence density).
+    mark_evidence_related_digests_dirty(&tenant_id, artifact.project_id.as_option());
 
     format_mcp_response(&TaskArtifactResult {
         task_id: result.task_id,
@@ -3874,15 +4322,78 @@ pub async fn handle_task_add_evidence<S: Store>(
     })
 }
 
+/// Phase 3.4: mark every digest whose view depends on evidence
+/// content as dirty. Called from `task.add_evidence` and from the
+/// artifact.create path when the kind influences evidence aggregation.
+fn mark_evidence_related_digests_dirty(tenant_id: &TenantId, project_id: Option<&str>) {
+    let project = project_id.map(str::to_string);
+    for role in [
+        crate::task_memory::DIGEST_ROLE_EVIDENCE_LIBRARY,
+        crate::task_memory::DIGEST_ROLE_HIGHLIGHT_LIBRARY,
+        crate::task_memory::DIGEST_ROLE_PROJECT_BRIEF,
+    ] {
+        crate::task_memory::digest_dirty::mark_dirty(tenant_id.to_string(), project.clone(), role);
+    }
+}
+
+/// Phase 3.4: mark digests affected by decision/review/revision
+/// artifact writes.
+fn mark_decision_related_digests_dirty(tenant_id: &TenantId, project_id: Option<&str>) {
+    let project = project_id.map(str::to_string);
+    for role in [
+        crate::task_memory::DIGEST_ROLE_DECISION_LIBRARY,
+        crate::task_memory::DIGEST_ROLE_HIGHLIGHT_LIBRARY,
+        crate::task_memory::DIGEST_ROLE_PROJECT_BRIEF,
+    ] {
+        crate::task_memory::digest_dirty::mark_dirty(tenant_id.to_string(), project.clone(), role);
+    }
+}
+
+/// Phase 3.4: `task.finish` captures `what_failed` / `validation` /
+/// `what_worked` / `followups`, which feed ALL four canonical-data
+/// digest families (`infer_failure_items`, `infer_decision_items`,
+/// `infer_evidence_items`, `infer_highlight_items` in `task_memory::digests`
+/// all consume `TaskFinish`). Mark every one dirty so the sweeper
+/// refreshes the full set; dropping decision/evidence here was a
+/// Codex-flagged coverage hole.
+fn mark_task_finish_digests_dirty(tenant_id: &TenantId, project_id: Option<&str>) {
+    let project = project_id.map(str::to_string);
+    for role in [
+        crate::task_memory::DIGEST_ROLE_FAILURE_LIBRARY,
+        crate::task_memory::DIGEST_ROLE_DECISION_LIBRARY,
+        crate::task_memory::DIGEST_ROLE_EVIDENCE_LIBRARY,
+        crate::task_memory::DIGEST_ROLE_HIGHLIGHT_LIBRARY,
+        crate::task_memory::DIGEST_ROLE_PROJECT_BRIEF,
+    ] {
+        crate::task_memory::digest_dirty::mark_dirty(tenant_id.to_string(), project.clone(), role);
+    }
+}
+
 /// Handle artifact.create tool call.
 pub async fn handle_artifact_create<S: Store>(
     store: &S,
     tenant_manager: Option<&TenantManager>,
     params: ArtifactCreateParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     let artifact_kind =
         ArtifactKind::from_str(&params.artifact_kind).map_err(McpError::InvalidParams)?;
+
+    // Digest artifacts are server-generated by the compaction runner /
+    // memory.compact path (via `persist_digest_artifact`). Because their
+    // IDs are deterministic on (role, scope), accepting client-authored
+    // digests lets any caller overwrite the project's canonical digest
+    // artifacts (`project_brief`, `failure_library`, …). Reject them at
+    // the boundary — the only legitimate way to refresh a digest is via
+    // `memory.compact`.
+    if artifact_kind == ArtifactKind::Digest {
+        return Err(McpError::InvalidParams(
+            "artifact.create: digests are server-generated; \
+             use memory.compact to refresh digest artifacts"
+                .to_string(),
+        ));
+    }
+
     if let Some(confidence) = params.confidence {
         validate_confidence(confidence)?;
     }
@@ -4088,7 +4599,7 @@ pub async fn handle_artifact_create<S: Store>(
         &mut artifact,
         params.project_id.or(inherited_project_id),
         params.parent_task_id,
-        params.agent_id,
+        resolved_agent_id(params.agent_id.as_deref()),
         params.session_id,
         params.status,
         params.artifact_role,
@@ -4103,11 +4614,62 @@ pub async fn handle_artifact_create<S: Store>(
     );
 
     finalize_artifact_for_storage(&mut artifact);
+    // If this artifact countersigns a prior canonical artifact written
+    // by a different agent, upgrade the promotion state to Verified.
+    // This is the ONLY path that produces `VerifiedRecord` trust today.
+    promote_if_countersigned(store, &mut artifact).await?;
     let projections = build_task_projections(&artifact);
+    // Capture scope + kind for the Phase 3.4 dirty-digest hook before
+    // the artifact moves into the store.
+    let tenant_for_dirty = artifact.tenant_id.clone();
+    let project_for_dirty = artifact.project_id.as_option().map(str::to_string);
+    let kind_for_dirty = artifact.artifact_kind;
+    let validation_for_dirty: Vec<String> = artifact.validation.clone();
     let result = store
         .add_task_artifact(artifact, projections)
         .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    // Phase 3.4: decisions, reviews, verifications invalidate the
+    // decision/highlight/project_brief libraries. Evidence artifacts
+    // invalidate the evidence family. Additionally (Codex follow-up):
+    // any artifact with non-empty `validation` also feeds the evidence
+    // library via `infer_evidence_items`, so we dirty that family too
+    // even for review/decision/verification kinds when validation is
+    // present. `revision` is intentionally narrower — revisions are
+    // meta-edits and don't flow into the decision/evidence aggregates.
+    match kind_for_dirty {
+        ArtifactKind::Decision | ArtifactKind::Review | ArtifactKind::Verification => {
+            mark_decision_related_digests_dirty(&tenant_for_dirty, project_for_dirty.as_deref());
+        }
+        ArtifactKind::Evidence => {
+            mark_evidence_related_digests_dirty(&tenant_for_dirty, project_for_dirty.as_deref());
+        }
+        ArtifactKind::Revision => {
+            // Revisions only touch the thread structure + highlight
+            // ranking, not the library content directly.
+            crate::task_memory::digest_dirty::mark_dirty(
+                tenant_for_dirty.to_string(),
+                project_for_dirty.clone(),
+                crate::task_memory::DIGEST_ROLE_HIGHLIGHT_LIBRARY,
+            );
+            crate::task_memory::digest_dirty::mark_dirty(
+                tenant_for_dirty.to_string(),
+                project_for_dirty.clone(),
+                crate::task_memory::DIGEST_ROLE_PROJECT_BRIEF,
+            );
+        }
+        _ => {}
+    }
+    // Any artifact that carries validation flows into the evidence
+    // library regardless of kind.
+    if !validation_for_dirty.is_empty() && !matches!(kind_for_dirty, ArtifactKind::Evidence) {
+        crate::task_memory::digest_dirty::mark_dirty(
+            tenant_for_dirty.to_string(),
+            project_for_dirty.clone(),
+            crate::task_memory::DIGEST_ROLE_EVIDENCE_LIBRARY,
+        );
+    }
 
     format_mcp_response(&TaskArtifactResult {
         task_id: result.task_id,
@@ -4121,7 +4683,7 @@ pub async fn handle_task_get<S: Store>(
     store: &S,
     params: TaskGetParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_identifier("task_id", &params.task_id)?;
 
     let artifacts = store
@@ -4140,7 +4702,7 @@ pub async fn handle_artifact_get<S: Store>(
     store: &S,
     params: ArtifactGetParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_identifier("artifact_id", &params.artifact_id)?;
 
     let artifact = store
@@ -4156,7 +4718,7 @@ pub async fn handle_task_search<S: Store>(
     store: &S,
     params: TaskSearchParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_search_k(params.k)?;
     let filters = parse_task_search_filters(params.filters.as_ref())?;
     let mode = params.mode.unwrap_or_default();
@@ -4301,7 +4863,7 @@ pub async fn handle_artifact_search<S: Store>(
     store: &S,
     params: TaskSearchParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_search_k(params.k)?;
     let filters = parse_task_search_filters(params.filters.as_ref())?;
     let mode = params.mode.unwrap_or_default();
@@ -4317,7 +4879,7 @@ pub async fn handle_artifact_list_thread<S: Store>(
     store: &S,
     params: ArtifactListThreadParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
 
     let thread_id = match (params.thread_id, params.artifact_id) {
         (Some(thread_id), _) => {
@@ -4475,6 +5037,12 @@ async fn persist_verification_artifact<S: Store>(
 
     let mut artifact = TaskArtifact::new_verification(tenant_id.clone(), task_id.clone());
     artifact.project_id = ProjectId::from(params.project_id.clone());
+    // Attribute the verification record to the caller's agent_id when
+    // supplied. Without this the artifact is anonymous, and the
+    // countersignature promotion in `promote_if_countersigned` cannot
+    // elevate it to `VerifiedRecord` — a deliberate safeguard that
+    // keeps self-attributed "verifications" from laundering trust.
+    artifact.agent_id = resolved_agent_id(params.agent_id.as_deref());
     artifact.artifact_role = Some("claim_grounding".to_string());
     artifact.summary = Some(format!(
         "Claim grounding status: {}. Claim: {}",
@@ -4534,6 +5102,10 @@ async fn persist_verification_artifact<S: Store>(
         .or_else(|| Some(task_id.clone()));
 
     finalize_artifact_for_storage(&mut artifact);
+    // Match handle_artifact_create: the verification record can only be
+    // treated as a VerifiedRecord after a distinct-writer countersignature
+    // check; otherwise it stays at `Canonical`.
+    promote_if_countersigned(store, &mut artifact).await?;
     let projections = build_task_projections(&artifact);
     store
         .add_task_artifact(artifact.clone(), projections)
@@ -4547,7 +5119,7 @@ pub async fn handle_artifact_verify<S: Store>(
     store: &S,
     params: ArtifactVerifyParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_search_k(params.k)?;
     if params.claim.trim().is_empty() {
         return Err(McpError::InvalidParams(
@@ -4782,7 +5354,7 @@ pub async fn handle_context_brief_project<S: Store>(
     store: &S,
     params: ProjectBriefParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_identifier("project_id", &params.project_id)?;
     validate_search_k(params.k)?;
 
@@ -4824,7 +5396,7 @@ pub async fn handle_task_resume<S: Store>(
     store: &S,
     params: TaskResumeParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_identifier("task_id", &params.task_id)?;
     validate_search_k(params.k)?;
 
@@ -4862,7 +5434,7 @@ pub async fn handle_artifact_find_failures<S: Store>(
     store: &S,
     params: ArtifactLibraryParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_search_k(params.k)?;
     if let Some(project_id) = params.project_id.as_deref() {
         validate_identifier("project_id", project_id)?;
@@ -4890,7 +5462,7 @@ pub async fn handle_artifact_find_decisions<S: Store>(
     store: &S,
     params: ArtifactLibraryParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_search_k(params.k)?;
     if let Some(project_id) = params.project_id.as_deref() {
         validate_identifier("project_id", project_id)?;
@@ -4918,7 +5490,7 @@ pub async fn handle_artifact_find_evidence<S: Store>(
     store: &S,
     params: ArtifactLibraryParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_search_k(params.k)?;
     if let Some(project_id) = params.project_id.as_deref() {
         validate_identifier("project_id", project_id)?;
@@ -4946,7 +5518,7 @@ pub async fn handle_artifact_find_highlights<S: Store>(
     store: &S,
     params: ArtifactLibraryParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_search_k(params.k)?;
     if let Some(project_id) = params.project_id.as_deref() {
         validate_identifier("project_id", project_id)?;
@@ -4970,7 +5542,7 @@ pub async fn handle_artifact_find_highlights<S: Store>(
 
 /// Handle memory.get tool call
 pub async fn handle_memory_get<S: Store>(store: &S, params: GetParams) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     let chunk_id = validate_chunk_id(&params.chunk_id)?;
 
     debug!(
@@ -5006,7 +5578,7 @@ pub async fn handle_memory_delete<S: Store>(
     store: &S,
     params: DeleteParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     let chunk_id = validate_chunk_id(&params.chunk_id)?;
 
     info!(
@@ -5034,7 +5606,7 @@ pub async fn handle_memory_feedback<S: Store>(
     store: &S,
     params: FeedbackParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     let chunk_id = validate_chunk_id(&params.chunk_id)?;
     let query = params.query.trim();
     if query.is_empty() {
@@ -5079,7 +5651,7 @@ pub async fn handle_memory_stats<S: Store>(
     tenant_manager: Option<&TenantManager>,
     params: StatsParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
 
     info!(tenant_id = %tenant_id, "memory.stats");
 
@@ -5139,7 +5711,10 @@ pub fn handle_memory_metrics(
         "memory.metrics"
     );
 
-    // Filter index stats by tenant if specified
+    // Filter index stats by tenant if specified. `memory.metrics`
+    // intentionally keeps strict semantics here: if the caller passed a
+    // tenant_id, it must parse — we do NOT fall back to the default so
+    // an empty string doesn't silently show all tenants.
     let filtered_stats = if let Some(ref tenant_id_str) = params.tenant_id {
         let tenant_id = validate_tenant_id(tenant_id_str)?;
         index_stats
@@ -5169,7 +5744,7 @@ pub async fn handle_memory_compact<S: Store>(
     store: &S,
     params: CompactParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
 
     info!(
         tenant_id = %tenant_id,
@@ -5181,6 +5756,21 @@ pub async fn handle_memory_compact<S: Store>(
 
     let digest_modes = params.digest_modes.clone().unwrap_or_default();
     let should_rebuild_digests = params.force_digest_rebuild || !digest_modes.is_empty();
+
+    // Phase 3.4: before checking thresholds, drain the writer-side
+    // dirty tracker and regenerate any digests that were flagged by
+    // `task.add_evidence` / `task.finish` / `artifact.create`. This
+    // gives operators a knob — `memory.compact` — to actually action
+    // the writer-driven invalidations without also paying the cost of
+    // a full storage compaction. Any explicit `digest_modes` or
+    // `force_digest_rebuild` below still runs as before.
+    let dirty_digests_swept = sweep_dirty_digests(store).await;
+    if dirty_digests_swept > 0 {
+        debug!(
+            swept = dirty_digests_swept,
+            "Phase 3.4: regenerated dirty digests flagged by writer paths"
+        );
+    }
 
     if params.force {
         // Force compaction regardless of thresholds
@@ -5306,7 +5896,7 @@ pub async fn handle_memory_consolidate_episode<S: Store>(
     store: &S,
     params: ConsolidateEpisodeParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_episode_id(&params.episode_id)?;
 
     if params.max_chunks == 0 {
@@ -5364,7 +5954,7 @@ pub async fn handle_context_list_subsystems<S: Store>(
     store: &S,
     params: ContextListSubsystemsParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     let limit = params.limit.min(500);
     let prefix = params
         .prefix
@@ -5419,7 +6009,7 @@ pub async fn handle_context_get_files_for_subsystem<S: Store>(
     store: &S,
     params: ContextGetFilesForSubsystemParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     let subsystem_key = params.subsystem_key.trim();
     if subsystem_key.is_empty() {
         return Err(McpError::InvalidParams(
@@ -5456,13 +6046,24 @@ pub async fn handle_context_get_files_for_subsystem<S: Store>(
     })
 }
 
-/// Handle context.search_context_documents tool call
+/// Handle context.search_context_documents tool call.
+///
+/// Phase 2.4 consolidation: operators should prefer
+/// `memory.search` with `mode = "generic"` plus tag filters for new
+/// integrations. `context.search_context_documents` still offers a
+/// context-doc-specific return shape and remains supported for
+/// existing callers, but we emit a deprecation-style log each call so
+/// the usage is visible in telemetry.
 pub async fn handle_context_search_documents<S: Store>(
     store: &S,
     params: ContextSearchDocumentsParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_search_k(params.k)?;
+    warn!(
+        tool = "context.search_context_documents",
+        "deprecated: prefer memory.search with tag filters / mode"
+    );
 
     let tier = params
         .tier
@@ -5535,7 +6136,7 @@ pub async fn handle_context_find_relevant_context<S: Store>(
     store: &S,
     params: ContextFindRelevantContextParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_search_k(params.k)?;
 
     let subsystem_keys: Vec<String> = params
@@ -5625,7 +6226,7 @@ pub async fn handle_context_suggest_agent<S: Store>(
     store: &S,
     params: ContextSuggestAgentParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_search_k(params.k)?;
 
     let changed_files: Vec<String> = params
@@ -5766,7 +6367,7 @@ pub async fn handle_context_get_hot_context<S: Store>(
     store: &S,
     params: ContextGetHotContextParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     validate_search_k(params.k)?;
 
     info!(tenant_id = %tenant_id, k = params.k, "context.get_hot_context");
@@ -5793,7 +6394,7 @@ pub fn handle_find_definition(
     query_service: &SymbolQueryService,
     params: FindDefinitionParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
 
     info!(
         tenant_id = %tenant_id,
@@ -5820,7 +6421,7 @@ pub fn handle_find_references(
     query_service: &SymbolQueryService,
     params: FindReferencesParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
 
     info!(
         tenant_id = %tenant_id,
@@ -5847,7 +6448,7 @@ pub fn handle_find_callers(
     query_service: &SymbolQueryService,
     params: FindCallersParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
 
     // Clamp depth to 1-3
     let depth = params.depth.clamp(1, 3);
@@ -5883,7 +6484,7 @@ pub fn handle_find_imports(
     query_service: &SymbolQueryService,
     params: FindImportsParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
 
     info!(
         tenant_id = %tenant_id,
@@ -5946,8 +6547,8 @@ fn import_info_to_result(info: ImportInfo) -> ImportInfoResult {
 // ---------- Trace Query Handlers ----------
 
 use crate::structural::{
-    ErrorResult, FrameInfo, TimeRange as StructuralTimeRange, ToolCallResult, TraceQueryService,
-    parse_iso_datetime,
+    parse_iso_datetime, ErrorResult, FrameInfo, TimeRange as StructuralTimeRange, ToolCallResult,
+    TraceQueryService,
 };
 
 /// Result type for debug.find_tool_calls
@@ -6021,7 +6622,7 @@ pub fn handle_find_tool_calls(
     trace_service: &TraceQueryService,
     params: FindToolCallsParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     let limit = params.limit.min(100);
 
     // Parse time range
@@ -6070,7 +6671,7 @@ pub fn handle_find_errors(
     trace_service: &TraceQueryService,
     params: FindErrorsParams,
 ) -> Result<Value, McpError> {
-    let tenant_id = validate_tenant_id(&params.tenant_id)?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     let limit = params.limit.min(100);
 
     // Parse time range
@@ -6117,6 +6718,19 @@ mod tests {
     use crate::store::{MemoryStore, Store};
     use proptest::prelude::*;
     use serde::de::DeserializeOwned;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// Serialize tests that flip the process-global
+    /// `ALLOW_CROSS_TENANT_PROJECT_FALLBACK` atomic. Without this, parallel
+    /// tests would interleave writes to the flag and observe each other's
+    /// state.
+    static FALLBACK_FLAG_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn with_fallback_flag<'a>() -> MutexGuard<'a, ()> {
+        FALLBACK_FLAG_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     fn make_store() -> MemoryStore {
         MemoryStore::new()
@@ -6394,12 +7008,10 @@ mod tests {
         let text = result["content"][0]["text"].as_str().unwrap();
         let search_response: SearchResult = serde_json::from_str(text).unwrap();
         assert_eq!(search_response.results.len(), 2);
-        assert!(
-            search_response
-                .results
-                .iter()
-                .all(|r| matches!(r.chunk_type.as_str(), "doc" | "code"))
-        );
+        assert!(search_response
+            .results
+            .iter()
+            .all(|r| matches!(r.chunk_type.as_str(), "doc" | "code")));
     }
 
     #[tokio::test]
@@ -7073,16 +7685,12 @@ mod tests {
         let payload: ContextGetFilesForSubsystemResult = parse_tool_payload(&result);
         assert_eq!(payload.subsystem_key, "storage");
         assert_eq!(payload.files.len(), 2);
-        assert!(
-            payload
-                .files
-                .contains(&"crates/memd/src/store/mod.rs".to_string())
-        );
-        assert!(
-            payload
-                .files
-                .contains(&"crates/memd/src/store/hybrid.rs".to_string())
-        );
+        assert!(payload
+            .files
+            .contains(&"crates/memd/src/store/mod.rs".to_string()));
+        assert!(payload
+            .files
+            .contains(&"crates/memd/src/store/hybrid.rs".to_string()));
     }
 
     #[tokio::test]
@@ -7366,7 +7974,7 @@ mod tests {
                 session_id: None,
                 summary: "Top hit exceeded the curated threshold".to_string(),
                 evidence_kind: "metric".to_string(),
-                supports_claim: true,
+                supports_claim: Some(true),
                 metric_name: Some("top_hit_bitscore".to_string()),
                 metric_value: Some(json!(310.5)),
                 metrics: None,
@@ -7390,18 +7998,14 @@ mod tests {
 
         let payload: TaskGetResult = parse_tool_payload(&result);
         assert_eq!(payload.artifacts.len(), 5);
-        assert!(
-            payload
-                .artifacts
-                .iter()
-                .any(|artifact| artifact.artifact_kind == ArtifactKind::TaskStart)
-        );
-        assert!(
-            payload
-                .artifacts
-                .iter()
-                .any(|artifact| artifact.artifact_kind == ArtifactKind::Evidence)
-        );
+        assert!(payload
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.artifact_kind == ArtifactKind::TaskStart));
+        assert!(payload
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.artifact_kind == ArtifactKind::Evidence));
     }
 
     #[tokio::test]
@@ -7554,17 +8158,23 @@ mod tests {
 
         let payload: SearchResult = parse_tool_payload(&result);
         assert_eq!(payload.results.len(), 1);
-        assert!(
-            payload.results[0]
-                .tags
-                .iter()
-                .any(|tag| tag.starts_with("task:kind:run_start"))
-        );
+        assert!(payload.results[0]
+            .tags
+            .iter()
+            .any(|tag| tag.starts_with("task:kind:run_start")));
     }
 
     #[tokio::test]
     async fn task_search_project_scope_spans_tenants() {
+        let _flag_guard = with_fallback_flag();
         let store = make_store();
+
+        // This test exercises the LEGACY cross-tenant project fallback,
+        // which became opt-in in v0.3.1 (see the tenant-isolation
+        // regression test above). Flip the flag on for this scenario only
+        // and restore the default at the end so sibling tests stay
+        // isolated.
+        set_cross_tenant_project_fallback(true);
 
         let start: TaskArtifactResult = parse_tool_payload(
             &handle_task_start(
@@ -7638,10 +8248,17 @@ mod tests {
             .expect("artifact should be attached");
         assert_eq!(artifact.tenant_id.as_str(), "default");
         assert_eq!(artifact.project_id.as_option(), Some("advanced_benchmark"));
+
+        set_cross_tenant_project_fallback(false);
     }
 
     #[tokio::test]
     async fn memory_search_project_scope_spans_tenants_for_raw_chunks() {
+        let _flag_guard = with_fallback_flag();
+        // Same legacy-fallback scenario as task_search_project_scope_spans_tenants:
+        // the widening is opt-in in v0.3.1+ and must be enabled here.
+        set_cross_tenant_project_fallback(true);
+
         let store = make_store();
 
         handle_memory_add(
@@ -7677,11 +8294,11 @@ mod tests {
 
         let payload: SearchResult = parse_tool_payload(&result);
         assert!(!payload.results.is_empty());
-        assert!(
-            payload.results[0]
-                .text
-                .contains("strict reproduction blocker")
-        );
+        assert!(payload.results[0]
+            .text
+            .contains("strict reproduction blocker"));
+
+        set_cross_tenant_project_fallback(false);
     }
 
     #[tokio::test]
@@ -7751,7 +8368,7 @@ mod tests {
                     what_failed: vec!["Search still centers projection chunks".to_string()],
                     validation: vec![],
                     uncertainty: vec![
-                        "Exact artifact exchange semantics are still thin".to_string(),
+                        "Exact artifact exchange semantics are still thin".to_string()
                     ],
                     followups: vec!["Add artifact.search and thread inspection".to_string()],
                     expected_outputs: vec![],
@@ -7914,12 +8531,10 @@ mod tests {
             .unwrap(),
         );
         assert!(!task_search_payload.results.is_empty());
-        assert!(
-            task_search_payload
-                .results
-                .iter()
-                .all(|result| result.artifact.is_some())
-        );
+        assert!(task_search_payload
+            .results
+            .iter()
+            .all(|result| result.artifact.is_some()));
         assert_eq!(
             task_search_payload.results.iter().find_map(|result| {
                 result
@@ -8007,51 +8622,48 @@ mod tests {
                 .iter()
                 .any(|tag| tag.starts_with("task:kind:task_start"))
         }));
-        assert!(
-            search_payload
-                .results
-                .iter()
-                .any(|result| result.trust_tier == TrustTier::CanonicalRecord)
-        );
-        assert!(
-            search_payload
-                .results
-                .iter()
-                .any(|result| !result.grounding_refs.is_empty())
-        );
+        assert!(search_payload
+            .results
+            .iter()
+            .any(|result| result.trust_tier == TrustTier::CanonicalRecord));
+        assert!(search_payload
+            .results
+            .iter()
+            .any(|result| !result.grounding_refs.is_empty()));
     }
 
     #[tokio::test]
     async fn task_finish_stores_failed_and_validation_projections() {
         let store = make_store();
 
-        let result = handle_task_finish(
-            &store,
-            None,
-            TaskFinishParams {
-                tenant_id: "test".to_string(),
-                task_id: "task-123".to_string(),
-                project_id: Some("proj_alpha".to_string()),
-                agent_id: Some("agent-1".to_string()),
-                session_id: Some("session-7".to_string()),
-                status: Some("completed".to_string()),
-                goal: Some("Quantify the stress-response regulon".to_string()),
-                scientific_question: None,
-                dataset_refs: vec![],
-                entity_refs: vec![],
-                what_worked: vec![
-                    "Re-running with stricter QC stabilized the hit list".to_string(),
-                ],
-                what_failed: vec!["The first alignment preset over-trimmed reads".to_string()],
-                validation: vec!["Independent replicate confirmed the top genes".to_string()],
-                uncertainty: vec!["One replicate remains borderline".to_string()],
-                followups: vec!["Collect an additional replicate".to_string()],
-                confidence: 0.78,
-                provenance: None,
-            },
-        )
-        .await
-        .unwrap();
+        let result =
+            handle_task_finish(
+                &store,
+                None,
+                TaskFinishParams {
+                    tenant_id: "test".to_string(),
+                    task_id: "task-123".to_string(),
+                    project_id: Some("proj_alpha".to_string()),
+                    agent_id: Some("agent-1".to_string()),
+                    session_id: Some("session-7".to_string()),
+                    status: Some("completed".to_string()),
+                    goal: Some("Quantify the stress-response regulon".to_string()),
+                    scientific_question: None,
+                    dataset_refs: vec![],
+                    entity_refs: vec![],
+                    what_worked: vec![
+                        "Re-running with stricter QC stabilized the hit list".to_string()
+                    ],
+                    what_failed: vec!["The first alignment preset over-trimmed reads".to_string()],
+                    validation: vec!["Independent replicate confirmed the top genes".to_string()],
+                    uncertainty: vec!["One replicate remains borderline".to_string()],
+                    followups: vec!["Collect an additional replicate".to_string()],
+                    confidence: Some(0.78),
+                    provenance: None,
+                },
+            )
+            .await
+            .unwrap();
 
         let payload: TaskArtifactResult = parse_tool_payload(&result);
         let tenant = TenantId::new("test").unwrap();
@@ -8109,7 +8721,7 @@ mod tests {
                 validation: vec![],
                 uncertainty: vec![],
                 followups: vec![],
-                confidence: 1.1,
+                confidence: Some(1.1),
                 provenance: None,
             },
         )
@@ -8165,7 +8777,7 @@ mod tests {
                 validation: vec!["Project brief response returned one active task".to_string()],
                 uncertainty: vec![],
                 followups: vec!["Bias memory.search toward project digests".to_string()],
-                confidence: 0.9,
+                confidence: Some(0.9),
                 provenance: None,
             },
         )
@@ -8248,11 +8860,11 @@ mod tests {
                 ],
                 what_failed: vec![],
                 validation: vec![
-                    "Grounding should prefer canonical artifacts over digests".to_string(),
+                    "Grounding should prefer canonical artifacts over digests".to_string()
                 ],
                 uncertainty: vec![],
                 followups: vec![],
-                confidence: 0.9,
+                confidence: Some(0.9),
                 provenance: None,
             },
         )
@@ -8272,6 +8884,7 @@ mod tests {
                 include_digests: false,
                 create_artifact: true,
                 record_task_id: Some(start_payload.task_id.clone()),
+                agent_id: None,
             },
         )
         .await
@@ -8301,16 +8914,895 @@ mod tests {
     async fn artifact_verify_returns_digest_only_when_only_unbacked_digest_matches() {
         let store = make_store();
 
-        let digest = handle_artifact_create(
+        // `artifact.create` rejects `artifact_kind = digest` (digests are
+        // server-generated via memory.compact to prevent ID-based overwrite
+        // of canonical digests). Use the server-side `persist_digest_artifact`
+        // path directly to set up the test fixture.
+        let tenant = TenantId::new("tenant_digest").unwrap();
+        let mut digest = TaskArtifact::new_digest(
+            tenant.clone(),
+            "digest_task_project_brief::proj_digest",
+            "project_brief::proj_digest",
+            "project_brief",
+        );
+        digest.project_id = ProjectId::from("proj_digest");
+        digest.summary = Some("Digest-only hint about an isolated semantic summary".to_string());
+        let digest = persist_digest_artifact(&store, digest)
+            .await
+            .expect("server-side digest persist must succeed");
+
+        let result = handle_artifact_verify(
+            &store,
+            ArtifactVerifyParams {
+                tenant_id: "tenant_digest".to_string(),
+                claim: "isolated semantic summary".to_string(),
+                project_id: Some("proj_digest".to_string()),
+                task_id: None,
+                thread_id: None,
+                candidate_artifact_ids: vec![digest.artifact_id],
+                k: 8,
+                include_digests: false,
+                create_artifact: false,
+                record_task_id: None,
+                agent_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let payload: ArtifactVerifyResult = parse_tool_payload(&result);
+        assert_eq!(payload.grounding_status, GroundingStatus::DigestOnly);
+        assert!(payload.supporting_artifacts.is_empty());
+        assert_eq!(payload.consulted_digests.len(), 1);
+    }
+
+    /// Regression test for the tenant-isolation default:
+    /// `scoped_tenants_for_project` must NOT widen across tenants when
+    /// `allow_cross_tenant_project_fallback` is false (the v0.3.1 default).
+    /// The legacy sweep leaked tenant B's project-scoped artifacts to any
+    /// caller in tenant A that guessed the same `project_id`.
+    #[tokio::test]
+    async fn scoped_tenants_respects_isolation_default() {
+        let _flag_guard = with_fallback_flag();
+        let store = make_store();
+
+        // Seed two tenants with the same project_id.
+        handle_task_start(
+            &store,
+            None,
+            TaskStartParams {
+                tenant_id: "tenant_a".to_string(),
+                project_id: Some("shared".to_string()),
+                parent_task_id: None,
+                agent_id: None,
+                session_id: None,
+                goal: "A's work".to_string(),
+                motivation: "m".to_string(),
+                hypothesis: "h".to_string(),
+                scientific_question: "q".to_string(),
+                dataset_refs: vec![],
+                expected_outputs: vec!["o".to_string()],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        handle_task_start(
+            &store,
+            None,
+            TaskStartParams {
+                tenant_id: "tenant_b".to_string(),
+                project_id: Some("shared".to_string()),
+                parent_task_id: None,
+                agent_id: None,
+                session_id: None,
+                goal: "B's work".to_string(),
+                motivation: "m".to_string(),
+                hypothesis: "h".to_string(),
+                scientific_question: "q".to_string(),
+                dataset_refs: vec![],
+                expected_outputs: vec!["o".to_string()],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Default (flag off): tenant A should see ONLY its own tenant.
+        set_cross_tenant_project_fallback(false);
+        let scoped =
+            scoped_tenants_for_project(&store, &TenantId::new("tenant_a").unwrap(), Some("shared"))
+                .await
+                .unwrap();
+        assert_eq!(
+            scoped,
+            vec![TenantId::new("tenant_a").unwrap()],
+            "default isolation must not widen across tenants"
+        );
+
+        // Opt-in (flag on): should widen to include tenant_b.
+        set_cross_tenant_project_fallback(true);
+        let scoped =
+            scoped_tenants_for_project(&store, &TenantId::new("tenant_a").unwrap(), Some("shared"))
+                .await
+                .unwrap();
+        assert!(
+            scoped.contains(&TenantId::new("tenant_b").unwrap()),
+            "flag-on must widen retrieval to other tenants sharing the project_id"
+        );
+
+        // Reset global state so sibling tests see the default.
+        set_cross_tenant_project_fallback(false);
+    }
+
+    /// Phase 2.5: `task.progress` and `task.add_evidence` emit ONE
+    /// projection per call (the base summary) instead of the legacy
+    /// fanout of 2-3 kind-specific chunks. task.start / task.finish /
+    /// task.run_start / task.run_finish keep the full fanout because
+    /// their kind-specific projections carry tool/command text that
+    /// downstream filters rely on.
+    #[tokio::test]
+    async fn task_progress_emits_single_projection_chunk() {
+        let store = make_store();
+
+        // Seed a task so progress has something to reply to.
+        let start = handle_task_start(
+            &store,
+            None,
+            TaskStartParams {
+                tenant_id: "amplification".to_string(),
+                project_id: Some("proj".to_string()),
+                parent_task_id: None,
+                agent_id: None,
+                session_id: None,
+                goal: "measure write amplification".to_string(),
+                motivation: String::new(),
+                hypothesis: String::new(),
+                scientific_question: String::new(),
+                dataset_refs: vec![],
+                expected_outputs: vec![],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        let start_payload: TaskArtifactResult = parse_tool_payload(&start);
+
+        let progress = handle_task_progress(
+            &store,
+            None,
+            TaskProgressParams {
+                tenant_id: "amplification".to_string(),
+                task_id: start_payload.task_id.clone(),
+                project_id: Some("proj".to_string()),
+                agent_id: None,
+                session_id: None,
+                summary: "investigated legacy fanout".to_string(),
+                blockers: vec!["waiting on review".to_string()],
+                failed_attempts: vec![],
+                next_step: "cut projection count".to_string(),
+                dataset_refs: vec![],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        let progress_payload: TaskArtifactResult = parse_tool_payload(&progress);
+
+        // Before Phase 2.5 this value was 2 (TaskSummary base +
+        // blocker/followup fanout). After the cut it must be exactly 1.
+        assert_eq!(
+            progress_payload.projection_chunk_ids.len(),
+            1,
+            "task.progress must emit exactly one projection chunk; \
+             write amplification regression if this grows"
+        );
+    }
+
+    /// Phase 2.1 (Codex coverage gap): the file-arm of
+    /// `resolve_tenant_id`. With `$MEMD_DEFAULT_TENANT` cleared and a
+    /// pinned `~/.memd/default_tenant` file, the file's contents must
+    /// win over the literal `"default"` fallback. Also verifies that
+    /// env still overrides the file when both are present.
+    #[test]
+    fn resolve_tenant_id_reads_pinned_default_tenant_file() {
+        let _flag_guard = with_fallback_flag();
+        let previous_env = std::env::var("MEMD_DEFAULT_TENANT").ok();
+        let previous_home = std::env::var("HOME").ok();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let memd_dir = tmp.path().join(".memd");
+        std::fs::create_dir_all(&memd_dir).unwrap();
+        std::fs::write(memd_dir.join("default_tenant"), "  file_pinned_tenant\n").unwrap();
+
+        // SAFETY: tests serialized via `with_fallback_flag()`.
+        unsafe {
+            std::env::remove_var("MEMD_DEFAULT_TENANT");
+            std::env::set_var("HOME", tmp.path());
+        }
+
+        // Explicit empty → env empty → file wins.
+        let resolved = resolve_tenant_id("").unwrap();
+        assert_eq!(
+            resolved.as_str(),
+            "file_pinned_tenant",
+            "file arm must take precedence over the literal `default` fallback"
+        );
+
+        // When both env and file are present, env must win.
+        unsafe { std::env::set_var("MEMD_DEFAULT_TENANT", "env_wins") };
+        let resolved_env = resolve_tenant_id("").unwrap();
+        assert_eq!(resolved_env.as_str(), "env_wins");
+
+        // Restore environment.
+        unsafe {
+            if let Some(prev) = previous_home {
+                std::env::set_var("HOME", prev);
+            } else {
+                std::env::remove_var("HOME");
+            }
+            if let Some(prev) = previous_env {
+                std::env::set_var("MEMD_DEFAULT_TENANT", prev);
+            } else {
+                std::env::remove_var("MEMD_DEFAULT_TENANT");
+            }
+        }
+    }
+
+    /// Phase 3.4 regression: a `task.add_evidence` write must mark
+    /// the evidence / highlight / project_brief digests dirty on the
+    /// writer side. The dirty tracker is a process-global singleton,
+    /// so this test holds the policy-flag mutex (which already
+    /// serializes other tests that manipulate globals) to get
+    /// exclusive access, then drains the tracker before and after.
+    #[tokio::test]
+    async fn task_add_evidence_marks_evidence_digests_dirty() {
+        use crate::task_memory::digest_dirty::{global as dirty_tracker, DigestDirtyKey};
+        use crate::task_memory::{
+            DIGEST_ROLE_EVIDENCE_LIBRARY, DIGEST_ROLE_HIGHLIGHT_LIBRARY, DIGEST_ROLE_PROJECT_BRIEF,
+        };
+
+        // Serialize with sibling tests that manipulate other global
+        // state (e.g., the cross-tenant fallback flag). This also
+        // prevents concurrent writer paths from other tests from
+        // polluting our dirty-tracker snapshot.
+        let _flag_guard = with_fallback_flag();
+        let _ = dirty_tracker().drain_dirty();
+
+        let store = make_store();
+
+        let start = handle_task_start(
+            &store,
+            None,
+            TaskStartParams {
+                tenant_id: "dirty_ev".to_string(),
+                project_id: Some("proj_dirty".to_string()),
+                parent_task_id: None,
+                agent_id: None,
+                session_id: None,
+                goal: "phase 3.4 writer-dirty test".to_string(),
+                motivation: String::new(),
+                hypothesis: String::new(),
+                scientific_question: String::new(),
+                dataset_refs: vec![],
+                expected_outputs: vec![],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        let start_payload: TaskArtifactResult = parse_tool_payload(&start);
+
+        // task.add_evidence should flag the evidence + highlight +
+        // project_brief digests as dirty.
+        handle_task_add_evidence(
+            &store,
+            None,
+            TaskAddEvidenceParams {
+                tenant_id: "dirty_ev".to_string(),
+                task_id: start_payload.task_id,
+                project_id: Some("proj_dirty".to_string()),
+                agent_id: None,
+                session_id: None,
+                summary: "sentinel evidence".to_string(),
+                evidence_kind: "unit_test".to_string(),
+                supports_claim: Some(true),
+                metric_name: None,
+                metric_value: None,
+                metrics: None,
+                dataset_refs: vec![],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Tracker is a process-global, so other concurrent tests may
+        // also contribute entries. Check our specific (tenant,
+        // project, role) triples are present rather than asserting
+        // the total count.
+        for role in [
+            DIGEST_ROLE_EVIDENCE_LIBRARY,
+            DIGEST_ROLE_HIGHLIGHT_LIBRARY,
+            DIGEST_ROLE_PROJECT_BRIEF,
+        ] {
+            let key = DigestDirtyKey {
+                tenant_id: "dirty_ev".to_string(),
+                project_id: Some("proj_dirty".to_string()),
+                role: role.to_string(),
+            };
+            assert!(
+                dirty_tracker().contains(&key),
+                "{} digest must be marked dirty after task.add_evidence; \
+                 current dirty entries: {:?}",
+                role,
+                dirty_tracker().drain_dirty(),
+            );
+        }
+    }
+
+    /// Phase 2.2: `task.start` accepts only `{goal}` as the
+    /// hard-required surface — motivation, hypothesis, and the rest
+    /// default to empty. An agent that just wants to log "I started
+    /// working on X" should not be forced to invent fields.
+    #[tokio::test]
+    async fn task_start_accepts_minimal_goal_only_payload() {
+        let _flag_guard = with_fallback_flag();
+        // Point HOME at an empty temp dir so no pinned
+        // `~/.memd/default_tenant` file from the developer machine
+        // redirects the implicit default.
+        let tmp = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let previous_env = std::env::var("MEMD_DEFAULT_TENANT").ok();
+        unsafe { std::env::remove_var("MEMD_DEFAULT_TENANT") };
+
+        let store = make_store();
+
+        // Exactly the minimum: no tenant_id, no motivation, no
+        // hypothesis, etc.
+        let params: TaskStartParams = serde_json::from_value(json!({
+            "goal": "Minimal start scenario"
+        }))
+        .expect("task.start must deserialize from just `{goal}`");
+
+        let result = handle_task_start(&store, None, params).await.unwrap();
+        let payload: TaskArtifactResult = parse_tool_payload(&result);
+
+        // With env cleared and no pinned file, the resolver falls
+        // back to the literal "default" tenant.
+        let artifact = store
+            .get_task_artifact(&TenantId::new("default").unwrap(), &payload.artifact_id)
+            .await
+            .unwrap()
+            .expect("artifact must land in the `default` tenant");
+        assert_eq!(artifact.goal.as_deref(), Some("Minimal start scenario"));
+
+        // Restore env for sibling tests.
+        if let Some(prev) = previous_home {
+            unsafe { std::env::set_var("HOME", prev) };
+        } else {
+            unsafe { std::env::remove_var("HOME") };
+        }
+        if let Some(prev) = previous_env {
+            unsafe { std::env::set_var("MEMD_DEFAULT_TENANT", prev) };
+        }
+    }
+
+    /// Phase 2.1: `tenant_id` resolution falls through an ordered chain
+    /// of sources. Explicit value wins; otherwise `$MEMD_DEFAULT_TENANT`
+    /// is consulted; otherwise `~/.memd/default_tenant` (not covered
+    /// here to avoid touching `$HOME`); finally the literal `"default"`
+    /// is used.
+    ///
+    /// Test is serialized via `with_fallback_flag()` because it
+    /// manipulates process env vars.
+    #[test]
+    fn resolve_tenant_id_falls_back_through_env_and_literal_default() {
+        let _flag_guard = with_fallback_flag();
+        let previous = std::env::var("MEMD_DEFAULT_TENANT").ok();
+
+        // Explicit non-empty wins even when env is set.
+        // SAFETY: tests are serialized via the fallback-flag mutex.
+        unsafe { std::env::set_var("MEMD_DEFAULT_TENANT", "env_default") };
+        let explicit = resolve_tenant_id("explicit_tenant").unwrap();
+        assert_eq!(explicit.as_str(), "explicit_tenant");
+
+        // Empty explicit + env set → env wins.
+        let env_resolved = resolve_tenant_id("").unwrap();
+        assert_eq!(env_resolved.as_str(), "env_default");
+
+        // Empty explicit + unset env (and presumably no pinned file in
+        // the test environment) → literal "default".
+        unsafe { std::env::remove_var("MEMD_DEFAULT_TENANT") };
+        // Point HOME at an empty temp dir so the file-lookup arm cannot
+        // find a pinned value left over from the developer machine.
+        let tmp = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+
+        let fallback = resolve_tenant_id("   ").unwrap();
+        assert_eq!(fallback.as_str(), "default");
+
+        // Restore environment for sibling tests.
+        if let Some(prev) = previous_home {
+            unsafe { std::env::set_var("HOME", prev) };
+        } else {
+            unsafe { std::env::remove_var("HOME") };
+        }
+        if let Some(prev) = previous {
+            unsafe { std::env::set_var("MEMD_DEFAULT_TENANT", prev) };
+        }
+    }
+
+    /// Writer-identity resolution in v0.3.1 is explicit-only:
+    /// non-empty explicit → that value, else → anonymous (`None`). The
+    /// previous prototype maintained a process-global default derived
+    /// from `initialize.clientInfo` but that was unsound across shared
+    /// HTTP sessions (identity bleed + re-initialize forgery). See the
+    /// comment on `resolved_agent_id`.
+    #[test]
+    fn resolved_agent_id_uses_explicit_value_or_anonymous() {
+        assert_eq!(
+            resolved_agent_id(Some("codex@0.12")),
+            Some("codex@0.12".to_string()),
+            "non-empty explicit identifier is returned as-is"
+        );
+        assert!(
+            resolved_agent_id(Some("   ")).is_none(),
+            "whitespace-only explicit value must NOT masquerade as an identity"
+        );
+        assert!(
+            resolved_agent_id(Some("")).is_none(),
+            "empty string must be treated as anonymous"
+        );
+        assert!(
+            resolved_agent_id(None).is_none(),
+            "absent agent_id is anonymous; the countersignature path will refuse to promote"
+        );
+    }
+
+    /// End-to-end: a `task.start` without an explicit `agent_id`
+    /// persists an anonymous artifact in v0.3.1. Identity auto-fill
+    /// from session state is deferred to Phase 2.
+    #[tokio::test]
+    async fn task_start_without_explicit_agent_id_stays_anonymous() {
+        let store = make_store();
+
+        let start_value = handle_task_start(
+            &store,
+            None,
+            TaskStartParams {
+                tenant_id: "writer_anon".to_string(),
+                project_id: Some("proj".to_string()),
+                parent_task_id: None,
+                agent_id: None,
+                session_id: None,
+                goal: "test anonymous write".to_string(),
+                motivation: "no identity supplied".to_string(),
+                hypothesis: "anonymous writes stay anonymous".to_string(),
+                scientific_question: "does it stay None?".to_string(),
+                dataset_refs: vec![],
+                expected_outputs: vec!["ok".to_string()],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        let payload: TaskArtifactResult = parse_tool_payload(&start_value);
+
+        let canonical = store
+            .get_task_artifact(&TenantId::new("writer_anon").unwrap(), &payload.artifact_id)
+            .await
+            .unwrap()
+            .expect("artifact must be persisted");
+        assert!(
+            canonical.agent_id.is_none(),
+            "artifact must remain anonymous when no agent_id is supplied; \
+             got {:?}",
+            canonical.agent_id
+        );
+
+        // Explicit agent_id still persists as-is.
+        let start_explicit = handle_task_start(
+            &store,
+            None,
+            TaskStartParams {
+                tenant_id: "writer_anon".to_string(),
+                project_id: Some("proj".to_string()),
+                parent_task_id: None,
+                agent_id: Some("planner-override".to_string()),
+                session_id: None,
+                goal: "explicit".to_string(),
+                motivation: "m".to_string(),
+                hypothesis: "h".to_string(),
+                scientific_question: "q".to_string(),
+                dataset_refs: vec![],
+                expected_outputs: vec!["ok".to_string()],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        let explicit_payload: TaskArtifactResult = parse_tool_payload(&start_explicit);
+        let canonical_explicit = store
+            .get_task_artifact(
+                &TenantId::new("writer_anon").unwrap(),
+                &explicit_payload.artifact_id,
+            )
+            .await
+            .unwrap()
+            .expect("artifact must be persisted");
+        assert_eq!(
+            canonical_explicit.agent_id.as_deref(),
+            Some("planner-override")
+        );
+    }
+
+    /// End-to-end trust-tier test: a single-agent `artifact.create` with
+    /// `artifact_kind = "verification"` and agent-labelled fields must
+    /// NOT produce a `VerifiedRecord`. Only a countersignature from a
+    /// distinct `agent_id` can promote trust.
+    #[tokio::test]
+    async fn single_writer_verification_is_not_verified_record() {
+        let store = make_store();
+
+        let start = handle_task_start(
+            &store,
+            None,
+            TaskStartParams {
+                tenant_id: "trust_solo".to_string(),
+                project_id: Some("proj".to_string()),
+                parent_task_id: None,
+                agent_id: Some("solo".to_string()),
+                session_id: None,
+                goal: "test solo".to_string(),
+                motivation: "m".to_string(),
+                hypothesis: "h".to_string(),
+                scientific_question: "q".to_string(),
+                dataset_refs: vec![],
+                expected_outputs: vec!["ok".to_string()],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        let start_payload: TaskArtifactResult = parse_tool_payload(&start);
+
+        // Same writer "solo" tries to self-verify via artifact.create.
+        let verify_value = handle_artifact_create(
+            &store,
+            None,
+            artifact_params_minimal(
+                "trust_solo",
+                "verification",
+                &start_payload.task_id,
+                Some("solo"),
+                Some(&start_payload.artifact_id),
+                "looks good to me",
+                Some(true),
+                Some("verified"),
+                Some("approved"),
+            ),
+        )
+        .await
+        .unwrap();
+        let verify_payload: TaskArtifactResult = parse_tool_payload(&verify_value);
+
+        let persisted = store
+            .get_task_artifact(
+                &TenantId::new("trust_solo").unwrap(),
+                &verify_payload.artifact_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            derive_artifact_trust_tier(&persisted),
+            TrustTier::CanonicalRecord,
+            "single-writer verification cannot be VerifiedRecord"
+        );
+    }
+
+    /// Positive test: a verification artifact written by a DIFFERENT
+    /// agent, replying to the original and explicitly supporting the
+    /// claim, is promoted to `VerifiedRecord`.
+    #[tokio::test]
+    async fn distinct_writer_countersignature_produces_verified_record() {
+        let store = make_store();
+
+        let start = handle_task_start(
+            &store,
+            None,
+            TaskStartParams {
+                tenant_id: "trust_pair".to_string(),
+                project_id: Some("proj".to_string()),
+                parent_task_id: None,
+                agent_id: Some("author".to_string()),
+                session_id: None,
+                goal: "test pair".to_string(),
+                motivation: "m".to_string(),
+                hypothesis: "h".to_string(),
+                scientific_question: "q".to_string(),
+                dataset_refs: vec![],
+                expected_outputs: vec!["ok".to_string()],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        let start_payload: TaskArtifactResult = parse_tool_payload(&start);
+
+        // A DIFFERENT agent verifies.
+        let verify_value = handle_artifact_create(
+            &store,
+            None,
+            artifact_params_minimal(
+                "trust_pair",
+                "verification",
+                &start_payload.task_id,
+                Some("reviewer"),
+                Some(&start_payload.artifact_id),
+                "independently reproduced",
+                Some(true),
+                None,
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+        let verify_payload: TaskArtifactResult = parse_tool_payload(&verify_value);
+
+        let persisted = store
+            .get_task_artifact(
+                &TenantId::new("trust_pair").unwrap(),
+                &verify_payload.artifact_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            derive_artifact_trust_tier(&persisted),
+            TrustTier::VerifiedRecord,
+            "countersignature from a distinct agent_id must promote trust"
+        );
+    }
+
+    /// Codex-review regression (v0.3.1): the old process-global
+    /// `SESSION_DEFAULT_AGENT_ID` let a single client reinitialize as a
+    /// different persona and forge a countersignature by writing an
+    /// anonymous reply that the server backfilled with the new default.
+    /// The fix removes the default entirely — anonymous writes stay
+    /// anonymous, and the countersignature check refuses to promote.
+    #[tokio::test]
+    async fn anonymous_verification_never_promotes_to_verified() {
+        let store = make_store();
+
+        // Author writes with agent_id = "alice".
+        let start = handle_task_start(
+            &store,
+            None,
+            TaskStartParams {
+                tenant_id: "trust_forge".to_string(),
+                project_id: Some("proj".to_string()),
+                parent_task_id: None,
+                agent_id: Some("alice".to_string()),
+                session_id: None,
+                goal: "anti-forgery scenario".to_string(),
+                motivation: "m".to_string(),
+                hypothesis: "h".to_string(),
+                scientific_question: "q".to_string(),
+                dataset_refs: vec![],
+                expected_outputs: vec!["ok".to_string()],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        let start_payload: TaskArtifactResult = parse_tool_payload(&start);
+
+        // "Verification" submitted WITHOUT an explicit agent_id — this is
+        // what the old default-backfill path would have silently
+        // attributed to whichever client most recently called initialize.
+        let verify = handle_artifact_create(
+            &store,
+            None,
+            artifact_params_minimal(
+                "trust_forge",
+                "verification",
+                &start_payload.task_id,
+                None, // <-- anonymous
+                Some(&start_payload.artifact_id),
+                "I say it's fine",
+                Some(true),
+                None,
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+        let verify_payload: TaskArtifactResult = parse_tool_payload(&verify);
+
+        let persisted = store
+            .get_task_artifact(
+                &TenantId::new("trust_forge").unwrap(),
+                &verify_payload.artifact_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            persisted.agent_id.is_none(),
+            "anonymous write must stay anonymous; got {:?}",
+            persisted.agent_id
+        );
+        assert_eq!(
+            derive_artifact_trust_tier(&persisted),
+            TrustTier::CanonicalRecord,
+            "anonymous verification must never produce VerifiedRecord"
+        );
+    }
+
+    /// Negative test: a reviewer who explicitly REJECTS the claim
+    /// (`supports_claim = false`) must NOT promote trust, even with a
+    /// distinct agent_id.
+    #[tokio::test]
+    async fn distinct_writer_explicit_rejection_does_not_promote() {
+        let store = make_store();
+
+        let start = handle_task_start(
+            &store,
+            None,
+            TaskStartParams {
+                tenant_id: "trust_reject".to_string(),
+                project_id: Some("proj".to_string()),
+                parent_task_id: None,
+                agent_id: Some("author".to_string()),
+                session_id: None,
+                goal: "test reject".to_string(),
+                motivation: "m".to_string(),
+                hypothesis: "h".to_string(),
+                scientific_question: "q".to_string(),
+                dataset_refs: vec![],
+                expected_outputs: vec!["ok".to_string()],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        let start_payload: TaskArtifactResult = parse_tool_payload(&start);
+
+        let verify_value = handle_artifact_create(
+            &store,
+            None,
+            artifact_params_minimal(
+                "trust_reject",
+                "review",
+                &start_payload.task_id,
+                Some("reviewer"),
+                Some(&start_payload.artifact_id),
+                "could not reproduce",
+                Some(false),
+                None,
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+        let verify_payload: TaskArtifactResult = parse_tool_payload(&verify_value);
+
+        let persisted = store
+            .get_task_artifact(
+                &TenantId::new("trust_reject").unwrap(),
+                &verify_payload.artifact_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            derive_artifact_trust_tier(&persisted),
+            TrustTier::CanonicalRecord,
+            "explicit rejection must leave the reviewer's artifact at canonical"
+        );
+    }
+
+    fn artifact_params_minimal(
+        tenant_id: &str,
+        artifact_kind: &str,
+        task_id: &str,
+        agent_id: Option<&str>,
+        reply_to_artifact_id: Option<&str>,
+        summary: &str,
+        supports_claim: Option<bool>,
+        verification_status: Option<&str>,
+        approval_state: Option<&str>,
+    ) -> ArtifactCreateParams {
+        ArtifactCreateParams {
+            tenant_id: tenant_id.to_string(),
+            artifact_kind: artifact_kind.to_string(),
+            task_id: Some(task_id.to_string()),
+            project_id: None,
+            parent_task_id: None,
+            agent_id: agent_id.map(|s| s.to_string()),
+            session_id: None,
+            status: None,
+            artifact_role: None,
+            challenge_id: None,
+            thread_id: None,
+            reply_to_artifact_id: reply_to_artifact_id.map(|s| s.to_string()),
+            relation_kind: None,
+            goal: None,
+            motivation: None,
+            hypothesis: None,
+            scientific_question: None,
+            method_summary: None,
+            summary: Some(summary.to_string()),
+            evidence_kind: None,
+            supports_claim,
+            blockers: vec![],
+            what_worked: vec![],
+            what_failed: vec![],
+            validation: vec![],
+            uncertainty: vec![],
+            followups: vec![],
+            expected_outputs: vec![],
+            related_artifact_ids: vec![],
+            contributors: vec![],
+            dataset_refs: vec![],
+            entity_refs: vec![],
+            tool_name: None,
+            tool_version: None,
+            command: None,
+            parameters: None,
+            inputs: vec![],
+            outputs: vec![],
+            metrics: None,
+            why_chosen: None,
+            confidence: None,
+            requested_action: None,
+            verification_status: verification_status.map(|s| s.to_string()),
+            compute_budget: None,
+            cost_actual: None,
+            data_access_level: None,
+            policy_tags: vec![],
+            allowed_tools: vec![],
+            approval_state: approval_state.map(|s| s.to_string()),
+            provenance: None,
+        }
+    }
+
+    /// Regression test for the digest-forgery mitigation: `artifact.create`
+    /// must reject any attempt to write `artifact_kind = "digest"`. Digests
+    /// are server-generated and have deterministic IDs; accepting
+    /// agent-authored digests lets any caller overwrite the canonical
+    /// `project_brief` / `failure_library` / etc. artifacts.
+    #[tokio::test]
+    async fn artifact_create_rejects_agent_authored_digest() {
+        let store = make_store();
+
+        let err = handle_artifact_create(
             &store,
             None,
             ArtifactCreateParams {
-                tenant_id: "tenant_digest".to_string(),
+                tenant_id: "tenant_forge".to_string(),
                 artifact_kind: "digest".to_string(),
                 task_id: None,
-                project_id: Some("proj_digest".to_string()),
+                project_id: Some("proj_forge".to_string()),
                 parent_task_id: None,
-                agent_id: None,
+                agent_id: Some("attacker".to_string()),
                 session_id: None,
                 status: None,
                 artifact_role: Some("project_brief".to_string()),
@@ -8323,7 +9815,7 @@ mod tests {
                 hypothesis: None,
                 scientific_question: None,
                 method_summary: None,
-                summary: Some("Digest-only hint about an isolated semantic summary".to_string()),
+                summary: Some("forged brief that overwrites the real digest".to_string()),
                 evidence_kind: None,
                 supports_claim: None,
                 blockers: vec![],
@@ -8358,31 +9850,18 @@ mod tests {
             },
         )
         .await
-        .unwrap();
-        let digest_payload: TaskArtifactResult = parse_tool_payload(&digest);
+        .expect_err("agent-authored digests must be rejected");
 
-        let result = handle_artifact_verify(
-            &store,
-            ArtifactVerifyParams {
-                tenant_id: "tenant_digest".to_string(),
-                claim: "isolated semantic summary".to_string(),
-                project_id: Some("proj_digest".to_string()),
-                task_id: None,
-                thread_id: None,
-                candidate_artifact_ids: vec![digest_payload.artifact_id],
-                k: 8,
-                include_digests: false,
-                create_artifact: false,
-                record_task_id: None,
-            },
-        )
-        .await
-        .unwrap();
-
-        let payload: ArtifactVerifyResult = parse_tool_payload(&result);
-        assert_eq!(payload.grounding_status, GroundingStatus::DigestOnly);
-        assert!(payload.supporting_artifacts.is_empty());
-        assert_eq!(payload.consulted_digests.len(), 1);
+        match err {
+            McpError::InvalidParams(msg) => {
+                assert!(
+                    msg.contains("digests are server-generated"),
+                    "error message should explain digest policy, got: {}",
+                    msg
+                );
+            }
+            other => panic!("expected InvalidParams, got: {:?}", other),
+        }
     }
 
     #[tokio::test]
@@ -8546,6 +10025,7 @@ mod tests {
                 include_digests: false,
                 create_artifact: false,
                 record_task_id: None,
+                agent_id: None,
             },
         )
         .await
@@ -8604,7 +10084,7 @@ mod tests {
                 validation: vec!["Project brief response returned one active task".to_string()],
                 uncertainty: vec![],
                 followups: vec!["Bias memory.search toward project digests".to_string()],
-                confidence: 0.9,
+                confidence: Some(0.9),
                 provenance: None,
             },
         )
@@ -8779,7 +10259,7 @@ mod tests {
                 validation: vec!["Repeated refreshes do not add chunks".to_string()],
                 uncertainty: vec![],
                 followups: vec![],
-                confidence: 0.85,
+                confidence: Some(0.85),
                 provenance: None,
             },
         )
@@ -8830,7 +10310,7 @@ mod tests {
                 validation: vec!["Repeated refreshes do not add chunks".to_string()],
                 uncertainty: vec![],
                 followups: vec![],
-                confidence: 0.9,
+                confidence: Some(0.9),
                 provenance: None,
             },
         )
@@ -8880,11 +10360,9 @@ mod tests {
         );
         assert!(!first_payload.results.is_empty());
         assert_eq!(first_payload.results[0].category, "tactic");
-        assert!(
-            first_payload.results[0]
-                .summary
-                .contains("digest persistence idempotence")
-        );
+        assert!(first_payload.results[0]
+            .summary
+            .contains("digest persistence idempotence"));
         assert_eq!(first_payload.results[0].support_count, 2);
         assert_eq!(
             first_payload.artifact.timestamp_created,
@@ -8942,7 +10420,7 @@ mod tests {
                 validation: vec!["Compaction response returned digest artifact ids".to_string()],
                 uncertainty: vec![],
                 followups: vec![],
-                confidence: 0.8,
+                confidence: Some(0.8),
                 provenance: None,
             },
         )
@@ -8964,11 +10442,9 @@ mod tests {
 
         let payload: Value = parse_tool_payload(&result);
         assert_eq!(payload["status"].as_str(), Some("completed"));
-        assert!(
-            payload["digest_artifacts"]
-                .as_array()
-                .map(|items| !items.is_empty())
-                .unwrap_or(false)
-        );
+        assert!(payload["digest_artifacts"]
+            .as_array()
+            .map(|items| !items.is_empty())
+            .unwrap_or(false));
     }
 }

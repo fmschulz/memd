@@ -3,6 +3,7 @@
 //! Keeps the canonical task artifact envelope separate from the retrieval
 //! projection chunks stored in the main search engine.
 
+pub mod digest_dirty;
 mod digests;
 
 use serde::{Deserialize, Serialize};
@@ -36,13 +37,13 @@ pub(crate) fn sanitize_tag_value(value: &str) -> String {
 }
 
 pub use digests::{
-    DIGEST_ROLE_DECISION_LIBRARY, DIGEST_ROLE_EVIDENCE_LIBRARY, DIGEST_ROLE_FAILURE_LIBRARY,
-    DIGEST_ROLE_HIGHLIGHT_LIBRARY, DIGEST_ROLE_PROJECT_BRIEF, DIGEST_ROLE_TASK_RESUME,
-    DecisionViewItem, EvidenceViewItem, FailureViewItem, HighlightViewItem, ProjectBriefView,
-    RunDigestItem, TaskResumeView, build_library_digest_artifact,
-    build_project_brief_digest_artifact, build_project_brief_view,
+    build_library_digest_artifact, build_project_brief_digest_artifact, build_project_brief_view,
     build_task_resume_digest_artifact, build_task_resume_view, infer_decision_items,
     infer_evidence_items, infer_failure_items, infer_highlight_items, stable_digest_identity,
+    DecisionViewItem, EvidenceViewItem, FailureViewItem, HighlightViewItem, ProjectBriefView,
+    RunDigestItem, TaskResumeView, DIGEST_ROLE_DECISION_LIBRARY, DIGEST_ROLE_EVIDENCE_LIBRARY,
+    DIGEST_ROLE_FAILURE_LIBRARY, DIGEST_ROLE_HIGHLIGHT_LIBRARY, DIGEST_ROLE_PROJECT_BRIEF,
+    DIGEST_ROLE_TASK_RESUME,
 };
 
 fn join_lines(items: &[String]) -> String {
@@ -676,23 +677,16 @@ fn base_projection_tags(artifact: &TaskArtifact) -> Vec<String> {
     tags
 }
 
-fn is_verified_marker(value: Option<&str>) -> bool {
-    matches!(
-        value.map(|v| v.trim().to_ascii_lowercase()),
-        Some(value)
-            if matches!(
-                value.as_str(),
-                "verified" | "accepted" | "approved" | "confirmed" | "complete" | "completed"
-            )
-    )
-}
-
 pub fn derive_artifact_trust_tier(artifact: &TaskArtifact) -> TrustTier {
-    if artifact.artifact_kind == ArtifactKind::Verification
-        || artifact.promotion_state == PromotionState::Verified
-        || is_verified_marker(artifact.verification_status.as_deref())
-        || is_verified_marker(artifact.approval_state.as_deref())
-    {
+    // `VerifiedRecord` is reserved for artifacts the server has
+    // explicitly promoted via `promote_if_countersigned` (see
+    // `mcp::handlers`). Agent-supplied `verification_status` /
+    // `approval_state` / `ArtifactKind::Verification` previously unlocked
+    // the tier directly — that was a self-labelling laundering channel
+    // because any caller could write an artifact that stamped itself
+    // verified. The fix: the only signal that promotes trust is the
+    // server-computed `PromotionState::Verified`.
+    if artifact.promotion_state == PromotionState::Verified {
         return TrustTier::VerifiedRecord;
     }
 
@@ -709,30 +703,22 @@ pub fn derive_chunk_trust_tier(artifact: Option<&TaskArtifact>) -> TrustTier {
         .unwrap_or(TrustTier::SemanticCandidate)
 }
 
+/// Pure derivation of promotion state from artifact content.
+///
+/// This function intentionally NEVER returns `PromotionState::Verified`.
+/// Verification is a server-side decision made by
+/// `mcp::handlers::promote_if_countersigned` after looking up the
+/// reply-to parent and checking distinct-writer countersignature; it is
+/// the only path that should produce a `Verified` promotion in v0.3.1+.
+///
+/// Historically this function honoured agent-supplied fields
+/// (`verification_status`, `approval_state`, `ArtifactKind::Verification`,
+/// non-empty `validation`). That allowed any single agent to self-label
+/// as verified, which turned the trust boundary into marketing. Those
+/// branches are removed.
 pub fn derive_artifact_promotion_state(artifact: &TaskArtifact) -> PromotionState {
-    if artifact.artifact_kind == ArtifactKind::Digest {
-        if is_verified_marker(artifact.verification_status.as_deref())
-            || is_verified_marker(artifact.status.as_deref())
-        {
-            return PromotionState::Verified;
-        }
-        return PromotionState::Summarized;
-    }
-
-    if artifact.artifact_kind == ArtifactKind::Verification
-        || is_verified_marker(artifact.verification_status.as_deref())
-        || is_verified_marker(artifact.approval_state.as_deref())
-    {
-        return PromotionState::Verified;
-    }
-
-    if artifact.artifact_kind == ArtifactKind::Decision
-        && (!artifact.validation.is_empty() || artifact.supports_claim == Some(true))
-    {
-        return PromotionState::Verified;
-    }
-
     match artifact.artifact_kind {
+        ArtifactKind::Digest => PromotionState::Summarized,
         ArtifactKind::TaskStart
         | ArtifactKind::TaskProgress
         | ArtifactKind::RunStart
@@ -743,7 +729,6 @@ pub fn derive_artifact_promotion_state(artifact: &TaskArtifact) -> PromotionStat
         | ArtifactKind::Verification
         | ArtifactKind::Decision
         | ArtifactKind::TaskFinish => PromotionState::Canonical,
-        ArtifactKind::Digest => PromotionState::Summarized,
     }
 }
 
@@ -809,6 +794,25 @@ fn build_projection_chunk(
     chunk.timestamp_observed = artifact.timestamp_observed;
 
     TaskProjection { kind, chunk }
+}
+
+/// Produce just the base summary projection chunk for a canonical
+/// artifact — no fanout.
+///
+/// Phase 2.5 write-amplification cut: high-frequency handlers
+/// (`task.progress`, `task.run_start`, `task.run_finish`,
+/// `task.add_evidence`) now emit one projection per call instead of
+/// 4-7. The base summary already carries every field the retrieval
+/// layer needs (task_id, kind, status, role, summary, goal,
+/// verification_status, …); the library-digest pipeline reads from
+/// canonical artifacts directly, not projection chunks, so library
+/// quality is unaffected. `task.start` and `task.finish` keep the
+/// full fanout via `build_task_projections` because their richer
+/// decomposition is genuinely useful for onboarding-style retrieval.
+pub fn build_task_projections_minimal(artifact: &TaskArtifact) -> Vec<TaskProjection> {
+    let mut all = build_task_projections(artifact);
+    all.truncate(1);
+    all
 }
 
 /// Build retrieval-friendly projection chunks from a canonical task artifact.
@@ -1106,11 +1110,9 @@ mod tests {
         let projections = build_task_projections(&artifact);
         assert!(projections.iter().any(|p| p.kind == ProjectionKind::Worked));
         assert!(projections.iter().any(|p| p.kind == ProjectionKind::Failed));
-        assert!(
-            projections
-                .iter()
-                .any(|p| p.kind == ProjectionKind::Validation)
-        );
+        assert!(projections
+            .iter()
+            .any(|p| p.kind == ProjectionKind::Validation));
     }
 
     #[test]
@@ -1154,11 +1156,9 @@ mod tests {
         run.tool_name = Some("mmseqs".to_string());
         run.command = Some("mmseqs search db query out tmp".to_string());
         let run_projections = build_task_projections(&run);
-        assert!(
-            run_projections
-                .iter()
-                .any(|p| p.kind == ProjectionKind::Run)
-        );
+        assert!(run_projections
+            .iter()
+            .any(|p| p.kind == ProjectionKind::Run));
 
         let mut evidence = TaskArtifact::new_evidence(tenant_id, "task-1");
         evidence.summary = Some("Top hit exceeded the threshold".to_string());
@@ -1166,11 +1166,9 @@ mod tests {
         evidence.supports_claim = Some(true);
         evidence.metrics = Some(serde_json::json!({"score": 0.93}));
         let evidence_projections = build_task_projections(&evidence);
-        assert!(
-            evidence_projections
-                .iter()
-                .any(|p| p.kind == ProjectionKind::Evidence)
-        );
+        assert!(evidence_projections
+            .iter()
+            .any(|p| p.kind == ProjectionKind::Evidence));
     }
 
     #[test]
@@ -1183,11 +1181,9 @@ mod tests {
             vec!["Prototype query flow returned the expected task state".to_string()];
         decision.promotion_state = derive_artifact_promotion_state(&decision);
         let decision_projections = build_task_projections(&decision);
-        assert!(
-            decision_projections
-                .iter()
-                .any(|p| p.kind == ProjectionKind::Decision)
-        );
+        assert!(decision_projections
+            .iter()
+            .any(|p| p.kind == ProjectionKind::Decision));
 
         let mut digest = TaskArtifact::new_digest(
             tenant_id,
@@ -1198,11 +1194,89 @@ mod tests {
         digest.summary = Some("Project brief for the current tenant".to_string());
         digest.promotion_state = derive_artifact_promotion_state(&digest);
         let digest_projections = build_task_projections(&digest);
-        assert!(
-            digest_projections
-                .iter()
-                .any(|p| p.kind == ProjectionKind::Digest)
-        );
+        assert!(digest_projections
+            .iter()
+            .any(|p| p.kind == ProjectionKind::Digest));
         assert_eq!(digest.promotion_state, PromotionState::Summarized);
+    }
+
+    /// Regression test: `derive_artifact_promotion_state` is a PURE
+    /// function and must never return `Verified`. Verification is a
+    /// store-side decision made by
+    /// `mcp::handlers::promote_if_countersigned` that cannot be reached
+    /// by only reading an artifact's fields. Previously this function
+    /// honoured agent-supplied `verification_status`, `approval_state`,
+    /// `ArtifactKind::Verification`, and non-empty `validation` — each
+    /// was a laundering channel that let a single agent self-label.
+    #[test]
+    fn derive_artifact_promotion_state_never_returns_verified() {
+        let tenant = TenantId::new("trust_pure").unwrap();
+
+        let mut verification = TaskArtifact::new(ArtifactKind::Verification, tenant.clone(), "t1");
+        verification.verification_status = Some("verified".to_string());
+        verification.approval_state = Some("approved".to_string());
+        verification.validation = vec!["lgtm".to_string()];
+        assert_eq!(
+            derive_artifact_promotion_state(&verification),
+            PromotionState::Canonical,
+            "Verification kind with self-labelled fields must NOT promote"
+        );
+
+        let mut decision = TaskArtifact::new_decision(tenant.clone(), "t1");
+        decision.validation = vec!["manual review passed".to_string()];
+        decision.supports_claim = Some(true);
+        assert_eq!(
+            derive_artifact_promotion_state(&decision),
+            PromotionState::Canonical,
+            "Decision with non-empty validation must NOT promote"
+        );
+
+        let mut review = TaskArtifact::new(ArtifactKind::Review, tenant.clone(), "t1");
+        review.verification_status = Some("approved".to_string());
+        assert_eq!(
+            derive_artifact_promotion_state(&review),
+            PromotionState::Canonical,
+            "Review with self-labelled approval must NOT promote"
+        );
+
+        let digest = TaskArtifact::new_digest(
+            tenant,
+            "digest_task",
+            "digest::scope".to_string(),
+            "project_brief".to_string(),
+        );
+        assert_eq!(
+            derive_artifact_promotion_state(&digest),
+            PromotionState::Summarized,
+            "Digest kind maps to Summarized regardless of agent-supplied fields"
+        );
+    }
+
+    /// Regression test: `derive_artifact_trust_tier` only returns
+    /// `VerifiedRecord` when `promotion_state == Verified`. Previously
+    /// it also honoured `ArtifactKind::Verification` and agent-supplied
+    /// `verification_status` / `approval_state`.
+    #[test]
+    fn derive_artifact_trust_tier_requires_server_verified_promotion() {
+        let tenant = TenantId::new("trust_tier").unwrap();
+
+        let mut agent_labelled =
+            TaskArtifact::new(ArtifactKind::Verification, tenant.clone(), "t1");
+        agent_labelled.verification_status = Some("verified".to_string());
+        agent_labelled.approval_state = Some("approved".to_string());
+        agent_labelled.promotion_state = PromotionState::Canonical;
+        assert_eq!(
+            derive_artifact_trust_tier(&agent_labelled),
+            TrustTier::CanonicalRecord,
+            "agent-supplied labels must not produce VerifiedRecord"
+        );
+
+        let mut server_promoted = TaskArtifact::new(ArtifactKind::Review, tenant, "t1");
+        server_promoted.promotion_state = PromotionState::Verified;
+        assert_eq!(
+            derive_artifact_trust_tier(&server_promoted),
+            TrustTier::VerifiedRecord,
+            "server-side PromotionState::Verified is the only path to VerifiedRecord"
+        );
     }
 }
