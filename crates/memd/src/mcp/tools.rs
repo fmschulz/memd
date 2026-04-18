@@ -1147,7 +1147,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
         // MCP-05: memory.get
         ToolDefinition::new(
             "memory.get",
-            "Get a memory chunk by its ID",
+            "Get a memory chunk by its ID. Applies the lifecycle visibility overlay so superseded/expired/history chunks are hidden unless explicitly requested.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1158,6 +1158,21 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "chunk_id": {
                         "type": "string",
                         "description": "UUID of the chunk to retrieve"
+                    },
+                    "include_superseded": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "When true, return chunks marked Superseded instead of hiding them."
+                    },
+                    "include_expired": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "When true, return chunks marked Expired (by status or expires_at_ms) instead of hiding them."
+                    },
+                    "include_history": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "When true, return chunks in the History tier instead of hiding them."
                     }
                 },
                 "required": ["chunk_id"]
@@ -1804,7 +1819,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn get_all_tools_returns_forty() {
+    fn get_all_tools_returns_expected_count() {
         let tools = get_all_tools();
         // Phase 2.3: 42 legacy tools + four focused artifact tools
         // (artifact.review / revision / decision / verification).

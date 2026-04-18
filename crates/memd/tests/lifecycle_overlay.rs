@@ -348,9 +348,24 @@ async fn memory_supersede_requires_existing_old_chunk_id() {
         }),
     )
     .await;
+    // Tighten the assertion: the error message must specifically mention
+    // the missing old_chunk_id or a "not found" condition. A generic
+    // "some error happened" would hide regressions that swap the error
+    // code for an unrelated failure (e.g. schema validation).
+    let msg = parse_error(&resp)
+        .map(|(_, m)| m)
+        .or_else(|| {
+            resp.get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
     assert!(
-        parse_error(&resp).is_some() || resp.get("error").is_some(),
-        "expected error envelope for missing old_chunk_id, got: {resp}"
+        msg.contains("old_chunk_id")
+            || msg.contains("not found")
+            || msg.to_lowercase().contains("old chunk"),
+        "expected error mentioning old_chunk_id or 'not found', got: {msg}"
     );
 }
 
@@ -392,4 +407,99 @@ async fn supersede_chunk_errors_on_tenant_mismatch() {
         0,
         "no chunk should have been written under t2; observed orphan(s): {t2_rows:?}"
     );
+}
+
+#[tokio::test]
+async fn memory_get_hides_superseded_by_default() {
+    // A8 contract: memory.get must route through the lifecycle overlay and
+    // hide Superseded chunks from callers that did not opt in. The chunk
+    // payload MUST NOT be included when hidden=true so stale text cannot
+    // leak via the primary chunk-lookup tool.
+    let (server, _tmp) = test_server().await;
+    let ps = server.store().as_persistent().expect("persistent store");
+    let t = tenant("t");
+    let id = ps
+        .add(MemoryChunk::new(t.clone(), "v1", ChunkType::Doc))
+        .await
+        .unwrap();
+    ps.supersede_chunk(&t, &id, MemoryChunk::new(t.clone(), "v2", ChunkType::Doc))
+        .await
+        .unwrap();
+
+    let resp = call_tool(
+        &server,
+        "memory.get",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunk_id": id.to_string(),
+        }),
+    )
+    .await;
+    let body = parse_result_text(&resp);
+
+    assert!(
+        body["hidden"].as_bool().unwrap_or(false),
+        "superseded chunk must report hidden=true by default: {body}"
+    );
+    assert_eq!(body["status"].as_str(), Some("superseded"));
+    assert!(
+        body.get("chunk").map_or(true, |v| v.is_null()),
+        "chunk payload must be omitted when hidden=true: {body}"
+    );
+}
+
+#[tokio::test]
+async fn memory_get_returns_payload_when_include_superseded_true() {
+    // Opting in with include_superseded=true must surface the full chunk
+    // plus lifecycle overlay and still report status=superseded so callers
+    // can reason about the edge.
+    let (server, _tmp) = test_server().await;
+    let ps = server.store().as_persistent().expect("persistent store");
+    let t = tenant("t");
+    let id = ps
+        .add(MemoryChunk::new(t.clone(), "v1", ChunkType::Doc))
+        .await
+        .unwrap();
+    ps.supersede_chunk(&t, &id, MemoryChunk::new(t.clone(), "v2", ChunkType::Doc))
+        .await
+        .unwrap();
+
+    let resp = call_tool(
+        &server,
+        "memory.get",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunk_id": id.to_string(),
+            "include_superseded": true,
+        }),
+    )
+    .await;
+    let body = parse_result_text(&resp);
+
+    assert_eq!(body["found"].as_bool(), Some(true));
+    assert!(
+        !body["hidden"].as_bool().unwrap_or(false),
+        "hidden must be false/absent when caller opts in: {body}"
+    );
+    assert_eq!(body["chunk"]["text"].as_str(), Some("v1"));
+    assert_eq!(body["status"].as_str(), Some("superseded"));
+}
+
+#[tokio::test]
+async fn memory_get_returns_found_false_when_chunk_absent() {
+    // Missing chunks must surface as `found=false` without leaking a
+    // phantom payload.
+    let (server, _tmp) = test_server().await;
+    let bogus = ChunkId::new();
+    let resp = call_tool(
+        &server,
+        "memory.get",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunk_id": bogus.to_string(),
+        }),
+    )
+    .await;
+    let body = parse_result_text(&resp);
+    assert_eq!(body["found"].as_bool(), Some(false));
 }
