@@ -277,6 +277,10 @@ pub enum ChunkStatus {
     Error,
     /// Soft deleted, excluded from retrieval
     Deleted,
+    /// Replaced by a newer chunk; retained for audit but excluded from active retrieval.
+    Superseded,
+    /// Retention window elapsed; excluded from active retrieval.
+    Expired,
 }
 
 impl fmt::Display for ChunkStatus {
@@ -286,6 +290,8 @@ impl fmt::Display for ChunkStatus {
             ChunkStatus::Final => "final",
             ChunkStatus::Error => "error",
             ChunkStatus::Deleted => "deleted",
+            ChunkStatus::Superseded => "superseded",
+            ChunkStatus::Expired => "expired",
         };
         write!(f, "{}", s)
     }
@@ -294,6 +300,25 @@ impl fmt::Display for ChunkStatus {
 impl Default for ChunkStatus {
     fn default() -> Self {
         ChunkStatus::Final
+    }
+}
+
+impl std::str::FromStr for ChunkStatus {
+    type Err = crate::error::MemdError;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s {
+            "draft" => Self::Draft,
+            "final" => Self::Final,
+            "error" => Self::Error,
+            "deleted" => Self::Deleted,
+            "superseded" => Self::Superseded,
+            "expired" => Self::Expired,
+            _ => {
+                return Err(crate::error::MemdError::ValidationError(format!(
+                    "unknown status: {s}"
+                )))
+            }
+        })
     }
 }
 
@@ -654,5 +679,32 @@ mod tests {
     fn ingestion_mode_display() {
         assert_eq!(IngestionMode::Conversation.to_string(), "conversation");
         assert_eq!(IngestionMode::Document.to_string(), "document");
+    }
+
+    #[test]
+    fn chunk_status_lifecycle_variants_serialize() {
+        assert_eq!(ChunkStatus::Superseded.to_string(), "superseded");
+        assert_eq!(ChunkStatus::Expired.to_string(), "expired");
+        assert_eq!(
+            serde_json::to_string(&ChunkStatus::Superseded).unwrap(),
+            "\"superseded\""
+        );
+        let parsed: ChunkStatus = serde_json::from_str("\"expired\"").unwrap();
+        assert_eq!(parsed, ChunkStatus::Expired);
+    }
+
+    #[test]
+    fn chunk_status_from_str_fails_closed() {
+        use std::str::FromStr;
+        assert_eq!(
+            ChunkStatus::from_str("superseded").unwrap(),
+            ChunkStatus::Superseded
+        );
+        assert_eq!(
+            ChunkStatus::from_str("expired").unwrap(),
+            ChunkStatus::Expired
+        );
+        assert_eq!(ChunkStatus::from_str("final").unwrap(), ChunkStatus::Final);
+        assert!(ChunkStatus::from_str("bogus").is_err());
     }
 }
