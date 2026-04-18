@@ -685,12 +685,22 @@ mod tests {
     fn chunk_status_lifecycle_variants_serialize() {
         assert_eq!(ChunkStatus::Superseded.to_string(), "superseded");
         assert_eq!(ChunkStatus::Expired.to_string(), "expired");
+
+        // serialize both new variants
         assert_eq!(
             serde_json::to_string(&ChunkStatus::Superseded).unwrap(),
             "\"superseded\""
         );
-        let parsed: ChunkStatus = serde_json::from_str("\"expired\"").unwrap();
-        assert_eq!(parsed, ChunkStatus::Expired);
+        assert_eq!(
+            serde_json::to_string(&ChunkStatus::Expired).unwrap(),
+            "\"expired\""
+        );
+
+        // deserialize both new variants
+        let s: ChunkStatus = serde_json::from_str("\"superseded\"").unwrap();
+        assert_eq!(s, ChunkStatus::Superseded);
+        let e: ChunkStatus = serde_json::from_str("\"expired\"").unwrap();
+        assert_eq!(e, ChunkStatus::Expired);
     }
 
     #[test]
