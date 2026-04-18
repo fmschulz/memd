@@ -2319,4 +2319,93 @@ mod tests {
         );
         assert!(result.is_err(), "expected error on unknown status");
     }
+
+    #[test]
+    fn legacy_db_gains_lifecycle_columns_on_reopen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("m.db");
+
+        // Simulate a DB created before A3 by opening a raw rusqlite connection and
+        // creating chunks WITHOUT the 7 new columns.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute(
+                "CREATE TABLE chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    project_id TEXT,
+                    segment_id INTEGER NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    chunk_type TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'final',
+                    timestamp_created INTEGER NOT NULL,
+                    hash TEXT NOT NULL,
+                    source_uri TEXT
+                )",
+                [],
+            )
+            .unwrap();
+            // Insert a row with the pre-A3 column set only.
+            conn.execute(
+                "INSERT INTO chunks (chunk_id, tenant_id, segment_id, ordinal, chunk_type, status, timestamp_created, hash)
+                 VALUES (?1, ?2, 0, 0, 'doc', 'final', 1, 'h')",
+                rusqlite::params![
+                    "019d0000-0000-7000-8000-000000000010",
+                    "t",
+                ],
+            )
+            .unwrap();
+        }
+
+        // Now open via SqliteMetadataStore — this should trigger
+        // ensure_index_columns to backfill the 7 new columns and
+        // indexes.
+        let store = SqliteMetadataStore::open(&db_path).unwrap();
+
+        // Verify the columns now exist.
+        let conn = store.pool.get();
+        let cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(chunks)").unwrap();
+            let rows = stmt
+                .query_map([], |r| r.get::<usize, String>(1))
+                .unwrap();
+            let mut names = Vec::new();
+            for row in rows {
+                names.push(row.unwrap());
+            }
+            names
+        };
+        for c in &[
+            "tier",
+            "supersedes",
+            "superseded_by",
+            "expires_at_ms",
+            "review_after_ms",
+            "lifecycle_updated_at_ms",
+            "canonical_text",
+        ] {
+            assert!(
+                cols.iter().any(|x| x == c),
+                "missing column after migration: {c}"
+            );
+        }
+        drop(conn);
+
+        // Verify the pre-existing row is still readable AND gains default lifecycle.
+        let meta = store
+            .get(
+                &TenantId::new("t").unwrap(),
+                &ChunkId::parse("019d0000-0000-7000-8000-000000000010").unwrap(),
+            )
+            .unwrap()
+            .expect("row survives migration");
+        assert_eq!(meta.status, ChunkStatus::Final);
+        assert_eq!(meta.lifecycle.tier, crate::types::MemoryTier::LongTerm);
+        assert_eq!(meta.lifecycle.lifecycle_updated_at_ms, 0);
+        assert!(meta.lifecycle.supersedes.is_none());
+        assert!(meta.lifecycle.superseded_by.is_none());
+        assert!(meta.lifecycle.expires_at_ms.is_none());
+        assert!(meta.lifecycle.review_after_ms.is_none());
+        assert!(meta.canonical_text.is_none());
+    }
 }
