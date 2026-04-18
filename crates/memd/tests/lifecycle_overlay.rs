@@ -4,6 +4,7 @@
 mod common;
 use common::*;
 
+use memd::store::metadata::MetadataStore;
 use memd::store::Store;
 use memd::types::lifecycle::{LifecycleDelta, MemoryTier};
 use memd::types::{ChunkStatus, ChunkType, MemoryChunk};
@@ -51,4 +52,34 @@ async fn store_get_with_lifecycle_default_impl_returns_default_lifecycle() {
     let resolved = store.get_with_lifecycle(&t, &id).await.unwrap().unwrap();
     assert_eq!(resolved.lifecycle.tier, MemoryTier::LongTerm); // default
     assert_eq!(resolved.lifecycle.lifecycle_updated_at_ms, 0); // default
+}
+
+#[tokio::test]
+async fn get_with_lifecycle_returns_none_for_deleted_chunk() {
+    // A6 (supersede_chunk) relies on Deleted rows being hidden by
+    // get_with_lifecycle — document that invariant here so any future refactor
+    // that drops the Deleted branch fails loudly.
+    let tmp = tempfile::tempdir().unwrap();
+    let store = persistent_store(tmp.path()).await;
+    let t = tenant("t");
+    let id = store
+        .add(MemoryChunk::new(t.clone(), "to-delete", ChunkType::Doc))
+        .await
+        .unwrap();
+
+    // Confirm the chunk is visible before deletion.
+    let before = store.get_with_lifecycle(&t, &id).await.unwrap();
+    assert!(before.is_some(), "chunk should be visible before delete");
+
+    // Mark deleted via the metadata store (mirrors what memory.delete does
+    // today). The `MetadataStore` trait is in scope at the top of the file so
+    // `mark_deleted` resolves on the `&SqliteMetadataStore` accessor.
+    store.metadata().mark_deleted(&t, &id).unwrap();
+
+    // get_with_lifecycle must now return None, matching the Deleted branch.
+    let after = store.get_with_lifecycle(&t, &id).await.unwrap();
+    assert!(
+        after.is_none(),
+        "Deleted chunk must not surface through get_with_lifecycle"
+    );
 }
