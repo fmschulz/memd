@@ -649,4 +649,10 @@ mod tests {
         let parsed: IngestionMode = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, IngestionMode::Conversation);
     }
+
+    #[test]
+    fn ingestion_mode_display() {
+        assert_eq!(IngestionMode::Conversation.to_string(), "conversation");
+        assert_eq!(IngestionMode::Document.to_string(), "document");
+    }
 }
