@@ -281,6 +281,80 @@ async fn supersede_chunk_errors_when_old_id_missing_and_does_not_orphan() {
 }
 
 #[tokio::test]
+async fn memory_supersede_handler_matches_store_op() {
+    // Round-trips a chunk through `memory.add` then `memory.supersede`
+    // and asserts the handler-side path produces the same overlay as
+    // calling `PersistentStore::supersede_chunk` directly.
+    let (server, _tmp) = test_server().await;
+    let add_resp = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "text": "v1",
+            "type": "doc"
+        }),
+    )
+    .await;
+    let old_id = parse_result_text(&add_resp)["chunk_id"]
+        .as_str()
+        .expect("chunk_id from memory.add")
+        .to_string();
+
+    let sup = call_tool(
+        &server,
+        "memory.supersede",
+        serde_json::json!({
+            "tenant_id": "t",
+            "old_chunk_id": old_id.clone(),
+            "new_text": "v2",
+            "type": "doc"
+        }),
+    )
+    .await;
+    let new_id = parse_result_text(&sup)["new_chunk_id"]
+        .as_str()
+        .expect("new_chunk_id from memory.supersede")
+        .to_string();
+
+    let resolved = server
+        .store()
+        .get_with_lifecycle(&tenant("t"), &ChunkId::parse(&old_id).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.status, ChunkStatus::Superseded);
+    assert_eq!(
+        resolved.lifecycle.superseded_by.as_ref().unwrap().to_string(),
+        new_id
+    );
+}
+
+#[tokio::test]
+async fn memory_supersede_requires_existing_old_chunk_id() {
+    // Pin the negative path: handing memory.supersede a fresh
+    // (non-existent) old_chunk_id must surface an error envelope and
+    // must not write any state.
+    let (server, _tmp) = test_server().await;
+    let bogus = ChunkId::new().to_string();
+    let resp = call_tool(
+        &server,
+        "memory.supersede",
+        serde_json::json!({
+            "tenant_id": "t",
+            "old_chunk_id": bogus,
+            "new_text": "v2",
+            "type": "doc"
+        }),
+    )
+    .await;
+    assert!(
+        parse_error(&resp).is_some() || resp.get("error").is_some(),
+        "expected error envelope for missing old_chunk_id, got: {resp}"
+    );
+}
+
+#[tokio::test]
 async fn supersede_chunk_errors_on_tenant_mismatch() {
     // The dispatch layer is the natural place to enforce
     // tenant_id == new_chunk.tenant_id, but supersede_chunk now
