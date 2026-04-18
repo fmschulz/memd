@@ -4,6 +4,64 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [0.5.0] - 2026-04-18
+
+Retrieval durability release. Two production-observed failure modes in the persistent store are
+fixed, and a startup-time HNSW backfill closes the cold-start gap that left pre-crash data
+semantically invisible. Every change was reviewed by Codex CLI; all flagged issues addressed
+before cutting.
+
+### Fixed
+
+- **`get_chunk` no longer silently returns "not found" when the in-memory segment cache drifts.**
+  Observed in production: after an 8-day daemon run, a freshly-added chunk had a valid metadata
+  row (status=final, correct segment/ordinal) and its segment files existed on disk, yet
+  `memory.get` returned `null` and semantic search returned no results. Root read: a missing
+  entry in `tenant.segments` was being collapsed into `Ok(None)`. The read path now opens the
+  segment on demand, emits a `warn!` for observability, repopulates the cache via
+  `entry().or_insert()` (race-safe against concurrent rollover), and propagates a real
+  `StorageError` on open failure instead of masking it as "chunk not found". The underlying
+  registration race that produces the drift is not yet root-caused — the defensive fix is
+  observable via the new log so the next recurrence is diagnosable.
+
+### Added
+
+- **HNSW startup backfill for cold tenants.** `DenseSearcher` persists HNSW state only on
+  graceful shutdown (Drop / explicit shutdown); any non-graceful restart — crash, SIGKILL,
+  systemd restart loop — left the in-memory dense index empty for every tenant on next boot
+  while `load_segments()` still rehydrated segment readers. Reads worked but semantic search
+  returned nothing for pre-crash data. New `PersistentStore::backfill_hnsw_for_cold_tenants`
+  async method plus free-fn `run_hnsw_backfill` iterate each tenant's active metadata rows,
+  filter via the new `DenseSearcher::contains_chunk` per-chunk membership test, and re-index
+  the missing chunks in batches of 64 via `hybrid.index_batch` (or `dense.index_batch` when
+  hybrid is off). New `PersistentStoreConfig::backfill_hnsw_on_startup` (default `true`, env
+  override `MEMD_BACKFILL_HNSW_ON_STARTUP`) triggers a one-shot background task on the ambient
+  Tokio runtime at `open()`. Non-blocking — the daemon starts serving immediately; semantic
+  search on older chunks degrades until the task completes.
+- **`DenseSearcher::contains_chunk`.** Per-chunk HNSW-mapping membership check. Codex-reviewed:
+  count-based heuristics (`index_len >= active_count`) silently skip stale tenants because
+  HNSW's `next_id` never decrements on delete, so a tenant with delete + re-add + crash can
+  satisfy the count check while still missing live chunks.
+
+### Testing
+
+- Three new integration tests in `crates/memd/tests/bug_b_rollover_read.rs` (rollover/restart
+  read round-trips) plus one white-box test `get_chunk_recovers_when_segments_cache_loses_entry`
+  in the persistent-store tests module that deliberately removes a finalized reader from
+  `tenant.segments` and asserts on-demand recovery plus cache repopulation.
+- Four new backfill tests including
+  `backfill_hnsw_detects_staleness_via_per_chunk_membership_not_counts`, which pins the
+  delete-skew regression Codex flagged during review.
+- Full suite: 623 lib + 30 integration tests pass.
+
+### Review
+
+- Codex CLI reviewed both fixes across multiple rounds: Phase 1 caught silent-`Ok(None)`,
+  unsafe unconditional cache insert, and tests that did not exercise the new path. Phase 2
+  caught the count-heuristic blind spot and the `LIMIT/OFFSET` race under concurrent writes
+  (replaced with a single `metadata.list` snapshot). All flagged issues addressed before
+  landing.
+
 ## [0.4.0] - 2026-04-16
 
 This release is the product of a deep four-phase audit-and-remediation arc across safety, adoption,
