@@ -5692,21 +5692,12 @@ pub async fn handle_memory_get<S: Store>(store: &S, params: GetParams) -> Result
         include_history: params.include_history.unwrap_or(false),
     };
 
-    // Expiry check: VisibilityPolicy::is_visible only inspects status +
-    // tier, not the wall-clock expires_at_ms window. Fold that in here so
-    // a chunk whose expires_at_ms has elapsed is hidden unless the caller
-    // opts in — matches the overlay contract and keeps the rule in one
-    // place until the policy type itself learns about time.
+    // Single consolidation point for the lifecycle visibility rule —
+    // `is_visible_at` covers status, tier, and the wall-clock
+    // `expires_at_ms` window. B1 (search filter) and C3/C4 (tiering)
+    // share this method so the rule never drifts between call sites.
     let now_ms = current_time_ms();
-    let expired_by_clock = resolved
-        .lifecycle
-        .expires_at_ms
-        .is_some_and(|exp| exp <= now_ms);
-
-    let base_visible = policy.is_visible(resolved.status, resolved.lifecycle.tier);
-    let visible = base_visible && (!expired_by_clock || policy.include_expired);
-
-    if !visible {
+    if !policy.is_visible_at(resolved.status, &resolved.lifecycle, now_ms) {
         info!(
             chunk_id = %chunk_id,
             status = %resolved.status,
