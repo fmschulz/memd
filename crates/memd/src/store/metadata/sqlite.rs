@@ -1845,7 +1845,12 @@ impl MetadataStore for SqliteMetadataStore {
     ) -> Result<()> {
         let mut conn = self.pool.get();
         let tx = conn.transaction()?;
-        tx.execute(
+
+        // Both UPDATEs must touch exactly one row; otherwise one side of
+        // the supersession edge would dangle. Returning an error here
+        // drops the `Transaction` without commit, which rolls the
+        // partial update back on SQLite's side.
+        let old_rows = tx.execute(
             "UPDATE chunks SET status = 'superseded', superseded_by = :new,
                 lifecycle_updated_at_ms = :now
              WHERE tenant_id = :tenant AND chunk_id = :old",
@@ -1856,7 +1861,13 @@ impl MetadataStore for SqliteMetadataStore {
                 ":old": old_id.to_string(),
             },
         )?;
-        tx.execute(
+        if old_rows != 1 {
+            return Err(crate::error::MemdError::StorageError(format!(
+                "atomic_supersede: old chunk {old_id} not found in tenant {tenant_id} (rows={old_rows})"
+            )));
+        }
+
+        let new_rows = tx.execute(
             "UPDATE chunks SET supersedes = :old, lifecycle_updated_at_ms = :now
              WHERE tenant_id = :tenant AND chunk_id = :new",
             rusqlite::named_params! {
@@ -1866,6 +1877,12 @@ impl MetadataStore for SqliteMetadataStore {
                 ":new": new_id.to_string(),
             },
         )?;
+        if new_rows != 1 {
+            return Err(crate::error::MemdError::StorageError(format!(
+                "atomic_supersede: new chunk {new_id} not found in tenant {tenant_id} (rows={new_rows})"
+            )));
+        }
+
         tx.commit()?;
         Ok(())
     }
@@ -2877,5 +2894,139 @@ mod tests {
             .list_by_canonical_text(&tenant, None, "gamma")
             .unwrap();
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn atomic_supersede_rolls_back_when_old_chunk_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("m.db")).unwrap();
+        let new = seed_chunk(&store, "t");
+        let bogus_old = ChunkId::new(); // never inserted
+
+        let result =
+            store.atomic_supersede(&new.tenant_id, &bogus_old, &new.chunk_id, 1_900_000_000_000);
+        assert!(result.is_err(), "expected error when old chunk missing");
+
+        // The new chunk must be untouched — supersedes should still be None.
+        let new_r = store.get(&new.tenant_id, &new.chunk_id).unwrap().unwrap();
+        assert!(
+            new_r.lifecycle.supersedes.is_none(),
+            "new row must not have been updated"
+        );
+        assert_eq!(
+            new_r.lifecycle.lifecycle_updated_at_ms, 0,
+            "lifecycle_updated_at_ms must not have been bumped"
+        );
+    }
+
+    #[test]
+    fn atomic_supersede_rolls_back_when_new_chunk_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("m.db")).unwrap();
+        let old = seed_chunk(&store, "t");
+        let bogus_new = ChunkId::new(); // never inserted
+
+        let before = store.get(&old.tenant_id, &old.chunk_id).unwrap().unwrap();
+
+        let result =
+            store.atomic_supersede(&old.tenant_id, &old.chunk_id, &bogus_new, 1_900_000_000_000);
+        assert!(result.is_err(), "expected error when new chunk missing");
+
+        // The old chunk must be untouched — status unchanged, no bump.
+        let old_r = store.get(&old.tenant_id, &old.chunk_id).unwrap().unwrap();
+        assert_eq!(
+            old_r.status, before.status,
+            "old status must not have changed"
+        );
+        assert!(
+            old_r.lifecycle.superseded_by.is_none(),
+            "old row must not have gained superseded_by"
+        );
+        assert_eq!(
+            old_r.lifecycle.lifecycle_updated_at_ms,
+            before.lifecycle.lifecycle_updated_at_ms
+        );
+    }
+
+    #[test]
+    fn update_lifecycle_triple_state_clear_review_after() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("m.db")).unwrap();
+        let meta = seed_chunk(&store, "t");
+
+        store
+            .update_lifecycle(
+                &meta.tenant_id,
+                &meta.chunk_id,
+                &crate::types::LifecycleDelta {
+                    review_after_ms: Some(Some(2_000_000)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .get(&meta.tenant_id, &meta.chunk_id)
+                .unwrap()
+                .unwrap()
+                .lifecycle
+                .review_after_ms,
+            Some(2_000_000)
+        );
+
+        store
+            .update_lifecycle(
+                &meta.tenant_id,
+                &meta.chunk_id,
+                &crate::types::LifecycleDelta {
+                    review_after_ms: Some(None),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(store
+            .get(&meta.tenant_id, &meta.chunk_id)
+            .unwrap()
+            .unwrap()
+            .lifecycle
+            .review_after_ms
+            .is_none());
+    }
+
+    #[test]
+    fn list_expired_before_skips_already_expired_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("m.db")).unwrap();
+        let a = seed_chunk(&store, "t");
+        let b = seed_chunk(&store, "t");
+
+        // A has expires_at_ms < now AND status=Final: eligible
+        store
+            .update_lifecycle(
+                &a.tenant_id,
+                &a.chunk_id,
+                &crate::types::LifecycleDelta {
+                    expires_at_ms: Some(Some(500)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        // B has expires_at_ms < now BUT status=Expired already: should be skipped
+        store
+            .update_lifecycle(
+                &b.tenant_id,
+                &b.chunk_id,
+                &crate::types::LifecycleDelta {
+                    expires_at_ms: Some(Some(500)),
+                    status: Some(ChunkStatus::Expired),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let ids = store.list_expired_before(&a.tenant_id, 1_000).unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0], a.chunk_id);
     }
 }
