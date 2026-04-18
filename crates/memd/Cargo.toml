@@ -8,6 +8,13 @@ description = "Local memory daemon for AI agents - MCP server with hybrid retrie
 [features]
 default = []
 cross-encoder-reranker = ["dep:ort", "dep:ndarray", "dep:flate2", "dep:tar"]
+# Exposes `pub(crate)` test-only helpers (e.g.
+# `SqliteMetadataStore::force_timestamp_created`) to integration tests in
+# `crates/memd/tests/` that cannot see `#[cfg(test)]` items. The feature is
+# OFF by default; enable it with `--features test-support` when an
+# integration test needs these helpers, or let the in-tree `#[cfg(test)]`
+# path cover the unit-test side.
+test-support = []
 
 [dependencies]
 serde.workspace = true
