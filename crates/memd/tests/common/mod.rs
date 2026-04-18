@@ -10,6 +10,8 @@
 //! All helpers are async-aware where needed. The module deliberately stays
 //! small — anything specific to a single test suite should live next to that
 //! suite's assertions, not here.
+//!
+//! Some helpers (e.g. `backdate_timestamp_created`) require `--features test-support`.
 
 #![allow(dead_code)]
 
@@ -106,6 +108,15 @@ pub fn parse_result_text(resp: &serde_json::Value) -> serde_json::Value {
         .and_then(|t| t.as_str())
         .expect("content[0].text");
     serde_json::from_str(text).expect("content text is valid JSON")
+}
+
+/// Extract a JSON-RPC error envelope from a tool response. Tests that expect
+/// a failure path call this instead of `parse_result_text`.
+pub fn parse_error(resp: &serde_json::Value) -> Option<(i64, String)> {
+    let err = resp.get("error")?;
+    let code = err.get("code")?.as_i64()?;
+    let message = err.get("message")?.as_str()?.to_string();
+    Some((code, message))
 }
 
 /// Add a chunk via `memory.add`. Returns the resulting `ChunkId`.
