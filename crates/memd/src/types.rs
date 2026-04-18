@@ -642,6 +642,21 @@ pub mod lifecycle {
         pub lifecycle_updated_at_ms: Option<i64>,
     }
 
+    impl LifecycleDelta {
+        /// Returns true when no field is set — used by writers to skip
+        /// no-op overlay UPDATEs (e.g. `add_chunk_with_lifecycle` with a
+        /// default delta).
+        pub fn is_empty(&self) -> bool {
+            self.status.is_none()
+                && self.tier.is_none()
+                && self.supersedes.is_none()
+                && self.superseded_by.is_none()
+                && self.expires_at_ms.is_none()
+                && self.review_after_ms.is_none()
+                && self.lifecycle_updated_at_ms.is_none()
+        }
+    }
+
     impl LifecycleMetadata {
         /// Produce a new `LifecycleMetadata` with the delta applied.
         ///
@@ -804,6 +819,26 @@ pub mod lifecycle {
             });
             assert_eq!(set.expires_at_ms, Some(3_000));
             assert_eq!(set.review_after_ms, Some(2_000)); // untouched
+        }
+
+        #[test]
+        fn lifecycle_delta_is_empty_default_and_set_fields() {
+            // Default delta has every field as `None` — writers should skip the
+            // overlay UPDATE in that case.
+            assert!(LifecycleDelta::default().is_empty());
+
+            // Any set field breaks emptiness.
+            let with_tier = LifecycleDelta {
+                tier: Some(MemoryTier::Working),
+                ..Default::default()
+            };
+            assert!(!with_tier.is_empty());
+
+            let with_cleared_expiry = LifecycleDelta {
+                expires_at_ms: Some(None),
+                ..Default::default()
+            };
+            assert!(!with_cleared_expiry.is_empty());
         }
 
         #[test]
