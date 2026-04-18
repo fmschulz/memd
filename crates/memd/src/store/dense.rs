@@ -334,6 +334,23 @@ impl DenseSearcher {
         indices.get(&tenant_str).map(|i| i.len()).unwrap_or(0)
     }
 
+    /// Check whether a specific chunk is present in the tenant's HNSW
+    /// mapping.
+    ///
+    /// Used by startup backfill: comparing counts (`index_len` vs metadata
+    /// row count) is unreliable because HNSW's `next_id` counter never
+    /// decrements on delete, so a tenant with deletes + re-adds + a crash
+    /// can satisfy `index_len >= active_count` while still missing live
+    /// chunks. Per-chunk membership is the authoritative signal.
+    pub fn contains_chunk(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> bool {
+        let indices = self.indices.read();
+        let tenant_str = tenant_id.to_string();
+        match indices.get(&tenant_str) {
+            Some(index) => index.get_mapping().read().get_internal_id(chunk_id).is_some(),
+            None => false,
+        }
+    }
+
     /// Embed a query text (exposes embedder for tiered search)
     pub async fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
         self.embedder.embed_query(text).await
