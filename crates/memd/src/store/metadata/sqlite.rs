@@ -13,7 +13,9 @@ use super::{ChunkMetadata, IndexState, MetadataStore};
 use crate::error::Result;
 use crate::store::{normalize_query, FeedbackEntry, RelevanceLabel};
 use crate::task_memory::{ArtifactKind, TaskArtifact, TaskRecord, TaskSearchFilters};
-use crate::types::{ChunkId, ChunkStatus, ChunkType, LifecycleMetadata, MemoryTier, TenantId};
+use crate::types::{
+    ChunkId, ChunkStatus, ChunkType, LifecycleDelta, LifecycleMetadata, MemoryTier, TenantId,
+};
 
 /// Canonical column list for `chunks` SELECT statements that feed
 /// `row_to_metadata`.
@@ -1799,6 +1801,266 @@ impl MetadataStore for SqliteMetadataStore {
         }
         Ok((pending, indexed, failed))
     }
+
+    fn update_lifecycle(
+        &self,
+        tenant_id: &TenantId,
+        chunk_id: &ChunkId,
+        delta: &LifecycleDelta,
+    ) -> Result<()> {
+        let conn = self.pool.get();
+        conn.execute(
+            "UPDATE chunks SET
+                status                  = COALESCE(:status, status),
+                tier                    = COALESCE(:tier, tier),
+                supersedes              = COALESCE(:supersedes, supersedes),
+                superseded_by           = COALESCE(:superseded_by, superseded_by),
+                expires_at_ms           = CASE WHEN :set_expires = 1 THEN :expires_at ELSE expires_at_ms END,
+                review_after_ms         = CASE WHEN :set_review  = 1 THEN :review_at  ELSE review_after_ms END,
+                lifecycle_updated_at_ms = COALESCE(:lifecycle_at, lifecycle_updated_at_ms)
+             WHERE tenant_id = :tenant AND chunk_id = :chunk",
+            rusqlite::named_params! {
+                ":status":        delta.status.map(|s| s.to_string()),
+                ":tier":          delta.tier.map(|t| t.to_string()),
+                ":supersedes":    delta.supersedes.as_ref().map(|c| c.to_string()),
+                ":superseded_by": delta.superseded_by.as_ref().map(|c| c.to_string()),
+                ":set_expires":   i64::from(delta.expires_at_ms.is_some()),
+                ":expires_at":    delta.expires_at_ms.flatten(),
+                ":set_review":    i64::from(delta.review_after_ms.is_some()),
+                ":review_at":     delta.review_after_ms.flatten(),
+                ":lifecycle_at":  delta.lifecycle_updated_at_ms,
+                ":tenant":        tenant_id.as_str(),
+                ":chunk":         chunk_id.to_string(),
+            },
+        )?;
+        Ok(())
+    }
+
+    fn atomic_supersede(
+        &self,
+        tenant_id: &TenantId,
+        old_id: &ChunkId,
+        new_id: &ChunkId,
+        now_ms: i64,
+    ) -> Result<()> {
+        let mut conn = self.pool.get();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE chunks SET status = 'superseded', superseded_by = :new,
+                lifecycle_updated_at_ms = :now
+             WHERE tenant_id = :tenant AND chunk_id = :old",
+            rusqlite::named_params! {
+                ":new": new_id.to_string(),
+                ":now": now_ms,
+                ":tenant": tenant_id.as_str(),
+                ":old": old_id.to_string(),
+            },
+        )?;
+        tx.execute(
+            "UPDATE chunks SET supersedes = :old, lifecycle_updated_at_ms = :now
+             WHERE tenant_id = :tenant AND chunk_id = :new",
+            rusqlite::named_params! {
+                ":old": old_id.to_string(),
+                ":now": now_ms,
+                ":tenant": tenant_id.as_str(),
+                ":new": new_id.to_string(),
+            },
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn set_canonical_text(
+        &self,
+        tenant_id: &TenantId,
+        chunk_id: &ChunkId,
+        canonical: &str,
+    ) -> Result<()> {
+        let conn = self.pool.get();
+        conn.execute(
+            "UPDATE chunks SET canonical_text = ?1 WHERE tenant_id = ?2 AND chunk_id = ?3",
+            rusqlite::params![canonical, tenant_id.as_str(), chunk_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    fn list_expired_before(&self, tenant_id: &TenantId, now_ms: i64) -> Result<Vec<ChunkId>> {
+        let conn = self.pool.get();
+        let mut stmt = conn.prepare(
+            "SELECT chunk_id FROM chunks
+             WHERE tenant_id = ?1
+               AND expires_at_ms IS NOT NULL
+               AND expires_at_ms < ?2
+               AND status NOT IN ('deleted', 'expired')",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![tenant_id.as_str(), now_ms],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut ids = Vec::new();
+        for row in rows {
+            let s = row?;
+            let id = ChunkId::parse(&s).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    fn list_stale_superseded(
+        &self,
+        tenant_id: &TenantId,
+        older_than_ms: i64,
+    ) -> Result<Vec<ChunkId>> {
+        let conn = self.pool.get();
+        let mut stmt = conn.prepare(
+            "SELECT chunk_id FROM chunks
+             WHERE tenant_id = ?1
+               AND status IN ('superseded', 'expired')
+               AND tier != 'history'
+               AND lifecycle_updated_at_ms < ?2",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![tenant_id.as_str(), older_than_ms],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut ids = Vec::new();
+        for row in rows {
+            let s = row?;
+            let id = ChunkId::parse(&s).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    fn list_lifecycle_hidden(&self, tenant_id: &TenantId) -> Result<Vec<ChunkId>> {
+        let conn = self.pool.get();
+        let mut stmt = conn.prepare(
+            "SELECT chunk_id FROM chunks
+             WHERE tenant_id = ?1
+               AND (status IN ('superseded', 'expired') OR tier = 'history')",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![tenant_id.as_str()], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut ids = Vec::new();
+        for row in rows {
+            let s = row?;
+            let id = ChunkId::parse(&s).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    fn list_by_canonical_text(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        canonical: &str,
+    ) -> Result<Vec<ChunkMetadata>> {
+        let conn = self.pool.get();
+        let sql = format!(
+            "SELECT {CHUNK_COLUMNS} FROM chunks
+             WHERE tenant_id = :tenant
+               AND (:project IS NULL OR project_id = :project)
+               AND canonical_text = :canonical"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::named_params! {
+                ":tenant": tenant_id.as_str(),
+                ":project": project_id,
+                ":canonical": canonical,
+            },
+            Self::row_to_metadata,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    fn list_recent_for_project(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ChunkMetadata>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.pool.get();
+        let sql = format!(
+            "SELECT {CHUNK_COLUMNS} FROM chunks
+             WHERE tenant_id = :tenant
+               AND (:project IS NULL OR project_id = :project)
+             ORDER BY timestamp_created DESC
+             LIMIT :limit"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::named_params! {
+                ":tenant": tenant_id.as_str(),
+                ":project": project_id,
+                ":limit": limit as i64,
+            },
+            Self::row_to_metadata,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    fn list_for_export(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        include_history: bool,
+    ) -> Result<Vec<ChunkMetadata>> {
+        let conn = self.pool.get();
+        let sql = format!(
+            "SELECT {CHUNK_COLUMNS} FROM chunks
+             WHERE tenant_id = :tenant
+               AND (:project IS NULL OR project_id = :project)
+               AND (:include_history = 1 OR tier != 'history')
+               AND status NOT IN ('deleted', 'error')
+             ORDER BY timestamp_created ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::named_params! {
+                ":tenant": tenant_id.as_str(),
+                ":project": project_id,
+                ":include_history": i64::from(include_history),
+            },
+            Self::row_to_metadata,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -2407,5 +2669,213 @@ mod tests {
         assert!(meta.lifecycle.expires_at_ms.is_none());
         assert!(meta.lifecycle.review_after_ms.is_none());
         assert!(meta.canonical_text.is_none());
+    }
+
+    /// Seed a fresh chunk row for the given tenant and return its
+    /// `ChunkMetadata`. Used by the A4 lifecycle tests to avoid
+    /// repeating insert boilerplate.
+    fn seed_chunk(store: &SqliteMetadataStore, tenant: &str) -> ChunkMetadata {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // Unique (segment_id, ordinal) pair per call so we do not
+        // collide with prior seeds in the same test.
+        static NEXT_SEGMENT: AtomicU64 = AtomicU64::new(1_000);
+        let segment_id = NEXT_SEGMENT.fetch_add(1, Ordering::SeqCst);
+
+        let chunk_id = ChunkId::new();
+        let mut meta = create_test_metadata(tenant, &chunk_id);
+        meta.segment_id = segment_id;
+        meta.ordinal = 0;
+        store.insert(&meta).unwrap();
+        meta
+    }
+
+    #[test]
+    fn update_lifecycle_writes_overlay_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("m.db")).unwrap();
+        let meta = seed_chunk(&store, "t");
+        let new_id = ChunkId::new();
+
+        store
+            .update_lifecycle(
+                &meta.tenant_id,
+                &meta.chunk_id,
+                &crate::types::LifecycleDelta {
+                    status: Some(ChunkStatus::Superseded),
+                    superseded_by: Some(new_id.clone()),
+                    lifecycle_updated_at_ms: Some(1_700_000_000_000),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let reloaded = store.get(&meta.tenant_id, &meta.chunk_id).unwrap().unwrap();
+        assert_eq!(reloaded.status, ChunkStatus::Superseded);
+        assert_eq!(
+            reloaded.lifecycle.superseded_by.as_ref().unwrap(),
+            &new_id
+        );
+        assert_eq!(reloaded.lifecycle.lifecycle_updated_at_ms, 1_700_000_000_000);
+    }
+
+    #[test]
+    fn update_lifecycle_triple_state_clear() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("m.db")).unwrap();
+        let meta = seed_chunk(&store, "t");
+
+        // Set expires_at_ms via Some(Some(value)).
+        store
+            .update_lifecycle(
+                &meta.tenant_id,
+                &meta.chunk_id,
+                &crate::types::LifecycleDelta {
+                    expires_at_ms: Some(Some(1_000_000)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let r1 = store.get(&meta.tenant_id, &meta.chunk_id).unwrap().unwrap();
+        assert_eq!(r1.lifecycle.expires_at_ms, Some(1_000_000));
+
+        // Clear expires_at_ms via Some(None).
+        store
+            .update_lifecycle(
+                &meta.tenant_id,
+                &meta.chunk_id,
+                &crate::types::LifecycleDelta {
+                    expires_at_ms: Some(None),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let r2 = store.get(&meta.tenant_id, &meta.chunk_id).unwrap().unwrap();
+        assert!(r2.lifecycle.expires_at_ms.is_none());
+    }
+
+    #[test]
+    fn atomic_supersede_links_both_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("m.db")).unwrap();
+        let old = seed_chunk(&store, "t");
+        let new = seed_chunk(&store, "t");
+        assert_ne!(old.chunk_id, new.chunk_id);
+
+        store
+            .atomic_supersede(
+                &old.tenant_id,
+                &old.chunk_id,
+                &new.chunk_id,
+                1_800_000_000_000,
+            )
+            .unwrap();
+
+        let old_r = store.get(&old.tenant_id, &old.chunk_id).unwrap().unwrap();
+        assert_eq!(old_r.status, ChunkStatus::Superseded);
+        assert_eq!(
+            old_r.lifecycle.superseded_by.as_ref().unwrap(),
+            &new.chunk_id
+        );
+        assert_eq!(old_r.lifecycle.lifecycle_updated_at_ms, 1_800_000_000_000);
+
+        let new_r = store.get(&new.tenant_id, &new.chunk_id).unwrap().unwrap();
+        assert_eq!(
+            new_r.lifecycle.supersedes.as_ref().unwrap(),
+            &old.chunk_id
+        );
+        assert_eq!(new_r.lifecycle.lifecycle_updated_at_ms, 1_800_000_000_000);
+    }
+
+    #[test]
+    fn list_expired_before_returns_only_old_expiring_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("m.db")).unwrap();
+        let tenant = TenantId::new("t").unwrap();
+
+        // One expires at 500 (before 1000).
+        let early = seed_chunk(&store, "t");
+        store
+            .update_lifecycle(
+                &tenant,
+                &early.chunk_id,
+                &crate::types::LifecycleDelta {
+                    expires_at_ms: Some(Some(500)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        // One expires at 2000 (after 1000).
+        let later = seed_chunk(&store, "t");
+        store
+            .update_lifecycle(
+                &tenant,
+                &later.chunk_id,
+                &crate::types::LifecycleDelta {
+                    expires_at_ms: Some(Some(2000)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        // One with no expiry.
+        let never = seed_chunk(&store, "t");
+
+        let expired = store.list_expired_before(&tenant, 1000).unwrap();
+        assert_eq!(
+            expired.len(),
+            1,
+            "only the row expiring before 1000 should appear"
+        );
+        assert_eq!(expired[0], early.chunk_id);
+        assert!(!expired.contains(&later.chunk_id));
+        assert!(!expired.contains(&never.chunk_id));
+    }
+
+    #[test]
+    fn list_by_canonical_text_filters_by_project_and_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("m.db")).unwrap();
+        let tenant = TenantId::new("t").unwrap();
+
+        // Three rows: two share canonical='alpha' but differ by project;
+        // one has canonical='beta'.
+        let mut a = seed_chunk(&store, "t");
+        a.project_id = Some("proj_a".to_string());
+        a.canonical_text = Some("alpha".to_string());
+        store.insert(&a).unwrap();
+
+        let mut b = seed_chunk(&store, "t");
+        b.project_id = Some("proj_b".to_string());
+        b.canonical_text = Some("alpha".to_string());
+        store.insert(&b).unwrap();
+
+        let mut c = seed_chunk(&store, "t");
+        c.project_id = Some("proj_a".to_string());
+        c.canonical_text = Some("beta".to_string());
+        store.insert(&c).unwrap();
+
+        // Filter by project=proj_a + canonical=alpha → only `a`.
+        let scoped = store
+            .list_by_canonical_text(&tenant, Some("proj_a"), "alpha")
+            .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].chunk_id, a.chunk_id);
+
+        // Project=None matches across all projects → both `a` and `b`.
+        let all_projects = store
+            .list_by_canonical_text(&tenant, None, "alpha")
+            .unwrap();
+        assert_eq!(all_projects.len(), 2);
+        let ids: std::collections::HashSet<_> =
+            all_projects.iter().map(|m| m.chunk_id.clone()).collect();
+        assert!(ids.contains(&a.chunk_id));
+        assert!(ids.contains(&b.chunk_id));
+
+        // Non-matching canonical returns empty.
+        let empty = store
+            .list_by_canonical_text(&tenant, None, "gamma")
+            .unwrap();
+        assert!(empty.is_empty());
     }
 }
