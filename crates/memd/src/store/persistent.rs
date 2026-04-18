@@ -1958,22 +1958,82 @@ impl PersistentStore {
             return Ok(Some(chunk));
         }
 
-        // Check finalized segments
-        let segments = tenant.segments.read();
-        let reader = match segments.get(&meta.segment_id) {
-            Some(r) => r,
-            None => return Ok(None),
-        };
+        // Check finalized segments — fast path via the in-memory cache.
+        {
+            let segments = tenant.segments.read();
+            if let Some(reader) = segments.get(&meta.segment_id) {
+                let payload = reader.read_chunk(meta.ordinal)?;
+                return Ok(match payload {
+                    Some(bytes) => {
+                        let chunk: MemoryChunk = serde_json::from_slice(&bytes).map_err(|e| {
+                            MemdError::StorageError(format!("deserialize chunk: {}", e))
+                        })?;
+                        Some(chunk)
+                    }
+                    None => None, // Tombstoned
+                });
+            }
+        }
 
+        // Cache miss. Metadata says the chunk exists at (segment_id, ordinal)
+        // but the segment reader is not in `tenant.segments`. This should not
+        // happen — startup `load_segments()` and every rollover insert into
+        // the map. The previous implementation returned `Ok(None)` here,
+        // which surfaces as a silent "chunk not found" and masks the real
+        // inconsistency. Instead, try to open the segment on demand so the
+        // read still succeeds, and log loudly so the drift is observable.
+        //
+        // On the explicit `memory.get` path the returned error is surfaced to
+        // the caller (handlers.rs swallows only in `get_chunk_for_retrieval`),
+        // so a truly missing/corrupt segment produces a real error instead of
+        // a false "not found".
+        let seg_dir = tenant
+            .base_dir
+            .join("segments")
+            .join(format!("seg_{:06}", meta.segment_id));
+        let reader = SegmentReader::open(seg_dir).map_err(|e| {
+            warn!(
+                tenant_id = %tenant_id,
+                chunk_id = %chunk_id,
+                segment_id = meta.segment_id,
+                ordinal = meta.ordinal,
+                error = %e,
+                "segment reader missing from cache and on-demand open failed"
+            );
+            MemdError::StorageError(format!(
+                "segment {} missing from cache; on-demand open failed: {}",
+                meta.segment_id, e
+            ))
+        })?;
+
+        warn!(
+            tenant_id = %tenant_id,
+            chunk_id = %chunk_id,
+            segment_id = meta.segment_id,
+            ordinal = meta.ordinal,
+            "segment reader missing from cache; opened on demand (cache drift)"
+        );
         let payload = reader.read_chunk(meta.ordinal)?;
-        match payload {
+
+        // Repopulate the cache so subsequent reads take the fast path. Use
+        // `entry(...).or_insert(...)` instead of unconditional `insert` so we
+        // don't overwrite a fresher reader that a concurrent thread (e.g. a
+        // rollover or delete that materialized tombstone state) may have
+        // installed between our read lock and this write lock.
+        tenant
+            .segments
+            .write()
+            .entry(meta.segment_id)
+            .or_insert(reader);
+
+        Ok(match payload {
             Some(bytes) => {
                 let chunk: MemoryChunk = serde_json::from_slice(&bytes)
                     .map_err(|e| MemdError::StorageError(format!("deserialize chunk: {}", e)))?;
-                Ok(Some(chunk))
+                Some(chunk)
             }
-            None => Ok(None), // Tombstoned
-        }
+            None => None,
+        })
     }
 
     async fn get_chunk_for_retrieval(
@@ -2503,6 +2563,79 @@ mod tests {
         // Search isolation
         let results = store.search(&tenant_b, "secret", 10).await.unwrap();
         assert!(results.is_empty());
+    }
+
+    /// Bug B defense-in-depth: if `tenant.segments` drops a finalized entry
+    /// for any reason (observed in prod, unreliable to reproduce from a
+    /// rollover race), `get_chunk` must still serve the read by opening the
+    /// segment on demand AND it must repopulate the cache for next time.
+    #[tokio::test]
+    async fn get_chunk_recovers_when_segments_cache_loses_entry() {
+        let dir = tempdir().unwrap();
+        let config = PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            segment_max_chunks: 1, // force rollover so the first chunk finalizes
+            wal_checkpoint_interval: 10,
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            ..Default::default()
+        };
+        let store = PersistentStore::open(config).unwrap();
+        let tenant = make_tenant();
+
+        // With segment_max_chunks=1, the second add triggers rollover, which
+        // finalizes the first chunk's segment and registers its reader in
+        // `tenant.segments`.
+        let finalized_id = store
+            .add(make_chunk(&tenant, "finalized bytes that must survive cache drift"))
+            .await
+            .unwrap();
+        let _ = store
+            .add(make_chunk(&tenant, "subsequent chunk forces rollover"))
+            .await
+            .unwrap();
+
+        // Find the tenant store and the segment id that holds the first chunk.
+        let meta = store
+            .metadata
+            .get(&tenant, &finalized_id)
+            .unwrap()
+            .expect("metadata row for finalized chunk");
+        let tenant_store = store
+            .tenants
+            .read()
+            .get(tenant.as_str())
+            .cloned()
+            .expect("tenant store must exist after an add");
+
+        // Simulate the observed production failure: the reader for this
+        // segment disappears from the cache.
+        {
+            let mut segments = tenant_store.segments.write();
+            let removed = segments.remove(&meta.segment_id);
+            assert!(
+                removed.is_some(),
+                "expected finalized reader for segment {} to be cached before removal",
+                meta.segment_id
+            );
+        }
+
+        // The read must still succeed — on-demand open from disk.
+        let recovered = store
+            .get(&tenant, &finalized_id)
+            .await
+            .expect("get_chunk must succeed via on-demand open");
+        assert!(
+            recovered.is_some(),
+            "get_chunk returned None despite segment files existing on disk"
+        );
+
+        // And the cache must be repopulated so subsequent reads skip the
+        // on-demand open.
+        assert!(
+            tenant_store.segments.read().contains_key(&meta.segment_id),
+            "on-demand open must repopulate tenant.segments"
+        );
     }
 
     #[tokio::test]
