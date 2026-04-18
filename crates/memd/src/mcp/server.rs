@@ -29,17 +29,17 @@ use super::handlers::{
     handle_find_references, handle_find_tool_calls, handle_memory_add, handle_memory_add_batch,
     handle_memory_compact, handle_memory_consolidate_episode, handle_memory_delete,
     handle_memory_feedback, handle_memory_get, handle_memory_metrics, handle_memory_search,
-    handle_memory_stats, handle_task_add_evidence, handle_task_finish, handle_task_get,
-    handle_task_progress, handle_task_resume, handle_task_run_finish, handle_task_run_start,
-    handle_task_search, handle_task_start, AddBatchParams, AddParams, ArtifactCreateParams,
-    ArtifactGetParams, ArtifactLibraryParams, ArtifactListThreadParams, ArtifactVerifyParams,
-    CompactParams, ConsolidateEpisodeParams, ContextFindRelevantContextParams,
+    handle_memory_stats, handle_memory_supersede, handle_task_add_evidence, handle_task_finish,
+    handle_task_get, handle_task_progress, handle_task_resume, handle_task_run_finish,
+    handle_task_run_start, handle_task_search, handle_task_start, AddBatchParams, AddParams,
+    ArtifactCreateParams, ArtifactGetParams, ArtifactLibraryParams, ArtifactListThreadParams,
+    ArtifactVerifyParams, CompactParams, ConsolidateEpisodeParams, ContextFindRelevantContextParams,
     ContextGetFilesForSubsystemParams, ContextGetHotContextParams, ContextListSubsystemsParams,
     ContextSearchDocumentsParams, ContextSuggestAgentParams, DeleteParams, FeedbackParams,
     FindCallersParams, FindDefinitionParams, FindErrorsParams, FindImportsParams,
     FindReferencesParams, FindToolCallsParams, GetParams, MetricsParams, ProjectBriefParams,
-    SearchParams, StatsParams, TaskAddEvidenceParams, TaskFinishParams, TaskGetParams,
-    TaskProgressParams, TaskResumeParams, TaskRunFinishParams, TaskRunStartParams,
+    SearchParams, StatsParams, SupersedeParams, TaskAddEvidenceParams, TaskFinishParams,
+    TaskGetParams, TaskProgressParams, TaskResumeParams, TaskRunFinishParams, TaskRunStartParams,
     TaskSearchParams, TaskStartParams,
 };
 use super::protocol::{Request, Response, RpcError};
@@ -854,6 +854,33 @@ impl<S: Store> McpServer<S> {
                         McpError::InvalidParams(format!("invalid compact params: {}", e))
                     })?;
                     handle_memory_compact(&*self.store, params).await
+                }
+                "memory.supersede" => {
+                    let params: SupersedeParams =
+                        serde_json::from_value(arguments).map_err(|e| {
+                            McpError::InvalidParams(format!(
+                                "invalid supersede params: {}",
+                                e
+                            ))
+                        })?;
+                    let (response, event) = handle_memory_supersede(
+                        &*self.store,
+                        self.tenant_manager.as_ref(),
+                        params,
+                    )
+                    .await?;
+                    // Run structural indexing for the newly-written
+                    // chunk, mirroring memory.add. The handler returns
+                    // the event so the dispatch arm stays the single
+                    // place that owns post-write side effects.
+                    self.maybe_index_structural_chunk(
+                        &event.tenant_id,
+                        event.project_id.as_deref(),
+                        &event.chunk_type,
+                        event.source_path.as_deref(),
+                        &event.text,
+                    );
+                    Ok(response)
                 }
                 "memory.consolidate_episode" => {
                     let params: ConsolidateEpisodeParams = serde_json::from_value(arguments)
