@@ -11,6 +11,7 @@ pub mod metadata;
 pub mod persistent;
 pub mod segment;
 pub mod shared_add;
+pub mod supersession;
 pub mod tenant;
 pub mod tombstone;
 pub mod wal;
