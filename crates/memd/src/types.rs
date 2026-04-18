@@ -10,6 +10,10 @@ use uuid::Uuid;
 
 use crate::error::{MemdError, Result};
 
+pub use lifecycle::{
+    LifecycleDelta, LifecycleMetadata, MemoryTier, ResolvedChunk, VisibilityPolicy,
+};
+
 /// Tenant identifier - validated string wrapper
 ///
 /// TenantId must be non-empty and contain only alphanumeric characters and underscores.
@@ -547,6 +551,209 @@ impl MemoryChunk {
     pub fn with_promotion_state(mut self, promotion_state: PromotionState) -> Self {
         self.promotion_state = promotion_state;
         self
+    }
+}
+
+pub mod lifecycle {
+    use super::{ChunkId, ChunkStatus, MemoryChunk};
+    use serde::{Deserialize, Serialize};
+
+    /// Retrieval tier for a chunk's lifecycle position.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+    #[serde(rename_all = "snake_case")]
+    pub enum MemoryTier {
+        /// Short-lived, actively-worked context.
+        Working,
+        /// Durable default tier for retained knowledge.
+        #[default]
+        LongTerm,
+        /// Archive tier, excluded from active retrieval by default.
+        History,
+    }
+
+    impl std::fmt::Display for MemoryTier {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let s = match self {
+                Self::Working => "working",
+                Self::LongTerm => "long_term",
+                Self::History => "history",
+            };
+            f.write_str(s)
+        }
+    }
+
+    impl std::str::FromStr for MemoryTier {
+        type Err = crate::error::MemdError;
+        fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+            match s {
+                "working" => Ok(Self::Working),
+                "long_term" => Ok(Self::LongTerm),
+                "history" => Ok(Self::History),
+                _ => Err(crate::error::MemdError::ValidationError(format!(
+                    "unknown tier: {s}"
+                ))),
+            }
+        }
+    }
+
+    /// Lifecycle overlay metadata for a chunk.
+    ///
+    /// Stored alongside the immutable `MemoryChunk` payload to track
+    /// supersession edges, retention windows, and tier placement without
+    /// mutating the chunk itself.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct LifecycleMetadata {
+        pub tier: MemoryTier,
+        pub supersedes: Option<ChunkId>,
+        pub superseded_by: Option<ChunkId>,
+        pub expires_at_ms: Option<i64>,
+        pub review_after_ms: Option<i64>,
+        pub lifecycle_updated_at_ms: i64,
+    }
+
+    impl Default for LifecycleMetadata {
+        fn default() -> Self {
+            Self {
+                tier: MemoryTier::LongTerm,
+                supersedes: None,
+                superseded_by: None,
+                expires_at_ms: None,
+                review_after_ms: None,
+                lifecycle_updated_at_ms: 0,
+            }
+        }
+    }
+
+    /// Triple-state delta for lifecycle updates.
+    ///
+    /// Semantics:
+    /// - `None` on an outer `Option` means "leave the field unchanged".
+    /// - `Some(value)` on a plain field means "set to `value`".
+    /// - `Some(None)` on a nested `Option<Option<T>>` means "clear the field".
+    /// - `Some(Some(v))` on a nested `Option<Option<T>>` means "set to `v`".
+    #[derive(Debug, Clone, Default)]
+    pub struct LifecycleDelta {
+        pub status: Option<ChunkStatus>,
+        pub tier: Option<MemoryTier>,
+        pub supersedes: Option<ChunkId>,
+        pub superseded_by: Option<ChunkId>,
+        pub expires_at_ms: Option<Option<i64>>,
+        pub review_after_ms: Option<Option<i64>>,
+        pub lifecycle_updated_at_ms: Option<i64>,
+    }
+
+    impl LifecycleMetadata {
+        /// Produce a new `LifecycleMetadata` with the delta applied.
+        ///
+        /// Fields left `None` in the delta are carried over unchanged.
+        pub fn apply(&self, delta: &LifecycleDelta) -> Self {
+            let mut next = self.clone();
+            if let Some(tier) = delta.tier {
+                next.tier = tier;
+            }
+            if let Some(ref s) = delta.supersedes {
+                next.supersedes = Some(s.clone());
+            }
+            if let Some(ref s) = delta.superseded_by {
+                next.superseded_by = Some(s.clone());
+            }
+            if let Some(exp) = delta.expires_at_ms {
+                next.expires_at_ms = exp;
+            }
+            if let Some(rev) = delta.review_after_ms {
+                next.review_after_ms = rev;
+            }
+            if let Some(ts) = delta.lifecycle_updated_at_ms {
+                next.lifecycle_updated_at_ms = ts;
+            }
+            next
+        }
+    }
+
+    /// A chunk paired with its current status and lifecycle overlay.
+    ///
+    /// Returned by lifecycle-aware retrieval helpers so callers see the
+    /// authoritative current state without having to re-read side tables.
+    #[derive(Debug, Clone)]
+    pub struct ResolvedChunk {
+        pub chunk: MemoryChunk,
+        pub status: ChunkStatus,
+        pub lifecycle: LifecycleMetadata,
+    }
+
+    /// Visibility policy for lifecycle-aware retrieval.
+    ///
+    /// Defaults hide non-active content: superseded, expired, and history-tier
+    /// chunks are excluded unless explicitly opted in. `Deleted` and `Error`
+    /// chunks are always hidden regardless of policy.
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    pub struct VisibilityPolicy {
+        #[serde(default)]
+        pub include_superseded: bool,
+        #[serde(default)]
+        pub include_expired: bool,
+        #[serde(default)]
+        pub include_history: bool,
+    }
+
+    impl VisibilityPolicy {
+        /// Check whether a chunk with the given status/tier should be visible.
+        pub fn is_visible(&self, status: ChunkStatus, tier: MemoryTier) -> bool {
+            match status {
+                ChunkStatus::Deleted | ChunkStatus::Error => false,
+                ChunkStatus::Superseded if !self.include_superseded => false,
+                ChunkStatus::Expired if !self.include_expired => false,
+                _ => !matches!(tier, MemoryTier::History if !self.include_history),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn lifecycle_metadata_defaults_and_apply_delta() {
+            let lc = LifecycleMetadata::default();
+            assert_eq!(lc.tier, MemoryTier::LongTerm);
+            assert!(lc.supersedes.is_none());
+            assert!(lc.superseded_by.is_none());
+            assert!(lc.expires_at_ms.is_none());
+
+            let delta = LifecycleDelta {
+                superseded_by: Some(ChunkId::new()),
+                tier: Some(MemoryTier::Working),
+                lifecycle_updated_at_ms: Some(1_700_000_000_000),
+                ..Default::default()
+            };
+            let next = lc.apply(&delta);
+            assert!(next.superseded_by.is_some());
+            assert_eq!(next.tier, MemoryTier::Working);
+            assert_eq!(next.lifecycle_updated_at_ms, 1_700_000_000_000);
+        }
+
+        #[test]
+        fn visibility_policy_default_hides_nonactive() {
+            let p = VisibilityPolicy::default();
+            assert!(!p.include_superseded);
+            assert!(!p.include_expired);
+            assert!(!p.include_history);
+        }
+
+        #[test]
+        fn memory_tier_display_and_from_str_fails_closed() {
+            use std::str::FromStr;
+            assert_eq!(MemoryTier::Working.to_string(), "working");
+            assert_eq!(MemoryTier::LongTerm.to_string(), "long_term");
+            assert_eq!(MemoryTier::History.to_string(), "history");
+            assert_eq!(MemoryTier::from_str("working").unwrap(), MemoryTier::Working);
+            assert_eq!(
+                MemoryTier::from_str("long_term").unwrap(),
+                MemoryTier::LongTerm
+            );
+            assert_eq!(MemoryTier::from_str("history").unwrap(), MemoryTier::History);
+            assert!(MemoryTier::from_str("bogus").is_err());
+        }
     }
 }
 
