@@ -442,8 +442,11 @@ async fn memory_get_hides_superseded_by_default() {
         "superseded chunk must report hidden=true by default: {body}"
     );
     assert_eq!(body["status"].as_str(), Some("superseded"));
+    // `serde_json::Value` indexing returns `Value::Null` for missing
+    // keys, so `is_null()` covers both "absent" and "explicitly null"
+    // — which is exactly the contract for hidden responses.
     assert!(
-        body.get("chunk").map_or(true, |v| v.is_null()),
+        body["chunk"].is_null(),
         "chunk payload must be omitted when hidden=true: {body}"
     );
 }
