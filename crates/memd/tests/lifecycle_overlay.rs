@@ -7,7 +7,7 @@ use common::*;
 use memd::store::metadata::MetadataStore;
 use memd::store::Store;
 use memd::types::lifecycle::{LifecycleDelta, MemoryTier};
-use memd::types::{ChunkStatus, ChunkType, MemoryChunk};
+use memd::types::{ChunkId, ChunkStatus, ChunkType, MemoryChunk};
 
 #[tokio::test]
 async fn persistent_store_returns_lifecycle_overlay() {
@@ -242,5 +242,80 @@ async fn supersede_chunk_detects_cycle_via_forged_overlay() {
     assert!(
         msg.contains("supersession cycle detected"),
         "expected cycle-detection error, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn supersede_chunk_errors_when_old_id_missing_and_does_not_orphan() {
+    // Regression for the orphan-chunk window in the original A6 commit:
+    // if `old_id` did not exist, `detect_supersession_cycle` correctly
+    // treated the missing row as a terminal chain (not a cycle), then
+    // `add_chunk_with_lifecycle` committed the new chunk to WAL +
+    // segment + metadata, then `atomic_supersede` failed on the missing
+    // old row — leaving the new row orphaned. The store-layer fix is
+    // an up-front existence check; this test pins it by asserting that
+    // a failed call produces zero metadata rows for the tenant.
+    let tmp = tempfile::tempdir().unwrap();
+    let store = persistent_store(tmp.path()).await;
+    let t = tenant("t");
+    let bogus_old = ChunkId::new();
+    let new_chunk = MemoryChunk::new(t.clone(), "replacement", ChunkType::Doc);
+
+    let result = store.supersede_chunk(&t, &bogus_old, new_chunk).await;
+    let err = result.expect_err("expected error when old chunk is missing");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("not found"),
+        "expected `not found` error, got: {msg}"
+    );
+
+    // The whole point: zero metadata rows must exist for this tenant.
+    // Any nonzero count means the new chunk was orphaned.
+    let list = store.metadata().list(&t, 100, 0).unwrap();
+    assert_eq!(
+        list.len(),
+        0,
+        "no chunk should have been written for failed supersede; \
+         observed orphan(s): {list:?}"
+    );
+}
+
+#[tokio::test]
+async fn supersede_chunk_errors_on_tenant_mismatch() {
+    // The dispatch layer is the natural place to enforce
+    // tenant_id == new_chunk.tenant_id, but supersede_chunk now
+    // refuses the mismatch as a defense-in-depth check. Without it,
+    // the new chunk would be persisted under `new_chunk.tenant_id`
+    // while the supersede edge would target `tenant_id` — orphaning
+    // the new row in a different tenant from where the caller meant
+    // to operate.
+    let tmp = tempfile::tempdir().unwrap();
+    let store = persistent_store(tmp.path()).await;
+    let t1 = tenant("t1");
+    let t2 = tenant("t2");
+    let old = store
+        .add(MemoryChunk::new(t1.clone(), "A", ChunkType::Doc))
+        .await
+        .unwrap();
+
+    // new_chunk belongs to tenant t2, but we're asking for supersede
+    // under t1. supersede_chunk must reject this BEFORE writing.
+    let mismatched = MemoryChunk::new(t2.clone(), "B", ChunkType::Doc);
+    let err = store
+        .supersede_chunk(&t1, &old, mismatched)
+        .await
+        .expect_err("tenant mismatch must be rejected");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("does not match"),
+        "expected tenant-mismatch error, got: {msg}"
+    );
+
+    // Defense-in-depth check: nothing was written under t2.
+    let t2_rows = store.metadata().list(&t2, 100, 0).unwrap();
+    assert_eq!(
+        t2_rows.len(),
+        0,
+        "no chunk should have been written under t2; observed orphan(s): {t2_rows:?}"
     );
 }
