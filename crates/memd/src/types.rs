@@ -721,6 +721,34 @@ pub mod lifecycle {
                 _ => !matches!(tier, MemoryTier::History if !self.include_history),
             }
         }
+
+        /// Wall-clock-aware visibility. Hides a chunk when either:
+        /// 1. Its status/tier are not visible under the current flags, OR
+        /// 2. It has a `lifecycle.expires_at_ms` that has passed and
+        ///    `include_expired` is false.
+        ///
+        /// Prefer this over `is_visible` whenever the caller has access to
+        /// a `now_ms` timestamp — it is the single consolidation point for
+        /// the lifecycle visibility rule so B1 (search filtering) and C3/C4
+        /// (expiry-driven tiering) do not each reimplement the clock check.
+        pub fn is_visible_at(
+            &self,
+            status: ChunkStatus,
+            lifecycle: &LifecycleMetadata,
+            now_ms: i64,
+        ) -> bool {
+            if !self.is_visible(status, lifecycle.tier) {
+                return false;
+            }
+            if !self.include_expired {
+                if let Some(exp) = lifecycle.expires_at_ms {
+                    if exp <= now_ms {
+                        return false;
+                    }
+                }
+            }
+            true
+        }
     }
 
     #[cfg(test)]
@@ -874,6 +902,36 @@ pub mod lifecycle {
 
             // Active Final + LongTerm visible by default
             assert!(default.is_visible(ChunkStatus::Final, MemoryTier::LongTerm));
+        }
+
+        #[test]
+        fn visibility_policy_is_visible_at_hides_clock_expired() {
+            let lc = LifecycleMetadata {
+                expires_at_ms: Some(500),
+                ..LifecycleMetadata::default()
+            };
+            let default_p = VisibilityPolicy::default();
+            // Status=Final, tier=LongTerm would normally be visible, but
+            // the wall clock has passed the expiry threshold.
+            assert!(!default_p.is_visible_at(ChunkStatus::Final, &lc, 1_000));
+            // Edge case: exactly at expiry counts as expired (`<=`).
+            assert!(!default_p.is_visible_at(ChunkStatus::Final, &lc, 500));
+            // Before expiry: visible.
+            assert!(default_p.is_visible_at(ChunkStatus::Final, &lc, 400));
+
+            // include_expired flips the clock-check too, not just the
+            // Expired status branch.
+            let inc = VisibilityPolicy {
+                include_expired: true,
+                ..Default::default()
+            };
+            assert!(inc.is_visible_at(ChunkStatus::Final, &lc, 1_000));
+
+            // No expires_at_ms: status/tier rule governs alone.
+            let lc_none = LifecycleMetadata::default();
+            assert!(default_p.is_visible_at(ChunkStatus::Final, &lc_none, 1_000));
+            // Deleted still fails regardless of clock / expiry flag.
+            assert!(!inc.is_visible_at(ChunkStatus::Deleted, &lc_none, 1_000));
         }
     }
 }
