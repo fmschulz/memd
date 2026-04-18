@@ -73,6 +73,15 @@ pub struct PersistentStoreConfig {
     pub async_index_batch_size: usize,
     /// Poll interval for async indexer in milliseconds
     pub async_index_poll_ms: u64,
+    /// On startup, backfill the HNSW index for tenants whose in-memory
+    /// dense state is colder than their metadata (observed when the
+    /// previous daemon crashed or was killed before `save_all()` ran).
+    /// When enabled, `open()` schedules a best-effort background task on
+    /// the ambient Tokio runtime that re-indexes stranded chunks. Reads
+    /// still work during the backfill (they go through metadata +
+    /// segment files); only semantic search is degraded until the task
+    /// completes.
+    pub backfill_hnsw_on_startup: bool,
 }
 
 impl Default for PersistentStoreConfig {
@@ -94,6 +103,13 @@ impl Default for PersistentStoreConfig {
             .and_then(|v| v.parse::<u64>().ok())
             .filter(|v| *v > 0)
             .unwrap_or(250);
+        let backfill_hnsw_on_startup = std::env::var("MEMD_BACKFILL_HNSW_ON_STARTUP")
+            .ok()
+            .map(|v| {
+                let normalized = v.trim().to_ascii_lowercase();
+                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(true);
 
         Self {
             data_dir: PathBuf::from("data"),
@@ -117,6 +133,7 @@ impl Default for PersistentStoreConfig {
             enable_async_indexing,
             async_index_batch_size,
             async_index_poll_ms,
+            backfill_hnsw_on_startup,
         }
     }
 }
@@ -161,6 +178,18 @@ struct TenantStore {
 struct ActiveSegment {
     writer: SegmentWriter,
     chunk_count: u32,
+}
+
+/// Result of an HNSW backfill pass.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BackfillStats {
+    /// Number of tenants whose HNSW index received at least one new chunk.
+    pub tenants_backfilled: usize,
+    /// Total chunks re-indexed into HNSW.
+    pub chunks_indexed: usize,
+    /// Chunks encountered but not indexed (missing text, load error, or
+    /// a per-batch index error).
+    pub chunks_skipped: usize,
 }
 
 struct PendingChunkAdd {
@@ -272,11 +301,94 @@ impl PersistentStore {
         let mut store = store;
         store.async_indexer = async_indexer;
 
+        if store.config.backfill_hnsw_on_startup {
+            store.spawn_startup_hnsw_backfill();
+        }
+
         Ok(store)
+    }
+
+    /// Schedule a one-shot background task that re-indexes any tenants
+    /// whose HNSW state is colder than their metadata. No-op when no
+    /// Tokio runtime is available (e.g., sync test contexts) — callers
+    /// can invoke `backfill_hnsw_for_cold_tenants` explicitly in that case.
+    fn spawn_startup_hnsw_backfill(&self) {
+        let handle = match tokio::runtime::Handle::try_current() {
+            Ok(h) => h,
+            Err(_) => {
+                // Test / sync context. The caller who wants backfill can
+                // call `backfill_hnsw_for_cold_tenants` directly.
+                return;
+            }
+        };
+
+        let dense_searcher = self.dense_searcher.clone();
+        let hybrid_searcher = self.hybrid_searcher.clone();
+        let metadata = Arc::clone(&self.metadata);
+        let tenants = Arc::clone(&self.tenants);
+
+        handle.spawn(async move {
+            match run_hnsw_backfill(
+                dense_searcher.as_ref(),
+                hybrid_searcher.as_ref(),
+                metadata.as_ref(),
+                tenants.as_ref(),
+            )
+            .await
+            {
+                Ok(stats) => {
+                    if stats.tenants_backfilled > 0 || stats.chunks_indexed > 0 {
+                        info!(
+                            tenants = stats.tenants_backfilled,
+                            chunks = stats.chunks_indexed,
+                            skipped = stats.chunks_skipped,
+                            "startup HNSW backfill completed"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "startup HNSW backfill failed");
+                }
+            }
+        });
     }
 
     pub fn async_indexing_enabled(&self) -> bool {
         self.async_indexer.is_some()
+    }
+
+    /// Backfill the per-tenant HNSW index for tenants whose metadata has
+    /// chunks but whose in-memory HNSW is empty or significantly stale.
+    ///
+    /// Why this exists: `DenseSearcher` holds HNSW indices in memory and
+    /// only persists them on a graceful shutdown path (Drop / shutdown()).
+    /// If the daemon crashes, is killed, or restarts before `save_all()`
+    /// runs, on next boot every tenant's HNSW starts empty while
+    /// `load_segments()` happily rehydrates segment readers from disk.
+    /// Reads still work (via metadata + segment files) but semantic search
+    /// returns nothing — pre-crash data is invisible.
+    ///
+    /// This method snapshots the tenant's active metadata rows once
+    /// (avoiding the LIMIT/OFFSET race with concurrent writes), filters
+    /// via per-chunk HNSW membership (`DenseSearcher::contains_chunk`),
+    /// and re-indexes only the missing chunks in batches of 64. Count
+    /// comparisons are not used: HNSW's internal id counter never
+    /// decrements on delete, so count-based heuristics can silently
+    /// miss stale tenants after delete/re-add cycles.
+    ///
+    /// Intended to be called once at startup, either synchronously
+    /// before serving traffic or spawned as a background task. The
+    /// returned `BackfillStats` are informational; a non-zero
+    /// `chunks_skipped` indicates coverage may be partial (typically
+    /// from a corrupt segment or a transient index error).
+    pub async fn backfill_hnsw_for_cold_tenants(&self) -> Result<BackfillStats> {
+        run_hnsw_backfill(
+            self.dense_searcher.as_ref(),
+            self.hybrid_searcher.as_ref(),
+            self.metadata.as_ref(),
+            self.tenants.as_ref(),
+        )
+        .await
     }
 
     /// Get reference to metrics collector
@@ -1631,6 +1743,134 @@ fn load_chunk_text_for_index(
     let chunk: MemoryChunk = serde_json::from_slice(&bytes)
         .map_err(|e| MemdError::StorageError(format!("deserialize chunk: {}", e)))?;
     Ok(Some(chunk.text))
+}
+
+async fn run_hnsw_backfill(
+    dense_searcher: Option<&Arc<DenseSearcher>>,
+    hybrid_searcher: Option<&Arc<HybridSearcher>>,
+    metadata: &SqliteMetadataStore,
+    tenants: &RwLock<HashMap<String, Arc<TenantStore>>>,
+) -> Result<BackfillStats> {
+    let mut stats = BackfillStats::default();
+    let Some(dense) = dense_searcher else {
+        // Dense search disabled — nothing to do.
+        return Ok(stats);
+    };
+
+    let tenant_strs: Vec<String> = tenants.read().keys().cloned().collect();
+    for tenant_str in tenant_strs {
+        let tenant_id = match TenantId::new(&tenant_str) {
+            Ok(id) => id,
+            Err(e) => {
+                warn!(
+                    tenant_id = %tenant_str,
+                    error = %e,
+                    "skipping tenant with invalid id during HNSW backfill"
+                );
+                continue;
+            }
+        };
+
+        // Snapshot the tenant's active chunk metadata into memory in one
+        // shot. Paging with OFFSET would race with concurrent writes that
+        // shift rows between pages; a single `list` call binds the result
+        // set to the SQLite view at one point in time and avoids that.
+        //
+        // `MetadataStore::list` already filters out soft-deleted rows
+        // (see sqlite.rs: `WHERE status != 'deleted'`), so the snapshot
+        // is the authoritative "active" set at this moment. Any new
+        // writes arriving after this point will be indexed by their
+        // write path; any chunks indexed between snapshot and the
+        // per-chunk membership check will be skipped by `contains_chunk`.
+        let metas = metadata.list(&tenant_id, usize::MAX, 0)?;
+        if metas.is_empty() {
+            continue;
+        }
+
+        // Per-chunk membership is the authoritative cold signal.
+        // Count-only heuristics fail when HNSW's `next_id` has grown past
+        // the active count due to deletes (dense deletes never decrement
+        // the counter).
+        let missing: Vec<_> = metas
+            .into_iter()
+            .filter(|m| !dense.contains_chunk(&tenant_id, &m.chunk_id))
+            .collect();
+
+        if missing.is_empty() {
+            continue;
+        }
+
+        info!(
+            tenant_id = %tenant_id,
+            missing_count = missing.len(),
+            "HNSW cold for tenant — backfilling"
+        );
+
+        let batch_size: usize = 64;
+        let mut indexed_this_tenant = 0usize;
+        let mut tenant_had_batch_failure = false;
+        for chunk_batch in missing.chunks(batch_size) {
+            let mut index_rows: Vec<(ChunkId, String)> = Vec::with_capacity(chunk_batch.len());
+            for m in chunk_batch {
+                match load_chunk_text_for_index(tenants, metadata, &tenant_id, &m.chunk_id) {
+                    Ok(Some(text)) => index_rows.push((m.chunk_id.clone(), text)),
+                    Ok(None) => stats.chunks_skipped += 1,
+                    Err(e) => {
+                        warn!(
+                            tenant_id = %tenant_id,
+                            chunk_id = %m.chunk_id,
+                            error = %e,
+                            "HNSW backfill: failed to load chunk, skipping"
+                        );
+                        stats.chunks_skipped += 1;
+                    }
+                }
+            }
+
+            if index_rows.is_empty() {
+                continue;
+            }
+
+            let batch_len = index_rows.len();
+            let result = if let Some(hybrid) = hybrid_searcher {
+                hybrid.index_batch(&tenant_id, &index_rows).await
+            } else {
+                dense.index_batch(&tenant_id, &index_rows).await
+            };
+            match result {
+                Ok(()) => {
+                    indexed_this_tenant += batch_len;
+                    stats.chunks_indexed += batch_len;
+                }
+                Err(e) => {
+                    // Don't abandon the rest of the tenant; a single bad
+                    // batch shouldn't block the other 99%. But do record
+                    // the failure so callers know coverage may be
+                    // incomplete and a follow-up pass is warranted.
+                    warn!(
+                        tenant_id = %tenant_id,
+                        batch_len = batch_len,
+                        error = %e,
+                        "HNSW backfill batch failed; continuing with next batch"
+                    );
+                    stats.chunks_skipped += batch_len;
+                    tenant_had_batch_failure = true;
+                }
+            }
+        }
+
+        if indexed_this_tenant > 0 {
+            stats.tenants_backfilled += 1;
+            info!(
+                tenant_id = %tenant_id,
+                chunks_indexed = indexed_this_tenant,
+                had_batch_failure = tenant_had_batch_failure,
+                "HNSW backfill complete for tenant"
+            );
+        }
+    }
+
+    Ok(stats)
 }
 
 async fn sweep_pending_index_jobs(
@@ -3121,6 +3361,284 @@ mod tests {
             .unwrap();
         assert_eq!(ranked.len(), 2);
         assert_eq!(ranked[0].0.chunk_id, older);
+    }
+
+    /// Bug A: HNSW backfill. Simulates the production cold-start condition
+    /// where metadata has chunks but the in-memory HNSW is empty (because
+    /// the previous daemon never saved it). After calling
+    /// `backfill_hnsw_for_cold_tenants`, the search must find chunks whose
+    /// embeddings were previously missing.
+    #[tokio::test]
+    async fn backfill_hnsw_for_cold_tenants_reindexes_stranded_chunks() {
+        use crate::embeddings::MockEmbedder;
+        use crate::store::dense::{DenseSearchConfig, DenseSearcher};
+        use crate::store::hybrid::{HybridConfig, HybridSearcher};
+
+        let dir = tempdir().unwrap();
+        let config = PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            segment_max_chunks: 100,
+            wal_checkpoint_interval: 0,
+            enable_dense_search: true,
+            enable_hybrid_search: true,
+            enable_tiered_search: false, // keep the test simple
+            ..Default::default()
+        };
+        let mut store = PersistentStore::open(config).unwrap();
+        let embedder = Arc::new(MockEmbedder::new());
+        let dense_searcher = Arc::new(DenseSearcher::with_embedder(
+            Arc::clone(&embedder) as Arc<dyn crate::embeddings::Embedder>,
+            DenseSearchConfig {
+                persist: false,
+                ..Default::default()
+            },
+        ));
+        let hybrid = HybridSearcher::new(
+            Arc::clone(&dense_searcher),
+            None,
+            HybridConfig {
+                enable_sparse: false,
+                enable_tiered: false,
+                ..Default::default()
+            },
+        );
+        store.dense_searcher = Some(Arc::clone(&dense_searcher));
+        store.hybrid_searcher = Some(Arc::new(hybrid));
+
+        let tenant = make_tenant();
+        let texts = [
+            "alpha lifecycle overlay prototype",
+            "bravo wal recovery idempotent replay",
+            "charlie tiered cache invalidation",
+        ];
+        for text in &texts {
+            Store::add(&store, make_chunk(&tenant, text))
+                .await
+                .unwrap();
+        }
+        // Sanity: search works while HNSW is warm.
+        assert_eq!(dense_searcher.index_len(&tenant), texts.len());
+
+        // Simulate the cold-start condition: swap in a brand new empty
+        // dense searcher + hybrid. Metadata is unchanged; segments are on
+        // disk; but HNSW has no entries — exactly the state we observed
+        // on the production daemon after restart.
+        let cold_dense = Arc::new(DenseSearcher::with_embedder(
+            Arc::clone(&embedder) as Arc<dyn crate::embeddings::Embedder>,
+            DenseSearchConfig {
+                persist: false,
+                ..Default::default()
+            },
+        ));
+        let cold_hybrid = HybridSearcher::new(
+            Arc::clone(&cold_dense),
+            None,
+            HybridConfig {
+                enable_sparse: false,
+                enable_tiered: false,
+                ..Default::default()
+            },
+        );
+        store.dense_searcher = Some(Arc::clone(&cold_dense));
+        store.hybrid_searcher = Some(Arc::new(cold_hybrid));
+
+        // Before backfill: searching the cold HNSW returns nothing.
+        assert_eq!(
+            cold_dense.index_len(&tenant),
+            0,
+            "fresh dense searcher must start empty"
+        );
+
+        // Act.
+        let stats = store.backfill_hnsw_for_cold_tenants().await.unwrap();
+
+        // After backfill: HNSW has all three chunks, search finds them.
+        assert!(
+            stats.chunks_indexed >= texts.len(),
+            "backfill must reindex all stranded chunks, got stats {:?}",
+            stats
+        );
+        assert_eq!(stats.tenants_backfilled, 1);
+        assert_eq!(cold_dense.index_len(&tenant), texts.len());
+
+        let scored = store
+            .search_with_scores(&tenant, "lifecycle", 10)
+            .await
+            .unwrap();
+        assert!(
+            !scored.is_empty(),
+            "semantic search must return results after backfill"
+        );
+    }
+
+    #[tokio::test]
+    async fn backfill_hnsw_is_noop_when_dense_disabled() {
+        let (store, _dir) = make_test_store();
+        // make_test_store disables dense search; backfill must return
+        // cleanly with zero work done.
+        let stats = store.backfill_hnsw_for_cold_tenants().await.unwrap();
+        assert_eq!(stats.tenants_backfilled, 0);
+        assert_eq!(stats.chunks_indexed, 0);
+    }
+
+    /// Codex-reviewed regression: count-only heuristics (`index_len >=
+    /// active_count`) silently skip stale tenants because HNSW's
+    /// `next_id` counter never decrements on delete. Simulate:
+    /// add 3 chunks, delete 2 (HNSW count still 3, active metadata 1),
+    /// then add 2 new chunks while HNSW is empty (simulates a
+    /// cold-restart mid-lifecycle). The stale tenant must still be
+    /// backfilled.
+    #[tokio::test]
+    async fn backfill_hnsw_detects_staleness_via_per_chunk_membership_not_counts() {
+        use crate::embeddings::MockEmbedder;
+        use crate::store::dense::{DenseSearchConfig, DenseSearcher};
+        use crate::store::hybrid::{HybridConfig, HybridSearcher};
+
+        let dir = tempdir().unwrap();
+        let config = PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            segment_max_chunks: 100,
+            wal_checkpoint_interval: 0,
+            enable_dense_search: true,
+            enable_hybrid_search: true,
+            enable_tiered_search: false,
+            ..Default::default()
+        };
+        let mut store = PersistentStore::open(config).unwrap();
+        let embedder = Arc::new(MockEmbedder::new());
+        let dense = Arc::new(DenseSearcher::with_embedder(
+            Arc::clone(&embedder) as Arc<dyn crate::embeddings::Embedder>,
+            DenseSearchConfig {
+                persist: false,
+                ..Default::default()
+            },
+        ));
+        let hybrid = HybridSearcher::new(
+            Arc::clone(&dense),
+            None,
+            HybridConfig {
+                enable_sparse: false,
+                enable_tiered: false,
+                ..Default::default()
+            },
+        );
+        store.dense_searcher = Some(Arc::clone(&dense));
+        store.hybrid_searcher = Some(Arc::new(hybrid));
+
+        let tenant = make_tenant();
+        let id1 = Store::add(&store, make_chunk(&tenant, "first old chunk"))
+            .await
+            .unwrap();
+        let id2 = Store::add(&store, make_chunk(&tenant, "second old chunk"))
+            .await
+            .unwrap();
+        let _id3 = Store::add(&store, make_chunk(&tenant, "third old chunk"))
+            .await
+            .unwrap();
+
+        // Soft-delete two of the chunks. HNSW's mapping.next_id stays at
+        // 3, but metadata only has one active row.
+        assert!(store.delete(&tenant, &id1).await.unwrap());
+        assert!(store.delete(&tenant, &id2).await.unwrap());
+
+        // Now simulate a cold restart: swap in a fresh empty HNSW state.
+        let cold_dense = Arc::new(DenseSearcher::with_embedder(
+            Arc::clone(&embedder) as Arc<dyn crate::embeddings::Embedder>,
+            DenseSearchConfig {
+                persist: false,
+                ..Default::default()
+            },
+        ));
+        let cold_hybrid = HybridSearcher::new(
+            Arc::clone(&cold_dense),
+            None,
+            HybridConfig {
+                enable_sparse: false,
+                enable_tiered: false,
+                ..Default::default()
+            },
+        );
+        store.dense_searcher = Some(Arc::clone(&cold_dense));
+        store.hybrid_searcher = Some(Arc::new(cold_hybrid));
+
+        // Add one more chunk post-"restart" — this one lands in HNSW
+        // normally. With the naive count heuristic, `hnsw_count = 1` and
+        // `active_count = 2` so backfill WOULD run, but only because
+        // the skew is in our favor. Before per-chunk membership the
+        // heuristic could also have failed the other way.
+        let id4 = Store::add(&store, make_chunk(&tenant, "new post-restart chunk"))
+            .await
+            .unwrap();
+        assert_eq!(cold_dense.index_len(&tenant), 1);
+        assert!(cold_dense.contains_chunk(&tenant, &id4));
+
+        // The surviving-from-old-era chunk is id3. It must be missing
+        // from HNSW currently.
+        let _ = _id3; // only referenced for assertion symmetry
+
+        // Act.
+        let stats = store.backfill_hnsw_for_cold_tenants().await.unwrap();
+
+        // Exactly the one surviving pre-restart chunk should have been
+        // re-indexed; id4 is already there and gets skipped by the
+        // per-chunk membership test.
+        assert_eq!(
+            stats.chunks_indexed, 1,
+            "backfill should re-index only the one missing chunk, got {:?}",
+            stats
+        );
+        assert_eq!(stats.tenants_backfilled, 1);
+    }
+
+    #[tokio::test]
+    async fn backfill_hnsw_skips_tenants_whose_index_is_already_warm() {
+        use crate::embeddings::MockEmbedder;
+        use crate::store::dense::{DenseSearchConfig, DenseSearcher};
+        use crate::store::hybrid::{HybridConfig, HybridSearcher};
+
+        let dir = tempdir().unwrap();
+        let config = PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            segment_max_chunks: 100,
+            wal_checkpoint_interval: 0,
+            enable_dense_search: true,
+            enable_hybrid_search: true,
+            enable_tiered_search: false,
+            ..Default::default()
+        };
+        let mut store = PersistentStore::open(config).unwrap();
+        let embedder = Arc::new(MockEmbedder::new());
+        let dense = Arc::new(DenseSearcher::with_embedder(
+            Arc::clone(&embedder) as Arc<dyn crate::embeddings::Embedder>,
+            DenseSearchConfig {
+                persist: false,
+                ..Default::default()
+            },
+        ));
+        let hybrid = HybridSearcher::new(
+            Arc::clone(&dense),
+            None,
+            HybridConfig {
+                enable_sparse: false,
+                enable_tiered: false,
+                ..Default::default()
+            },
+        );
+        store.dense_searcher = Some(Arc::clone(&dense));
+        store.hybrid_searcher = Some(Arc::new(hybrid));
+
+        let tenant = make_tenant();
+        Store::add(&store, make_chunk(&tenant, "already indexed"))
+            .await
+            .unwrap();
+
+        let before = dense.index_len(&tenant);
+        let stats = store.backfill_hnsw_for_cold_tenants().await.unwrap();
+        let after = dense.index_len(&tenant);
+
+        assert_eq!(before, after, "warm tenant must not be re-indexed");
+        assert_eq!(stats.tenants_backfilled, 0);
+        assert_eq!(stats.chunks_indexed, 0);
     }
 
     /// Regression test for the `next_segment_id` scan.
