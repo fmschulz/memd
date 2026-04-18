@@ -1473,6 +1473,56 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                 "required": []
             }),
         ),
+        // LIFECYCLE-01: memory.supersede (Track A — A7)
+        ToolDefinition::new(
+            "memory.supersede",
+            "Atomically supersede an existing chunk with a new version. Old chunk keeps \
+             provenance but is filtered from default retrieval. Bumps tenant cache version.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier for data isolation"
+                    },
+                    "old_chunk_id": {
+                        "type": "string",
+                        "description": "UUID of the chunk being superseded"
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "Content of the replacement chunk"
+                    },
+                    "type": {
+                        "type": "string",
+                        "enum": ["code", "doc", "trace", "decision", "plan", "research", "message", "summary", "other"],
+                        "description": "Chunk type (code, doc, trace, etc.) of the replacement"
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional project identifier"
+                    },
+                    "source": {
+                        "type": "object",
+                        "description": "Optional provenance information",
+                        "properties": {
+                            "uri": {"type": "string"},
+                            "repo": {"type": "string"},
+                            "commit": {"type": "string"},
+                            "path": {"type": "string"},
+                            "tool_name": {"type": "string"},
+                            "tool_call_id": {"type": "string"}
+                        }
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional tags for filtering"
+                    }
+                },
+                "required": ["old_chunk_id", "new_text", "type"]
+            }),
+        ),
         // MEMORY-09: memory.consolidate_episode
         ToolDefinition::new(
             "memory.consolidate_episode",
@@ -1731,6 +1781,7 @@ pub fn tool_names() -> Vec<&'static str> {
         "memory.stats",
         "memory.metrics",
         "memory.compact",
+        "memory.supersede",
         "memory.consolidate_episode",
         "context.list_subsystems",
         "context.get_files_for_subsystem",
@@ -1757,7 +1808,8 @@ mod tests {
         let tools = get_all_tools();
         // Phase 2.3: 42 legacy tools + four focused artifact tools
         // (artifact.review / revision / decision / verification).
-        assert_eq!(tools.len(), 46);
+        // Track A (A7): + memory.supersede.
+        assert_eq!(tools.len(), 47);
     }
 
     #[test]
@@ -2076,7 +2128,9 @@ mod tests {
     fn tool_names_list() {
         let names = tool_names();
         // Phase 2.3: 42 legacy + 4 focused artifact tools.
-        assert_eq!(names.len(), 46);
+        // Track A (A7): + memory.supersede.
+        assert_eq!(names.len(), 47);
+        assert!(names.contains(&"memory.supersede"));
         assert!(names.contains(&"artifact.find_related"));
         assert!(names.contains(&"artifact.review"));
         assert!(names.contains(&"artifact.revision"));
