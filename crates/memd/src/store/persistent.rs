@@ -2057,19 +2057,33 @@ impl PersistentStore {
     /// Atomically supersede `old_id` with a newly written `new_chunk`.
     ///
     /// Flow:
-    /// 1. Walk the `superseded_by` chain from `old_id` for up to 64
+    /// 0. Reject `tenant_id` / `new_chunk.tenant_id` mismatches — an
+    ///    easy-to-make caller mistake that would otherwise persist
+    ///    `new_chunk` under a different tenant from the supersession
+    ///    edge.
+    /// 1. Confirm `old_id` exists in `tenant_id` and is not already
+    ///    `Deleted`. Doing this BEFORE writing `new_chunk` is what
+    ///    makes the operation safe at the store layer: if we deferred
+    ///    the check to `atomic_supersede` (step 4), a missing /
+    ///    cross-tenant `old_id` would surface as an error AFTER
+    ///    `new_chunk` has already been committed to WAL + segment +
+    ///    metadata, leaving an orphan row behind.
+    /// 2. Walk the `superseded_by` chain from `old_id` for up to 64
     ///    hops to detect pre-existing cycles before we touch disk.
-    /// 2. Write `new_chunk` through `add_chunk_with_lifecycle`, which
+    /// 3. Write `new_chunk` through `add_chunk_with_lifecycle`, which
     ///    runs the full WAL + segment + metadata + canonical-text path
     ///    and bumps the tenant cache version.
-    /// 3. Link old ↔ new in one SQLite transaction via
+    /// 4. Link old ↔ new in one SQLite transaction via
     ///    `MetadataStore::atomic_supersede`. The pair of UPDATEs is
     ///    all-or-nothing on SQLite's side, so a mid-call crash cannot
     ///    leave a half-linked edge.
-    /// 4. Drop `old_id` from the BM25 sparse index when hybrid+sparse is
-    ///    enabled; HNSW exclusion happens at rebuild time. Finally,
-    ///    bump the tenant cache version once more so any tiered
-    ///    searcher snapshots taken between (2) and (3) invalidate.
+    /// 5. Best-effort drop of `old_id` from the BM25 sparse index
+    ///    (immediate, when hybrid+sparse is enabled) and bump the
+    ///    tenant cache version so tiered/in-memory snapshots taken
+    ///    between (3) and (4) invalidate. HNSW exclusion happens at
+    ///    next compaction rebuild. Authoritative invisibility of
+    ///    superseded rows in retrieval is the visibility filter at
+    ///    the handler boundary (Track B), not anything in this layer.
     ///
     /// Structural indexing is intentionally NOT performed here — it
     /// happens at the MCP/server layer via post-write hooks after the
@@ -2080,29 +2094,69 @@ impl PersistentStore {
         old_id: &ChunkId,
         new_chunk: MemoryChunk,
     ) -> Result<ChunkId> {
-        // Step 1: cycle detection first, before we commit any new state.
+        // Step 0: refuse tenant mismatch immediately. Without this guard
+        // the new chunk would be written under `new_chunk.tenant_id`
+        // while `atomic_supersede` looks for `old_id` under
+        // `tenant_id` — the second would fail and orphan the first.
+        if new_chunk.tenant_id != *tenant_id {
+            return Err(MemdError::ValidationError(format!(
+                "supersede_chunk: new_chunk.tenant_id {} does not match tenant_id {}",
+                new_chunk.tenant_id, tenant_id
+            )));
+        }
+
+        // Step 1: confirm `old_id` exists in `tenant_id` and is not
+        // already Deleted before we commit any new state. `atomic_supersede`
+        // also enforces existence via its row-count guard, but only
+        // *after* the new chunk has been persisted — so without this
+        // pre-flight a missing/deleted `old_id` would orphan the new
+        // row in WAL + segment + metadata. Linking a Deleted row would
+        // also produce an unreachable supersession edge (Deleted rows
+        // are filtered from retrieval).
+        match self.metadata.get(tenant_id, old_id)? {
+            Some(m) if m.status != ChunkStatus::Deleted => {}
+            Some(_) => {
+                return Err(MemdError::ValidationError(format!(
+                    "supersede_chunk: old chunk {old_id} is deleted in tenant {tenant_id}"
+                )));
+            }
+            None => {
+                return Err(MemdError::ValidationError(format!(
+                    "supersede_chunk: old chunk {old_id} not found in tenant {tenant_id}"
+                )));
+            }
+        }
+
+        // Step 2: cycle detection — guards against a pre-existing loop in
+        // the `superseded_by` chain that would make the new edge nonsensical.
         self.detect_supersession_cycle(tenant_id, old_id, 64)?;
 
-        // Step 2: write the new chunk through the normal add path. Passing
+        // Step 3: write the new chunk through the normal add path. Passing
         // a default lifecycle delta keeps this light — atomic_supersede
-        // populates `supersedes` / `superseded_by` in step 3.
+        // populates `supersedes` / `superseded_by` in step 4. At this
+        // point steps 0–2 have ruled out every reason `atomic_supersede`
+        // would reject the link, so writing the new row first is safe
+        // (the only remaining failure modes are catastrophic — e.g.
+        // SQLite I/O — which would orphan even with the inverse order).
         let new_id = self
             .add_chunk_with_lifecycle(new_chunk, LifecycleDelta::default())
             .await?;
 
-        // Step 3: atomically link old ↔ new in a single SQLite transaction.
+        // Step 4: atomically link old ↔ new in a single SQLite transaction.
         let now = current_time_ms();
         self.metadata
             .atomic_supersede(tenant_id, old_id, &new_id, now)?;
 
-        // Step 4: drop old from the sparse index (if hybrid+sparse
-        // enabled); HNSW excludes superseded rows on next rebuild.
+        // Step 5: drop old from the sparse index (immediate when
+        // hybrid+sparse enabled) and bump the tenant memory version
+        // for tiered/in-memory caches. HNSW exclusion lands at next
+        // compaction rebuild; the handler-boundary visibility filter
+        // (Track B) is the authoritative invisibility guarantee.
         if let Some(h) = self.hybrid() {
             if let Some(sparse) = h.sparse_index() {
-                // Best-effort: a failure here doesn't invalidate the
-                // supersession — the BM25 entry will linger until the
-                // next compaction but downstream search already filters
-                // on `status = Active` via lifecycle joins.
+                // Best-effort: a sparse-delete failure does not invalidate
+                // the supersession edge — the BM25 entry will linger
+                // until the next compaction.
                 let _ = sparse.delete(tenant_id, old_id);
             }
             h.bump_tenant_memory_version(tenant_id);
