@@ -72,7 +72,7 @@ use crate::task_memory::{
     DIGEST_ROLE_PROJECT_BRIEF, DIGEST_ROLE_TASK_RESUME,
 };
 use crate::tiered::TieredTiming;
-use crate::types::{ChunkId, ChunkType, MemoryChunk, ProjectId, Source, TenantId};
+use crate::types::{ChunkId, ChunkType, MemoryChunk, ProjectId, Source, TenantId, VisibilityPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -690,11 +690,22 @@ pub struct ArtifactVerifyParams {
 }
 
 /// Parameters for memory.get
+///
+/// The three `include_*` flags map 1:1 onto `VisibilityPolicy`. They
+/// default to `false` so memory.get hides non-active content (superseded
+/// / expired / history) unless the caller explicitly opts in — mirroring
+/// the overlay semantics documented on `VisibilityPolicy` in types.rs.
 #[derive(Debug, Deserialize)]
 pub struct GetParams {
     #[serde(default)]
     pub tenant_id: String,
     pub chunk_id: String,
+    #[serde(default)]
+    pub include_superseded: Option<bool>,
+    #[serde(default)]
+    pub include_expired: Option<bool>,
+    #[serde(default)]
+    pub include_history: Option<bool>,
 }
 
 /// Parameters for memory.delete
@@ -5644,7 +5655,15 @@ pub async fn handle_artifact_find_highlights<S: Store>(
     })
 }
 
-/// Handle memory.get tool call
+/// Handle memory.get tool call.
+///
+/// Routes through `Store::get_with_lifecycle` so the caller sees the
+/// authoritative lifecycle overlay (status + tier + supersedes edges),
+/// then applies `VisibilityPolicy` — Superseded, Expired, and
+/// History-tier chunks are hidden by default. When hidden, the response
+/// omits the chunk payload and advertises `hidden: true` plus the
+/// status/tier so callers can decide whether to retry with an
+/// `include_*` flag.
 pub async fn handle_memory_get<S: Store>(store: &S, params: GetParams) -> Result<Value, McpError> {
     let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     let chunk_id = validate_chunk_id(&params.chunk_id)?;
@@ -5655,26 +5674,72 @@ pub async fn handle_memory_get<S: Store>(store: &S, params: GetParams) -> Result
         "memory.get"
     );
 
-    let chunk = store
-        .get(&tenant_id, &chunk_id)
+    let resolved = match store
+        .get_with_lifecycle(&tenant_id, &chunk_id)
         .await
-        .map_err(|e| McpError::ToolError(e.to_string()))?;
-
-    let json_str = if let Some(c) = chunk {
-        info!(chunk_id = %chunk_id, "chunk found");
-        serde_json::to_string(&c)
-            .map_err(|e| McpError::ToolError(format!("failed to serialize chunk: {}", e)))?
-    } else {
-        debug!(chunk_id = %chunk_id, "chunk not found");
-        "null".to_string()
+        .map_err(|e| McpError::ToolError(e.to_string()))?
+    {
+        Some(r) => r,
+        None => {
+            debug!(chunk_id = %chunk_id, "chunk not found");
+            return format_mcp_response(&json!({ "found": false }));
+        }
     };
 
-    Ok(json!({
-        "content": [{
-            "type": "text",
-            "text": json_str
-        }]
+    let policy = VisibilityPolicy {
+        include_superseded: params.include_superseded.unwrap_or(false),
+        include_expired: params.include_expired.unwrap_or(false),
+        include_history: params.include_history.unwrap_or(false),
+    };
+
+    // Expiry check: VisibilityPolicy::is_visible only inspects status +
+    // tier, not the wall-clock expires_at_ms window. Fold that in here so
+    // a chunk whose expires_at_ms has elapsed is hidden unless the caller
+    // opts in — matches the overlay contract and keeps the rule in one
+    // place until the policy type itself learns about time.
+    let now_ms = current_time_ms();
+    let expired_by_clock = resolved
+        .lifecycle
+        .expires_at_ms
+        .is_some_and(|exp| exp <= now_ms);
+
+    let base_visible = policy.is_visible(resolved.status, resolved.lifecycle.tier);
+    let visible = base_visible && (!expired_by_clock || policy.include_expired);
+
+    if !visible {
+        info!(
+            chunk_id = %chunk_id,
+            status = %resolved.status,
+            tier = %resolved.lifecycle.tier,
+            "memory.get hidden by visibility policy"
+        );
+        return format_mcp_response(&json!({
+            "found": true,
+            "hidden": true,
+            "status": resolved.status.to_string(),
+            "tier": resolved.lifecycle.tier.to_string(),
+        }));
+    }
+
+    info!(chunk_id = %chunk_id, "chunk found");
+    format_mcp_response(&json!({
+        "found": true,
+        "chunk": resolved.chunk,
+        "lifecycle": resolved.lifecycle,
+        "status": resolved.status.to_string(),
     }))
+}
+
+/// Current wall-clock time in milliseconds since UNIX_EPOCH.
+///
+/// Local helper for handlers that need a timestamp but do not want to
+/// reach into the persistent store layer (which carries its own
+/// `current_time_ms`).
+fn current_time_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Handle memory.delete tool call
@@ -6200,6 +6265,10 @@ pub async fn handle_context_search_documents<S: Store>(
         "context.search_context_documents"
     );
 
+    // TODO(B1): apply VisibilityPolicy via apply_visibility_filter to hide
+    // superseded/expired/history chunks. memory.get (A8) enforces this at
+    // the point-lookup; the search path still leaks non-active content
+    // until Track B1 wires the overlay into search_with_scores.
     let scored_chunks = store
         .search_with_scores(&tenant_id, &params.query, fetch_k)
         .await
@@ -6285,6 +6354,10 @@ pub async fn handle_context_find_relevant_context<S: Store>(
         }
     }
 
+    // TODO(B1): apply VisibilityPolicy via apply_visibility_filter to hide
+    // superseded/expired/history chunks. memory.get (A8) enforces this at
+    // the point-lookup; the search path still leaks non-active content
+    // until Track B1 wires the overlay into search_with_scores.
     let scored_chunks = store
         .search_with_scores(&tenant_id, &params.task, fetch_k)
         .await
@@ -7374,11 +7447,16 @@ mod tests {
         let get_params = GetParams {
             tenant_id: "test".to_string(),
             chunk_id: response.chunk_id.clone(),
+            include_superseded: None,
+            include_expired: None,
+            include_history: None,
         };
 
         let get_result = handle_memory_get(&store, get_params).await.unwrap();
         let text = get_result["content"][0]["text"].as_str().unwrap();
-        let chunk: MemoryChunk = serde_json::from_str(text).unwrap();
+        let body: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(body["found"].as_bool(), Some(true));
+        let chunk: MemoryChunk = serde_json::from_value(body["chunk"].clone()).unwrap();
 
         assert_eq!(chunk.text, "function hello() {}");
         assert_eq!(chunk.chunk_type, ChunkType::Code);
@@ -7452,11 +7530,19 @@ mod tests {
         let get_params = GetParams {
             tenant_id: "test".to_string(),
             chunk_id: add_response.chunk_id,
+            include_superseded: None,
+            include_expired: None,
+            include_history: None,
         };
 
         let get_result = handle_memory_get(&store, get_params).await.unwrap();
         let text = get_result["content"][0]["text"].as_str().unwrap();
-        assert_eq!(text, "null");
+        let body: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            body["found"].as_bool(),
+            Some(false),
+            "deleted chunk must surface as found=false via memory.get"
+        );
     }
 
     #[tokio::test]
@@ -7574,6 +7660,9 @@ mod tests {
         let params = GetParams {
             tenant_id: "test".to_string(),
             chunk_id: "not-a-uuid".to_string(),
+            include_superseded: None,
+            include_expired: None,
+            include_history: None,
         };
 
         let result = handle_memory_get(&store, params).await;
