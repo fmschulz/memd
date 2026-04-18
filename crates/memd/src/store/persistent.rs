@@ -43,7 +43,7 @@ use super::wal::{TaskArtifactWalPayload, WalReader, WalRecord, WalRecordType, Wa
 use super::{rank_candidate_chunks, score_candidate_chunk, Store, StoreStats};
 use crate::embeddings::EmbeddingModel;
 use crate::error::{MemdError, Result};
-use crate::index::Bm25Index;
+use crate::index::{Bm25Index, SparseIndex};
 use crate::metrics::{IndexStats, MetricsCollector, QueryMetrics, TieredQueryMetrics};
 use crate::retrieval::RerankerMode;
 use crate::types::lifecycle::{LifecycleDelta, ResolvedChunk};
@@ -1994,6 +1994,147 @@ impl PersistentStore {
         self.metadata.update_lifecycle(tenant_id, chunk_id, delta)?;
         if let Some(h) = self.hybrid() {
             h.bump_tenant_memory_version(tenant_id);
+        }
+        Ok(())
+    }
+
+    /// Write a chunk plus its initial lifecycle overlay in one logical step.
+    ///
+    /// Flow:
+    /// 1. Write the payload through the normal `Store::add` path
+    ///    (WAL + segment + metadata + async index), which already bumps the
+    ///    tenant memory version when hybrid/tiered is enabled.
+    /// 2. Persist the canonical text used by writer-driven digest /
+    ///    supersession-by-content-identity flows (Track D).
+    /// 3. If the initial delta has any non-default field, apply it through
+    ///    the overlay UPDATE and bump the tenant cache version a second
+    ///    time so consumers observing a snapshot between (1) and (3)
+    ///    invalidate it.
+    ///
+    /// Structural indexing is intentionally NOT performed here — it lives
+    /// at the MCP/server layer via post-write hooks so the store stays
+    /// agnostic about language-aware extraction.
+    pub async fn add_chunk_with_lifecycle(
+        &self,
+        chunk: MemoryChunk,
+        initial: LifecycleDelta,
+    ) -> Result<ChunkId> {
+        let canonical =
+            crate::store::supersession::canonicalize_for_type(&chunk.text, chunk.chunk_type);
+        let tenant_id = chunk.tenant_id.clone();
+
+        // Step 1: write payload via existing add path (WAL + segment +
+        // SQLite + async index). This already bumps the tenant memory
+        // version when hybrid is enabled (see add_chunks_internal).
+        let chunk_id = <Self as Store>::add(self, chunk).await?;
+
+        // Step 2: persist canonical_text on the primary metadata row so
+        // Track D's dedup path can hash/match without rereading the
+        // immutable chunk payload.
+        self.metadata
+            .set_canonical_text(&tenant_id, &chunk_id, &canonical)?;
+
+        // Step 3: apply the initial lifecycle delta only if non-empty so
+        // we skip a no-op UPDATE on the common "no overlay yet" call.
+        if !initial.is_empty() {
+            let now = current_time_ms();
+            let mut delta = initial;
+            if delta.lifecycle_updated_at_ms.is_none() {
+                delta.lifecycle_updated_at_ms = Some(now);
+            }
+            self.metadata
+                .update_lifecycle(&tenant_id, &chunk_id, &delta)?;
+            // Bump again to invalidate any snapshot captured between
+            // `add()` and this overlay UPDATE.
+            if let Some(h) = self.hybrid() {
+                h.bump_tenant_memory_version(&tenant_id);
+            }
+        }
+
+        Ok(chunk_id)
+    }
+
+    /// Atomically supersede `old_id` with a newly written `new_chunk`.
+    ///
+    /// Flow:
+    /// 1. Walk the `superseded_by` chain from `old_id` for up to 64
+    ///    hops to detect pre-existing cycles before we touch disk.
+    /// 2. Write `new_chunk` through `add_chunk_with_lifecycle`, which
+    ///    runs the full WAL + segment + metadata + canonical-text path
+    ///    and bumps the tenant cache version.
+    /// 3. Link old ↔ new in one SQLite transaction via
+    ///    `MetadataStore::atomic_supersede`. The pair of UPDATEs is
+    ///    all-or-nothing on SQLite's side, so a mid-call crash cannot
+    ///    leave a half-linked edge.
+    /// 4. Drop `old_id` from the BM25 sparse index when hybrid+sparse is
+    ///    enabled; HNSW exclusion happens at rebuild time. Finally,
+    ///    bump the tenant cache version once more so any tiered
+    ///    searcher snapshots taken between (2) and (3) invalidate.
+    ///
+    /// Structural indexing is intentionally NOT performed here — it
+    /// happens at the MCP/server layer via post-write hooks after the
+    /// caller's dispatch arm invokes this method.
+    pub async fn supersede_chunk(
+        &self,
+        tenant_id: &TenantId,
+        old_id: &ChunkId,
+        new_chunk: MemoryChunk,
+    ) -> Result<ChunkId> {
+        // Step 1: cycle detection first, before we commit any new state.
+        self.detect_supersession_cycle(tenant_id, old_id, 64)?;
+
+        // Step 2: write the new chunk through the normal add path. Passing
+        // a default lifecycle delta keeps this light — atomic_supersede
+        // populates `supersedes` / `superseded_by` in step 3.
+        let new_id = self
+            .add_chunk_with_lifecycle(new_chunk, LifecycleDelta::default())
+            .await?;
+
+        // Step 3: atomically link old ↔ new in a single SQLite transaction.
+        let now = current_time_ms();
+        self.metadata
+            .atomic_supersede(tenant_id, old_id, &new_id, now)?;
+
+        // Step 4: drop old from the sparse index (if hybrid+sparse
+        // enabled); HNSW excludes superseded rows on next rebuild.
+        if let Some(h) = self.hybrid() {
+            if let Some(sparse) = h.sparse_index() {
+                // Best-effort: a failure here doesn't invalidate the
+                // supersession — the BM25 entry will linger until the
+                // next compaction but downstream search already filters
+                // on `status = Active` via lifecycle joins.
+                let _ = sparse.delete(tenant_id, old_id);
+            }
+            h.bump_tenant_memory_version(tenant_id);
+        }
+
+        Ok(new_id)
+    }
+
+    /// Walk the `superseded_by` chain starting at `start` for up to
+    /// `max_depth` hops. Returns `Err(ValidationError)` if a cycle is
+    /// detected (the chain points back at `start`), and `Ok(())` both on
+    /// termination at an empty `superseded_by` and on exhausting the
+    /// depth budget without a loop — the latter intentionally permits
+    /// very long chains rather than flagging them as invalid.
+    fn detect_supersession_cycle(
+        &self,
+        tenant: &TenantId,
+        start: &ChunkId,
+        max_depth: usize,
+    ) -> Result<()> {
+        let mut current = start.clone();
+        for _ in 0..max_depth {
+            let meta = self.metadata.get(tenant, &current)?;
+            match meta.and_then(|m| m.lifecycle.superseded_by) {
+                Some(next) if next == *start => {
+                    return Err(MemdError::ValidationError(format!(
+                        "supersession cycle detected at {current}"
+                    )));
+                }
+                Some(next) => current = next,
+                None => return Ok(()),
+            }
         }
         Ok(())
     }
