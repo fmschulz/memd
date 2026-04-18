@@ -859,6 +859,7 @@ impl TenantStore {
                         timestamp_created: chunk.timestamp_created,
                         hash: chunk.hash.clone(),
                         source_uri: chunk.source.uri.clone(),
+                        // A8: writer will populate lifecycle overlay directly once update_lifecycle is wired in.
                         lifecycle: crate::types::LifecycleMetadata::default(),
                         canonical_text: None,
                     };
@@ -1216,6 +1217,7 @@ impl Store for PersistentStore {
                 timestamp_created: row.chunk.timestamp_created,
                 hash: row.chunk.hash.clone(),
                 source_uri: row.chunk.source.uri.clone(),
+                // A8: writer will populate lifecycle overlay directly once update_lifecycle is wired in.
                 lifecycle: crate::types::LifecycleMetadata::default(),
                 canonical_text: None,
             });
@@ -1856,6 +1858,7 @@ impl PersistentStore {
                     timestamp_created: row.chunk.timestamp_created,
                     hash: row.chunk.hash.clone(),
                     source_uri: row.chunk.source.uri.clone(),
+                    // A8: writer will populate lifecycle overlay directly once update_lifecycle is wired in.
                     lifecycle: crate::types::LifecycleMetadata::default(),
                     canonical_text: None,
                 });
