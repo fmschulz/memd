@@ -10,7 +10,7 @@ pub use pool::{PooledConnection, SqliteConnectionPool};
 pub use sqlite::SqliteMetadataStore;
 
 use crate::error::Result;
-use crate::types::{ChunkId, ChunkStatus, ChunkType, TenantId};
+use crate::types::{ChunkId, ChunkStatus, ChunkType, LifecycleMetadata, TenantId};
 
 /// Index lifecycle state for a chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +43,16 @@ pub struct ChunkMetadata {
     pub timestamp_created: i64,
     pub hash: String,
     pub source_uri: Option<String>,
+    /// Lifecycle overlay (tier, supersession edges, retention window).
+    ///
+    /// Added in A3. For chunks inserted before the lifecycle columns
+    /// existed, this falls back to `LifecycleMetadata::default()` at
+    /// read time (long-term tier, no supersession, no expiry).
+    pub lifecycle: LifecycleMetadata,
+    /// Optional canonical text for writer-driven digests / supersession
+    /// by content identity. Orthogonal to the chunk payload; empty for
+    /// regular chunks.
+    pub canonical_text: Option<String>,
 }
 
 /// Metadata store trait
