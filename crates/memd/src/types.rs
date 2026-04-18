@@ -754,6 +754,92 @@ pub mod lifecycle {
             assert_eq!(MemoryTier::from_str("history").unwrap(), MemoryTier::History);
             assert!(MemoryTier::from_str("bogus").is_err());
         }
+
+        #[test]
+        fn memory_tier_serde_snake_case() {
+            assert_eq!(
+                serde_json::to_string(&MemoryTier::Working).unwrap(),
+                "\"working\""
+            );
+            assert_eq!(
+                serde_json::to_string(&MemoryTier::LongTerm).unwrap(),
+                "\"long_term\""
+            );
+            assert_eq!(
+                serde_json::to_string(&MemoryTier::History).unwrap(),
+                "\"history\""
+            );
+            let t: MemoryTier = serde_json::from_str("\"long_term\"").unwrap();
+            assert_eq!(t, MemoryTier::LongTerm);
+            let t: MemoryTier = serde_json::from_str("\"history\"").unwrap();
+            assert_eq!(t, MemoryTier::History);
+        }
+
+        #[test]
+        fn lifecycle_delta_clears_expires_and_review_via_some_none() {
+            let lc = LifecycleMetadata {
+                expires_at_ms: Some(1_000),
+                review_after_ms: Some(2_000),
+                ..LifecycleMetadata::default()
+            };
+
+            // Some(None) clears
+            let cleared = lc.apply(&LifecycleDelta {
+                expires_at_ms: Some(None),
+                review_after_ms: Some(None),
+                ..Default::default()
+            });
+            assert!(cleared.expires_at_ms.is_none());
+            assert!(cleared.review_after_ms.is_none());
+
+            // None leaves unchanged
+            let left = lc.apply(&LifecycleDelta::default());
+            assert_eq!(left.expires_at_ms, Some(1_000));
+            assert_eq!(left.review_after_ms, Some(2_000));
+
+            // Some(Some(v)) sets
+            let set = lc.apply(&LifecycleDelta {
+                expires_at_ms: Some(Some(3_000)),
+                ..Default::default()
+            });
+            assert_eq!(set.expires_at_ms, Some(3_000));
+            assert_eq!(set.review_after_ms, Some(2_000)); // untouched
+        }
+
+        #[test]
+        fn visibility_policy_is_visible_matrix() {
+            let default = VisibilityPolicy::default();
+
+            // Always hidden regardless of flags
+            assert!(!default.is_visible(ChunkStatus::Deleted, MemoryTier::LongTerm));
+            assert!(!default.is_visible(ChunkStatus::Error, MemoryTier::LongTerm));
+
+            // Hidden by default, visible when flag flipped
+            assert!(!default.is_visible(ChunkStatus::Superseded, MemoryTier::LongTerm));
+            let inc_sup = VisibilityPolicy {
+                include_superseded: true,
+                ..Default::default()
+            };
+            assert!(inc_sup.is_visible(ChunkStatus::Superseded, MemoryTier::LongTerm));
+
+            assert!(!default.is_visible(ChunkStatus::Expired, MemoryTier::LongTerm));
+            let inc_exp = VisibilityPolicy {
+                include_expired: true,
+                ..Default::default()
+            };
+            assert!(inc_exp.is_visible(ChunkStatus::Expired, MemoryTier::LongTerm));
+
+            // History tier hidden by default for otherwise-visible status
+            assert!(!default.is_visible(ChunkStatus::Final, MemoryTier::History));
+            let inc_hist = VisibilityPolicy {
+                include_history: true,
+                ..Default::default()
+            };
+            assert!(inc_hist.is_visible(ChunkStatus::Final, MemoryTier::History));
+
+            // Active Final + LongTerm visible by default
+            assert!(default.is_visible(ChunkStatus::Final, MemoryTier::LongTerm));
+        }
     }
 }
 
