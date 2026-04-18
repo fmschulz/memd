@@ -182,6 +182,16 @@ struct IndexJob {
 }
 
 impl PersistentStore {
+    /// Borrow the hybrid searcher when hybrid retrieval is enabled.
+    pub fn hybrid(&self) -> Option<&HybridSearcher> {
+        self.hybrid_searcher.as_deref()
+    }
+
+    /// Borrow the metadata store.
+    pub fn metadata(&self) -> &SqliteMetadataStore {
+        self.metadata.as_ref()
+    }
+
     /// Open or create persistent store
     pub fn open(config: PersistentStoreConfig) -> Result<Self> {
         std::fs::create_dir_all(&config.data_dir)?;

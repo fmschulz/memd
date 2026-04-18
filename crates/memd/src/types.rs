@@ -241,6 +241,28 @@ impl Default for ChunkType {
     }
 }
 
+impl std::str::FromStr for ChunkType {
+    type Err = crate::error::MemdError;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s {
+            "code" => Self::Code,
+            "doc" => Self::Doc,
+            "trace" => Self::Trace,
+            "decision" => Self::Decision,
+            "plan" => Self::Plan,
+            "research" => Self::Research,
+            "message" => Self::Message,
+            "summary" => Self::Summary,
+            "other" => Self::Other,
+            _ => {
+                return Err(crate::error::MemdError::ValidationError(format!(
+                    "unknown chunk_type: {s}"
+                )))
+            }
+        })
+    }
+}
+
 /// Status of a memory chunk
 ///
 /// Tracks the lifecycle state of a chunk.
@@ -299,6 +321,43 @@ impl fmt::Display for PromotionState {
             PromotionState::Verified => "verified",
         };
         write!(f, "{}", s)
+    }
+}
+
+/// Ingestion mode for incoming text.
+///
+/// Distinguishes between conversational turns (which may need different
+/// chunking, retention, and retrieval defaults) and document content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IngestionMode {
+    /// Chat/turn-style content from an interactive session.
+    Conversation,
+    /// File, note, or document-style content (default).
+    #[default]
+    Document,
+}
+
+impl fmt::Display for IngestionMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::Conversation => "conversation",
+            Self::Document => "document",
+        };
+        f.write_str(s)
+    }
+}
+
+impl std::str::FromStr for IngestionMode {
+    type Err = crate::error::MemdError;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "conversation" => Ok(Self::Conversation),
+            "document" => Ok(Self::Document),
+            _ => Err(crate::error::MemdError::ValidationError(format!(
+                "unknown ingestion mode: {s}"
+            ))),
+        }
     }
 }
 
@@ -554,5 +613,40 @@ mod tests {
         assert_eq!(chunk.agent_id.as_deref(), Some("claude"));
         assert_eq!(chunk.tags.len(), 2);
         assert_eq!(chunk.status, ChunkStatus::Draft);
+    }
+
+    #[test]
+    fn chunk_type_from_str_round_trip_and_failure() {
+        use std::str::FromStr;
+
+        assert_eq!(ChunkType::from_str("code").unwrap(), ChunkType::Code);
+        assert_eq!(
+            ChunkType::from_str("decision").unwrap(),
+            ChunkType::Decision
+        );
+        let err = ChunkType::from_str("bogus").unwrap_err();
+        assert!(matches!(err, MemdError::ValidationError(_)));
+    }
+
+    #[test]
+    fn ingestion_mode_default_and_parsing() {
+        use std::str::FromStr;
+
+        assert_eq!(IngestionMode::default(), IngestionMode::Document);
+        assert_eq!(
+            IngestionMode::from_str("conversation").unwrap(),
+            IngestionMode::Conversation
+        );
+        let err = IngestionMode::from_str("bogus").unwrap_err();
+        assert!(matches!(err, MemdError::ValidationError(_)));
+    }
+
+    #[test]
+    fn ingestion_mode_serde_round_trip() {
+        let json = serde_json::to_string(&IngestionMode::Conversation).unwrap();
+        assert_eq!(json, "\"conversation\"");
+
+        let parsed: IngestionMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, IngestionMode::Conversation);
     }
 }
