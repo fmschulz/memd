@@ -1286,6 +1286,34 @@ impl SqliteMetadataStore {
             source_uri,
         })
     }
+
+    /// Back-date a chunk's `timestamp_created` via direct SQL.
+    ///
+    /// TEST-ONLY: used by integration tests that need a deterministic
+    /// clock when exercising history promotion / age-based behavior.
+    /// Gated behind `cfg(any(test, feature = "test-support"))` so it
+    /// never ships in release builds. Allowed-dead until Track C tests
+    /// wire it up through the `common` test-helpers module.
+    ///
+    /// Visibility note: spec called for `pub(crate)`, but the integration
+    /// tests under `crates/memd/tests/` live in a separate crate and
+    /// cannot see crate-private items. Exposing this as `pub` behind the
+    /// `test-support` feature keeps it off release builds while letting
+    /// integration tests reach it.
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub fn force_timestamp_created(
+        &self,
+        chunk_id: &ChunkId,
+        ts_ms: i64,
+    ) -> Result<()> {
+        let conn = self.pool.get();
+        conn.execute(
+            "UPDATE chunks SET timestamp_created = ?1 WHERE chunk_id = ?2",
+            rusqlite::params![ts_ms, chunk_id.to_string()],
+        )?;
+        Ok(())
+    }
 }
 
 fn relevance_to_int(relevance: RelevanceLabel) -> i64 {
