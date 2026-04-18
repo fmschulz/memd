@@ -46,6 +46,7 @@ use crate::error::{MemdError, Result};
 use crate::index::Bm25Index;
 use crate::metrics::{IndexStats, MetricsCollector, QueryMetrics, TieredQueryMetrics};
 use crate::retrieval::RerankerMode;
+use crate::types::lifecycle::{LifecycleDelta, ResolvedChunk};
 use crate::types::{ChunkId, ChunkStatus, MemoryChunk, TenantId};
 
 /// Configuration for persistent store
@@ -1453,6 +1454,30 @@ impl Store for PersistentStore {
         self.get_chunk(tenant_id, chunk_id).await
     }
 
+    async fn get_with_lifecycle(
+        &self,
+        tenant_id: &TenantId,
+        chunk_id: &ChunkId,
+    ) -> Result<Option<ResolvedChunk>> {
+        let meta = match self.metadata.get(tenant_id, chunk_id)? {
+            Some(m) if m.status != ChunkStatus::Deleted => m,
+            _ => return Ok(None),
+        };
+        let chunk = match self.get_chunk(tenant_id, chunk_id).await? {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+        Ok(Some(ResolvedChunk {
+            chunk,
+            status: meta.status,
+            lifecycle: meta.lifecycle,
+        }))
+    }
+
+    fn as_persistent(&self) -> Option<&PersistentStore> {
+        Some(self)
+    }
+
     async fn search(
         &self,
         tenant_id: &TenantId,
@@ -1951,6 +1976,28 @@ impl PersistentStore {
 }
 
 impl PersistentStore {
+    /// Apply a lifecycle delta through the metadata overlay and bump the tenant
+    /// cache version so any tiered searcher invalidates entries that predate
+    /// the lifecycle change.
+    ///
+    /// Intentionally `async` even though the current body has no `.await`:
+    /// callers introduced by A6+ (e.g. `supersede_chunk`) and C6 live in
+    /// async contexts, so keeping the signature async now avoids a
+    /// breaking-change churn later.
+    #[allow(clippy::unused_async)]
+    pub async fn update_lifecycle(
+        &self,
+        tenant_id: &TenantId,
+        chunk_id: &ChunkId,
+        delta: &LifecycleDelta,
+    ) -> Result<()> {
+        self.metadata.update_lifecycle(tenant_id, chunk_id, delta)?;
+        if let Some(h) = self.hybrid() {
+            h.bump_tenant_memory_version(tenant_id);
+        }
+        Ok(())
+    }
+
     async fn get_chunk(
         &self,
         tenant_id: &TenantId,
