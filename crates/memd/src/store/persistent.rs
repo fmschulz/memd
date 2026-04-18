@@ -859,6 +859,8 @@ impl TenantStore {
                         timestamp_created: chunk.timestamp_created,
                         hash: chunk.hash.clone(),
                         source_uri: chunk.source.uri.clone(),
+                        lifecycle: crate::types::LifecycleMetadata::default(),
+                        canonical_text: None,
                     };
                     metadata.insert(&chunk_meta)?;
 
@@ -1214,6 +1216,8 @@ impl Store for PersistentStore {
                 timestamp_created: row.chunk.timestamp_created,
                 hash: row.chunk.hash.clone(),
                 source_uri: row.chunk.source.uri.clone(),
+                lifecycle: crate::types::LifecycleMetadata::default(),
+                canonical_text: None,
             });
             index_rows.push((row.chunk_id.clone(), row.chunk.text.clone()));
         }
@@ -1852,6 +1856,8 @@ impl PersistentStore {
                     timestamp_created: row.chunk.timestamp_created,
                     hash: row.chunk.hash.clone(),
                     source_uri: row.chunk.source.uri.clone(),
+                    lifecycle: crate::types::LifecycleMetadata::default(),
+                    canonical_text: None,
                 });
                 index_rows.push((row.chunk_id.clone(), row.chunk.text.clone()));
             }
