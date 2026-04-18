@@ -109,6 +109,11 @@ pub struct McpServer<S: Store> {
 }
 
 impl<S: Store> McpServer<S> {
+    /// Borrow the concrete store behind Arc<S>.
+    pub fn store(&self) -> &S {
+        &self.store
+    }
+
     /// Create a new MCP server with the given configuration and store
     pub fn new(config: Config, store: Arc<S>) -> Self {
         // Create tenant manager from config data_dir
