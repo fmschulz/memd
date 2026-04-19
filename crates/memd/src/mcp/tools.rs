@@ -1593,6 +1593,35 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                 "required": ["old_chunk_id", "new_text", "type"]
             }),
         ),
+        // LIFECYCLE-02: memory.set_expiry (Track C6)
+        ToolDefinition::new(
+            "memory.set_expiry",
+            "Update the expires_at_ms and/or review_after_ms overlay fields on an existing chunk. \
+             Pass `null` to clear a field, omit to leave it unchanged, pass a number to set it. \
+             Bumps the tenant cache version when at least one field changed.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier for data isolation"
+                    },
+                    "chunk_id": {
+                        "type": "string",
+                        "description": "UUID of the chunk whose overlay is being updated"
+                    },
+                    "expires_at_ms": {
+                        "type": ["integer", "null"],
+                        "description": "New wall-clock expiry (ms since epoch). `null` clears the field; omit to leave it unchanged."
+                    },
+                    "review_after_ms": {
+                        "type": ["integer", "null"],
+                        "description": "New review reminder (ms since epoch). `null` clears the field; omit to leave it unchanged."
+                    }
+                },
+                "required": ["chunk_id"]
+            }),
+        ),
         // MEMORY-09: memory.consolidate_episode
         ToolDefinition::new(
             "memory.consolidate_episode",
@@ -1879,7 +1908,8 @@ mod tests {
         // Phase 2.3: 42 legacy tools + four focused artifact tools
         // (artifact.review / revision / decision / verification).
         // Track A (A7): + memory.supersede.
-        assert_eq!(tools.len(), 47);
+        // Track C (C6): + memory.set_expiry.
+        assert_eq!(tools.len(), 48);
     }
 
     #[test]
