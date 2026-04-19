@@ -22,8 +22,10 @@ review of the merge (2 HIGH + 2 MEDIUM + 1 LOW).
     included.
   - `{found: true, hidden: true, status, tier, hidden_reason}` — chunk exists but is
     hidden by the lifecycle visibility policy. `hidden_reason` is one of `superseded`,
-    `expired`, `history`, or `deleted` so the caller knows which `include_*` flag
-    flips it visible.
+    `expired`, `history`, or `error`. For `superseded`, `expired`, and `history` the
+    caller can retry with the matching `include_*` flag to unhide; `error` has no
+    include knob (it flags a corrupted / unrecoverable row). `deleted` rows never
+    surface through `memory.get` at all — they return `{found: false}`.
   - Clients pinned to the old shape must update. The in-tree `evals/harness` conformance
     suite was updated in this release.
 
@@ -40,10 +42,14 @@ review of the merge (2 HIGH + 2 MEDIUM + 1 LOW).
   `include_history` flags control whether hidden rows surface with their payload. The
   response always advertises `hidden_reason` on a hidden envelope so agents can retry
   with the right knob.
-- **Lifecycle metadata columns + partial indexes on `chunks`.** Seven new columns
-  (`status`, `tier`, `supersedes`, `superseded_by`, `expires_at_ms`, `review_after_ms`,
-  `lifecycle_updated_at_ms`) + four partial indexes for the common access paths.
-  Legacy rows migrate with safe defaults (`Final` / `LongTerm`).
+- **Lifecycle metadata columns + access-path indexes on `chunks`.** Seven new
+  columns added by the A3 migration: `tier`, `supersedes`, `superseded_by`,
+  `expires_at_ms`, `review_after_ms`, `lifecycle_updated_at_ms`, `canonical_text`
+  (`status` already existed). Four new indexes: `idx_chunks_expiry` (partial, on
+  `expires_at_ms IS NOT NULL`), `idx_chunks_supersedes` (partial, on
+  `supersedes IS NOT NULL`), `idx_chunks_tier_status` (full), and
+  `idx_chunks_canonical` (partial, on `canonical_text IS NOT NULL`). Legacy rows
+  migrate with safe defaults (`Final` / `LongTerm`).
 - **`ChunkStatus::Superseded` and `ChunkStatus::Expired`** with fail-closed `FromStr`.
 - **Visibility policy primitives.** `VisibilityPolicy` with `is_visible` / `is_visible_at`;
   `MemoryTier`, `LifecycleDelta` (triple-state clear semantics), `ResolvedChunk`.
@@ -54,11 +60,16 @@ review of the merge (2 HIGH + 2 MEDIUM + 1 LOW).
   new-chunk write and the `atomic_supersede` SQL transaction left an orphan replacement
   visible in retrieval with no supersession edge. Fix: `atomic_supersede`'s UPDATE now
   carries a `superseded_by IS NULL` guard (head-only at SQL level), and
-  `supersede_chunk` rolls back the orphan via `mark_deleted` if the link transaction
-  fails after the new chunk was persisted.
+  `supersede_chunk` rolls the orphan back via the full `Store::delete_chunk` path if
+  the link transaction fails after the new chunk was persisted. That path appends a
+  WAL delete record (so restart recovery cannot resurrect the orphan), marks the
+  segment tombstone, removes the chunk from the hybrid / sparse / dense / tiered
+  indexes, and invalidates the cache — leaving no trace of the failed write.
 - **HIGH-2: `memory.get` wire envelope (see Breaking changes above).**
 - **MEDIUM-3: hidden `memory.get` envelope omitted the hiding cause.** Callers now get
-  `hidden_reason` ∈ {`superseded`, `expired`, `history`, `deleted`}.
+  `hidden_reason` ∈ {`superseded`, `expired`, `history`, `error`} with precedence
+  matching `VisibilityPolicy::is_visible_at` exactly (status → tier → wall-clock
+  expiry) so the flag it names actually unhides the row.
 - **MEDIUM-4: `supersede_chunk` accepted any non-deleted `old_id`.** A double-supersede
   on the same chunk used to fork the graph with two live successors. Now enforced as a
   two-layer invariant: preflight rejects when `old_id.superseded_by` is already set;
