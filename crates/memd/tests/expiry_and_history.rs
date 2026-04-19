@@ -1148,6 +1148,59 @@ async fn memory_set_expiry_returns_error_for_unknown_chunk() {
     );
 }
 
+/// Deleted (tombstoned) chunks must not be mutable via memory.set_expiry.
+#[tokio::test]
+async fn memory_set_expiry_refuses_deleted_chunk() {
+    use memd::store::metadata::MetadataStore;
+    use memd::types::{ChunkStatus, LifecycleDelta};
+
+    let (server, _tmp) = test_server().await;
+    let tenant = TenantId::new("t").expect("valid tenant id");
+    let resp = call_tool(
+        &server,
+        "memory.add",
+        json!({ "tenant_id": "t", "text": "doomed", "type": "doc" }),
+    )
+    .await;
+    let id_str = parse_result_text(&resp)["chunk_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let id = ChunkId::parse(&id_str).expect("valid chunk id");
+
+    // Tombstone the row at the overlay layer.
+    server
+        .store()
+        .metadata()
+        .update_lifecycle(
+            &tenant,
+            &id,
+            &LifecycleDelta {
+                status: Some(ChunkStatus::Deleted),
+                ..Default::default()
+            },
+        )
+        .expect("tombstone ok");
+
+    // Now set_expiry on a deleted row must fail; mutating a
+    // tombstoned chunk's overlay would be a correctness bug because
+    // the row is invisible to every retrieval surface.
+    let resp = call_tool(
+        &server,
+        "memory.set_expiry",
+        json!({
+            "tenant_id": "t",
+            "chunk_id": id_str,
+            "expires_at_ms": 1_900_000_000_000_i64,
+        }),
+    )
+    .await;
+    assert!(
+        parse_error(&resp).is_some(),
+        "set_expiry must refuse deleted chunks, got: {resp}"
+    );
+}
+
 /// Cross-tenant access must also surface as an error — the chunk
 /// exists but not in the caller's tenant.
 #[tokio::test]

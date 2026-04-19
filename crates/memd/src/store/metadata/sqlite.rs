@@ -1457,6 +1457,14 @@ impl SqliteMetadataStore {
         delta: &LifecycleDelta,
     ) -> Result<usize> {
         let conn = self.pool.get();
+        // `status != 'deleted'` guard: once a row is tombstoned no
+        // caller should be mutating its overlay. Before this guard,
+        // `memory.set_expiry` could flip `expires_at_ms` on a deleted
+        // row (and bump the cache) even though the row was invisible
+        // to every retrieval surface. The guarded UPDATE matches zero
+        // rows for deleted chunks, so the atomic
+        // `update_lifecycle_if_exists` path returns `updated=false`
+        // end-to-end.
         let rows = conn.execute(
             "UPDATE chunks SET
                 status                  = COALESCE(:status, status),
@@ -1466,7 +1474,9 @@ impl SqliteMetadataStore {
                 expires_at_ms           = CASE WHEN :set_expires = 1 THEN :expires_at ELSE expires_at_ms END,
                 review_after_ms         = CASE WHEN :set_review  = 1 THEN :review_at  ELSE review_after_ms END,
                 lifecycle_updated_at_ms = COALESCE(:lifecycle_at, lifecycle_updated_at_ms)
-             WHERE tenant_id = :tenant AND chunk_id = :chunk",
+             WHERE tenant_id = :tenant
+               AND chunk_id = :chunk
+               AND status != 'deleted'",
             rusqlite::named_params! {
                 ":status":        delta.status.map(|s| s.to_string()),
                 ":tier":          delta.tier.map(|t| t.to_string()),
