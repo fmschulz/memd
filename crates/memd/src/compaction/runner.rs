@@ -6,6 +6,8 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+use crate::compaction::expiry_sweep::ExpirySweep;
+use crate::compaction::history_promotion::HistoryPromotion;
 use crate::compaction::hnsw_rebuild::RebuildResult;
 use crate::compaction::metrics::CompactionMetrics;
 use crate::compaction::segment_merge::{MergeResult, SegmentMerger};
@@ -14,6 +16,7 @@ use crate::compaction::CompactionConfig;
 use crate::error::Result;
 use crate::index::Bm25Index;
 use crate::store::dense::DenseSearcher;
+use crate::store::hybrid::HybridSearcher;
 use crate::store::metadata::{MetadataStore, SqliteMetadataStore};
 use crate::tiered::SemanticCache;
 use crate::types::{ChunkId, TenantId};
@@ -29,6 +32,15 @@ pub struct CompactionResult {
     pub segment_merge: Option<MergeResult>,
     /// Number of cache entries invalidated
     pub cache_entries_invalidated: usize,
+    /// Number of rows whose status flipped to `Expired` during this
+    /// cycle's `ExpirySweep` (Track C3/C5). 0 when the sweep was
+    /// disabled via `CompactionConfig::expiry_sweep_enabled` or when
+    /// no rows were past their retention window.
+    pub expired_count: usize,
+    /// Number of rows whose tier was demoted to `History` during this
+    /// cycle's `HistoryPromotion` (Track C4/C5). 0 when the promotion
+    /// was disabled or when no rows matched the age threshold.
+    pub promoted_count: usize,
     /// Total duration of compaction
     pub duration: Duration,
 }
@@ -73,10 +85,66 @@ impl CompactionRunner {
         dense_searcher: &DenseSearcher,
         sparse_index: Option<&Bm25Index>,
         semantic_cache: Option<&SemanticCache>,
+        hybrid: Option<&HybridSearcher>,
     ) -> Result<CompactionResult> {
         let start = Instant::now();
 
         tracing::info!(tenant_id = %tenant_id, "compaction started");
+
+        // 0. Track C5 — ExpirySweep and HistoryPromotion run BEFORE
+        //    the excluded-ID set is gathered so the sweep/promotion's
+        //    status/tier transitions flow into B2's HNSW-rebuild
+        //    exclusion via `list_lifecycle_hidden` below. Both sweeps
+        //    are invoked with `hybrid=None` — the runner owns the
+        //    single centralised cache bump at the end of the cycle
+        //    rather than letting each sweep bump independently.
+        let expired_count = if self.config.expiry_sweep_enabled {
+            match ExpirySweep::new().run(metadata, None, tenant_id) {
+                Ok(r) => {
+                    tracing::debug!(
+                        tenant_id = %tenant_id,
+                        expired = r.expired_count,
+                        "expiry sweep completed"
+                    );
+                    r.expired_count
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        tenant_id = %tenant_id,
+                        error = %e,
+                        "expiry sweep failed, continuing compaction"
+                    );
+                    0
+                }
+            }
+        } else {
+            0
+        };
+
+        let promoted_count = if self.config.history_promotion_enabled {
+            match HistoryPromotion::new(self.config.history_promotion_age_ms)
+                .run(metadata, None, tenant_id)
+            {
+                Ok(r) => {
+                    tracing::debug!(
+                        tenant_id = %tenant_id,
+                        promoted = r.promoted_count,
+                        "history promotion completed"
+                    );
+                    r.promoted_count
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        tenant_id = %tenant_id,
+                        error = %e,
+                        "history promotion failed, continuing compaction"
+                    );
+                    0
+                }
+            }
+        } else {
+            0
+        };
 
         // 1. Build the HNSW-rebuild excluded set.
         //
@@ -240,11 +308,28 @@ impl CompactionRunner {
             0
         };
 
+        // Centralised cache bump for the whole cycle. Runs once at
+        // the end so multiple phase-level overlay transitions collapse
+        // into a single tenant_memory_version advance. Only bumps when
+        // hybrid is available AND at least one phase that could have
+        // invalidated a snapshot actually touched rows.
+        if let Some(h) = hybrid {
+            if expired_count > 0
+                || promoted_count > 0
+                || tombstones_processed > 0
+                || hnsw_rebuild.is_some()
+            {
+                h.bump_tenant_memory_version(tenant_id);
+            }
+        }
+
         let duration = start.elapsed();
 
         tracing::info!(
             tenant_id = %tenant_id,
             tombstones = tombstones_processed,
+            expired = expired_count,
+            promoted = promoted_count,
             hnsw_rebuilt = hnsw_rebuild.is_some(),
             segments_merged = segment_merge.is_some(),
             cache_invalidated = cache_entries_invalidated,
@@ -257,6 +342,8 @@ impl CompactionRunner {
             hnsw_rebuild,
             segment_merge,
             cache_entries_invalidated,
+            expired_count,
+            promoted_count,
             duration,
         })
     }
