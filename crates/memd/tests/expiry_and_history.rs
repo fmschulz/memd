@@ -840,6 +840,194 @@ async fn history_promotion_also_demotes_long_stale_expired_rows() {
     assert_eq!(resolved.lifecycle.tier, MemoryTier::History);
 }
 
+/// Track C5: `CompactionRunner::run_compaction` runs `ExpirySweep` and
+/// `HistoryPromotion` before the existing HNSW/segment/cache phases and
+/// surfaces their outputs on `CompactionResult.expired_count` and
+/// `CompactionResult.promoted_count`.
+///
+/// This test builds a `CompactionRunner` directly and drives it with a
+/// `SqliteMetadataStore` and a `MockEmbedder`-backed `DenseSearcher` so
+/// the dense/HNSW pipeline can initialise without a real model.
+#[tokio::test]
+async fn compaction_runs_expiry_sweep_and_history_promotion() {
+    use memd::compaction::{CompactionConfig, CompactionRunner};
+    use memd::embeddings::MockEmbedder;
+    use memd::store::dense::{DenseSearchConfig, DenseSearcher};
+    use memd::store::metadata::MetadataStore;
+    use memd::store::persistent::{PersistentStore, PersistentStoreConfig};
+    use memd::types::{ChunkStatus, LifecycleDelta, MemoryChunk, MemoryTier, ChunkType};
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cfg = PersistentStoreConfig {
+        data_dir: tmp.path().to_path_buf(),
+        enable_dense_search: false,
+        enable_hybrid_search: false,
+        ..Default::default()
+    };
+    let store = PersistentStore::open(cfg).expect("persistent store");
+    let tenant = TenantId::new("t").expect("valid tenant id");
+
+    // Seed one row whose retention window elapsed (ExpirySweep should
+    // flip it to Expired) and one row that was superseded long ago
+    // (HistoryPromotion should move it to History tier).
+    let expiring = store
+        .add(MemoryChunk::new(tenant.clone(), "expiring", ChunkType::Doc))
+        .await
+        .expect("add ok");
+    store
+        .metadata()
+        .update_lifecycle(
+            &tenant,
+            &expiring,
+            &LifecycleDelta {
+                expires_at_ms: Some(Some(1_i64)),
+                ..Default::default()
+            },
+        )
+        .expect("overlay ok");
+
+    let old_superseded = store
+        .add(MemoryChunk::new(tenant.clone(), "old superseded", ChunkType::Doc))
+        .await
+        .expect("add ok");
+    let long_ago = current_time_ms() - 365 * 86_400_000;
+    store
+        .metadata()
+        .update_lifecycle(
+            &tenant,
+            &old_superseded,
+            &LifecycleDelta {
+                status: Some(ChunkStatus::Superseded),
+                lifecycle_updated_at_ms: Some(long_ago),
+                ..Default::default()
+            },
+        )
+        .expect("flip ok");
+
+    // Construct a CompactionRunner with default Track C5 config (both
+    // sweeps enabled, 90-day history threshold). DenseSearcher uses a
+    // MockEmbedder so no external model is required.
+    let runner = CompactionRunner::new(CompactionConfig::default());
+    let embedder = Arc::new(MockEmbedder::new());
+    let dense = DenseSearcher::with_embedder(
+        embedder,
+        DenseSearchConfig {
+            persist: false,
+            ..Default::default()
+        },
+    );
+
+    let result = runner
+        .run_compaction(&tenant, store.metadata(), &dense, None, None, None)
+        .expect("run_compaction ok");
+
+    assert_eq!(result.expired_count, 1, "ExpirySweep must have fired");
+    assert_eq!(
+        result.promoted_count, 1,
+        "HistoryPromotion must have fired"
+    );
+
+    // Verify the two rows now reflect the expected overlay state.
+    let r_expired = store
+        .get_with_lifecycle(&tenant, &expiring)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(r_expired.status, ChunkStatus::Expired);
+
+    let r_promoted = store
+        .get_with_lifecycle(&tenant, &old_superseded)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(r_promoted.lifecycle.tier, MemoryTier::History);
+}
+
+/// Disabling either sweep via config must make that phase a no-op.
+#[tokio::test]
+async fn compaction_skips_sweeps_when_disabled_via_config() {
+    use memd::compaction::{CompactionConfig, CompactionRunner};
+    use memd::embeddings::MockEmbedder;
+    use memd::store::dense::{DenseSearchConfig, DenseSearcher};
+    use memd::store::metadata::MetadataStore;
+    use memd::store::persistent::{PersistentStore, PersistentStoreConfig};
+    use memd::types::{ChunkStatus, LifecycleDelta, MemoryChunk, ChunkType};
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cfg = PersistentStoreConfig {
+        data_dir: tmp.path().to_path_buf(),
+        enable_dense_search: false,
+        enable_hybrid_search: false,
+        ..Default::default()
+    };
+    let store = PersistentStore::open(cfg).expect("persistent store");
+    let tenant = TenantId::new("t").expect("valid tenant id");
+
+    let expiring = store
+        .add(MemoryChunk::new(tenant.clone(), "expiring", ChunkType::Doc))
+        .await
+        .expect("add ok");
+    store
+        .metadata()
+        .update_lifecycle(
+            &tenant,
+            &expiring,
+            &LifecycleDelta {
+                expires_at_ms: Some(Some(1_i64)),
+                ..Default::default()
+            },
+        )
+        .expect("overlay ok");
+
+    let old_superseded = store
+        .add(MemoryChunk::new(tenant.clone(), "old", ChunkType::Doc))
+        .await
+        .expect("add ok");
+    let long_ago = current_time_ms() - 365 * 86_400_000;
+    store
+        .metadata()
+        .update_lifecycle(
+            &tenant,
+            &old_superseded,
+            &LifecycleDelta {
+                status: Some(ChunkStatus::Superseded),
+                lifecycle_updated_at_ms: Some(long_ago),
+                ..Default::default()
+            },
+        )
+        .expect("flip ok");
+
+    let disabled_cfg = CompactionConfig {
+        expiry_sweep_enabled: false,
+        history_promotion_enabled: false,
+        ..Default::default()
+    };
+    let runner = CompactionRunner::new(disabled_cfg);
+    let embedder = Arc::new(MockEmbedder::new());
+    let dense = DenseSearcher::with_embedder(
+        embedder,
+        DenseSearchConfig {
+            persist: false,
+            ..Default::default()
+        },
+    );
+
+    let result = runner
+        .run_compaction(&tenant, store.metadata(), &dense, None, None, None)
+        .expect("run_compaction ok");
+
+    assert_eq!(result.expired_count, 0, "sweep must not run when disabled");
+    assert_eq!(
+        result.promoted_count, 0,
+        "promotion must not run when disabled"
+    );
+    // The rows must still be in their original (non-terminal) state.
+    let r1 = store.get_with_lifecycle(&tenant, &expiring).await.unwrap().unwrap();
+    assert_eq!(r1.status, ChunkStatus::Final);
+}
+
 #[tokio::test]
 async fn memory_add_batch_validation_failure_leaves_no_partial_writes() {
     // When any chunk in a lifecycle-enabled batch fails validation,
