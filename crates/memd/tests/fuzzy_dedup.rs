@@ -181,6 +181,54 @@ async fn add_with_lifecycle_persists_canonical_text_consistently() {
     assert_eq!(meta.lifecycle.expires_at_ms, Some(now_ms + 60_000));
 }
 
+// D2 round-1 MEDIUM regression — Codex flagged that pre-D2 production
+// rows still carry canonical_text=NULL after upgrade and remain
+// invisible to D3 exact dedup until backfilled. We expose
+// `force_clear_canonical_text` as a test-support helper to simulate
+// the legacy state; the backfill test is gated behind the feature so
+// it only runs under `cargo test -p memd --features test-support`.
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn backfill_canonical_text_repopulates_legacy_null_rows() {
+    let (server, _tmp) = test_server().await;
+    let id = add_chunk(&server, "t", "  Hello   World\n").await;
+
+    let ps = server
+        .store()
+        .as_persistent()
+        .expect("test_server uses PersistentStore");
+
+    // Simulate a pre-D2 row by clearing canonical_text directly.
+    ps.metadata()
+        .force_clear_canonical_text(&id)
+        .expect("force_clear_canonical_text");
+    let meta_before = ps
+        .metadata()
+        .get(&tenant("t"), &id)
+        .expect("metadata.get")
+        .expect("row");
+    assert!(
+        meta_before.canonical_text.is_none(),
+        "precondition: row should look pre-D2 (canonical_text NULL)"
+    );
+
+    // Run backfill — the same call that startup schedules.
+    let stats = ps.backfill_canonical_text_for_legacy_chunks();
+    assert_eq!(stats.rows_backfilled, 1, "exactly one legacy row backfilled");
+    assert_eq!(stats.rows_skipped, 0);
+
+    let meta_after = ps
+        .metadata()
+        .get(&tenant("t"), &id)
+        .expect("metadata.get")
+        .expect("row");
+    assert_eq!(
+        meta_after.canonical_text.as_deref(),
+        Some("hello world"),
+        "backfill must populate canonical_text from the row's own text"
+    );
+}
+
 #[tokio::test]
 async fn add_with_lifecycle_long_split_doc_uses_per_row_canonical() {
     // Codex round-1 D2 HIGH regression: when a long input was split by
