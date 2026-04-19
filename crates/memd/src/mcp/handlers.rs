@@ -72,7 +72,7 @@ use crate::task_memory::{
     DIGEST_ROLE_PROJECT_BRIEF, DIGEST_ROLE_TASK_RESUME,
 };
 use crate::tiered::TieredTiming;
-use crate::types::{ChunkId, ChunkType, MemoryChunk, ProjectId, Source, TenantId};
+use crate::types::{ChunkId, ChunkType, MemoryChunk, ProjectId, Source, TenantId, VisibilityPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -690,11 +690,22 @@ pub struct ArtifactVerifyParams {
 }
 
 /// Parameters for memory.get
+///
+/// The three `include_*` flags map 1:1 onto `VisibilityPolicy`. They
+/// default to `false` so memory.get hides non-active content (superseded
+/// / expired / history) unless the caller explicitly opts in — mirroring
+/// the overlay semantics documented on `VisibilityPolicy` in types.rs.
 #[derive(Debug, Deserialize)]
 pub struct GetParams {
     #[serde(default)]
     pub tenant_id: String,
     pub chunk_id: String,
+    #[serde(default)]
+    pub include_superseded: Option<bool>,
+    #[serde(default)]
+    pub include_expired: Option<bool>,
+    #[serde(default)]
+    pub include_history: Option<bool>,
 }
 
 /// Parameters for memory.delete
@@ -3876,6 +3887,110 @@ pub async fn handle_memory_add<S: Store>(
     })
 }
 
+/// Per-write event emitted by any handler that creates or updates a chunk
+/// payload. The server dispatch arm consumes these to run structural
+/// indexing and any other server-owned side effects that must happen
+/// after a store write succeeds.
+///
+/// Defined inline in handlers.rs for now; once a second consumer lands
+/// (e.g. memory.add migrating off its ad-hoc `(tenant_id, project_id,
+/// chunk_type, source_path, text)` tuple), this type can move into a
+/// dedicated `mcp::post_write_hooks` module without touching call sites.
+#[derive(Debug, Clone)]
+pub struct PostWriteEvent {
+    pub tenant_id: String,
+    pub chunk_id: ChunkId,
+    pub chunk_type: String,
+    pub project_id: Option<String>,
+    pub source_path: Option<String>,
+    pub text: String,
+}
+
+/// Parameters for memory.supersede
+#[derive(Debug, Deserialize)]
+pub struct SupersedeParams {
+    #[serde(default)]
+    pub tenant_id: String,
+    pub old_chunk_id: String,
+    pub new_text: String,
+    #[serde(rename = "type")]
+    pub chunk_type: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub source: Option<SourceParams>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// Handle memory.supersede tool call.
+///
+/// Atomically supersedes an existing chunk with a new version via
+/// `PersistentStore::supersede_chunk`. Returns both the formatted MCP
+/// response and a `PostWriteEvent` so the server dispatch arm can run
+/// structural indexing for the new chunk (mirroring memory.add).
+pub async fn handle_memory_supersede<S: Store>(
+    store: &S,
+    tenant_manager: Option<&TenantManager>,
+    params: SupersedeParams,
+) -> Result<(Value, PostWriteEvent), McpError> {
+    let ps = store.as_persistent().ok_or_else(|| {
+        McpError::ToolError("memory.supersede requires a persistent store".into())
+    })?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
+
+    info!(
+        tenant_id = %tenant_id,
+        old_chunk_id = %params.old_chunk_id,
+        new_text_len = params.new_text.len(),
+        "memory.supersede"
+    );
+
+    if let Some(tm) = tenant_manager {
+        tm.ensure_tenant_dir(&tenant_id)
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+    }
+
+    let old_id = ChunkId::parse(&params.old_chunk_id)
+        .map_err(|e| McpError::InvalidParams(format!("old_chunk_id: {e}")))?;
+    let chunk_type = parse_chunk_type(&params.chunk_type)?;
+
+    // Capture source_path before `params.source` is consumed by
+    // params_to_source — `SourceParams` is not Clone, so we lift the
+    // path out by reference first and own it for the post-write event.
+    let source_path = params.source.as_ref().and_then(|s| s.path.clone());
+
+    let mut new_chunk = MemoryChunk::new(tenant_id.clone(), &params.new_text, chunk_type);
+    if let Some(project_id) = params.project_id.clone() {
+        new_chunk = new_chunk.with_project(ProjectId::new(Some(project_id)));
+    }
+    new_chunk = new_chunk.with_source(params_to_source(params.source));
+    if !params.tags.is_empty() {
+        new_chunk = new_chunk.with_tags(params.tags.clone());
+    }
+
+    let new_id = ps
+        .supersede_chunk(&tenant_id, &old_id, new_chunk)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    info!(new_chunk_id = %new_id, old_chunk_id = %old_id, "chunk superseded");
+
+    let event = PostWriteEvent {
+        tenant_id: tenant_id.to_string(),
+        chunk_id: new_id.clone(),
+        chunk_type: params.chunk_type.clone(),
+        project_id: params.project_id,
+        source_path,
+        text: params.new_text.clone(),
+    };
+    let response = format_mcp_response(&json!({
+        "new_chunk_id": new_id.to_string(),
+        "old_chunk_id": old_id.to_string(),
+    }))?;
+    Ok((response, event))
+}
+
 /// Handle memory.add_batch tool call
 pub async fn handle_memory_add_batch<S: Store>(
     store: &S,
@@ -5540,7 +5655,15 @@ pub async fn handle_artifact_find_highlights<S: Store>(
     })
 }
 
-/// Handle memory.get tool call
+/// Handle memory.get tool call.
+///
+/// Routes through `Store::get_with_lifecycle` so the caller sees the
+/// authoritative lifecycle overlay (status + tier + supersedes edges),
+/// then applies `VisibilityPolicy` — Superseded, Expired, and
+/// History-tier chunks are hidden by default. When hidden, the response
+/// omits the chunk payload and advertises `hidden: true` plus the
+/// status/tier so callers can decide whether to retry with an
+/// `include_*` flag.
 pub async fn handle_memory_get<S: Store>(store: &S, params: GetParams) -> Result<Value, McpError> {
     let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     let chunk_id = validate_chunk_id(&params.chunk_id)?;
@@ -5551,26 +5674,63 @@ pub async fn handle_memory_get<S: Store>(store: &S, params: GetParams) -> Result
         "memory.get"
     );
 
-    let chunk = store
-        .get(&tenant_id, &chunk_id)
+    let resolved = match store
+        .get_with_lifecycle(&tenant_id, &chunk_id)
         .await
-        .map_err(|e| McpError::ToolError(e.to_string()))?;
-
-    let json_str = if let Some(c) = chunk {
-        info!(chunk_id = %chunk_id, "chunk found");
-        serde_json::to_string(&c)
-            .map_err(|e| McpError::ToolError(format!("failed to serialize chunk: {}", e)))?
-    } else {
-        debug!(chunk_id = %chunk_id, "chunk not found");
-        "null".to_string()
+        .map_err(|e| McpError::ToolError(e.to_string()))?
+    {
+        Some(r) => r,
+        None => {
+            debug!(chunk_id = %chunk_id, "chunk not found");
+            return format_mcp_response(&json!({ "found": false }));
+        }
     };
 
-    Ok(json!({
-        "content": [{
-            "type": "text",
-            "text": json_str
-        }]
+    let policy = VisibilityPolicy {
+        include_superseded: params.include_superseded.unwrap_or(false),
+        include_expired: params.include_expired.unwrap_or(false),
+        include_history: params.include_history.unwrap_or(false),
+    };
+
+    // Single consolidation point for the lifecycle visibility rule —
+    // `is_visible_at` covers status, tier, and the wall-clock
+    // `expires_at_ms` window. B1 (search filter) and C3/C4 (tiering)
+    // share this method so the rule never drifts between call sites.
+    let now_ms = current_time_ms();
+    if !policy.is_visible_at(resolved.status, &resolved.lifecycle, now_ms) {
+        info!(
+            chunk_id = %chunk_id,
+            status = %resolved.status,
+            tier = %resolved.lifecycle.tier,
+            "memory.get hidden by visibility policy"
+        );
+        return format_mcp_response(&json!({
+            "found": true,
+            "hidden": true,
+            "status": resolved.status.to_string(),
+            "tier": resolved.lifecycle.tier.to_string(),
+        }));
+    }
+
+    info!(chunk_id = %chunk_id, "chunk found");
+    format_mcp_response(&json!({
+        "found": true,
+        "chunk": resolved.chunk,
+        "lifecycle": resolved.lifecycle,
+        "status": resolved.status.to_string(),
     }))
+}
+
+/// Current wall-clock time in milliseconds since UNIX_EPOCH.
+///
+/// Local helper for handlers that need a timestamp but do not want to
+/// reach into the persistent store layer (which carries its own
+/// `current_time_ms`).
+fn current_time_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Handle memory.delete tool call
@@ -6096,6 +6256,10 @@ pub async fn handle_context_search_documents<S: Store>(
         "context.search_context_documents"
     );
 
+    // TODO(B1): apply VisibilityPolicy via apply_visibility_filter to hide
+    // superseded/expired/history chunks. memory.get (A8) enforces this at
+    // the point-lookup; the search path still leaks non-active content
+    // until Track B1 wires the overlay into search_with_scores.
     let scored_chunks = store
         .search_with_scores(&tenant_id, &params.query, fetch_k)
         .await
@@ -6181,6 +6345,10 @@ pub async fn handle_context_find_relevant_context<S: Store>(
         }
     }
 
+    // TODO(B1): apply VisibilityPolicy via apply_visibility_filter to hide
+    // superseded/expired/history chunks. memory.get (A8) enforces this at
+    // the point-lookup; the search path still leaks non-active content
+    // until Track B1 wires the overlay into search_with_scores.
     let scored_chunks = store
         .search_with_scores(&tenant_id, &params.task, fetch_k)
         .await
@@ -7270,11 +7438,16 @@ mod tests {
         let get_params = GetParams {
             tenant_id: "test".to_string(),
             chunk_id: response.chunk_id.clone(),
+            include_superseded: None,
+            include_expired: None,
+            include_history: None,
         };
 
         let get_result = handle_memory_get(&store, get_params).await.unwrap();
         let text = get_result["content"][0]["text"].as_str().unwrap();
-        let chunk: MemoryChunk = serde_json::from_str(text).unwrap();
+        let body: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(body["found"].as_bool(), Some(true));
+        let chunk: MemoryChunk = serde_json::from_value(body["chunk"].clone()).unwrap();
 
         assert_eq!(chunk.text, "function hello() {}");
         assert_eq!(chunk.chunk_type, ChunkType::Code);
@@ -7348,11 +7521,19 @@ mod tests {
         let get_params = GetParams {
             tenant_id: "test".to_string(),
             chunk_id: add_response.chunk_id,
+            include_superseded: None,
+            include_expired: None,
+            include_history: None,
         };
 
         let get_result = handle_memory_get(&store, get_params).await.unwrap();
         let text = get_result["content"][0]["text"].as_str().unwrap();
-        assert_eq!(text, "null");
+        let body: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            body["found"].as_bool(),
+            Some(false),
+            "deleted chunk must surface as found=false via memory.get"
+        );
     }
 
     #[tokio::test]
@@ -7470,6 +7651,9 @@ mod tests {
         let params = GetParams {
             tenant_id: "test".to_string(),
             chunk_id: "not-a-uuid".to_string(),
+            include_superseded: None,
+            include_expired: None,
+            include_history: None,
         };
 
         let result = handle_memory_get(&store, params).await;

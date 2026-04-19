@@ -10,6 +10,10 @@ use uuid::Uuid;
 
 use crate::error::{MemdError, Result};
 
+pub use lifecycle::{
+    LifecycleDelta, LifecycleMetadata, MemoryTier, ResolvedChunk, VisibilityPolicy,
+};
+
 /// Tenant identifier - validated string wrapper
 ///
 /// TenantId must be non-empty and contain only alphanumeric characters and underscores.
@@ -241,6 +245,28 @@ impl Default for ChunkType {
     }
 }
 
+impl std::str::FromStr for ChunkType {
+    type Err = crate::error::MemdError;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s {
+            "code" => Self::Code,
+            "doc" => Self::Doc,
+            "trace" => Self::Trace,
+            "decision" => Self::Decision,
+            "plan" => Self::Plan,
+            "research" => Self::Research,
+            "message" => Self::Message,
+            "summary" => Self::Summary,
+            "other" => Self::Other,
+            _ => {
+                return Err(crate::error::MemdError::ValidationError(format!(
+                    "unknown chunk_type: {s}"
+                )))
+            }
+        })
+    }
+}
+
 /// Status of a memory chunk
 ///
 /// Tracks the lifecycle state of a chunk.
@@ -255,6 +281,10 @@ pub enum ChunkStatus {
     Error,
     /// Soft deleted, excluded from retrieval
     Deleted,
+    /// Replaced by a newer chunk; retained for audit but excluded from active retrieval.
+    Superseded,
+    /// Retention window elapsed; excluded from active retrieval.
+    Expired,
 }
 
 impl fmt::Display for ChunkStatus {
@@ -264,6 +294,8 @@ impl fmt::Display for ChunkStatus {
             ChunkStatus::Final => "final",
             ChunkStatus::Error => "error",
             ChunkStatus::Deleted => "deleted",
+            ChunkStatus::Superseded => "superseded",
+            ChunkStatus::Expired => "expired",
         };
         write!(f, "{}", s)
     }
@@ -272,6 +304,25 @@ impl fmt::Display for ChunkStatus {
 impl Default for ChunkStatus {
     fn default() -> Self {
         ChunkStatus::Final
+    }
+}
+
+impl std::str::FromStr for ChunkStatus {
+    type Err = crate::error::MemdError;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s {
+            "draft" => Self::Draft,
+            "final" => Self::Final,
+            "error" => Self::Error,
+            "deleted" => Self::Deleted,
+            "superseded" => Self::Superseded,
+            "expired" => Self::Expired,
+            _ => {
+                return Err(crate::error::MemdError::ValidationError(format!(
+                    "unknown status: {s}"
+                )))
+            }
+        })
     }
 }
 
@@ -299,6 +350,43 @@ impl fmt::Display for PromotionState {
             PromotionState::Verified => "verified",
         };
         write!(f, "{}", s)
+    }
+}
+
+/// Ingestion mode for incoming text.
+///
+/// Distinguishes between conversational turns (which may need different
+/// chunking, retention, and retrieval defaults) and document content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IngestionMode {
+    /// Chat/turn-style content from an interactive session.
+    Conversation,
+    /// File, note, or document-style content (default).
+    #[default]
+    Document,
+}
+
+impl fmt::Display for IngestionMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::Conversation => "conversation",
+            Self::Document => "document",
+        };
+        f.write_str(s)
+    }
+}
+
+impl std::str::FromStr for IngestionMode {
+    type Err = crate::error::MemdError;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "conversation" => Ok(Self::Conversation),
+            "document" => Ok(Self::Document),
+            _ => Err(crate::error::MemdError::ValidationError(format!(
+                "unknown ingestion mode: {s}"
+            ))),
+        }
     }
 }
 
@@ -466,6 +554,388 @@ impl MemoryChunk {
     }
 }
 
+pub mod lifecycle {
+    use super::{ChunkId, ChunkStatus, MemoryChunk};
+    use serde::{Deserialize, Serialize};
+
+    /// Retrieval tier for a chunk's lifecycle position.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+    #[serde(rename_all = "snake_case")]
+    pub enum MemoryTier {
+        /// Short-lived, actively-worked context.
+        Working,
+        /// Durable default tier for retained knowledge.
+        #[default]
+        LongTerm,
+        /// Archive tier, excluded from active retrieval by default.
+        History,
+    }
+
+    impl std::fmt::Display for MemoryTier {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let s = match self {
+                Self::Working => "working",
+                Self::LongTerm => "long_term",
+                Self::History => "history",
+            };
+            f.write_str(s)
+        }
+    }
+
+    impl std::str::FromStr for MemoryTier {
+        type Err = crate::error::MemdError;
+        fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+            match s {
+                "working" => Ok(Self::Working),
+                "long_term" => Ok(Self::LongTerm),
+                "history" => Ok(Self::History),
+                _ => Err(crate::error::MemdError::ValidationError(format!(
+                    "unknown tier: {s}"
+                ))),
+            }
+        }
+    }
+
+    /// Lifecycle overlay metadata for a chunk.
+    ///
+    /// Stored alongside the immutable `MemoryChunk` payload to track
+    /// supersession edges, retention windows, and tier placement without
+    /// mutating the chunk itself.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct LifecycleMetadata {
+        pub tier: MemoryTier,
+        pub supersedes: Option<ChunkId>,
+        pub superseded_by: Option<ChunkId>,
+        pub expires_at_ms: Option<i64>,
+        pub review_after_ms: Option<i64>,
+        pub lifecycle_updated_at_ms: i64,
+    }
+
+    impl Default for LifecycleMetadata {
+        fn default() -> Self {
+            Self {
+                tier: MemoryTier::LongTerm,
+                supersedes: None,
+                superseded_by: None,
+                expires_at_ms: None,
+                review_after_ms: None,
+                lifecycle_updated_at_ms: 0,
+            }
+        }
+    }
+
+    /// Triple-state delta for lifecycle updates.
+    ///
+    /// Semantics:
+    /// - `None` on an outer `Option` means "leave the field unchanged".
+    /// - `Some(value)` on a plain field means "set to `value`".
+    /// - `Some(None)` on a nested `Option<Option<T>>` means "clear the field".
+    /// - `Some(Some(v))` on a nested `Option<Option<T>>` means "set to `v`".
+    #[derive(Debug, Clone, Default)]
+    pub struct LifecycleDelta {
+        pub status: Option<ChunkStatus>,
+        pub tier: Option<MemoryTier>,
+        pub supersedes: Option<ChunkId>,
+        pub superseded_by: Option<ChunkId>,
+        pub expires_at_ms: Option<Option<i64>>,
+        pub review_after_ms: Option<Option<i64>>,
+        pub lifecycle_updated_at_ms: Option<i64>,
+    }
+
+    impl LifecycleDelta {
+        /// Returns true when no field is set — used by writers to skip
+        /// no-op overlay UPDATEs (e.g. `add_chunk_with_lifecycle` with a
+        /// default delta).
+        pub fn is_empty(&self) -> bool {
+            self.status.is_none()
+                && self.tier.is_none()
+                && self.supersedes.is_none()
+                && self.superseded_by.is_none()
+                && self.expires_at_ms.is_none()
+                && self.review_after_ms.is_none()
+                && self.lifecycle_updated_at_ms.is_none()
+        }
+    }
+
+    impl LifecycleMetadata {
+        /// Produce a new `LifecycleMetadata` with the delta applied.
+        ///
+        /// Fields left `None` in the delta are carried over unchanged.
+        pub fn apply(&self, delta: &LifecycleDelta) -> Self {
+            let mut next = self.clone();
+            if let Some(tier) = delta.tier {
+                next.tier = tier;
+            }
+            if let Some(ref s) = delta.supersedes {
+                next.supersedes = Some(s.clone());
+            }
+            if let Some(ref s) = delta.superseded_by {
+                next.superseded_by = Some(s.clone());
+            }
+            if let Some(exp) = delta.expires_at_ms {
+                next.expires_at_ms = exp;
+            }
+            if let Some(rev) = delta.review_after_ms {
+                next.review_after_ms = rev;
+            }
+            if let Some(ts) = delta.lifecycle_updated_at_ms {
+                next.lifecycle_updated_at_ms = ts;
+            }
+            next
+        }
+    }
+
+    /// A chunk paired with its current status and lifecycle overlay.
+    ///
+    /// Returned by lifecycle-aware retrieval helpers so callers see the
+    /// authoritative current state without having to re-read side tables.
+    #[derive(Debug, Clone)]
+    pub struct ResolvedChunk {
+        pub chunk: MemoryChunk,
+        pub status: ChunkStatus,
+        pub lifecycle: LifecycleMetadata,
+    }
+
+    /// Visibility policy for lifecycle-aware retrieval.
+    ///
+    /// Defaults hide non-active content: superseded, expired, and history-tier
+    /// chunks are excluded unless explicitly opted in. `Deleted` and `Error`
+    /// chunks are always hidden regardless of policy.
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    pub struct VisibilityPolicy {
+        #[serde(default)]
+        pub include_superseded: bool,
+        #[serde(default)]
+        pub include_expired: bool,
+        #[serde(default)]
+        pub include_history: bool,
+    }
+
+    impl VisibilityPolicy {
+        /// Check whether a chunk with the given status/tier should be visible.
+        pub fn is_visible(&self, status: ChunkStatus, tier: MemoryTier) -> bool {
+            match status {
+                ChunkStatus::Deleted | ChunkStatus::Error => false,
+                ChunkStatus::Superseded if !self.include_superseded => false,
+                ChunkStatus::Expired if !self.include_expired => false,
+                _ => !matches!(tier, MemoryTier::History if !self.include_history),
+            }
+        }
+
+        /// Wall-clock-aware visibility. Hides a chunk when either:
+        /// 1. Its status/tier are not visible under the current flags, OR
+        /// 2. It has a `lifecycle.expires_at_ms` that has passed and
+        ///    `include_expired` is false.
+        ///
+        /// Prefer this over `is_visible` whenever the caller has access to
+        /// a `now_ms` timestamp — it is the single consolidation point for
+        /// the lifecycle visibility rule so B1 (search filtering) and C3/C4
+        /// (expiry-driven tiering) do not each reimplement the clock check.
+        pub fn is_visible_at(
+            &self,
+            status: ChunkStatus,
+            lifecycle: &LifecycleMetadata,
+            now_ms: i64,
+        ) -> bool {
+            if !self.is_visible(status, lifecycle.tier) {
+                return false;
+            }
+            if !self.include_expired {
+                if let Some(exp) = lifecycle.expires_at_ms {
+                    if exp <= now_ms {
+                        return false;
+                    }
+                }
+            }
+            true
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn lifecycle_metadata_defaults_and_apply_delta() {
+            let lc = LifecycleMetadata::default();
+            assert_eq!(lc.tier, MemoryTier::LongTerm);
+            assert!(lc.supersedes.is_none());
+            assert!(lc.superseded_by.is_none());
+            assert!(lc.expires_at_ms.is_none());
+
+            let delta = LifecycleDelta {
+                superseded_by: Some(ChunkId::new()),
+                tier: Some(MemoryTier::Working),
+                lifecycle_updated_at_ms: Some(1_700_000_000_000),
+                ..Default::default()
+            };
+            let next = lc.apply(&delta);
+            assert!(next.superseded_by.is_some());
+            assert_eq!(next.tier, MemoryTier::Working);
+            assert_eq!(next.lifecycle_updated_at_ms, 1_700_000_000_000);
+        }
+
+        #[test]
+        fn visibility_policy_default_hides_nonactive() {
+            let p = VisibilityPolicy::default();
+            assert!(!p.include_superseded);
+            assert!(!p.include_expired);
+            assert!(!p.include_history);
+        }
+
+        #[test]
+        fn memory_tier_display_and_from_str_fails_closed() {
+            use std::str::FromStr;
+            assert_eq!(MemoryTier::Working.to_string(), "working");
+            assert_eq!(MemoryTier::LongTerm.to_string(), "long_term");
+            assert_eq!(MemoryTier::History.to_string(), "history");
+            assert_eq!(MemoryTier::from_str("working").unwrap(), MemoryTier::Working);
+            assert_eq!(
+                MemoryTier::from_str("long_term").unwrap(),
+                MemoryTier::LongTerm
+            );
+            assert_eq!(MemoryTier::from_str("history").unwrap(), MemoryTier::History);
+            assert!(MemoryTier::from_str("bogus").is_err());
+        }
+
+        #[test]
+        fn memory_tier_serde_snake_case() {
+            assert_eq!(
+                serde_json::to_string(&MemoryTier::Working).unwrap(),
+                "\"working\""
+            );
+            assert_eq!(
+                serde_json::to_string(&MemoryTier::LongTerm).unwrap(),
+                "\"long_term\""
+            );
+            assert_eq!(
+                serde_json::to_string(&MemoryTier::History).unwrap(),
+                "\"history\""
+            );
+            let t: MemoryTier = serde_json::from_str("\"long_term\"").unwrap();
+            assert_eq!(t, MemoryTier::LongTerm);
+            let t: MemoryTier = serde_json::from_str("\"history\"").unwrap();
+            assert_eq!(t, MemoryTier::History);
+        }
+
+        #[test]
+        fn lifecycle_delta_clears_expires_and_review_via_some_none() {
+            let lc = LifecycleMetadata {
+                expires_at_ms: Some(1_000),
+                review_after_ms: Some(2_000),
+                ..LifecycleMetadata::default()
+            };
+
+            // Some(None) clears
+            let cleared = lc.apply(&LifecycleDelta {
+                expires_at_ms: Some(None),
+                review_after_ms: Some(None),
+                ..Default::default()
+            });
+            assert!(cleared.expires_at_ms.is_none());
+            assert!(cleared.review_after_ms.is_none());
+
+            // None leaves unchanged
+            let left = lc.apply(&LifecycleDelta::default());
+            assert_eq!(left.expires_at_ms, Some(1_000));
+            assert_eq!(left.review_after_ms, Some(2_000));
+
+            // Some(Some(v)) sets
+            let set = lc.apply(&LifecycleDelta {
+                expires_at_ms: Some(Some(3_000)),
+                ..Default::default()
+            });
+            assert_eq!(set.expires_at_ms, Some(3_000));
+            assert_eq!(set.review_after_ms, Some(2_000)); // untouched
+        }
+
+        #[test]
+        fn lifecycle_delta_is_empty_default_and_set_fields() {
+            // Default delta has every field as `None` — writers should skip the
+            // overlay UPDATE in that case.
+            assert!(LifecycleDelta::default().is_empty());
+
+            // Any set field breaks emptiness.
+            let with_tier = LifecycleDelta {
+                tier: Some(MemoryTier::Working),
+                ..Default::default()
+            };
+            assert!(!with_tier.is_empty());
+
+            let with_cleared_expiry = LifecycleDelta {
+                expires_at_ms: Some(None),
+                ..Default::default()
+            };
+            assert!(!with_cleared_expiry.is_empty());
+        }
+
+        #[test]
+        fn visibility_policy_is_visible_matrix() {
+            let default = VisibilityPolicy::default();
+
+            // Always hidden regardless of flags
+            assert!(!default.is_visible(ChunkStatus::Deleted, MemoryTier::LongTerm));
+            assert!(!default.is_visible(ChunkStatus::Error, MemoryTier::LongTerm));
+
+            // Hidden by default, visible when flag flipped
+            assert!(!default.is_visible(ChunkStatus::Superseded, MemoryTier::LongTerm));
+            let inc_sup = VisibilityPolicy {
+                include_superseded: true,
+                ..Default::default()
+            };
+            assert!(inc_sup.is_visible(ChunkStatus::Superseded, MemoryTier::LongTerm));
+
+            assert!(!default.is_visible(ChunkStatus::Expired, MemoryTier::LongTerm));
+            let inc_exp = VisibilityPolicy {
+                include_expired: true,
+                ..Default::default()
+            };
+            assert!(inc_exp.is_visible(ChunkStatus::Expired, MemoryTier::LongTerm));
+
+            // History tier hidden by default for otherwise-visible status
+            assert!(!default.is_visible(ChunkStatus::Final, MemoryTier::History));
+            let inc_hist = VisibilityPolicy {
+                include_history: true,
+                ..Default::default()
+            };
+            assert!(inc_hist.is_visible(ChunkStatus::Final, MemoryTier::History));
+
+            // Active Final + LongTerm visible by default
+            assert!(default.is_visible(ChunkStatus::Final, MemoryTier::LongTerm));
+        }
+
+        #[test]
+        fn visibility_policy_is_visible_at_hides_clock_expired() {
+            let lc = LifecycleMetadata {
+                expires_at_ms: Some(500),
+                ..LifecycleMetadata::default()
+            };
+            let default_p = VisibilityPolicy::default();
+            // Status=Final, tier=LongTerm would normally be visible, but
+            // the wall clock has passed the expiry threshold.
+            assert!(!default_p.is_visible_at(ChunkStatus::Final, &lc, 1_000));
+            // Edge case: exactly at expiry counts as expired (`<=`).
+            assert!(!default_p.is_visible_at(ChunkStatus::Final, &lc, 500));
+            // Before expiry: visible.
+            assert!(default_p.is_visible_at(ChunkStatus::Final, &lc, 400));
+
+            // include_expired flips the clock-check too, not just the
+            // Expired status branch.
+            let inc = VisibilityPolicy {
+                include_expired: true,
+                ..Default::default()
+            };
+            assert!(inc.is_visible_at(ChunkStatus::Final, &lc, 1_000));
+
+            // No expires_at_ms: status/tier rule governs alone.
+            let lc_none = LifecycleMetadata::default();
+            assert!(default_p.is_visible_at(ChunkStatus::Final, &lc_none, 1_000));
+            // Deleted still fails regardless of clock / expiry flag.
+            assert!(!inc.is_visible_at(ChunkStatus::Deleted, &lc_none, 1_000));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,5 +1024,83 @@ mod tests {
         assert_eq!(chunk.agent_id.as_deref(), Some("claude"));
         assert_eq!(chunk.tags.len(), 2);
         assert_eq!(chunk.status, ChunkStatus::Draft);
+    }
+
+    #[test]
+    fn chunk_type_from_str_round_trip_and_failure() {
+        use std::str::FromStr;
+
+        assert_eq!(ChunkType::from_str("code").unwrap(), ChunkType::Code);
+        assert_eq!(
+            ChunkType::from_str("decision").unwrap(),
+            ChunkType::Decision
+        );
+        let err = ChunkType::from_str("bogus").unwrap_err();
+        assert!(matches!(err, MemdError::ValidationError(_)));
+    }
+
+    #[test]
+    fn ingestion_mode_default_and_parsing() {
+        use std::str::FromStr;
+
+        assert_eq!(IngestionMode::default(), IngestionMode::Document);
+        assert_eq!(
+            IngestionMode::from_str("conversation").unwrap(),
+            IngestionMode::Conversation
+        );
+        let err = IngestionMode::from_str("bogus").unwrap_err();
+        assert!(matches!(err, MemdError::ValidationError(_)));
+    }
+
+    #[test]
+    fn ingestion_mode_serde_round_trip() {
+        let json = serde_json::to_string(&IngestionMode::Conversation).unwrap();
+        assert_eq!(json, "\"conversation\"");
+
+        let parsed: IngestionMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, IngestionMode::Conversation);
+    }
+
+    #[test]
+    fn ingestion_mode_display() {
+        assert_eq!(IngestionMode::Conversation.to_string(), "conversation");
+        assert_eq!(IngestionMode::Document.to_string(), "document");
+    }
+
+    #[test]
+    fn chunk_status_lifecycle_variants_serialize() {
+        assert_eq!(ChunkStatus::Superseded.to_string(), "superseded");
+        assert_eq!(ChunkStatus::Expired.to_string(), "expired");
+
+        // serialize both new variants
+        assert_eq!(
+            serde_json::to_string(&ChunkStatus::Superseded).unwrap(),
+            "\"superseded\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ChunkStatus::Expired).unwrap(),
+            "\"expired\""
+        );
+
+        // deserialize both new variants
+        let s: ChunkStatus = serde_json::from_str("\"superseded\"").unwrap();
+        assert_eq!(s, ChunkStatus::Superseded);
+        let e: ChunkStatus = serde_json::from_str("\"expired\"").unwrap();
+        assert_eq!(e, ChunkStatus::Expired);
+    }
+
+    #[test]
+    fn chunk_status_from_str_fails_closed() {
+        use std::str::FromStr;
+        assert_eq!(
+            ChunkStatus::from_str("superseded").unwrap(),
+            ChunkStatus::Superseded
+        );
+        assert_eq!(
+            ChunkStatus::from_str("expired").unwrap(),
+            ChunkStatus::Expired
+        );
+        assert_eq!(ChunkStatus::from_str("final").unwrap(), ChunkStatus::Final);
+        assert!(ChunkStatus::from_str("bogus").is_err());
     }
 }

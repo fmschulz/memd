@@ -11,6 +11,7 @@ pub mod metadata;
 pub mod persistent;
 pub mod segment;
 pub mod shared_add;
+pub mod supersession;
 pub mod tenant;
 pub mod tombstone;
 pub mod wal;
@@ -26,6 +27,7 @@ use crate::task_memory::{
     TaskArtifact, TaskArtifactWriteResult, TaskProjection, TaskRecord, TaskSearchFilters,
 };
 use crate::tiered::TieredTiming;
+use crate::types::lifecycle::{LifecycleMetadata, ResolvedChunk};
 use crate::types::{ChunkId, MemoryChunk, TenantId};
 pub use feedback::{
     apply_feedback_scores, normalize_query, FeedbackConfig, FeedbackEntry, RelevanceLabel,
@@ -223,6 +225,33 @@ pub trait Store: Send + Sync {
     ///
     /// Returns None if the chunk doesn't exist or belongs to a different tenant.
     async fn get(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<Option<MemoryChunk>>;
+
+    /// Get a chunk with its lifecycle overlay applied.
+    ///
+    /// Default impl returns the chunk with `status` derived from the payload
+    /// and `lifecycle` defaulted. `PersistentStore` overrides this to join with
+    /// the `SqliteMetadataStore` lifecycle columns.
+    async fn get_with_lifecycle(
+        &self,
+        tenant_id: &TenantId,
+        chunk_id: &ChunkId,
+    ) -> Result<Option<ResolvedChunk>> {
+        Ok(self
+            .get(tenant_id, chunk_id)
+            .await?
+            .map(|chunk| ResolvedChunk {
+                status: chunk.status,
+                chunk,
+                lifecycle: LifecycleMetadata::default(),
+            }))
+    }
+
+    /// Downcast helper for lifecycle-aware tools that need
+    /// `PersistentStore`-specific APIs. Default returns `None`;
+    /// `PersistentStore` overrides to `Some(self)`.
+    fn as_persistent(&self) -> Option<&crate::store::persistent::PersistentStore> {
+        None
+    }
 
     /// Search chunks (stub: returns all non-deleted chunks matching tenant)
     ///
