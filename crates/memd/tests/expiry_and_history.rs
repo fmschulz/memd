@@ -278,26 +278,29 @@ async fn expiry_sweep_marks_rows_expired() {
     );
 }
 
-/// Sweep must not clobber a row whose status was changed between the
-/// SELECT and the UPDATE. Simulates the race by flipping the row to
-/// `status=Superseded` through `update_lifecycle` after
-/// `list_expired_before` would have returned it. The sweep's guarded
-/// UPDATE rejects the stale promotion.
+/// Directly exercises the guarded UPDATE in `mark_expired_if_final`.
+/// These cases bypass the pre-filter in `list_expired_before` so the
+/// guard predicate (status='final' AND expires_at_ms <= now) is the
+/// only thing stopping a wrong promotion.
 #[tokio::test]
-async fn expiry_sweep_is_safe_against_concurrent_status_change() {
-    use memd::compaction::ExpirySweep;
+async fn mark_expired_if_final_rejects_non_final_rows() {
     use memd::store::metadata::MetadataStore;
     use memd::types::{ChunkStatus, LifecycleDelta};
 
     let (server, _tmp) = test_server().await;
     let tenant = TenantId::new("t").expect("valid tenant id");
 
+    // Seed a row that already has past expires_at_ms AND status=Superseded.
+    // Simulates the state right after another writer superseded an
+    // expired chunk. If the sweep called mark_expired_if_final anyway
+    // (e.g. because the SELECT pre-filter was loosened), the guarded
+    // UPDATE must still reject.
     let resp = call_tool(
         &server,
         "memory.add",
         json!({
             "tenant_id": "t",
-            "text": "raced note",
+            "text": "raced",
             "type": "doc",
             "expires_at_ms": 1_i64,
         }),
@@ -305,11 +308,6 @@ async fn expiry_sweep_is_safe_against_concurrent_status_change() {
     .await;
     let id = ChunkId::parse(parse_result_text(&resp)["chunk_id"].as_str().unwrap())
         .expect("valid chunk id");
-
-    // Simulate a concurrent writer that flips the row to Superseded
-    // BEFORE the sweep runs. The sweep still sees this ID in
-    // list_expired_before (because expires_at_ms <= now) but must not
-    // overwrite the Superseded status.
     server
         .store()
         .metadata()
@@ -323,29 +321,125 @@ async fn expiry_sweep_is_safe_against_concurrent_status_change() {
         )
         .expect("flip to superseded ok");
 
-    let sweep = ExpirySweep::new();
-    let result = sweep
-        .run(
-            server.store().metadata(),
-            server.store().hybrid(),
-            &tenant,
-        )
-        .expect("sweep ok");
-    assert_eq!(
-        result.expired_count, 0,
-        "guarded UPDATE must reject rows whose status already moved off Final"
+    let now = 10_000_i64;
+    let promoted = server
+        .store()
+        .metadata()
+        .mark_expired_if_final(&tenant, &id, now)
+        .expect("mark ok");
+    assert!(
+        !promoted,
+        "guarded UPDATE must reject rows whose status is not Final"
     );
-
     let resolved = server
         .store()
         .get_with_lifecycle(&tenant, &id)
         .await
         .expect("ok")
         .expect("present");
-    assert_eq!(
-        resolved.status,
-        ChunkStatus::Superseded,
-        "sweep must not clobber the newer lifecycle transition"
+    assert_eq!(resolved.status, ChunkStatus::Superseded);
+}
+
+#[tokio::test]
+async fn mark_expired_if_final_rejects_rows_whose_expiry_was_cleared() {
+    use memd::store::metadata::MetadataStore;
+    use memd::types::LifecycleDelta;
+
+    let (server, _tmp) = test_server().await;
+    let tenant = TenantId::new("t").expect("valid tenant id");
+
+    // Row was selected when it had past expires_at_ms, but before the
+    // UPDATE lands another writer clears the expiry (pattern expected
+    // from memory.set_expiry in Track C6 or from an in-flight retention
+    // extension). The guard must refuse because the row is no longer
+    // eligible at UPDATE time.
+    let resp = call_tool(
+        &server,
+        "memory.add",
+        json!({
+            "tenant_id": "t",
+            "text": "cleared",
+            "type": "doc",
+            "expires_at_ms": 1_i64,
+        }),
+    )
+    .await;
+    let id = ChunkId::parse(parse_result_text(&resp)["chunk_id"].as_str().unwrap())
+        .expect("valid chunk id");
+
+    // Concurrent writer clears expires_at_ms while leaving status=Final.
+    server
+        .store()
+        .metadata()
+        .update_lifecycle(
+            &tenant,
+            &id,
+            &LifecycleDelta {
+                expires_at_ms: Some(None),
+                ..Default::default()
+            },
+        )
+        .expect("clear expiry ok");
+
+    let now = 10_000_i64;
+    let promoted = server
+        .store()
+        .metadata()
+        .mark_expired_if_final(&tenant, &id, now)
+        .expect("mark ok");
+    assert!(
+        !promoted,
+        "guarded UPDATE must refuse when expires_at_ms was cleared before the UPDATE"
+    );
+}
+
+#[tokio::test]
+async fn mark_expired_if_final_rejects_rows_whose_expiry_moved_to_future() {
+    use memd::store::metadata::MetadataStore;
+    use memd::types::LifecycleDelta;
+
+    let (server, _tmp) = test_server().await;
+    let tenant = TenantId::new("t").expect("valid tenant id");
+
+    // Row started with past expiry but was just extended to a future
+    // expiry. The guard must refuse at UPDATE time.
+    let resp = call_tool(
+        &server,
+        "memory.add",
+        json!({
+            "tenant_id": "t",
+            "text": "extended",
+            "type": "doc",
+            "expires_at_ms": 1_i64,
+        }),
+    )
+    .await;
+    let id = ChunkId::parse(parse_result_text(&resp)["chunk_id"].as_str().unwrap())
+        .expect("valid chunk id");
+
+    let future = current_time_ms() + 1_000 * 60 * 60 * 24;
+    server
+        .store()
+        .metadata()
+        .update_lifecycle(
+            &tenant,
+            &id,
+            &LifecycleDelta {
+                expires_at_ms: Some(Some(future)),
+                ..Default::default()
+            },
+        )
+        .expect("extend expiry ok");
+
+    let now = 10_000_i64;
+    let promoted = server
+        .store()
+        .metadata()
+        .mark_expired_if_final(&tenant, &id, now)
+        .expect("mark ok");
+    assert!(
+        !promoted,
+        "guarded UPDATE must refuse when expires_at_ms was pushed past the UPDATE's clock"
     );
 }
 
