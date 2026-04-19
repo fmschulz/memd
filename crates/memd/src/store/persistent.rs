@@ -2346,46 +2346,102 @@ impl PersistentStore {
         }
 
         // Step 1: confirm `old_id` exists in `tenant_id` and is not
-        // already Deleted before we commit any new state. `atomic_supersede`
-        // also enforces existence via its row-count guard, but only
-        // *after* the new chunk has been persisted — so without this
-        // pre-flight a missing/deleted `old_id` would orphan the new
-        // row in WAL + segment + metadata. Linking a Deleted row would
-        // also produce an unreachable supersession edge (Deleted rows
-        // are filtered from retrieval).
-        match self.metadata.get(tenant_id, old_id)? {
-            Some(m) if m.status != ChunkStatus::Deleted => {}
-            Some(_) => {
+        // Deleted before we commit any new state. Linking a Deleted
+        // row would produce an unreachable supersession edge. The
+        // head check is deferred to step 2a so that a pre-existing
+        // cycle in a forged / corrupted chain is reported as a cycle
+        // rather than masked as a generic not-current-head error —
+        // the cycle is a structural bug in the overlay, the not-head
+        // case is a normal caller error, and both have distinct
+        // remediation paths.
+        let old_meta = match self.metadata.get(tenant_id, old_id)? {
+            Some(m) if m.status == ChunkStatus::Deleted => {
                 return Err(MemdError::ValidationError(format!(
                     "supersede_chunk: old chunk {old_id} is deleted in tenant {tenant_id}"
                 )));
             }
+            Some(m) => m,
             None => {
                 return Err(MemdError::ValidationError(format!(
                     "supersede_chunk: old chunk {old_id} not found in tenant {tenant_id}"
                 )));
             }
-        }
+        };
 
-        // Step 2: cycle detection — guards against a pre-existing loop in
-        // the `superseded_by` chain that would make the new edge nonsensical.
-        self.detect_supersession_cycle(tenant_id, old_id, 64)?;
+        // Step 2: cycle detection — guards against a pre-existing loop
+        // in the `superseded_by` chain that would make the new edge
+        // nonsensical. Walks the visited-set from `old_id` and fails
+        // on any revisit (not only return-to-start), no length bound.
+        self.detect_supersession_cycle(tenant_id, old_id)?;
+
+        // Step 2a: require `old_id` to be the current head (no
+        // existing successor) — cycle detection already passed, so if
+        // `superseded_by.is_some()` we're in the plain double-supersede
+        // case, not a cycle. The SQL layer also enforces head-only
+        // semantics via a `superseded_by IS NULL` WHERE clause in
+        // `atomic_supersede`, but that fires only after the new chunk
+        // has been persisted — this preflight keeps the common
+        // caller-error path off the orphan path.
+        if let Some(existing_head) = old_meta.lifecycle.superseded_by.as_ref() {
+            return Err(MemdError::ValidationError(format!(
+                "supersede_chunk: old chunk {old_id} is not current head \
+                 (already superseded by {existing_head}) in tenant {tenant_id}"
+            )));
+        }
 
         // Step 3: write the new chunk through the normal add path. Passing
         // a default lifecycle delta keeps this light — atomic_supersede
-        // populates `supersedes` / `superseded_by` in step 4. At this
-        // point steps 0–2 have ruled out every reason `atomic_supersede`
-        // would reject the link, so writing the new row first is safe
-        // (the only remaining failure modes are catastrophic — e.g.
-        // SQLite I/O — which would orphan even with the inverse order).
+        // populates `supersedes` / `superseded_by` in step 4. Steps 0–2
+        // have ruled out every preflight reason `atomic_supersede` would
+        // reject the link; the remaining failure modes (SQLite I/O,
+        // concurrent supersede racing the head check) are caught in
+        // step 4 and compensated in step 4a so the orphan new chunk
+        // doesn't remain visible.
         let new_id = self
             .add_chunk_with_lifecycle(new_chunk, LifecycleDelta::default())
             .await?;
 
         // Step 4: atomically link old ↔ new in a single SQLite transaction.
+        // The UPDATE filters on `superseded_by IS NULL` so a concurrent
+        // supersede that raced the preflight will fail here rather than
+        // forking the graph.
         let now = current_time_ms();
-        self.metadata
-            .atomic_supersede(tenant_id, old_id, &new_id, now)?;
+        if let Err(link_err) = self
+            .metadata
+            .atomic_supersede(tenant_id, old_id, &new_id, now)
+        {
+            // Step 4a: compensating tombstone on link failure. If we
+            // return without this, the new chunk stays fully visible in
+            // retrieval with no supersession edge — the exact orphan
+            // state Codex flagged as HIGH-1. Soft-deleting keeps the
+            // invariant "either both visible+linked or neither visible"
+            // and leaves the segment file to be reclaimed by the normal
+            // tombstone compaction path.
+            let delete_res = self.metadata.mark_deleted(tenant_id, &new_id);
+            // Bump memory version once more so any caller that read the
+            // orphan between step 3 and this tombstone invalidates.
+            if let Some(h) = self.hybrid() {
+                h.bump_tenant_memory_version(tenant_id);
+            }
+            if let Err(del_err) = delete_res {
+                warn!(
+                    tenant_id = %tenant_id,
+                    new_id = %new_id,
+                    link_err = %link_err,
+                    del_err = %del_err,
+                    "supersede_chunk: atomic_supersede failed AND compensating tombstone failed; \
+                     new chunk is an orphan — investigate manually"
+                );
+            } else {
+                info!(
+                    tenant_id = %tenant_id,
+                    new_id = %new_id,
+                    link_err = %link_err,
+                    "supersede_chunk: atomic_supersede failed; orphan new chunk tombstoned"
+                );
+            }
+            return Err(link_err);
+        }
 
         // Step 5: drop old from the sparse index (immediate when
         // hybrid+sparse enabled) and bump the tenant memory version
@@ -2405,32 +2461,32 @@ impl PersistentStore {
         Ok(new_id)
     }
 
-    /// Walk the `superseded_by` chain starting at `start` for up to
-    /// `max_depth` hops. Returns `Err(ValidationError)` if a cycle is
-    /// detected (the chain points back at `start`), and `Ok(())` both on
-    /// termination at an empty `superseded_by` and on exhausting the
-    /// depth budget without a loop — the latter intentionally permits
-    /// very long chains rather than flagging them as invalid.
-    fn detect_supersession_cycle(
-        &self,
-        tenant: &TenantId,
-        start: &ChunkId,
-        max_depth: usize,
-    ) -> Result<()> {
+    /// Walk the `superseded_by` chain starting at `start`. Returns
+    /// `Err(ValidationError)` if any cycle is detected — either the
+    /// chain returns to `start` or revisits a previously-seen node
+    /// mid-walk. Returns `Ok(())` on termination at an empty
+    /// `superseded_by`. Arbitrary-length acyclic chains are permitted;
+    /// the visited-set check is what makes detection robust regardless
+    /// of chain length or where the cycle enters.
+    fn detect_supersession_cycle(&self, tenant: &TenantId, start: &ChunkId) -> Result<()> {
+        use std::collections::HashSet;
+        let mut visited: HashSet<ChunkId> = HashSet::new();
+        visited.insert(start.clone());
         let mut current = start.clone();
-        for _ in 0..max_depth {
+        loop {
             let meta = self.metadata.get(tenant, &current)?;
             match meta.and_then(|m| m.lifecycle.superseded_by) {
-                Some(next) if next == *start => {
-                    return Err(MemdError::ValidationError(format!(
-                        "supersession cycle detected at {current}"
-                    )));
-                }
-                Some(next) => current = next,
                 None => return Ok(()),
+                Some(next) => {
+                    if !visited.insert(next.clone()) {
+                        return Err(MemdError::ValidationError(format!(
+                            "supersession cycle detected: revisited {next} while walking from {start}"
+                        )));
+                    }
+                    current = next;
+                }
             }
         }
-        Ok(())
     }
 
     async fn get_chunk(

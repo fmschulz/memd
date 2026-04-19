@@ -506,3 +506,211 @@ async fn memory_get_returns_found_false_when_chunk_absent() {
     let body = parse_result_text(&resp);
     assert_eq!(body["found"].as_bool(), Some(false));
 }
+
+#[tokio::test]
+async fn supersede_chunk_rejects_double_supersede_on_same_old_id() {
+    // MED-4: the SAME old chunk must only be superseded once. Before
+    // the fix, atomic_supersede's UPDATE blindly overwrote
+    // `superseded_by` and the preflight accepted any non-deleted row,
+    // so two supersedes on the same old chunk created a forked
+    // supersession graph with two visible successors. The fix is
+    // twofold: preflight rejects old_id whose `superseded_by` is
+    // already set, and the SQL UPDATE carries a
+    // `superseded_by IS NULL` guard so a race past the preflight still
+    // fails atomically (and triggers the compensating tombstone).
+    let tmp = tempfile::tempdir().unwrap();
+    let store = persistent_store(tmp.path()).await;
+    let t = tenant("t");
+    let a = store
+        .add(MemoryChunk::new(t.clone(), "A", ChunkType::Doc))
+        .await
+        .unwrap();
+    let b = store
+        .supersede_chunk(&t, &a, MemoryChunk::new(t.clone(), "B", ChunkType::Doc))
+        .await
+        .unwrap();
+
+    // Second supersede on the same old_id must fail.
+    let err = store
+        .supersede_chunk(&t, &a, MemoryChunk::new(t.clone(), "B-prime", ChunkType::Doc))
+        .await
+        .expect_err("second supersede on same old_id must fail");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("not current head") || msg.contains("already superseded"),
+        "expected not-current-head error, got: {msg}"
+    );
+
+    // A still points to B — not to some forked B-prime.
+    let resolved_a = store.get_with_lifecycle(&t, &a).await.unwrap().unwrap();
+    assert_eq!(
+        resolved_a.lifecycle.superseded_by.as_ref().unwrap(),
+        &b,
+        "A.superseded_by must still point at B after the rejected double-supersede"
+    );
+
+    // No orphan B-prime in the tenant — the preflight rejected before
+    // add_chunk_with_lifecycle ran, so the row count is still {A, B}.
+    let list = store.metadata().list(&t, 100, 0).unwrap();
+    assert_eq!(
+        list.len(),
+        2,
+        "exactly 2 chunks expected (A, B); observed: {list:?}"
+    );
+}
+
+#[tokio::test]
+async fn supersede_chunk_detects_non_start_cycle_mid_chain() {
+    // LOW-5: the old bounded-walk-only-detects-return-to-start
+    // implementation missed cycles that re-entered the chain at any
+    // node other than `start`. The new HashSet-based walk catches any
+    // revisit. We forge a chain A → B → C → B (B re-entered) at the
+    // overlay layer and assert that supersede_chunk on A fails with a
+    // cycle error even though the cycle does not return to A.
+    use memd::types::lifecycle::LifecycleDelta;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store = persistent_store(tmp.path()).await;
+    let t = tenant("t");
+    let a = store
+        .add(MemoryChunk::new(t.clone(), "A", ChunkType::Doc))
+        .await
+        .unwrap();
+    let b = store
+        .add(MemoryChunk::new(t.clone(), "B", ChunkType::Doc))
+        .await
+        .unwrap();
+    let c = store
+        .add(MemoryChunk::new(t.clone(), "C", ChunkType::Doc))
+        .await
+        .unwrap();
+
+    // Forge A → B → C → B (B re-entered, not a return-to-A loop).
+    store
+        .update_lifecycle(
+            &t,
+            &a,
+            &LifecycleDelta {
+                superseded_by: Some(b.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .update_lifecycle(
+            &t,
+            &b,
+            &LifecycleDelta {
+                superseded_by: Some(c.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .update_lifecycle(
+            &t,
+            &c,
+            &LifecycleDelta {
+                superseded_by: Some(b.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let err = store
+        .supersede_chunk(&t, &a, MemoryChunk::new(t.clone(), "D", ChunkType::Doc))
+        .await
+        .expect_err("supersede_chunk must detect the non-start cycle B→C→B");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("supersession cycle detected"),
+        "expected cycle-detection error, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn supersede_chunk_walks_long_chain_past_old_64_hop_bound() {
+    // LOW-5: the old implementation capped the walk at 64 hops and
+    // silently returned Ok(()) on exhaustion — meaning a 65-hop cycle
+    // could slip through. The new HashSet walk has no length bound and
+    // detects cycles regardless of chain length. Pin the acyclic case:
+    // a 70-hop acyclic chain must still succeed.
+    let tmp = tempfile::tempdir().unwrap();
+    let store = persistent_store(tmp.path()).await;
+    let t = tenant("t");
+    let mut current = store
+        .add(MemoryChunk::new(t.clone(), "A", ChunkType::Doc))
+        .await
+        .unwrap();
+    for i in 0..70usize {
+        let label = format!("v{}", i);
+        current = store
+            .supersede_chunk(
+                &t,
+                &current,
+                MemoryChunk::new(t.clone(), &label, ChunkType::Doc),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("hop {i} failed: {e}"));
+    }
+    let resolved = store
+        .get_with_lifecycle(&t, &current)
+        .await
+        .unwrap()
+        .expect("final head must resolve");
+    assert_eq!(resolved.status, ChunkStatus::Final);
+}
+
+#[tokio::test]
+async fn memory_get_hidden_envelope_carries_hidden_reason() {
+    // MED-3: a caller that receives `{hidden:true,...}` needs to know
+    // which `include_*` flag would unhide the row. The envelope now
+    // carries a `hidden_reason` ∈ {"superseded","expired","history",
+    // "deleted"} discriminator so agents don't have to triangulate
+    // from status + tier + expires_at_ms.
+    let (server, _tmp) = test_server().await;
+    let add = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "text": "v1",
+            "type": "doc"
+        }),
+    )
+    .await;
+    let old_id = parse_result_text(&add)["chunk_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let _ = call_tool(
+        &server,
+        "memory.supersede",
+        serde_json::json!({
+            "tenant_id": "t",
+            "old_chunk_id": old_id.clone(),
+            "new_text": "v2",
+            "type": "doc"
+        }),
+    )
+    .await;
+    let get_resp = call_tool(
+        &server,
+        "memory.get",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunk_id": old_id,
+        }),
+    )
+    .await;
+    let body = parse_result_text(&get_resp);
+    assert_eq!(body["hidden"].as_bool(), Some(true));
+    assert_eq!(
+        body["hidden_reason"].as_str(),
+        Some("superseded"),
+        "superseded chunk must report hidden_reason=\"superseded\": {body}"
+    );
+}
