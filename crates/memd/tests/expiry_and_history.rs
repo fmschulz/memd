@@ -498,6 +498,212 @@ async fn expiry_sweep_is_idempotent_across_consecutive_runs() {
     );
 }
 
+/// Track C4: `HistoryPromotion` uses `lifecycle_updated_at_ms` as the
+/// clock, not `timestamp_created`. A row that was written a long time
+/// ago but whose overlay was touched recently (e.g. superseded today)
+/// should NOT be promoted until its overlay has been idle for the
+/// threshold window.
+#[tokio::test]
+async fn history_promotion_uses_lifecycle_updated_clock_not_created() {
+    use memd::compaction::HistoryPromotion;
+    use memd::store::metadata::MetadataStore;
+    use memd::types::{ChunkStatus, LifecycleDelta, MemoryTier};
+
+    let (server, _tmp) = test_server().await;
+    let tenant = TenantId::new("t").expect("valid tenant id");
+
+    // Seed a superseded row whose overlay was JUST touched — this
+    // simulates "superseded today". The promotion must NOT fire.
+    let resp = call_tool(
+        &server,
+        "memory.add",
+        json!({ "tenant_id": "t", "text": "active-history", "type": "doc" }),
+    )
+    .await;
+    let id = ChunkId::parse(parse_result_text(&resp)["chunk_id"].as_str().unwrap())
+        .expect("valid chunk id");
+    let now = current_time_ms();
+    server
+        .store()
+        .metadata()
+        .update_lifecycle(
+            &tenant,
+            &id,
+            &LifecycleDelta {
+                status: Some(ChunkStatus::Superseded),
+                lifecycle_updated_at_ms: Some(now),
+                ..Default::default()
+            },
+        )
+        .expect("supersede ok");
+
+    let promo = HistoryPromotion::new(30 * 86_400_000);
+    let r1 = promo
+        .run(
+            server.store().metadata(),
+            server.store().hybrid(),
+            &tenant,
+        )
+        .expect("run ok");
+    assert_eq!(
+        r1.promoted_count, 0,
+        "fresh overlay clock must not be promoted"
+    );
+
+    // Fast-forward the overlay clock by backdating
+    // `lifecycle_updated_at_ms` past the threshold. The sweep must now
+    // demote the row.
+    let old = now - 31 * 86_400_000;
+    server
+        .store()
+        .metadata()
+        .update_lifecycle(
+            &tenant,
+            &id,
+            &LifecycleDelta {
+                lifecycle_updated_at_ms: Some(old),
+                ..Default::default()
+            },
+        )
+        .expect("backdate ok");
+
+    let r2 = promo
+        .run(
+            server.store().metadata(),
+            server.store().hybrid(),
+            &tenant,
+        )
+        .expect("run ok");
+    assert_eq!(
+        r2.promoted_count, 1,
+        "stale overlay must be demoted to History"
+    );
+
+    let resolved = server
+        .store()
+        .get_with_lifecycle(&tenant, &id)
+        .await
+        .expect("ok")
+        .expect("present");
+    assert_eq!(resolved.lifecycle.tier, MemoryTier::History);
+}
+
+/// A second run immediately after a successful promotion must be a
+/// no-op because `list_stale_superseded` excludes rows already on the
+/// `history` tier.
+#[tokio::test]
+async fn history_promotion_is_idempotent_across_consecutive_runs() {
+    use memd::compaction::HistoryPromotion;
+    use memd::store::metadata::MetadataStore;
+    use memd::types::{ChunkStatus, LifecycleDelta};
+
+    let (server, _tmp) = test_server().await;
+    let tenant = TenantId::new("t").expect("valid tenant id");
+
+    let resp = call_tool(
+        &server,
+        "memory.add",
+        json!({ "tenant_id": "t", "text": "old", "type": "doc" }),
+    )
+    .await;
+    let id = ChunkId::parse(parse_result_text(&resp)["chunk_id"].as_str().unwrap())
+        .expect("valid chunk id");
+
+    // Flip to superseded AND backdate the overlay clock past the
+    // threshold in a single update.
+    let old = current_time_ms() - 365 * 86_400_000;
+    server
+        .store()
+        .metadata()
+        .update_lifecycle(
+            &tenant,
+            &id,
+            &LifecycleDelta {
+                status: Some(ChunkStatus::Superseded),
+                lifecycle_updated_at_ms: Some(old),
+                ..Default::default()
+            },
+        )
+        .expect("flip ok");
+
+    let promo = HistoryPromotion::new(30 * 86_400_000);
+    let r1 = promo
+        .run(
+            server.store().metadata(),
+            server.store().hybrid(),
+            &tenant,
+        )
+        .expect("run ok");
+    assert_eq!(r1.promoted_count, 1);
+
+    let r2 = promo
+        .run(
+            server.store().metadata(),
+            server.store().hybrid(),
+            &tenant,
+        )
+        .expect("run ok");
+    assert_eq!(
+        r2.promoted_count, 0,
+        "already-history rows must not be re-promoted"
+    );
+}
+
+/// Expired rows (not just Superseded) should also be candidates for
+/// history promotion once their overlay has been idle long enough.
+#[tokio::test]
+async fn history_promotion_also_demotes_long_stale_expired_rows() {
+    use memd::compaction::HistoryPromotion;
+    use memd::store::metadata::MetadataStore;
+    use memd::types::{ChunkStatus, LifecycleDelta, MemoryTier};
+
+    let (server, _tmp) = test_server().await;
+    let tenant = TenantId::new("t").expect("valid tenant id");
+
+    let resp = call_tool(
+        &server,
+        "memory.add",
+        json!({ "tenant_id": "t", "text": "long-expired", "type": "doc" }),
+    )
+    .await;
+    let id = ChunkId::parse(parse_result_text(&resp)["chunk_id"].as_str().unwrap())
+        .expect("valid chunk id");
+
+    // Simulate ExpirySweep (C3) having run a long time ago.
+    let old = current_time_ms() - 365 * 86_400_000;
+    server
+        .store()
+        .metadata()
+        .update_lifecycle(
+            &tenant,
+            &id,
+            &LifecycleDelta {
+                status: Some(ChunkStatus::Expired),
+                lifecycle_updated_at_ms: Some(old),
+                ..Default::default()
+            },
+        )
+        .expect("flip ok");
+
+    let promo = HistoryPromotion::new(30 * 86_400_000);
+    let result = promo
+        .run(
+            server.store().metadata(),
+            server.store().hybrid(),
+            &tenant,
+        )
+        .expect("run ok");
+    assert_eq!(result.promoted_count, 1);
+
+    let resolved = server
+        .store()
+        .get_with_lifecycle(&tenant, &id)
+        .await
+        .expect("ok")
+        .expect("present");
+    assert_eq!(resolved.lifecycle.tier, MemoryTier::History);
+}
+
 #[tokio::test]
 async fn memory_add_batch_validation_failure_leaves_no_partial_writes() {
     // When any chunk in a lifecycle-enabled batch fails validation,
