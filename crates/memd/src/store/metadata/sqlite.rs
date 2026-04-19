@@ -1809,7 +1809,7 @@ impl MetadataStore for SqliteMetadataStore {
         delta: &LifecycleDelta,
     ) -> Result<()> {
         let conn = self.pool.get();
-        conn.execute(
+        let rows = conn.execute(
             "UPDATE chunks SET
                 status                  = COALESCE(:status, status),
                 tier                    = COALESCE(:tier, tier),

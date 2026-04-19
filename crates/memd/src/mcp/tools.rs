@@ -1881,6 +1881,7 @@ pub fn tool_names() -> Vec<&'static str> {
         "memory.metrics",
         "memory.compact",
         "memory.supersede",
+        "memory.set_expiry",
         "memory.consolidate_episode",
         "context.list_subsystems",
         "context.get_files_for_subsystem",
@@ -2229,8 +2230,10 @@ mod tests {
         let names = tool_names();
         // Phase 2.3: 42 legacy + 4 focused artifact tools.
         // Track A (A7): + memory.supersede.
-        assert_eq!(names.len(), 47);
+        // Track C (C6): + memory.set_expiry.
+        assert_eq!(names.len(), 48);
         assert!(names.contains(&"memory.supersede"));
+        assert!(names.contains(&"memory.set_expiry"));
         assert!(names.contains(&"artifact.find_related"));
         assert!(names.contains(&"artifact.review"));
         assert!(names.contains(&"artifact.revision"));
