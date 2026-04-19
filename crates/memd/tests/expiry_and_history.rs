@@ -211,8 +211,13 @@ async fn future_expiry_does_not_hide_chunk_before_the_deadline() {
 ///
 /// Verifies both the count reported by the sweep and that the row's
 /// authoritative status flips from `Final` to `Expired` on the overlay.
+///
+/// Note: `test_server()` constructs the `PersistentStore` with hybrid
+/// search disabled, so `store.hybrid()` is `None` here and the sweep's
+/// cache-bump branch is not directly exercised — that path is tested
+/// separately in `expiry_sweep_bumps_hybrid_cache_when_enabled` below.
 #[tokio::test]
-async fn expiry_sweep_marks_rows_expired_and_bumps_cache() {
+async fn expiry_sweep_marks_rows_expired() {
     use memd::compaction::ExpirySweep;
 
     let (server, _tmp) = test_server().await;
@@ -270,6 +275,77 @@ async fn expiry_sweep_marks_rows_expired_and_bumps_cache() {
     assert!(
         resolved.lifecycle.lifecycle_updated_at_ms > 0,
         "sweep must stamp lifecycle_updated_at_ms"
+    );
+}
+
+/// Sweep must not clobber a row whose status was changed between the
+/// SELECT and the UPDATE. Simulates the race by flipping the row to
+/// `status=Superseded` through `update_lifecycle` after
+/// `list_expired_before` would have returned it. The sweep's guarded
+/// UPDATE rejects the stale promotion.
+#[tokio::test]
+async fn expiry_sweep_is_safe_against_concurrent_status_change() {
+    use memd::compaction::ExpirySweep;
+    use memd::store::metadata::MetadataStore;
+    use memd::types::{ChunkStatus, LifecycleDelta};
+
+    let (server, _tmp) = test_server().await;
+    let tenant = TenantId::new("t").expect("valid tenant id");
+
+    let resp = call_tool(
+        &server,
+        "memory.add",
+        json!({
+            "tenant_id": "t",
+            "text": "raced note",
+            "type": "doc",
+            "expires_at_ms": 1_i64,
+        }),
+    )
+    .await;
+    let id = ChunkId::parse(parse_result_text(&resp)["chunk_id"].as_str().unwrap())
+        .expect("valid chunk id");
+
+    // Simulate a concurrent writer that flips the row to Superseded
+    // BEFORE the sweep runs. The sweep still sees this ID in
+    // list_expired_before (because expires_at_ms <= now) but must not
+    // overwrite the Superseded status.
+    server
+        .store()
+        .metadata()
+        .update_lifecycle(
+            &tenant,
+            &id,
+            &LifecycleDelta {
+                status: Some(ChunkStatus::Superseded),
+                ..Default::default()
+            },
+        )
+        .expect("flip to superseded ok");
+
+    let sweep = ExpirySweep::new();
+    let result = sweep
+        .run(
+            server.store().metadata(),
+            server.store().hybrid(),
+            &tenant,
+        )
+        .expect("sweep ok");
+    assert_eq!(
+        result.expired_count, 0,
+        "guarded UPDATE must reject rows whose status already moved off Final"
+    );
+
+    let resolved = server
+        .store()
+        .get_with_lifecycle(&tenant, &id)
+        .await
+        .expect("ok")
+        .expect("present");
+    assert_eq!(
+        resolved.status,
+        ChunkStatus::Superseded,
+        "sweep must not clobber the newer lifecycle transition"
     );
 }
 

@@ -26,7 +26,7 @@
 use crate::error::Result;
 use crate::store::hybrid::HybridSearcher;
 use crate::store::metadata::MetadataStore;
-use crate::types::{ChunkStatus, LifecycleDelta, TenantId};
+use crate::types::TenantId;
 
 fn current_time_ms() -> i64 {
     std::time::SystemTime::now()
@@ -77,31 +77,54 @@ impl ExpirySweep {
     ) -> Result<SweepResult> {
         let now = current_time_ms();
         let ids = metadata.list_expired_before(tenant_id, now)?;
-        let count = ids.len();
-        if count == 0 {
+        if ids.is_empty() {
             return Ok(SweepResult { expired_count: 0 });
         }
 
-        // Per-row update so a single bad row does not cancel the batch;
-        // the next sweep will re-surface whatever stayed at Final.
+        // Per-row guarded UPDATE: `mark_expired_if_final` only promotes
+        // rows whose current status is still `final`, so a concurrent
+        // delete / supersession / expiry transition between the SELECT
+        // above and this UPDATE is silently tolerated (the row just
+        // doesn't count toward `expired_count`). Prevents the sweep
+        // from clobbering newer lifecycle state.
+        let mut promoted = 0usize;
         for id in &ids {
-            metadata.update_lifecycle(
-                tenant_id,
-                id,
-                &LifecycleDelta {
-                    status: Some(ChunkStatus::Expired),
-                    lifecycle_updated_at_ms: Some(now),
-                    ..Default::default()
-                },
-            )?;
+            if metadata.mark_expired_if_final(tenant_id, id, now)? {
+                promoted += 1;
+            }
         }
 
-        if let Some(h) = hybrid {
-            h.bump_tenant_memory_version(tenant_id);
+        if promoted > 0 {
+            if let Some(h) = hybrid {
+                h.bump_tenant_memory_version(tenant_id);
+            }
         }
 
         Ok(SweepResult {
-            expired_count: count,
+            expired_count: promoted,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Unit-level race-guard coverage lives alongside the SQLite
+    // MetadataStore override (`mark_expired_if_final`). The end-to-end
+    // sweep contract is covered in crates/memd/tests/expiry_and_history.rs:
+    //   - expiry_sweep_marks_rows_expired (happy path, status flip)
+    //   - expiry_sweep_is_idempotent_across_consecutive_runs
+    //   - expiry_sweep_is_safe_against_concurrent_status_change (race guard)
+    //
+    // The cache-bump path (bump_tenant_memory_version when hybrid is
+    // Some) is exercised by the CompactionRunner integration in Task C5
+    // rather than in a standalone unit test — spinning up a
+    // HybridSearcher in isolation pulls in dense search init which is
+    // tempdir-hostile for small-footprint tests.
+    #[test]
+    fn sweep_struct_is_default_constructable() {
+        let _ = super::ExpirySweep::new();
+        let _ = super::ExpirySweep;
+        let r = super::SweepResult::default();
+        assert_eq!(r.expired_count, 0);
     }
 }
