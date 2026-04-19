@@ -2303,22 +2303,20 @@ impl PersistentStore {
         chunk: MemoryChunk,
         initial: LifecycleDelta,
     ) -> Result<ChunkId> {
-        let canonical =
-            crate::store::supersession::canonicalize_for_type(&chunk.text, chunk.chunk_type);
         let tenant_id = chunk.tenant_id.clone();
 
         // Step 1: write payload via existing add path (WAL + segment +
-        // SQLite + async index). This already bumps the tenant memory
-        // version when hybrid is enabled (see add_chunks_internal).
+        // SQLite + async index). `add_chunks_internal` already populates
+        // `canonical_text` on every inserted row from each row's own
+        // `chunk.text` (D2). The previous design did a follow-up
+        // `set_canonical_text` here using the WHOLE original document's
+        // canonical form, which silently overwrote the primary row's
+        // per-row canonical_text whenever `split_for_add` produced
+        // multiple rows — Codex round-1 D2 review HIGH finding. The
+        // INSERT-side write is now the single source of truth.
         let chunk_id = <Self as Store>::add(self, chunk).await?;
 
-        // Step 2: persist canonical_text on the primary metadata row so
-        // Track D's dedup path can hash/match without rereading the
-        // immutable chunk payload.
-        self.metadata
-            .set_canonical_text(&tenant_id, &chunk_id, &canonical)?;
-
-        // Step 3: apply the initial lifecycle delta only if non-empty so
+        // Step 2: apply the initial lifecycle delta only if non-empty so
         // we skip a no-op UPDATE on the common "no overlay yet" call.
         if !initial.is_empty() {
             let now = current_time_ms();
