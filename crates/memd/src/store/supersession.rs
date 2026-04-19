@@ -15,9 +15,13 @@
 //!   delegates to `canonicalize_text`.
 //!
 //! `is_near_duplicate(a, b, threshold)` reports whether two strings share
-//! at least `threshold` of their byte-trigrams (Jaccard). The trigram
-//! input is always lowercased so similarity is independent of the
-//! per-type canonical form.
+//! at least `threshold` of their **padded char-trigrams** (Jaccard) over
+//! a lowercased view of each input. Padding follows the `pg_trgm`
+//! convention (two leading + one trailing space) so that very short
+//! inputs still produce distinguishing trigrams — without padding,
+//! `"a"` vs `"b"` would both yield empty sets and be reported as
+//! identical. Iterating over `chars()` rather than raw bytes keeps the
+//! similarity Unicode-semantic for non-ASCII text.
 
 use crate::types::ChunkType;
 use std::collections::HashSet;
@@ -43,9 +47,10 @@ pub(crate) fn canonicalize_for_type(text: &str, kind: ChunkType) -> String {
 }
 
 /// Returns `true` when `a` and `b` share at least `threshold` of their
-/// byte-trigrams (Jaccard similarity over a lowercased view of each
-/// input). Threshold range is the caller's responsibility; this fn does
-/// not validate. Used by Track D's `supersede_near_duplicates` flow.
+/// padded char-trigrams (Jaccard similarity over a lowercased view of
+/// each input). Threshold range is the caller's responsibility; this fn
+/// does not validate. Used by Track D's `supersede_near_duplicates`
+/// flow.
 #[allow(dead_code)] // wired in D3
 pub(crate) fn is_near_duplicate(a: &str, b: &str, threshold: f32) -> bool {
     jaccard_trigram(a, b) >= threshold
@@ -63,6 +68,9 @@ pub(crate) fn jaccard_trigram_score(a: &str, b: &str) -> f32 {
 fn jaccard_trigram(a: &str, b: &str) -> f32 {
     let ta = trigram_set(a);
     let tb = trigram_set(b);
+    // Both empty implies both inputs were empty after lowercasing — treat
+    // as identical so the dedup path doesn't NaN. Two distinct non-empty
+    // inputs always have non-empty trigram sets after padding.
     if ta.is_empty() && tb.is_empty() {
         return 1.0;
     }
@@ -75,12 +83,24 @@ fn jaccard_trigram(a: &str, b: &str) -> f32 {
     }
 }
 
+/// Build the `pg_trgm`-style padded char-trigram set for `s`. Padding
+/// (`"  " + s + " "`) ensures even single-char inputs produce two
+/// distinct trigrams, so `"a"` and `"b"` no longer collide on an empty
+/// set. Iterating over `chars()` keeps the result Unicode-semantic
+/// rather than byte-dependent.
 #[allow(dead_code)] // wired in D3 / D5
-fn trigram_set(s: &str) -> HashSet<[u8; 3]> {
-    let lower = s.to_lowercase();
-    let bytes = lower.as_bytes();
-    let mut out = HashSet::with_capacity(bytes.len().saturating_sub(2));
-    for w in bytes.windows(3) {
+fn trigram_set(s: &str) -> HashSet<[char; 3]> {
+    let lower: Vec<char> = s.to_lowercase().chars().collect();
+    if lower.is_empty() {
+        return HashSet::new();
+    }
+    let mut padded: Vec<char> = Vec::with_capacity(lower.len() + 3);
+    padded.push(' ');
+    padded.push(' ');
+    padded.extend(lower);
+    padded.push(' ');
+    let mut out = HashSet::with_capacity(padded.len().saturating_sub(2));
+    for w in padded.windows(3) {
         out.insert([w[0], w[1], w[2]]);
     }
     out
@@ -146,23 +166,21 @@ mod tests {
 
     #[test]
     fn is_near_duplicate_trigram_jaccard() {
-        // Inserting one short word ("on") gives a real-world trigram
-        // Jaccard of ~0.85; we use a slightly loose 0.80 so the test is
-        // resilient to small algorithm tweaks (e.g. future canonicalize
-        // changes that shift trigram counts by ±1).
+        // Inserting one short word ("on") puts the padded trigram
+        // Jaccard at ~0.86 — clears the plan's 0.85 bar with margin.
         assert!(is_near_duplicate(
             "Release freeze begins Thursday.",
             "Release freeze begins on Thursday.",
-            0.80,
+            0.85,
         ));
-        // Completely unrelated text: trigram Jaccard ≈ 0; any threshold
-        // above 0.05 must reject.
+        // Completely unrelated text: trigram Jaccard ≈ 0; any
+        // reasonable threshold must reject.
         assert!(!is_near_duplicate(
             "release freeze thursday",
             "migration rolled back",
             0.85,
         ));
-        // Single-word substitution drops Jaccard to ~0.6; the strict
+        // Single-word substitution drops Jaccard to ~0.63; the strict
         // 0.92 threshold (D3 paraphrase tier) must reject.
         assert!(!is_near_duplicate(
             "Release freeze begins Thursday.",
@@ -181,5 +199,34 @@ mod tests {
         // Both-empty short-circuits to 1.0 so the dedup path treats two
         // empty strings as identical rather than dividing by zero.
         assert!((jaccard_trigram_score("", "") - 1.0).abs() < 1e-6);
+    }
+
+    // Codex round-1 review (Track D1) flagged that the previous
+    // byte-trigram implementation reported "a" vs "b" (and any other
+    // distinct sub-3-byte inputs) as a perfect duplicate because both
+    // trigram sets were empty. Padding to "  a " and "  b " gives each
+    // input two distinct trigrams, restoring the expected 0.0 Jaccard.
+    #[test]
+    fn is_near_duplicate_distinguishes_short_distinct_inputs() {
+        assert!(!is_near_duplicate("a", "b", 0.5));
+        assert!(!is_near_duplicate("ab", "cd", 0.5));
+        // Identical short input still collides at 1.0.
+        assert!(is_near_duplicate("a", "a", 0.99));
+    }
+
+    // Codex round-1 review (Track D1) also flagged that byte-windowing
+    // on UTF-8 made similarity encoding-dependent: "é" (0xC3 0xA9) and
+    // "e" (0x65) shared no bytes by accident, but multi-byte CJK pairs
+    // would over-count via shared bytes that aren't shared codepoints.
+    // Iterating over chars() makes the comparison Unicode-semantic.
+    #[test]
+    fn is_near_duplicate_is_unicode_semantic_not_byte_semantic() {
+        assert!(!is_near_duplicate("é", "e", 0.5));
+        // CJK pair: shares two of three chars → score >0 but well
+        // below the strict default. Just confirm it scales by chars,
+        // not bytes (a pure byte impl would have over-counted shared
+        // UTF-8 prefix bytes).
+        let s = jaccard_trigram_score("漢字仮", "漢字語");
+        assert!((0.0..0.6).contains(&s), "expected ~0.33, got {s}");
     }
 }
