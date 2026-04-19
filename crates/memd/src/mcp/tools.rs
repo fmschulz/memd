@@ -95,6 +95,28 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                                 }
                             }
                         }
+                    },
+                    "include_superseded": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "When true, include chunks with status=Superseded in the results instead of hiding them."
+                    },
+                    "include_expired": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "When true, include chunks with status=Expired or a past expires_at_ms instead of hiding them."
+                    },
+                    "include_history": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "When true, include chunks in MemoryTier::History instead of hiding them."
+                    },
+                    "oversample_factor": {
+                        "type": "integer",
+                        "default": 3,
+                        "minimum": 1,
+                        "maximum": 10,
+                        "description": "Multiplier applied to k when pulling candidates from the ranker before visibility filtering. Larger values give more headroom to refill to k when many top hits are hidden; smaller values are cheaper but may under-fill. Ignored when all three include_* flags are true."
                     }
                 },
                 "required": ["query"]
