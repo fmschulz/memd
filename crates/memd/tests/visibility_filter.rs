@@ -243,11 +243,14 @@ async fn search_hides_history_tier_by_default() {
 
 #[tokio::test]
 async fn search_all_permissive_flags_disable_oversample() {
-    // When the caller opts into every hide reason the filter is a no-op
-    // and must not multiply fetch_k. We can't directly assert the
-    // internal fetch_k count from the handler, but we can assert
-    // functional behavior: with all three include_* flags true and k
-    // large, every chunk (superseded or not) appears.
+    // When the caller opts into every hide reason `resolve_visibility_
+    // and_oversample` sets oversample_factor=1 (no pre-visibility
+    // oversample). The filter itself still runs — it has to, to catch
+    // Deleted/Error rows and delete-race drops — but with oversample=1
+    // the handler does not multiply fetch_k. We can't directly assert
+    // internal fetch_k from the handler, so we check functional behavior
+    // instead: with all three include_* flags true and k large, every
+    // seeded chunk (superseded included) appears in the results.
     let (server, _tmp) = test_server().await;
 
     let mut ids = Vec::new();
