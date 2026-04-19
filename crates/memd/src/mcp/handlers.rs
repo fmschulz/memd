@@ -72,7 +72,9 @@ use crate::task_memory::{
     DIGEST_ROLE_PROJECT_BRIEF, DIGEST_ROLE_TASK_RESUME,
 };
 use crate::tiered::TieredTiming;
-use crate::types::{ChunkId, ChunkType, MemoryChunk, ProjectId, Source, TenantId, VisibilityPolicy};
+use crate::types::{
+    ChunkId, ChunkType, LifecycleDelta, MemoryChunk, ProjectId, Source, TenantId, VisibilityPolicy,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -188,7 +190,7 @@ pub struct TimeRange {
 }
 
 /// Parameters for memory.add
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct AddParams {
     #[serde(default)]
     pub tenant_id: String,
@@ -203,6 +205,16 @@ pub struct AddParams {
     pub source: Option<SourceParams>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Optional wall-clock expiry (ms since epoch). When set, the chunk is
+    /// hidden at retrieval after this time (C2) and materialised to
+    /// `status=Expired` by the compaction sweep (C3).
+    #[serde(default)]
+    pub expires_at_ms: Option<i64>,
+    /// Optional review reminder (ms since epoch). Purely informational at
+    /// the retrieval layer — does NOT hide the chunk — but callers may
+    /// surface it to prompt review.
+    #[serde(default)]
+    pub review_after_ms: Option<i64>,
 }
 
 /// Source information for a chunk
@@ -217,7 +229,7 @@ pub struct SourceParams {
 }
 
 /// Single chunk for batch add
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct BatchChunkParams {
     pub text: String,
     #[serde(rename = "type")]
@@ -230,6 +242,21 @@ pub struct BatchChunkParams {
     pub source: Option<SourceParams>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Optional wall-clock expiry (ms since epoch) for this chunk. Same
+    /// semantics as `AddParams::expires_at_ms`.
+    #[serde(default)]
+    pub expires_at_ms: Option<i64>,
+    /// Optional review reminder (ms since epoch) for this chunk. Same
+    /// semantics as `AddParams::review_after_ms`.
+    #[serde(default)]
+    pub review_after_ms: Option<i64>,
+}
+
+impl BatchChunkParams {
+    /// True when the chunk carries any Track C temporal overlay field.
+    fn has_lifecycle_overlay(&self) -> bool {
+        self.expires_at_ms.is_some() || self.review_after_ms.is_some()
+    }
 }
 
 /// Parameters for memory.add_batch
@@ -4047,10 +4074,31 @@ pub async fn handle_memory_add<S: Store>(
         chunk = chunk.with_tags(tags);
     }
 
-    let chunk_id = store
-        .add(chunk)
-        .await
-        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let has_lifecycle = params.expires_at_ms.is_some() || params.review_after_ms.is_some();
+    let chunk_id = if has_lifecycle {
+        // Temporal overlay requires the persistent-store write path that
+        // updates the lifecycle row in the same logical op. Non-persistent
+        // stores (used only by a small handful of tests) have no overlay
+        // table, so we refuse rather than silently dropping the fields.
+        let ps = store.as_persistent().ok_or_else(|| {
+            McpError::ToolError(
+                "memory.add with temporal fields requires a persistent store".into(),
+            )
+        })?;
+        let delta = LifecycleDelta {
+            expires_at_ms: params.expires_at_ms.map(Some),
+            review_after_ms: params.review_after_ms.map(Some),
+            ..Default::default()
+        };
+        ps.add_chunk_with_lifecycle(chunk, delta)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?
+    } else {
+        store
+            .add(chunk)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?
+    };
 
     info!(chunk_id = %chunk_id, "chunk added");
 
@@ -4183,38 +4231,83 @@ pub async fn handle_memory_add_batch<S: Store>(
             .map_err(|e| McpError::ToolError(e.to_string()))?;
     }
 
-    let mut chunks = Vec::with_capacity(params.chunks.len());
+    // If any chunk carries a temporal overlay field, fall out of the
+    // batched fast path and write each chunk through
+    // `add_chunk_with_lifecycle` so per-row lifecycle metadata is
+    // applied. Batches without any lifecycle fields keep the original
+    // `store.add_batch` pipeline unchanged.
+    let any_lifecycle = params.chunks.iter().any(|c| c.has_lifecycle_overlay());
 
-    for chunk_params in params.chunks {
-        let chunk_type = parse_chunk_type(&chunk_params.chunk_type)?;
-        let mut chunk = MemoryChunk::new(tenant_id.clone(), &chunk_params.text, chunk_type);
+    let chunk_ids = if any_lifecycle {
+        let ps = store.as_persistent().ok_or_else(|| {
+            McpError::ToolError(
+                "memory.add_batch with temporal fields requires a persistent store".into(),
+            )
+        })?;
+        let mut ids = Vec::with_capacity(params.chunks.len());
+        for chunk_params in params.chunks {
+            let chunk_type = parse_chunk_type(&chunk_params.chunk_type)?;
+            let mut chunk = MemoryChunk::new(tenant_id.clone(), &chunk_params.text, chunk_type);
+            if let Some(project_id) = &chunk_params.project_id {
+                chunk = chunk.with_project(ProjectId::new(Some(project_id.clone())));
+            }
+            if let Some(episode_id) = &chunk_params.episode_id {
+                validate_episode_id(episode_id)?;
+                let mut tags = chunk.tags.clone();
+                tags.push(make_episode_tag(episode_id));
+                chunk = chunk.with_tags(tags);
+            }
+            chunk = chunk.with_source(params_to_source(chunk_params.source));
+            if !chunk_params.tags.is_empty() {
+                let mut tags = chunk.tags.clone();
+                tags.extend(chunk_params.tags);
+                chunk = chunk.with_tags(tags);
+            }
+            let delta = LifecycleDelta {
+                expires_at_ms: chunk_params.expires_at_ms.map(Some),
+                review_after_ms: chunk_params.review_after_ms.map(Some),
+                ..Default::default()
+            };
+            let id = ps
+                .add_chunk_with_lifecycle(chunk, delta)
+                .await
+                .map_err(|e| McpError::ToolError(e.to_string()))?;
+            ids.push(id);
+        }
+        ids
+    } else {
+        let mut chunks = Vec::with_capacity(params.chunks.len());
+        for chunk_params in params.chunks {
+            let chunk_type = parse_chunk_type(&chunk_params.chunk_type)?;
+            let mut chunk = MemoryChunk::new(tenant_id.clone(), &chunk_params.text, chunk_type);
 
-        if let Some(project_id) = &chunk_params.project_id {
-            chunk = chunk.with_project(ProjectId::new(Some(project_id.clone())));
+            if let Some(project_id) = &chunk_params.project_id {
+                chunk = chunk.with_project(ProjectId::new(Some(project_id.clone())));
+            }
+
+            if let Some(episode_id) = &chunk_params.episode_id {
+                validate_episode_id(episode_id)?;
+                let mut tags = chunk.tags.clone();
+                tags.push(make_episode_tag(episode_id));
+                chunk = chunk.with_tags(tags);
+            }
+
+            chunk = chunk.with_source(params_to_source(chunk_params.source));
+
+            if !chunk_params.tags.is_empty() {
+                let mut tags = chunk.tags.clone();
+                tags.extend(chunk_params.tags);
+                chunk = chunk.with_tags(tags);
+            }
+
+            chunks.push(chunk);
         }
 
-        if let Some(episode_id) = &chunk_params.episode_id {
-            validate_episode_id(episode_id)?;
-            let mut tags = chunk.tags.clone();
-            tags.push(make_episode_tag(episode_id));
-            chunk = chunk.with_tags(tags);
-        }
-
-        chunk = chunk.with_source(params_to_source(chunk_params.source));
-
-        if !chunk_params.tags.is_empty() {
-            let mut tags = chunk.tags.clone();
-            tags.extend(chunk_params.tags);
-            chunk = chunk.with_tags(tags);
-        }
-
-        chunks.push(chunk);
-    }
-
-    let chunk_ids = store
-        .add_batch(chunks)
-        .await
-        .map_err(|e| McpError::ToolError(e.to_string()))?;
+        store
+            .add_batch(chunks)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?
+    };
 
     info!(count = chunk_ids.len(), "batch add completed");
 
@@ -7270,6 +7363,8 @@ mod tests {
             episode_id: None,
             source: None,
             tags: vec![],
+        expires_at_ms: None,
+        review_after_ms: None,
         };
 
         let add_result = handle_memory_add(&store, None, add_params).await.unwrap();
@@ -7314,6 +7409,8 @@ mod tests {
                 episode_id: None,
                 source: None,
                 tags: vec![],
+            expires_at_ms: None,
+            review_after_ms: None,
             },
         )
         .await
@@ -7330,6 +7427,8 @@ mod tests {
                 episode_id: None,
                 source: None,
                 tags: vec![],
+            expires_at_ms: None,
+            review_after_ms: None,
             },
         )
         .await
@@ -7380,6 +7479,8 @@ mod tests {
                     episode_id: None,
                     source: None,
                     tags: vec![],
+                expires_at_ms: None,
+                review_after_ms: None,
                 },
             )
             .await
@@ -7485,6 +7586,8 @@ mod tests {
                 episode_id: Some("ep1".to_string()),
                 source: None,
                 tags: vec![],
+            expires_at_ms: None,
+            review_after_ms: None,
             },
         )
         .await
@@ -7501,6 +7604,8 @@ mod tests {
                 episode_id: Some("ep2".to_string()),
                 source: None,
                 tags: vec![],
+            expires_at_ms: None,
+            review_after_ms: None,
             },
         )
         .await
@@ -7565,6 +7670,8 @@ mod tests {
                     tool_call_id: Some("call-1".to_string()),
                 }),
                 tags: vec![],
+                expires_at_ms: None,
+                review_after_ms: None,
             },
         )
         .await
@@ -7623,6 +7730,8 @@ mod tests {
                 episode_id: None,
                 source: None,
                 tags: vec![],
+            expires_at_ms: None,
+            review_after_ms: None,
             },
         )
         .await
@@ -7680,6 +7789,8 @@ mod tests {
                 ..Default::default()
             }),
             tags: vec!["rust".to_string(), "function".to_string()],
+            expires_at_ms: None,
+            review_after_ms: None,
         };
 
         let result = handle_memory_add(&store, None, add_params).await.unwrap();
@@ -7721,6 +7832,8 @@ mod tests {
                     episode_id: None,
                     source: None,
                     tags: vec![],
+                expires_at_ms: None,
+                review_after_ms: None,
                 },
                 BatchChunkParams {
                     text: "chunk 2".to_string(),
@@ -7729,6 +7842,8 @@ mod tests {
                     episode_id: None,
                     source: None,
                     tags: vec![],
+                expires_at_ms: None,
+                review_after_ms: None,
                 },
             ],
         };
@@ -7752,6 +7867,8 @@ mod tests {
             episode_id: None,
             source: None,
             tags: vec![],
+        expires_at_ms: None,
+        review_after_ms: None,
         };
 
         let add_result = handle_memory_add(&store, None, add_params).await.unwrap();
@@ -7803,6 +7920,8 @@ mod tests {
                 episode_id: None,
                 source: None,
                 tags: vec![],
+            expires_at_ms: None,
+            review_after_ms: None,
             },
         )
         .await
@@ -7841,6 +7960,8 @@ mod tests {
                 episode_id: None,
                 source: None,
                 tags: vec![],
+                expires_at_ms: None,
+                review_after_ms: None,
             };
             handle_memory_add(&store, None, add_params).await.unwrap();
         }
@@ -7893,6 +8014,8 @@ mod tests {
             episode_id: None,
             source: None,
             tags: vec![],
+        expires_at_ms: None,
+        review_after_ms: None,
         };
 
         let result = handle_memory_add(&store, None, params).await;
@@ -7930,6 +8053,8 @@ mod tests {
             episode_id: None,
             source: None,
             tags: vec![],
+        expires_at_ms: None,
+        review_after_ms: None,
         };
 
         handle_memory_add(&store, None, add_params).await.unwrap();
@@ -7968,6 +8093,8 @@ mod tests {
             episode_id: None,
             source: None,
             tags: vec![],
+        expires_at_ms: None,
+        review_after_ms: None,
         };
 
         handle_memory_add(&store, None, add_params).await.unwrap();
@@ -8019,6 +8146,9 @@ mod tests {
                     "ctx:subsystem:retrieval".to_string(),
                     "ctx:file:src/retrieval/mod.rs".to_string(),
                 ],
+            
+            expires_at_ms: None,
+            review_after_ms: None,
             },
         )
         .await
@@ -8042,6 +8172,9 @@ mod tests {
                     "ctx:subsystem:retrieval".to_string(),
                     "ctx:file:src/retrieval/index.rs".to_string(),
                 ],
+            
+            expires_at_ms: None,
+            review_after_ms: None,
             },
         )
         .await
@@ -8065,6 +8198,9 @@ mod tests {
                     "ctx:subsystem:planner".to_string(),
                     "ctx:file:src/planner/mod.rs".to_string(),
                 ],
+            
+            expires_at_ms: None,
+            review_after_ms: None,
             },
         )
         .await
@@ -8114,6 +8250,9 @@ mod tests {
                     "ctx:subsystem:storage".to_string(),
                     "ctx:file:crates/memd/src/store/hybrid.rs".to_string(),
                 ],
+            
+            expires_at_ms: None,
+            review_after_ms: None,
             },
         )
         .await
@@ -8164,6 +8303,9 @@ mod tests {
                         "ctx:subsystem:retrieval".to_string(),
                         tier_tag.to_string(),
                     ],
+                
+                expires_at_ms: None,
+                review_after_ms: None,
                 },
             )
             .await
@@ -8252,6 +8394,9 @@ mod tests {
                     "ctx:file:crates/memd/src/store/hybrid.rs".to_string(),
                     "ctx:tier:hot".to_string(),
                 ],
+            
+            expires_at_ms: None,
+            review_after_ms: None,
             },
         )
         .await
@@ -8720,6 +8865,8 @@ mod tests {
                 episode_id: None,
                 source: None,
                 tags: vec![],
+            expires_at_ms: None,
+            review_after_ms: None,
             },
         )
         .await

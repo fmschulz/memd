@@ -186,6 +186,14 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                             "type": "string"
                         },
                         "description": "Optional tags for filtering"
+                    },
+                    "expires_at_ms": {
+                        "type": "integer",
+                        "description": "Optional wall-clock expiry (ms since epoch). When set, the chunk is lazy-hidden from retrieval once expired (Track C2) and materialised to status=Expired by the compaction sweep (Track C3). Requires a persistent store."
+                    },
+                    "review_after_ms": {
+                        "type": "integer",
+                        "description": "Optional review reminder (ms since epoch). Informational only — does not hide the chunk. Requires a persistent store."
                     }
                 },
                 "required": ["text", "type"]
@@ -235,6 +243,14 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                                         "type": "string"
                                     },
                                     "description": "Optional tags"
+                                },
+                                "expires_at_ms": {
+                                    "type": "integer",
+                                    "description": "Optional wall-clock expiry (ms since epoch) for this chunk. Same semantics as memory.add.expires_at_ms."
+                                },
+                                "review_after_ms": {
+                                    "type": "integer",
+                                    "description": "Optional review reminder (ms since epoch) for this chunk. Informational only."
                                 }
                             },
                             "required": ["text", "type"]
