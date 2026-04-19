@@ -81,12 +81,14 @@ impl ExpirySweep {
             return Ok(SweepResult { expired_count: 0 });
         }
 
-        // Per-row guarded UPDATE: `mark_expired_if_final` only promotes
-        // rows whose current status is still `final`, so a concurrent
-        // delete / supersession / expiry transition between the SELECT
-        // above and this UPDATE is silently tolerated (the row just
-        // doesn't count toward `expired_count`). Prevents the sweep
-        // from clobbering newer lifecycle state.
+        // Per-row guarded UPDATE: `mark_expired_if_final` re-checks
+        // both `status = 'final'` and the retention predicate
+        // (`expires_at_ms IS NOT NULL AND expires_at_ms <= now_ms`) at
+        // UPDATE time, so concurrent status transitions OR expiry
+        // clears/extensions between this SELECT and the UPDATE are
+        // silently tolerated (the row just doesn't count toward
+        // `expired_count`). Prevents the sweep from clobbering newer
+        // lifecycle state.
         let mut promoted = 0usize;
         for id in &ids {
             if metadata.mark_expired_if_final(tenant_id, id, now)? {
