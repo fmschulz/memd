@@ -394,6 +394,103 @@ async fn search_hides_chunk_expired_by_wall_clock() {
     );
 }
 
+#[tokio::test]
+async fn list_lifecycle_hidden_returns_superseded_expired_and_history() {
+    // B2 correctness anchor: the `MetadataStore::list_lifecycle_hidden`
+    // helper must surface every row the visibility policy hides by
+    // lifecycle state (status=Superseded/Expired OR tier=History). The
+    // compaction runner unions this list into the HNSW-rebuild excluded
+    // set so the rebuilt index no longer carries weight for rows
+    // already invisible to callers.
+    //
+    // We exercise the metadata helper directly rather than the full
+    // compaction path — the runner's HNSW rebuild path requires a
+    // populated DenseSearcher, which test_server() deliberately disables
+    // for fast iteration. The wiring under test (runner.rs calling
+    // list_lifecycle_hidden and unioning it with get_deleted_chunk_ids)
+    // is a trivial set union; the risk is that the metadata helper
+    // misses a hide category. Assert that once over the three known
+    // categories is enough to pin the contract.
+    use memd::store::metadata::MetadataStore;
+    use memd::types::lifecycle::{LifecycleDelta, MemoryTier};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store = persistent_store(tmp.path()).await;
+    let t = tenant("t");
+    // Seed 5 chunks; we'll mutate 3 of them into different hidden states
+    // and leave 2 alone (visible).
+    let mut ids = Vec::new();
+    for _ in 0..5 {
+        let id = store
+            .add(MemoryChunk::new(t.clone(), "payload", ChunkType::Doc))
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+
+    // (a) status = Superseded via atomic supersede.
+    let _ = store
+        .supersede_chunk(&t, &ids[0], MemoryChunk::new(t.clone(), "v2", ChunkType::Doc))
+        .await
+        .unwrap();
+    // (b) status = Expired via direct overlay write — mimics what
+    // ExpirySweep (Track C3) will do when it lands.
+    store
+        .update_lifecycle(
+            &t,
+            &ids[1],
+            &LifecycleDelta {
+                status: Some(ChunkStatus::Expired),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    // (c) tier = History via direct overlay write.
+    store
+        .update_lifecycle(
+            &t,
+            &ids[2],
+            &LifecycleDelta {
+                tier: Some(MemoryTier::History),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Compaction runner uses this helper — the contract under test is
+    // "every lifecycle-hidden category shows up". The three mutated ids
+    // must all be present; the two untouched chunks must not be.
+    let hidden = store.metadata().list_lifecycle_hidden(&t).unwrap();
+    let hidden_set: std::collections::HashSet<_> = hidden.iter().cloned().collect();
+    assert!(
+        hidden_set.contains(&ids[0]),
+        "superseded chunk {} missing from list_lifecycle_hidden: {hidden_set:?}",
+        ids[0]
+    );
+    assert!(
+        hidden_set.contains(&ids[1]),
+        "expired-status chunk {} missing from list_lifecycle_hidden: {hidden_set:?}",
+        ids[1]
+    );
+    assert!(
+        hidden_set.contains(&ids[2]),
+        "history-tier chunk {} missing from list_lifecycle_hidden: {hidden_set:?}",
+        ids[2]
+    );
+    assert!(
+        !hidden_set.contains(&ids[3]),
+        "untouched visible chunk {} leaked into list_lifecycle_hidden: {hidden_set:?}",
+        ids[3]
+    );
+    assert!(
+        !hidden_set.contains(&ids[4]),
+        "untouched visible chunk {} leaked into list_lifecycle_hidden: {hidden_set:?}",
+        ids[4]
+    );
+}
+
 // Suppress unused-import warnings for items only used in cross-test helpers.
 #[allow(dead_code)]
 fn _unused_marker(_: ChunkId, _: ChunkStatus) {}
