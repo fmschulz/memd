@@ -4,6 +4,7 @@
 //! the compaction lifecycle. Includes metrics gathering, tombstone auditing,
 //! HNSW rebuild, segment merge, throttling, and compaction runner.
 
+pub mod expiry_sweep;
 pub mod hnsw_rebuild;
 pub mod metrics;
 pub mod runner;
@@ -11,6 +12,7 @@ pub mod segment_merge;
 pub mod throttle;
 pub mod tombstone_audit;
 
+pub use expiry_sweep::{ExpirySweep, SweepResult};
 pub use hnsw_rebuild::{HnswRebuilder, RebuildResult};
 pub use metrics::CompactionMetrics;
 pub use runner::{CompactionResult, CompactionRunner};

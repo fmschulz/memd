@@ -5,7 +5,7 @@ mod common;
 
 use common::*;
 use memd::store::Store;
-use memd::types::{ChunkId, TenantId};
+use memd::types::{ChunkId, ChunkStatus, TenantId};
 use serde_json::json;
 
 fn current_time_ms() -> i64 {
@@ -203,6 +203,128 @@ async fn future_expiry_does_not_hide_chunk_before_the_deadline() {
     assert!(
         ids.contains(&id),
         "chunk with future expiry must remain visible: {ids:?}"
+    );
+}
+
+/// Track C3: `ExpirySweep` materialises `status=Expired` for rows whose
+/// `expires_at_ms <= now_ms`.
+///
+/// Verifies both the count reported by the sweep and that the row's
+/// authoritative status flips from `Final` to `Expired` on the overlay.
+#[tokio::test]
+async fn expiry_sweep_marks_rows_expired_and_bumps_cache() {
+    use memd::compaction::ExpirySweep;
+
+    let (server, _tmp) = test_server().await;
+    let tenant = TenantId::new("t").expect("valid tenant id");
+
+    let past = 1_i64;
+    let resp = call_tool(
+        &server,
+        "memory.add",
+        json!({
+            "tenant_id": "t",
+            "text": "stale note",
+            "type": "doc",
+            "expires_at_ms": past,
+        }),
+    )
+    .await;
+    let id_str = parse_result_text(&resp)["chunk_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let id = ChunkId::parse(&id_str).expect("valid chunk id");
+
+    // Before: overlay is Final (C2 hides it from search but does not
+    // flip the status).
+    let resolved = server
+        .store()
+        .get_with_lifecycle(&tenant, &id)
+        .await
+        .expect("ok")
+        .expect("present");
+    assert_eq!(resolved.status, ChunkStatus::Final);
+
+    let sweep = ExpirySweep::new();
+    let result = sweep
+        .run(
+            server.store().metadata(),
+            server.store().hybrid(),
+            &tenant,
+        )
+        .expect("sweep ok");
+    assert_eq!(result.expired_count, 1);
+
+    let resolved = server
+        .store()
+        .get_with_lifecycle(&tenant, &id)
+        .await
+        .expect("ok")
+        .expect("present");
+    assert_eq!(
+        resolved.status,
+        ChunkStatus::Expired,
+        "sweep must materialise status=Expired"
+    );
+    assert!(
+        resolved.lifecycle.lifecycle_updated_at_ms > 0,
+        "sweep must stamp lifecycle_updated_at_ms"
+    );
+}
+
+/// Idempotency: a second sweep immediately after the first must return
+/// 0 because the Expired rows were filtered out of `list_expired_before`.
+#[tokio::test]
+async fn expiry_sweep_is_idempotent_across_consecutive_runs() {
+    use memd::compaction::ExpirySweep;
+
+    let (server, _tmp) = test_server().await;
+    let tenant = TenantId::new("t").expect("valid tenant id");
+
+    call_tool(
+        &server,
+        "memory.add",
+        json!({
+            "tenant_id": "t",
+            "text": "stale 1",
+            "type": "doc",
+            "expires_at_ms": 1_i64,
+        }),
+    )
+    .await;
+    call_tool(
+        &server,
+        "memory.add",
+        json!({
+            "tenant_id": "t",
+            "text": "stale 2",
+            "type": "doc",
+            "expires_at_ms": 1_i64,
+        }),
+    )
+    .await;
+
+    let sweep = ExpirySweep::new();
+    let r1 = sweep
+        .run(
+            server.store().metadata(),
+            server.store().hybrid(),
+            &tenant,
+        )
+        .expect("first sweep ok");
+    assert_eq!(r1.expired_count, 2);
+
+    let r2 = sweep
+        .run(
+            server.store().metadata(),
+            server.store().hybrid(),
+            &tenant,
+        )
+        .expect("second sweep ok");
+    assert_eq!(
+        r2.expired_count, 0,
+        "already-expired rows must not be re-swept"
     );
 }
 
