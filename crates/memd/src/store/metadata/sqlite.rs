@@ -1911,12 +1911,17 @@ impl MetadataStore for SqliteMetadataStore {
 
     fn list_expired_before(&self, tenant_id: &TenantId, now_ms: i64) -> Result<Vec<ChunkId>> {
         let conn = self.pool.get();
+        // Use `<=` so this matches `VisibilityPolicy::is_visible_at`
+        // (which hides any row with `expires_at_ms <= now_ms`); otherwise
+        // a row expiring exactly at `now_ms` is hidden by retrieval but
+        // never materialised to status=Expired by the sweep until the
+        // next invocation, which breaks the sweep→promote pipeline.
         let mut stmt = conn.prepare(
             "SELECT chunk_id FROM chunks
              WHERE tenant_id = ?1
                AND expires_at_ms IS NOT NULL
-               AND expires_at_ms < ?2
-               AND status NOT IN ('deleted', 'expired')",
+               AND expires_at_ms <= ?2
+               AND status NOT IN ('deleted', 'expired', 'superseded', 'error')",
         )?;
         let rows = stmt.query_map(
             rusqlite::params![tenant_id.as_str(), now_ms],
@@ -1935,6 +1940,29 @@ impl MetadataStore for SqliteMetadataStore {
             ids.push(id);
         }
         Ok(ids)
+    }
+
+    fn mark_expired_if_final(
+        &self,
+        tenant_id: &TenantId,
+        chunk_id: &ChunkId,
+        now_ms: i64,
+    ) -> Result<bool> {
+        // Guarded UPDATE: only matches rows still at `status='final'`.
+        // Any other status (deleted, superseded, expired, error) is
+        // treated as "raced out from under the sweep" and skipped so
+        // we never overwrite a newer lifecycle transition.
+        let conn = self.pool.get();
+        let rows = conn.execute(
+            "UPDATE chunks
+                SET status = 'expired',
+                    lifecycle_updated_at_ms = ?3
+              WHERE tenant_id = ?1
+                AND chunk_id = ?2
+                AND status = 'final'",
+            rusqlite::params![tenant_id.as_str(), chunk_id.to_string(), now_ms],
+        )?;
+        Ok(rows == 1)
     }
 
     fn list_stale_superseded(

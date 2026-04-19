@@ -152,8 +152,50 @@ pub trait MetadataStore: Send + Sync {
     /// List chunk IDs whose retention window has elapsed before `now_ms`.
     ///
     /// Skips rows already in terminal lifecycle states (`deleted`,
-    /// `expired`) so sweeps do not retouch previously expired rows.
+    /// `expired`, `superseded`, `error`) so sweeps do not retouch rows
+    /// that another writer has already moved out from under us. Uses
+    /// `expires_at_ms <= now_ms` to match `VisibilityPolicy::is_visible_at`.
     fn list_expired_before(&self, tenant_id: &TenantId, now_ms: i64) -> Result<Vec<ChunkId>>;
+
+    /// Atomically promote one chunk to `status='expired'` with a
+    /// guard against concurrent status changes. Only updates when the
+    /// row's current status is still `final` (i.e. the sweep has not
+    /// been raced by a delete, supersession, expiry, or error
+    /// transition). Stamps `lifecycle_updated_at_ms = now_ms`.
+    ///
+    /// Returns `true` when exactly one row was updated, `false` when
+    /// the guard rejected the update (row was already in a terminal
+    /// state, or not present).
+    ///
+    /// Default implementation reads the current row and then calls
+    /// `update_lifecycle`; this is NOT race-free. Backends with real
+    /// SQL should override with a single guarded `UPDATE ... WHERE
+    /// status = 'final'` statement.
+    fn mark_expired_if_final(
+        &self,
+        tenant_id: &TenantId,
+        chunk_id: &ChunkId,
+        now_ms: i64,
+    ) -> Result<bool> {
+        let current = match self.get(tenant_id, chunk_id)? {
+            Some(m) => m,
+            None => return Ok(false),
+        };
+        use crate::types::ChunkStatus;
+        if current.status != ChunkStatus::Final {
+            return Ok(false);
+        }
+        self.update_lifecycle(
+            tenant_id,
+            chunk_id,
+            &LifecycleDelta {
+                status: Some(ChunkStatus::Expired),
+                lifecycle_updated_at_ms: Some(now_ms),
+                ..Default::default()
+            },
+        )?;
+        Ok(true)
+    }
 
     /// List superseded/expired chunk IDs older than the given cutoff
     /// that are not yet demoted to the history tier. Feeds history
