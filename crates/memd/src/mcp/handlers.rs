@@ -5703,26 +5703,38 @@ pub async fn handle_memory_get<S: Store>(store: &S, params: GetParams) -> Result
         // can retry with the right knob without having to triangulate
         // from status + tier + expires_at_ms.
         //
-        // Precedence matters when multiple policies would hide the
-        // same row (e.g. a Superseded chunk with an expired
-        // `expires_at_ms`): status takes priority, then the wall-clock
-        // `expired` overlay (only applies to rows that are still
-        // `Final` — other statuses don't gate on it), then tier.
-        let reason = if resolved.status == crate::types::ChunkStatus::Superseded {
-            "superseded"
-        } else if resolved.status == crate::types::ChunkStatus::Expired {
-            "expired"
-        } else if resolved.status == crate::types::ChunkStatus::Deleted {
-            "deleted"
-        } else if resolved.status == crate::types::ChunkStatus::Final
-            && resolved
+        // Precedence MUST mirror `VisibilityPolicy::is_visible_at`
+        // exactly, otherwise this discriminator reports a flag that
+        // wouldn't actually unhide the row. The policy hides in the
+        // order: status → tier → wall-clock expiry. `Deleted` rows
+        // never reach this branch because `get_with_lifecycle` filters
+        // them upstream; `Error` rows do reach here because the store
+        // layer returns them (they are hidden by `is_visible`'s
+        // status arm), and we report them as `"error"` — there is no
+        // `include_error` knob, but the discriminator still describes
+        // the state accurately instead of falling through to a wrong
+        // bucket like `"history"`.
+        use crate::types::{ChunkStatus, MemoryTier};
+        let reason = match resolved.status {
+            ChunkStatus::Superseded => "superseded",
+            ChunkStatus::Expired => "expired",
+            ChunkStatus::Error => "error",
+            // At this point the status arm of `is_visible_at` accepted
+            // the row, so the hide must be tier-based or clock-based.
+            // Check tier first to match the policy's own order.
+            _ if resolved.lifecycle.tier == MemoryTier::History => "history",
+            _ if resolved
                 .lifecycle
                 .expires_at_ms
-                .is_some_and(|t| t <= now_ms)
-        {
-            "expired"
-        } else {
-            "history"
+                .is_some_and(|t| t <= now_ms) =>
+            {
+                "expired"
+            }
+            // Unreachable: if none of the above, the row would have
+            // been visible. Keep a defensive fallback rather than
+            // panicking so a future policy change can't take the
+            // handler down.
+            _ => "unknown",
         };
         info!(
             chunk_id = %chunk_id,
