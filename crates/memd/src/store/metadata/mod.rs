@@ -158,19 +158,29 @@ pub trait MetadataStore: Send + Sync {
     fn list_expired_before(&self, tenant_id: &TenantId, now_ms: i64) -> Result<Vec<ChunkId>>;
 
     /// Atomically promote one chunk to `status='expired'` with a
-    /// guard against concurrent status changes. Only updates when the
-    /// row's current status is still `final` (i.e. the sweep has not
-    /// been raced by a delete, supersession, expiry, or error
-    /// transition). Stamps `lifecycle_updated_at_ms = now_ms`.
+    /// guard against concurrent status *and* retention-window
+    /// changes. The backend-level implementation re-checks two
+    /// predicates at UPDATE time so a row that was eligible when the
+    /// sweep SELECTed it is no longer promoted if either drifted:
     ///
-    /// Returns `true` when exactly one row was updated, `false` when
-    /// the guard rejected the update (row was already in a terminal
-    /// state, or not present).
+    /// 1. `status = 'final'` — any other status (deleted,
+    ///    superseded, expired, error) is treated as "raced out from
+    ///    under the sweep".
+    /// 2. `expires_at_ms IS NOT NULL AND expires_at_ms <= now_ms` —
+    ///    if a concurrent writer cleared the expiry or pushed it
+    ///    forward while leaving status=Final, the row is no longer
+    ///    eligible and is skipped.
+    ///
+    /// Stamps `lifecycle_updated_at_ms = now_ms` on a successful
+    /// promotion. Returns `true` when exactly one row was updated,
+    /// `false` when either guard rejected the update (or the row is
+    /// not present).
     ///
     /// Default implementation reads the current row and then calls
     /// `update_lifecycle`; this is NOT race-free. Backends with real
     /// SQL should override with a single guarded `UPDATE ... WHERE
-    /// status = 'final'` statement.
+    /// status = 'final' AND expires_at_ms IS NOT NULL AND
+    /// expires_at_ms <= :now_ms` statement.
     fn mark_expired_if_final(
         &self,
         tenant_id: &TenantId,
