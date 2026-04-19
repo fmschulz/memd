@@ -1028,6 +1028,131 @@ async fn compaction_skips_sweeps_when_disabled_via_config() {
     assert_eq!(r1.status, ChunkStatus::Final);
 }
 
+/// Track C6: `memory.set_expiry` updates the overlay and bumps the
+/// tenant cache version.
+#[tokio::test]
+async fn memory_set_expiry_updates_overlay() {
+    let (server, _tmp) = test_server().await;
+    let tenant = TenantId::new("t").expect("valid tenant id");
+
+    // Seed a chunk without any temporal overlay.
+    let resp = call_tool(
+        &server,
+        "memory.add",
+        json!({ "tenant_id": "t", "text": "needs expiry", "type": "doc" }),
+    )
+    .await;
+    let id_str = parse_result_text(&resp)["chunk_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let id = ChunkId::parse(&id_str).expect("valid chunk id");
+
+    // Set expires_at_ms and review_after_ms via memory.set_expiry.
+    let resp = call_tool(
+        &server,
+        "memory.set_expiry",
+        json!({
+            "tenant_id": "t",
+            "chunk_id": id_str,
+            "expires_at_ms": 1_900_000_000_000_i64,
+            "review_after_ms": 1_800_000_000_000_i64,
+        }),
+    )
+    .await;
+    let body = parse_result_text(&resp);
+    assert_eq!(body["updated"], true);
+
+    let resolved = server
+        .store()
+        .get_with_lifecycle(&tenant, &id)
+        .await
+        .expect("ok")
+        .expect("present");
+    assert_eq!(resolved.lifecycle.expires_at_ms, Some(1_900_000_000_000));
+    assert_eq!(resolved.lifecycle.review_after_ms, Some(1_800_000_000_000));
+}
+
+/// `null` on an overlay field must clear it; absent must leave it alone.
+#[tokio::test]
+async fn memory_set_expiry_triple_state_clear_vs_leave() {
+    let (server, _tmp) = test_server().await;
+    let tenant = TenantId::new("t").expect("valid tenant id");
+
+    // Start with both fields set via memory.add.
+    let resp = call_tool(
+        &server,
+        "memory.add",
+        json!({
+            "tenant_id": "t",
+            "text": "both set",
+            "type": "doc",
+            "expires_at_ms": 1_900_000_000_000_i64,
+            "review_after_ms": 1_800_000_000_000_i64,
+        }),
+    )
+    .await;
+    let id_str = parse_result_text(&resp)["chunk_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let id = ChunkId::parse(&id_str).expect("valid chunk id");
+
+    // Clear expires_at_ms (null) and leave review_after_ms alone (absent).
+    call_tool(
+        &server,
+        "memory.set_expiry",
+        json!({
+            "tenant_id": "t",
+            "chunk_id": id_str,
+            "expires_at_ms": null,
+        }),
+    )
+    .await;
+
+    let resolved = server
+        .store()
+        .get_with_lifecycle(&tenant, &id)
+        .await
+        .expect("ok")
+        .expect("present");
+    assert!(
+        resolved.lifecycle.expires_at_ms.is_none(),
+        "expires_at_ms must be cleared by explicit null"
+    );
+    assert_eq!(
+        resolved.lifecycle.review_after_ms,
+        Some(1_800_000_000_000),
+        "review_after_ms must be untouched when absent from payload"
+    );
+}
+
+/// Payload with neither field must be rejected as a no-op.
+#[tokio::test]
+async fn memory_set_expiry_rejects_empty_payload() {
+    let (server, _tmp) = test_server().await;
+    let resp = call_tool(
+        &server,
+        "memory.add",
+        json!({ "tenant_id": "t", "text": "x", "type": "doc" }),
+    )
+    .await;
+    let id = parse_result_text(&resp)["chunk_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = call_tool(
+        &server,
+        "memory.set_expiry",
+        json!({ "tenant_id": "t", "chunk_id": id }),
+    )
+    .await;
+    assert!(
+        parse_error(&resp).is_some(),
+        "memory.set_expiry with neither field set must return an error, got: {resp}"
+    );
+}
+
 #[tokio::test]
 async fn memory_add_batch_validation_failure_leaves_no_partial_writes() {
     // When any chunk in a lifecycle-enabled batch fails validation,
