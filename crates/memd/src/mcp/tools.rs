@@ -1148,12 +1148,15 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
         ToolDefinition::new(
             "memory.get",
             "Fetch a chunk by id with its lifecycle overlay. Response shapes: \
-             `{found: false}` when the chunk does not exist; \
-             `{found: true, hidden: true, status, tier}` when the chunk is hidden \
-             by the visibility policy (status in {superseded, expired, deleted, error} \
-             OR tier=history, or expires_at_ms has passed — caller can opt in via \
-             include_superseded/include_expired/include_history); \
-             `{found: true, chunk, lifecycle, status}` when the chunk is visible.",
+             `{found: false}` when the chunk does not exist OR is Deleted; \
+             `{found: true, hidden: true, status, tier, hidden_reason}` when the \
+             chunk is hidden by the visibility policy. `hidden_reason` is one of \
+             `superseded`, `expired`, `history`, `error` and matches \
+             VisibilityPolicy::is_visible_at precedence (status → tier → wall-clock \
+             expiry). Caller can opt in to the first three via \
+             include_superseded/include_expired/include_history; `error` has no \
+             include knob. `{found: true, chunk, lifecycle, status}` when the chunk \
+             is visible.",
             json!({
                 "type": "object",
                 "properties": {

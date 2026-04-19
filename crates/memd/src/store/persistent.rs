@@ -2410,26 +2410,23 @@ impl PersistentStore {
             .metadata
             .atomic_supersede(tenant_id, old_id, &new_id, now)
         {
-            // Step 4a: compensating tombstone on link failure. If we
-            // return without this, the new chunk stays fully visible in
-            // retrieval with no supersession edge — the exact orphan
-            // state Codex flagged as HIGH-1. Soft-deleting keeps the
-            // invariant "either both visible+linked or neither visible"
-            // and leaves the segment file to be reclaimed by the normal
-            // tombstone compaction path.
-            let delete_res = self.metadata.mark_deleted(tenant_id, &new_id);
-            // Bump memory version once more so any caller that read the
-            // orphan between step 3 and this tombstone invalidates.
-            if let Some(h) = self.hybrid() {
-                h.bump_tenant_memory_version(tenant_id);
-            }
+            // Step 4a: compensating DURABLE delete on link failure. A
+            // metadata-only mark_deleted is not enough — without a WAL
+            // delete record, recover_from_wal would replay the original
+            // Add after restart and resurrect the orphan as Final; and
+            // the hybrid/sparse/dense/tiered indexes would still carry
+            // the chunk until the next compaction. Routing through
+            // `Store::delete_chunk` hits WAL + metadata + segment
+            // tombstone + hybrid delete + cache invalidation, so after
+            // this call the orphan is gone from every surface.
+            let delete_res = self.delete_chunk(tenant_id, &new_id).await;
             if let Err(del_err) = delete_res {
                 warn!(
                     tenant_id = %tenant_id,
                     new_id = %new_id,
                     link_err = %link_err,
                     del_err = %del_err,
-                    "supersede_chunk: atomic_supersede failed AND compensating tombstone failed; \
+                    "supersede_chunk: atomic_supersede failed AND compensating delete_chunk failed; \
                      new chunk is an orphan — investigate manually"
                 );
             } else {
@@ -2437,7 +2434,7 @@ impl PersistentStore {
                     tenant_id = %tenant_id,
                     new_id = %new_id,
                     link_err = %link_err,
-                    "supersede_chunk: atomic_supersede failed; orphan new chunk tombstoned"
+                    "supersede_chunk: atomic_supersede failed; orphan new chunk deleted via full delete path"
                 );
             }
             return Err(link_err);
