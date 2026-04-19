@@ -441,7 +441,13 @@ fn test_tool_call_search(memd_path: &str) -> TestResult {
     }
 }
 
-/// A1: memory.get returns chunk or null
+/// A1: memory.get returns the v0.6 envelope
+/// `{found:true, chunk, lifecycle, status}` or
+/// `{found:true, hidden:true, status, tier, hidden_reason}` or
+/// `{found:false}`. Pre-v0.6 this call returned a raw `MemoryChunk | null`;
+/// the envelope was introduced with Track A (lifecycle overlay) so callers
+/// can distinguish "not found" from "hidden by visibility policy" and
+/// retrieve lifecycle metadata without a second round trip.
 fn test_tool_call_get(memd_path: &str) -> TestResult {
     let start = Instant::now();
     let mut client = match McpClient::start(memd_path) {
@@ -525,15 +531,31 @@ fn test_tool_call_get(memd_path: &str) -> TestResult {
                 .and_then(|t| t.as_str());
 
             if let Some(text) = content_text {
-                // Should be a JSON chunk object or null
+                // v0.6 envelope: {found:true, chunk, lifecycle, status}
+                // or {found:true, hidden:true, status, tier, hidden_reason}
+                // or {found:false}. Validate the discriminator + payload
+                // shape for the visible case (what this happy-path test
+                // always exercises — the freshly-added chunk is Final +
+                // LongTerm and therefore visible).
                 let parsed: Result<serde_json::Value, _> = serde_json::from_str(text);
                 match parsed {
-                    Ok(result) if result.get("chunk_id").is_some() || result.is_null() => {
+                    Ok(result)
+                        if result.get("found").and_then(|v| v.as_bool()) == Some(true)
+                            && result
+                                .get("chunk")
+                                .and_then(|c| c.get("chunk_id"))
+                                .is_some() =>
+                    {
                         TestResult::pass_with_duration("A1_tool_get", start)
                     }
-                    _ => TestResult::fail_with_duration(
+                    Ok(_) => TestResult::fail_with_duration(
                         "A1_tool_get",
-                        "Response not a valid chunk or null",
+                        "Response is not the expected v0.6 envelope {found:true, chunk:{...}}",
+                        start,
+                    ),
+                    Err(e) => TestResult::fail_with_duration(
+                        "A1_tool_get",
+                        &format!("Response text was not valid JSON: {}", e),
                         start,
                     ),
                 }

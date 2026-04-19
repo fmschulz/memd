@@ -5698,10 +5698,37 @@ pub async fn handle_memory_get<S: Store>(store: &S, params: GetParams) -> Result
     // share this method so the rule never drifts between call sites.
     let now_ms = current_time_ms();
     if !policy.is_visible_at(resolved.status, &resolved.lifecycle, now_ms) {
+        // `hidden_reason` tells the caller which `include_*` flag would
+        // flip this row visible, so an agent that got `{hidden:true}`
+        // can retry with the right knob without having to triangulate
+        // from status + tier + expires_at_ms.
+        //
+        // Precedence matters when multiple policies would hide the
+        // same row (e.g. a Superseded chunk with an expired
+        // `expires_at_ms`): status takes priority, then the wall-clock
+        // `expired` overlay (only applies to rows that are still
+        // `Final` — other statuses don't gate on it), then tier.
+        let reason = if resolved.status == crate::types::ChunkStatus::Superseded {
+            "superseded"
+        } else if resolved.status == crate::types::ChunkStatus::Expired {
+            "expired"
+        } else if resolved.status == crate::types::ChunkStatus::Deleted {
+            "deleted"
+        } else if resolved.status == crate::types::ChunkStatus::Final
+            && resolved
+                .lifecycle
+                .expires_at_ms
+                .is_some_and(|t| t <= now_ms)
+        {
+            "expired"
+        } else {
+            "history"
+        };
         info!(
             chunk_id = %chunk_id,
             status = %resolved.status,
             tier = %resolved.lifecycle.tier,
+            reason = reason,
             "memory.get hidden by visibility policy"
         );
         return format_mcp_response(&json!({
@@ -5709,6 +5736,7 @@ pub async fn handle_memory_get<S: Store>(store: &S, params: GetParams) -> Result
             "hidden": true,
             "status": resolved.status.to_string(),
             "tier": resolved.lifecycle.tier.to_string(),
+            "hidden_reason": reason,
         }));
     }
 
