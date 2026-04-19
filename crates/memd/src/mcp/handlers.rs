@@ -1670,43 +1670,39 @@ fn apply_search_filters(
 /// trim to `k`. Superseded, Expired, and History-tier chunks are dropped
 /// unless the corresponding `include_*` flag is set; rows with an
 /// `expires_at_ms` that has already passed are dropped unless
-/// `include_expired` is set.
+/// `include_expired` is set; Deleted and Error rows are always dropped
+/// regardless of flags (the `Error` hide is the reason this loop cannot
+/// be short-circuited when all three `include_*` are true — the ranker
+/// backends only filter `Deleted`, so `Error` can still reach the
+/// handler and must be caught here).
 ///
 /// "Oversample-and-refill" is the whole point: callers request more than
 /// `k` candidates from the ranker so that even when the top hits are
 /// hidden we can still return a full page of visible results.
-///
-/// No-op fast path: when all three `include_*` flags are true AND no row
-/// has a past `expires_at_ms`, every row is visible. Rather than paying
-/// `get_with_lifecycle` per hit, detect the all-permit case and skip the
-/// round trips entirely.
 ///
 /// Cross-tenant correctness: `memory.search` can return hits across
 /// tenants when `project_id` is set. The visibility lookup must use the
 /// hit row's own `chunk.tenant_id`, not an outer tenant parameter, or a
 /// project-scoped search across tenants would point at the wrong overlay
 /// rows.
+///
+/// Cost: one `get_with_lifecycle` per kept candidate. With the default
+/// `oversample_factor=3` and `k=20`, this is up to 60 metadata reads per
+/// query. This is a known tail-latency cost of the visibility overlay;
+/// a cheaper design that carries `ResolvedChunk` from the ranker is a
+/// future optimisation (tracked as a followup) but would require
+/// changing the search return shape.
 async fn apply_visibility_filter<S: Store>(
     store: &S,
     ranked: Vec<(MemoryChunk, f32)>,
     policy: &VisibilityPolicy,
     k: usize,
 ) -> Vec<(MemoryChunk, f32)> {
-    let all_permissive =
-        policy.include_superseded && policy.include_expired && policy.include_history;
     let now_ms = current_time_ms();
     let mut out: Vec<(MemoryChunk, f32)> = Vec::with_capacity(k.min(ranked.len()));
     for (chunk, score) in ranked {
         if out.len() >= k {
             break;
-        }
-        // Fast path: if the caller opted into every hide reason, we still
-        // need to apply wall-clock expiry unless include_expired is true.
-        // include_expired IS true in the all-permissive branch, so the
-        // fast path is strictly safe.
-        if all_permissive {
-            out.push((chunk, score));
-            continue;
         }
         match store
             .get_with_lifecycle(&chunk.tenant_id, &chunk.chunk_id)
@@ -1726,10 +1722,9 @@ async fn apply_visibility_filter<S: Store>(
             }
             Err(e) => {
                 // Transient overlay lookup failure: log and drop this
-                // row rather than failing the whole search. The caller
-                // already got a degraded result if the row was
-                // supposed to be hidden and we let it through, so
-                // failing closed (drop) is the safer default.
+                // row rather than failing the whole search. Fail-closed
+                // (drop) is safer than leaking a row whose status we
+                // couldn't verify.
                 warn!(
                     chunk_id = %chunk.chunk_id,
                     tenant_id = %chunk.tenant_id,
