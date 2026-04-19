@@ -975,7 +975,13 @@ impl TenantStore {
                         source_uri: chunk.source.uri.clone(),
                         // A8: writer will populate lifecycle overlay directly once update_lifecycle is wired in.
                         lifecycle: crate::types::LifecycleMetadata::default(),
-                        canonical_text: None,
+                        // D2: rebuild canonical_text on WAL recovery so the
+                        // dedup index survives restart for chunks that were
+                        // written before this code shipped.
+                        canonical_text: Some(crate::store::supersession::canonicalize_for_type(
+                            &chunk.text,
+                            chunk.chunk_type,
+                        )),
                     };
                     metadata.insert(&chunk_meta)?;
 
@@ -2126,7 +2132,14 @@ impl PersistentStore {
                     source_uri: row.chunk.source.uri.clone(),
                     // A8: writer will populate lifecycle overlay directly once update_lifecycle is wired in.
                     lifecycle: crate::types::LifecycleMetadata::default(),
-                    canonical_text: None,
+                    // D2: populate canonical_text at INSERT time so the
+                    // `idx_chunks_canonical` index covers every memory.add
+                    // / memory.add_batch write — not just lifecycle-bearing
+                    // ones routed through `add_chunk_with_lifecycle`.
+                    canonical_text: Some(crate::store::supersession::canonicalize_for_type(
+                        &row.chunk.text,
+                        row.chunk.chunk_type,
+                    )),
                 });
                 index_rows.push((row.chunk_id.clone(), row.chunk.text.clone()));
             }
