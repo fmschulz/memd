@@ -216,6 +216,55 @@ pub trait MetadataStore: Send + Sync {
         older_than_ms: i64,
     ) -> Result<Vec<ChunkId>>;
 
+    /// Atomically promote one chunk to `tier='history'` with guards
+    /// against concurrent overlay refreshes. Only updates when the
+    /// row's current state at UPDATE time still satisfies all of:
+    ///   * status IN ('superseded', 'expired')
+    ///   * tier != 'history'
+    ///   * lifecycle_updated_at_ms < `older_than_ms`
+    ///
+    /// Stamps `lifecycle_updated_at_ms = now_ms` on a successful
+    /// promotion. Returns `true` when exactly one row was updated,
+    /// `false` when any guard rejected the update (row no longer
+    /// matches, was just refreshed, or is absent).
+    ///
+    /// Default implementation reads then calls `update_lifecycle`; it
+    /// is NOT race-free. Backends with real SQL should override with
+    /// a single guarded `UPDATE` that embeds all three predicates.
+    fn promote_to_history_if_stale(
+        &self,
+        tenant_id: &TenantId,
+        chunk_id: &ChunkId,
+        older_than_ms: i64,
+        now_ms: i64,
+    ) -> Result<bool> {
+        let current = match self.get(tenant_id, chunk_id)? {
+            Some(m) => m,
+            None => return Ok(false),
+        };
+        use crate::types::{ChunkStatus, MemoryTier};
+        let stale_status = matches!(
+            current.status,
+            ChunkStatus::Superseded | ChunkStatus::Expired
+        );
+        if !stale_status
+            || current.lifecycle.tier == MemoryTier::History
+            || current.lifecycle.lifecycle_updated_at_ms >= older_than_ms
+        {
+            return Ok(false);
+        }
+        self.update_lifecycle(
+            tenant_id,
+            chunk_id,
+            &LifecycleDelta {
+                tier: Some(MemoryTier::History),
+                lifecycle_updated_at_ms: Some(now_ms),
+                ..Default::default()
+            },
+        )?;
+        Ok(true)
+    }
+
     /// List chunk IDs hidden by lifecycle (superseded, expired, or
     /// history-tier). Used by compaction (B2) to extend the HNSW
     /// excluded-ID set beyond soft-deleted rows.
