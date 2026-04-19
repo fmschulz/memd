@@ -2239,6 +2239,36 @@ impl PersistentStore {
         Ok(())
     }
 
+    /// Apply a lifecycle delta and report whether the row existed.
+    ///
+    /// Returns `Ok(true)` when exactly one row was updated, `Ok(false)`
+    /// when the UPDATE matched zero rows (non-existent chunk_id OR
+    /// cross-tenant access). The cache-version bump only fires on a
+    /// successful update — a failed match is a no-op end-to-end.
+    ///
+    /// Used by `memory.set_expiry` (Track C6) to make the tool's
+    /// `{"updated": true}` payload a load-bearing claim rather than a
+    /// silent success.
+    #[allow(clippy::unused_async)]
+    pub async fn update_lifecycle_if_exists(
+        &self,
+        tenant_id: &TenantId,
+        chunk_id: &ChunkId,
+        delta: &LifecycleDelta,
+    ) -> Result<bool> {
+        let rows = self
+            .metadata
+            .update_lifecycle_counted(tenant_id, chunk_id, delta)?;
+        if rows > 0 {
+            if let Some(h) = self.hybrid() {
+                h.bump_tenant_memory_version(tenant_id);
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Write a chunk plus its initial lifecycle overlay in one logical step.
     ///
     /// Flow:
@@ -4095,6 +4125,120 @@ mod tests {
             store.hybrid_searcher = Some(Arc::new(hybrid));
             (store, dir)
         }
+    }
+
+    /// Track C6: `PersistentStore::update_lifecycle_if_exists` must
+    /// bump `tenant_memory_version` when the row was found AND hybrid
+    /// is enabled, and MUST NOT bump when the row didn't exist. Pins
+    /// the cache-invalidation contract that `memory.set_expiry`
+    /// depends on so a later refactor can't silently take it off the
+    /// bump path.
+    #[tokio::test]
+    async fn update_lifecycle_if_exists_bumps_only_on_match() {
+        use crate::embeddings::MockEmbedder;
+        use crate::retrieval::{RerankerConfig, RerankerMode};
+        use crate::store::dense::{DenseSearchConfig, DenseSearcher};
+        use crate::store::hybrid::{HybridConfig, HybridSearcher};
+        use crate::types::LifecycleDelta;
+
+        fn hybrid_store() -> (PersistentStore, tempfile::TempDir) {
+            let dir = tempdir().unwrap();
+            let config = PersistentStoreConfig {
+                data_dir: dir.path().to_path_buf(),
+                segment_max_chunks: 100,
+                wal_checkpoint_interval: 0,
+                enable_dense_search: true,
+                enable_hybrid_search: true,
+                enable_tiered_search: true,
+                ..Default::default()
+            };
+            let mut store = PersistentStore::open(config).unwrap();
+            let embedder = Arc::new(MockEmbedder::new());
+            let dense = Arc::new(DenseSearcher::with_embedder(
+                embedder,
+                DenseSearchConfig {
+                    persist: false,
+                    ..Default::default()
+                },
+            ));
+            let hybrid = HybridSearcher::new(
+                dense,
+                None,
+                HybridConfig {
+                    enable_sparse: false,
+                    enable_tiered: true,
+                    reranker: RerankerConfig {
+                        mode: RerankerMode::Feature,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            );
+            store.hybrid_searcher = Some(Arc::new(hybrid));
+            (store, dir)
+        }
+
+        let (store, _dir) = hybrid_store();
+        let hybrid = store.hybrid_searcher.as_ref().unwrap().clone();
+        let tenant = make_tenant();
+
+        // Seed the tiered warm tier so tenant_memory_version is live.
+        store
+            .search_with_scores(&tenant, "seed probe", 1)
+            .await
+            .unwrap();
+
+        // Add a chunk we can update.
+        let id = <PersistentStore as Store>::add(
+            &store,
+            MemoryChunk::new(tenant.clone(), "target", ChunkType::Doc),
+        )
+        .await
+        .unwrap();
+
+        let v_after_add = hybrid
+            .tenant_memory_version(&tenant)
+            .expect("tiered searcher must exist after an add");
+
+        // Matched update must return true AND bump the version.
+        let updated = store
+            .update_lifecycle_if_exists(
+                &tenant,
+                &id,
+                &LifecycleDelta {
+                    expires_at_ms: Some(Some(1_i64)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(updated, "existing row must report updated=true");
+        let v_after_update = hybrid.tenant_memory_version(&tenant).unwrap_or(0);
+        assert!(
+            v_after_update > v_after_add,
+            "matched update must bump tenant_memory_version: \
+             before={v_after_add} after={v_after_update}"
+        );
+
+        // Unmatched update must return false AND leave the version alone.
+        let bogus = ChunkId::new();
+        let updated = store
+            .update_lifecycle_if_exists(
+                &tenant,
+                &bogus,
+                &LifecycleDelta {
+                    expires_at_ms: Some(Some(1_i64)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!updated, "nonexistent row must report updated=false");
+        let v_after_noop = hybrid.tenant_memory_version(&tenant).unwrap_or(0);
+        assert_eq!(
+            v_after_noop, v_after_update,
+            "nonexistent-row update must NOT bump tenant_memory_version"
+        );
     }
 
     /// Codex-review regression (v0.3.1) for the WAL recovery durability
