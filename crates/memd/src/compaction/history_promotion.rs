@@ -34,7 +34,7 @@
 use crate::error::Result;
 use crate::store::hybrid::HybridSearcher;
 use crate::store::metadata::MetadataStore;
-use crate::types::{LifecycleDelta, MemoryTier, TenantId};
+use crate::types::TenantId;
 
 fn current_time_ms() -> i64 {
     std::time::SystemTime::now()
@@ -82,25 +82,29 @@ impl HistoryPromotion {
             return Ok(PromotionResult { promoted_count: 0 });
         }
 
-        let count = ids.len();
+        // Per-row guarded UPDATE: `promote_to_history_if_stale`
+        // re-checks status, tier, and the overlay-idle clock at UPDATE
+        // time, so a concurrent writer that refreshed
+        // `lifecycle_updated_at_ms` or flipped the row off
+        // Superseded/Expired between the SELECT above and the UPDATE
+        // is silently tolerated. Two overlapping promotion runs
+        // against the same tenant therefore cannot double-count the
+        // same row.
+        let mut promoted = 0usize;
         for id in &ids {
-            metadata.update_lifecycle(
-                tenant_id,
-                id,
-                &LifecycleDelta {
-                    tier: Some(MemoryTier::History),
-                    lifecycle_updated_at_ms: Some(now),
-                    ..Default::default()
-                },
-            )?;
+            if metadata.promote_to_history_if_stale(tenant_id, id, cutoff, now)? {
+                promoted += 1;
+            }
         }
 
-        if let Some(h) = hybrid {
-            h.bump_tenant_memory_version(tenant_id);
+        if promoted > 0 {
+            if let Some(h) = hybrid {
+                h.bump_tenant_memory_version(tenant_id);
+            }
         }
 
         Ok(PromotionResult {
-            promoted_count: count,
+            promoted_count: promoted,
         })
     }
 }

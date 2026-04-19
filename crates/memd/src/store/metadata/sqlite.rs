@@ -1976,6 +1976,37 @@ impl MetadataStore for SqliteMetadataStore {
         Ok(rows == 1)
     }
 
+    fn promote_to_history_if_stale(
+        &self,
+        tenant_id: &TenantId,
+        chunk_id: &ChunkId,
+        older_than_ms: i64,
+        now_ms: i64,
+    ) -> Result<bool> {
+        // Guarded UPDATE: re-check status, tier, and the overlay-idle
+        // clock at UPDATE time so a concurrent writer that refreshed
+        // lifecycle_updated_at_ms or flipped the row back off
+        // superseded/expired is not clobbered by a stale selection.
+        let conn = self.pool.get();
+        let rows = conn.execute(
+            "UPDATE chunks
+                SET tier = 'history',
+                    lifecycle_updated_at_ms = ?4
+              WHERE tenant_id = ?1
+                AND chunk_id = ?2
+                AND status IN ('superseded', 'expired')
+                AND tier != 'history'
+                AND lifecycle_updated_at_ms < ?3",
+            rusqlite::params![
+                tenant_id.as_str(),
+                chunk_id.to_string(),
+                older_than_ms,
+                now_ms
+            ],
+        )?;
+        Ok(rows == 1)
+    }
+
     fn list_stale_superseded(
         &self,
         tenant_id: &TenantId,

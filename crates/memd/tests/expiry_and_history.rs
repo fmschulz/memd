@@ -649,6 +649,142 @@ async fn history_promotion_is_idempotent_across_consecutive_runs() {
     );
 }
 
+/// Directly exercises the guarded UPDATE in
+/// `promote_to_history_if_stale` with each failure mode (non-stale
+/// status, already-on-history tier, freshly refreshed overlay). These
+/// cases bypass the `list_stale_superseded` pre-filter so the guard
+/// predicate is the only thing preventing a wrong promotion.
+#[tokio::test]
+async fn promote_to_history_if_stale_rejects_rows_whose_overlay_was_refreshed() {
+    use memd::store::metadata::MetadataStore;
+    use memd::types::{ChunkStatus, LifecycleDelta, MemoryTier};
+
+    let (server, _tmp) = test_server().await;
+    let tenant = TenantId::new("t").expect("valid tenant id");
+
+    // Seed a Superseded row with old overlay clock; then simulate a
+    // concurrent writer refreshing lifecycle_updated_at_ms just
+    // before the promote UPDATE would fire.
+    let resp = call_tool(
+        &server,
+        "memory.add",
+        json!({ "tenant_id": "t", "text": "raced-history", "type": "doc" }),
+    )
+    .await;
+    let id = ChunkId::parse(parse_result_text(&resp)["chunk_id"].as_str().unwrap())
+        .expect("valid chunk id");
+
+    let now = current_time_ms();
+    let old = now - 365 * 86_400_000;
+    server
+        .store()
+        .metadata()
+        .update_lifecycle(
+            &tenant,
+            &id,
+            &LifecycleDelta {
+                status: Some(ChunkStatus::Superseded),
+                lifecycle_updated_at_ms: Some(old),
+                ..Default::default()
+            },
+        )
+        .expect("seed ok");
+
+    // Concurrent refresh: bump lifecycle_updated_at_ms to now.
+    server
+        .store()
+        .metadata()
+        .update_lifecycle(
+            &tenant,
+            &id,
+            &LifecycleDelta {
+                lifecycle_updated_at_ms: Some(now),
+                ..Default::default()
+            },
+        )
+        .expect("refresh ok");
+
+    // Call promote directly with the cutoff the sweep would have
+    // computed. The guard must refuse because the row is no longer
+    // older than the cutoff.
+    let cutoff = now - 30 * 86_400_000;
+    let promoted = server
+        .store()
+        .metadata()
+        .promote_to_history_if_stale(&tenant, &id, cutoff, now)
+        .expect("promote ok");
+    assert!(
+        !promoted,
+        "guarded UPDATE must refuse rows whose overlay was refreshed past the cutoff"
+    );
+
+    let resolved = server
+        .store()
+        .get_with_lifecycle(&tenant, &id)
+        .await
+        .expect("ok")
+        .expect("present");
+    assert_ne!(
+        resolved.lifecycle.tier,
+        MemoryTier::History,
+        "sweep must not demote a row that was just refreshed"
+    );
+}
+
+#[tokio::test]
+async fn promote_to_history_if_stale_rejects_non_superseded_rows() {
+    use memd::store::metadata::MetadataStore;
+    use memd::types::{ChunkStatus, LifecycleDelta};
+
+    let (server, _tmp) = test_server().await;
+    let tenant = TenantId::new("t").expect("valid tenant id");
+
+    // Row is Final (not Superseded or Expired) — must not be promoted.
+    let resp = call_tool(
+        &server,
+        "memory.add",
+        json!({ "tenant_id": "t", "text": "still-active", "type": "doc" }),
+    )
+    .await;
+    let id = ChunkId::parse(parse_result_text(&resp)["chunk_id"].as_str().unwrap())
+        .expect("valid chunk id");
+    // Stamp an old lifecycle clock without changing status.
+    let old = current_time_ms() - 365 * 86_400_000;
+    server
+        .store()
+        .metadata()
+        .update_lifecycle(
+            &tenant,
+            &id,
+            &LifecycleDelta {
+                lifecycle_updated_at_ms: Some(old),
+                ..Default::default()
+            },
+        )
+        .expect("stamp ok");
+
+    let now = current_time_ms();
+    let cutoff = now - 30 * 86_400_000;
+    let promoted = server
+        .store()
+        .metadata()
+        .promote_to_history_if_stale(&tenant, &id, cutoff, now)
+        .expect("promote ok");
+    assert!(
+        !promoted,
+        "guarded UPDATE must refuse Final rows even when their overlay clock is old"
+    );
+
+    // Sanity: status stays Final.
+    let resolved = server
+        .store()
+        .get_with_lifecycle(&tenant, &id)
+        .await
+        .expect("ok")
+        .expect("present");
+    assert_eq!(resolved.status, ChunkStatus::Final);
+}
+
 /// Expired rows (not just Superseded) should also be candidates for
 /// history promotion once their overlay has been idle long enough.
 #[tokio::test]
