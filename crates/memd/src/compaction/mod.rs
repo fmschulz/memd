@@ -5,6 +5,7 @@
 //! HNSW rebuild, segment merge, throttling, and compaction runner.
 
 pub mod expiry_sweep;
+pub mod history_promotion;
 pub mod hnsw_rebuild;
 pub mod metrics;
 pub mod runner;
@@ -13,6 +14,7 @@ pub mod throttle;
 pub mod tombstone_audit;
 
 pub use expiry_sweep::{ExpirySweep, SweepResult};
+pub use history_promotion::{HistoryPromotion, PromotionResult};
 pub use hnsw_rebuild::{HnswRebuilder, RebuildResult};
 pub use metrics::CompactionMetrics;
 pub use runner::{CompactionResult, CompactionRunner};
