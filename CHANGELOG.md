@@ -4,6 +4,86 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [0.6.0] - 2026-04-18
+
+Lifecycle release. Landed Track A of the nanomem-inspired features plan — atomic chunk
+supersession, lifecycle overlay on `memory.get`, and the SQLite overlay columns that
+underpin the remaining tracks (B–G). Addresses all five findings from Codex CLI's round-1
+review of the merge (2 HIGH + 2 MEDIUM + 1 LOW).
+
+### Breaking changes
+
+- **`memory.get` response shape changed.** Pre-0.6 returned a bare `MemoryChunk | null`.
+  0.6 returns a discriminated envelope so callers can distinguish "not found" from
+  "hidden by visibility policy" and retrieve lifecycle metadata without a second round
+  trip:
+  - `{found: false}` — chunk does not exist for this tenant.
+  - `{found: true, chunk, lifecycle, status}` — chunk is visible; payload + overlay
+    included.
+  - `{found: true, hidden: true, status, tier, hidden_reason}` — chunk exists but is
+    hidden by the lifecycle visibility policy. `hidden_reason` is one of `superseded`,
+    `expired`, `history`, or `deleted` so the caller knows which `include_*` flag
+    flips it visible.
+  - Clients pinned to the old shape must update. The in-tree `evals/harness` conformance
+    suite was updated in this release.
+
+### Added
+
+- **`memory.supersede` MCP tool.** Atomically replaces an existing chunk with a new one
+  and records the supersession edge in a single SQLite transaction. Old chunk becomes
+  `status=Superseded`, new chunk gets `supersedes = old_id` and the old chunk gets
+  `superseded_by = new_id`. Preflight rejects missing / deleted / non-head `old_id`,
+  detects pre-existing cycles in the `superseded_by` chain before touching disk, and
+  rolls back compensating-tombstone-style if the link transaction fails after the new
+  chunk is already written.
+- **Lifecycle overlay on `memory.get`.** `include_superseded`, `include_expired`, and
+  `include_history` flags control whether hidden rows surface with their payload. The
+  response always advertises `hidden_reason` on a hidden envelope so agents can retry
+  with the right knob.
+- **Lifecycle metadata columns + partial indexes on `chunks`.** Seven new columns
+  (`status`, `tier`, `supersedes`, `superseded_by`, `expires_at_ms`, `review_after_ms`,
+  `lifecycle_updated_at_ms`) + four partial indexes for the common access paths.
+  Legacy rows migrate with safe defaults (`Final` / `LongTerm`).
+- **`ChunkStatus::Superseded` and `ChunkStatus::Expired`** with fail-closed `FromStr`.
+- **Visibility policy primitives.** `VisibilityPolicy` with `is_visible` / `is_visible_at`;
+  `MemoryTier`, `LifecycleDelta` (triple-state clear semantics), `ResolvedChunk`.
+
+### Fixed
+
+- **HIGH-1: `memory.supersede` is now actually atomic.** Pre-fix, a crash between the
+  new-chunk write and the `atomic_supersede` SQL transaction left an orphan replacement
+  visible in retrieval with no supersession edge. Fix: `atomic_supersede`'s UPDATE now
+  carries a `superseded_by IS NULL` guard (head-only at SQL level), and
+  `supersede_chunk` rolls back the orphan via `mark_deleted` if the link transaction
+  fails after the new chunk was persisted.
+- **HIGH-2: `memory.get` wire envelope (see Breaking changes above).**
+- **MEDIUM-3: hidden `memory.get` envelope omitted the hiding cause.** Callers now get
+  `hidden_reason` ∈ {`superseded`, `expired`, `history`, `deleted`}.
+- **MEDIUM-4: `supersede_chunk` accepted any non-deleted `old_id`.** A double-supersede
+  on the same chunk used to fork the graph with two live successors. Now enforced as a
+  two-layer invariant: preflight rejects when `old_id.superseded_by` is already set;
+  SQL-layer UPDATE filters on `superseded_by IS NULL` so a concurrent race past the
+  preflight rolls back rather than overwriting.
+- **LOW-5: cycle detection in `supersede_chunk`.** Replaced bounded 64-hop
+  return-to-start walk with a `HashSet<ChunkId>` visited-set scan that catches any
+  revisit at any depth. A 65-hop cycle, or a cycle that re-enters mid-chain, used to
+  pass; both now fail.
+
+### Testing
+
+- Four new lifecycle tests: `supersede_chunk_rejects_double_supersede_on_same_old_id`,
+  `supersede_chunk_detects_non_start_cycle_mid_chain`,
+  `supersede_chunk_walks_long_chain_past_old_64_hop_bound`,
+  `memory_get_hidden_envelope_carries_hidden_reason`.
+- Full suite: 699 tests pass (up from 695 on the 0.5.0 merge base).
+
+### Review
+
+- Codex CLI round-1 review of the Track A merge (session
+  `019da31a-5f94-7942-ab14-40d84012f7b5`): REQUEST_CHANGES, 5 findings. All addressed
+  in this release and re-reviewed; artifact `019da326-b1b3-7262-8d68-3734fdcac6f7`
+  in memd.
+
 ## [0.5.0] - 2026-04-18
 
 Retrieval durability release. Two production-observed failure modes in the persistent store are

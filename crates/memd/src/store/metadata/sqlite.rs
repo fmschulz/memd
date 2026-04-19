@@ -1850,10 +1850,18 @@ impl MetadataStore for SqliteMetadataStore {
         // the supersession edge would dangle. Returning an error here
         // drops the `Transaction` without commit, which rolls the
         // partial update back on SQLite's side.
+        //
+        // `superseded_by IS NULL` in the WHERE clause enforces head-only
+        // semantics at the SQL layer: an old chunk that already points
+        // to a successor won't match, rows=0 triggers the guard below,
+        // and the transaction rolls back. Without this, a double-
+        // supersede on the same old chunk would silently overwrite
+        // `superseded_by` and fork the graph.
         let old_rows = tx.execute(
             "UPDATE chunks SET status = 'superseded', superseded_by = :new,
                 lifecycle_updated_at_ms = :now
-             WHERE tenant_id = :tenant AND chunk_id = :old",
+             WHERE tenant_id = :tenant AND chunk_id = :old
+               AND superseded_by IS NULL",
             rusqlite::named_params! {
                 ":new": new_id.to_string(),
                 ":now": now_ms,
@@ -1862,8 +1870,8 @@ impl MetadataStore for SqliteMetadataStore {
             },
         )?;
         if old_rows != 1 {
-            return Err(crate::error::MemdError::StorageError(format!(
-                "atomic_supersede: old chunk {old_id} not found in tenant {tenant_id} (rows={old_rows})"
+            return Err(crate::error::MemdError::ValidationError(format!(
+                "atomic_supersede: old chunk {old_id} is not current head or missing in tenant {tenant_id} (rows={old_rows})"
             )));
         }
 
