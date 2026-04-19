@@ -4244,7 +4244,13 @@ pub async fn handle_memory_add_batch<S: Store>(
                 "memory.add_batch with temporal fields requires a persistent store".into(),
             )
         })?;
-        let mut ids = Vec::with_capacity(params.chunks.len());
+        // Build and validate all (chunk, delta) pairs BEFORE any write.
+        // Validation failures must not leave half-committed batches, so
+        // parse_chunk_type / validate_episode_id are hoisted into a
+        // pre-pass that either produces a full Vec or returns an error
+        // with zero writes performed.
+        let mut prepared: Vec<(MemoryChunk, LifecycleDelta)> =
+            Vec::with_capacity(params.chunks.len());
         for chunk_params in params.chunks {
             let chunk_type = parse_chunk_type(&chunk_params.chunk_type)?;
             let mut chunk = MemoryChunk::new(tenant_id.clone(), &chunk_params.text, chunk_type);
@@ -4268,6 +4274,14 @@ pub async fn handle_memory_add_batch<S: Store>(
                 review_after_ms: chunk_params.review_after_ms.map(Some),
                 ..Default::default()
             };
+            prepared.push((chunk, delta));
+        }
+        // Second pass: commit every prepared pair. Any store-layer error
+        // still leaves earlier rows committed — that mirrors the existing
+        // `store.add_batch` failure contract, which is not all-or-nothing
+        // either — but validation is no longer interleaved with writes.
+        let mut ids = Vec::with_capacity(prepared.len());
+        for (chunk, delta) in prepared {
             let id = ps
                 .add_chunk_with_lifecycle(chunk, delta)
                 .await
