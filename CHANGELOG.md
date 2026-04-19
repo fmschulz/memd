@@ -4,6 +4,57 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [0.7.0] - 2026-04-18
+
+Track C release. Lands the temporal-fields + sweep + expiry-control surface on top of
+Track A (lifecycle overlay) and Track B (visibility filter + HNSW exclusion) from 0.6.0.
+Every task (C1–C6) went through Codex CLI review; all HIGH findings on races,
+boundary semantics, and TOCTOU were addressed before sign-off.
+
+### Added
+
+- **`memory.add(_batch)` accepts `expires_at_ms`, `review_after_ms`, and `mode`** (C1).
+  Temporal overlay fields are persisted via `PersistentStore::add_chunk_with_lifecycle`
+  in the same logical op as the chunk write, so retrieval visibility (C2) and the sweeps
+  (C3/C4) see them on the next read. `mode` is accepted now for Track E forward-compat.
+- **`memory.set_expiry` MCP tool** (C6). Atomic out-of-band update of a chunk's
+  `expires_at_ms` / `review_after_ms`. JSON triple-state: field absent → leave, `null` →
+  clear, integer → set. Refuses deleted / unknown / cross-tenant chunks via a guarded
+  SQL `UPDATE` with rowcount check, so `{"updated": true}` is a load-bearing claim.
+- **`ExpirySweep`** (C3) — compaction-level sweep that promotes rows past their
+  `expires_at_ms` to `status=Expired`. Uses a race-safe `mark_expired_if_final` that
+  re-checks both the status and retention predicate at UPDATE time.
+- **`HistoryPromotion`** (C4) — compaction-level job that demotes long-stale
+  Superseded/Expired rows to `MemoryTier::History` based on the overlay-idle clock
+  (`lifecycle_updated_at_ms`, NOT `timestamp_created`). Uses a guarded
+  `promote_to_history_if_stale` with three predicates re-checked at UPDATE time.
+- **Wired into `CompactionRunner::run_compaction`** (C5). Both sweeps run before the
+  excluded-ID gather so their transitions flow into Track B2's HNSW-rebuild exclusion.
+  `CompactionResult` gains `expired_count` and `promoted_count`. `CompactionConfig`
+  gains `expiry_sweep_enabled`, `history_promotion_enabled`, and `history_promotion_age_ms`
+  (default 90 days). The runner owns a single centralised `tenant_memory_version` bump
+  per cycle, narrowly scoped to C3/C4 overlay transitions.
+
+### Changed
+
+- **Lazy retrieval hiding matches the sweep boundary.** `list_expired_before` now uses
+  `expires_at_ms <= now` (was `<`), mirroring `VisibilityPolicy::is_visible_at`.
+
+### Notes
+
+- `VisibilityPolicy::is_visible_at` was already in place in 0.6.0 and handles Track C2's
+  lazy retrieval hiding. 0.7.0 adds end-to-end tests for the MCP path now that C1 writes
+  the overlay field.
+- `memory.set_expiry` guard chain: preflight-via-atomic-UPDATE with
+  `AND status != 'deleted'` and tenant filter, so TOCTOU windows are closed.
+
+### Test coverage
+
+21 new tests in `crates/memd/tests/expiry_and_history.rs` plus two lib tests in
+`crates/memd/src/compaction/` and one in `crates/memd/src/store/persistent.rs`. Race
+guard paths are exercised directly (not just through the pre-filter) for both
+`mark_expired_if_final` and `promote_to_history_if_stale`.
+
 ## [0.6.0] - 2026-04-18
 
 Lifecycle release. Landed Track A of the nanomem-inspired features plan — atomic chunk
