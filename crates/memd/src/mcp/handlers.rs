@@ -108,14 +108,28 @@ pub struct SearchParams {
     pub mode: Option<QueryMode>,
     /// Return chunks with `status=Superseded` in results instead of hiding
     /// them. Maps 1:1 to `VisibilityPolicy::include_superseded`.
+    ///
+    /// Best-effort on dense-only tenants: compaction evicts lifecycle-
+    /// hidden rows from the HNSW index on each rebuild (see Track B2), so
+    /// `include_superseded=true` only surfaces rows that have not yet
+    /// been evicted. For guaranteed access to a specific superseded
+    /// chunk's payload, use `memory.get(chunk_id, include_superseded=true)`
+    /// — that path queries the metadata overlay directly and does not
+    /// depend on index retention.
     #[serde(default)]
     pub include_superseded: Option<bool>,
     /// Return chunks with `status=Expired` or a past `expires_at_ms` instead
     /// of hiding them. Maps 1:1 to `VisibilityPolicy::include_expired`.
+    ///
+    /// Same best-effort caveat as `include_superseded`: post-compaction,
+    /// use `memory.get` for deterministic access to a specific expired
+    /// chunk.
     #[serde(default)]
     pub include_expired: Option<bool>,
     /// Return chunks in `MemoryTier::History` instead of hiding them.
     /// Maps 1:1 to `VisibilityPolicy::include_history`.
+    ///
+    /// Same best-effort caveat as `include_superseded`.
     #[serde(default)]
     pub include_history: Option<bool>,
     /// Multiplier applied to `k` when deciding how many candidates to pull
