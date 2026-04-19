@@ -84,10 +84,13 @@ fn jaccard_trigram(a: &str, b: &str) -> f32 {
 }
 
 /// Build the `pg_trgm`-style padded char-trigram set for `s`. Padding
-/// (`"  " + s + " "`) ensures even single-char inputs produce two
-/// distinct trigrams, so `"a"` and `"b"` no longer collide on an empty
-/// set. Iterating over `chars()` keeps the result Unicode-semantic
-/// rather than byte-dependent.
+/// (`"  " + s + " "`) ensures any non-empty, non-whitespace input
+/// produces at least two distinct trigrams (e.g. `"a"` → `"  a"` and
+/// `" a "`), so `"a"` and `"b"` no longer collide on an empty set. A
+/// pure-whitespace input collapses to a single shared `"   "` trigram —
+/// still distinguishing it from non-whitespace inputs. Iterating over
+/// `chars()` keeps the result Unicode-semantic rather than
+/// byte-dependent.
 #[allow(dead_code)] // wired in D3 / D5
 fn trigram_set(s: &str) -> HashSet<[char; 3]> {
     let lower: Vec<char> = s.to_lowercase().chars().collect();
