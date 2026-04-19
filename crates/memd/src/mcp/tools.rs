@@ -99,17 +99,17 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "include_superseded": {
                         "type": "boolean",
                         "default": false,
-                        "description": "When true, include chunks with status=Superseded in the results instead of hiding them."
+                        "description": "When true, include chunks with status=Superseded in the results instead of hiding them. Best-effort on dense-only tenants: compaction evicts lifecycle-hidden rows from the HNSW index, so include_superseded=true only surfaces rows that have not yet been evicted. For guaranteed access to a specific superseded chunk, use memory.get(chunk_id, include_superseded=true)."
                     },
                     "include_expired": {
                         "type": "boolean",
                         "default": false,
-                        "description": "When true, include chunks with status=Expired or a past expires_at_ms instead of hiding them."
+                        "description": "When true, include chunks with status=Expired or a past expires_at_ms instead of hiding them. Same best-effort caveat as include_superseded."
                     },
                     "include_history": {
                         "type": "boolean",
                         "default": false,
-                        "description": "When true, include chunks in MemoryTier::History instead of hiding them."
+                        "description": "When true, include chunks in MemoryTier::History instead of hiding them. Same best-effort caveat as include_superseded."
                     },
                     "oversample_factor": {
                         "type": "integer",

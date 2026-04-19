@@ -1971,10 +1971,22 @@ impl MetadataStore for SqliteMetadataStore {
 
     fn list_lifecycle_hidden(&self, tenant_id: &TenantId) -> Result<Vec<ChunkId>> {
         let conn = self.pool.get();
+        // Must mirror `VisibilityPolicy::is_visible` (types.rs). Any status
+        // or tier that `is_visible` hides regardless of the include_*
+        // flags — Superseded, Expired, Error, plus MemoryTier::History —
+        // must be in this set so the HNSW rebuild excluded set matches
+        // retrieval-side hiding. Missing a category means the rebuilt
+        // HNSW carries graph weight for chunks that the handler will
+        // never surface.
+        //
+        // `Deleted` is intentionally NOT here: it comes from
+        // `get_deleted_chunk_ids` instead (tombstone path with its own
+        // metrics), and the runner unions the two sets before passing
+        // to `rebuild_hnsw_for_tenant`.
         let mut stmt = conn.prepare(
             "SELECT chunk_id FROM chunks
              WHERE tenant_id = ?1
-               AND (status IN ('superseded', 'expired') OR tier = 'history')",
+               AND (status IN ('superseded', 'expired', 'error') OR tier = 'history')",
         )?;
         let rows = stmt.query_map(rusqlite::params![tenant_id.as_str()], |row| {
             row.get::<_, String>(0)
