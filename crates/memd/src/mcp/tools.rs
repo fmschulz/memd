@@ -194,6 +194,10 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "review_after_ms": {
                         "type": "integer",
                         "description": "Optional review reminder (ms since epoch). Informational only — does not hide the chunk. Requires a persistent store."
+                    },
+                    "mode": {
+                        "type": "string",
+                        "description": "Optional ingestion mode label (e.g. \"conversation\", \"document\"). Accepted now for Track C/E forward-compat; consumed by Track E."
                     }
                 },
                 "required": ["text", "type"]
@@ -251,6 +255,10 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                                 "review_after_ms": {
                                     "type": "integer",
                                     "description": "Optional review reminder (ms since epoch) for this chunk. Informational only."
+                                },
+                                "mode": {
+                                    "type": "string",
+                                    "description": "Optional ingestion mode label for this chunk (Track E forward-compat)."
                                 }
                             },
                             "required": ["text", "type"]
