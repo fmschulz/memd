@@ -56,6 +56,17 @@ pub struct CompactionConfig {
     pub batch_size: usize,
     /// Whether compaction is enabled (default true)
     pub enabled: bool,
+    /// Whether `ExpirySweep` runs as part of each compaction cycle
+    /// (Track C3/C5). Default `true`. Operators can disable the sweep
+    /// temporarily without unwinding the rest of compaction.
+    pub expiry_sweep_enabled: bool,
+    /// Whether `HistoryPromotion` runs as part of each compaction
+    /// cycle (Track C4/C5). Default `true`.
+    pub history_promotion_enabled: bool,
+    /// Minimum overlay-idle window before `HistoryPromotion` demotes
+    /// a stale Superseded/Expired row to the History tier. Default
+    /// 90 days in milliseconds.
+    pub history_promotion_age_ms: i64,
 }
 
 impl Default for CompactionConfig {
@@ -65,6 +76,9 @@ impl Default for CompactionConfig {
             batch_delay_ms: 10,
             batch_size: 100,
             enabled: true,
+            expiry_sweep_enabled: true,
+            history_promotion_enabled: true,
+            history_promotion_age_ms: 90 * 86_400_000,
         }
     }
 }

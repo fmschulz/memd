@@ -575,6 +575,7 @@ impl PersistentStore {
                 .ok_or_else(|| MemdError::StorageError("dense searcher not available".into()))?,
             self.sparse_index.as_deref(),
             semantic_cache,
+            self.hybrid_searcher.as_deref(),
         )
     }
 
