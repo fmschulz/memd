@@ -106,10 +106,53 @@ pub struct SearchParams {
     pub debug_tiers: Option<bool>,
     #[serde(default)]
     pub mode: Option<QueryMode>,
+    /// Return chunks with `status=Superseded` in results instead of hiding
+    /// them. Maps 1:1 to `VisibilityPolicy::include_superseded`.
+    #[serde(default)]
+    pub include_superseded: Option<bool>,
+    /// Return chunks with `status=Expired` or a past `expires_at_ms` instead
+    /// of hiding them. Maps 1:1 to `VisibilityPolicy::include_expired`.
+    #[serde(default)]
+    pub include_expired: Option<bool>,
+    /// Return chunks in `MemoryTier::History` instead of hiding them.
+    /// Maps 1:1 to `VisibilityPolicy::include_history`.
+    #[serde(default)]
+    pub include_history: Option<bool>,
+    /// Multiplier applied to `k` when deciding how many candidates to pull
+    /// from the ranker before visibility filtering. Larger values give the
+    /// visibility filter more headroom to refill to `k`; smaller values
+    /// reduce cost but may under-fill when many top hits are hidden.
+    /// Default 3, capped at 10, ignored when no visibility flag flips any
+    /// row (i.e. all three include_* are true).
+    #[serde(default)]
+    pub oversample_factor: Option<usize>,
 }
 
 fn default_k() -> usize {
     20
+}
+
+impl Default for SearchParams {
+    fn default() -> Self {
+        // Mirrors the serde defaults so in-file `#[cfg(test)]` callers can
+        // use `SearchParams { query: ..., ..Default::default() }` instead of
+        // enumerating every optional field. Keep in sync with the serde
+        // `default = "default_k"` and `#[serde(default)]` attributes on
+        // the struct.
+        Self {
+            tenant_id: String::new(),
+            query: String::new(),
+            project_id: None,
+            k: default_k(),
+            filters: None,
+            debug_tiers: None,
+            mode: None,
+            include_superseded: None,
+            include_expired: None,
+            include_history: None,
+            oversample_factor: None,
+        }
+    }
 }
 
 /// Optional filters for search
@@ -1621,6 +1664,103 @@ fn apply_search_filters(
         })
         .take(k)
         .collect()
+}
+
+/// Apply the lifecycle visibility policy to an over-sampled ranked list and
+/// trim to `k`. Superseded, Expired, and History-tier chunks are dropped
+/// unless the corresponding `include_*` flag is set; rows with an
+/// `expires_at_ms` that has already passed are dropped unless
+/// `include_expired` is set.
+///
+/// "Oversample-and-refill" is the whole point: callers request more than
+/// `k` candidates from the ranker so that even when the top hits are
+/// hidden we can still return a full page of visible results.
+///
+/// No-op fast path: when all three `include_*` flags are true AND no row
+/// has a past `expires_at_ms`, every row is visible. Rather than paying
+/// `get_with_lifecycle` per hit, detect the all-permit case and skip the
+/// round trips entirely.
+///
+/// Cross-tenant correctness: `memory.search` can return hits across
+/// tenants when `project_id` is set. The visibility lookup must use the
+/// hit row's own `chunk.tenant_id`, not an outer tenant parameter, or a
+/// project-scoped search across tenants would point at the wrong overlay
+/// rows.
+async fn apply_visibility_filter<S: Store>(
+    store: &S,
+    ranked: Vec<(MemoryChunk, f32)>,
+    policy: &VisibilityPolicy,
+    k: usize,
+) -> Vec<(MemoryChunk, f32)> {
+    let all_permissive =
+        policy.include_superseded && policy.include_expired && policy.include_history;
+    let now_ms = current_time_ms();
+    let mut out: Vec<(MemoryChunk, f32)> = Vec::with_capacity(k.min(ranked.len()));
+    for (chunk, score) in ranked {
+        if out.len() >= k {
+            break;
+        }
+        // Fast path: if the caller opted into every hide reason, we still
+        // need to apply wall-clock expiry unless include_expired is true.
+        // include_expired IS true in the all-permissive branch, so the
+        // fast path is strictly safe.
+        if all_permissive {
+            out.push((chunk, score));
+            continue;
+        }
+        match store
+            .get_with_lifecycle(&chunk.tenant_id, &chunk.chunk_id)
+            .await
+        {
+            Ok(Some(resolved)) => {
+                if policy.is_visible_at(resolved.status, &resolved.lifecycle, now_ms) {
+                    // Use the resolved chunk payload (same content, but
+                    // from the overlay path — keeps any future overlay-
+                    // side payload annotations consistent with memory.get).
+                    out.push((resolved.chunk, score));
+                }
+            }
+            Ok(None) => {
+                // Row was deleted between the ranker pull and the
+                // visibility check — drop it.
+            }
+            Err(e) => {
+                // Transient overlay lookup failure: log and drop this
+                // row rather than failing the whole search. The caller
+                // already got a degraded result if the row was
+                // supposed to be hidden and we let it through, so
+                // failing closed (drop) is the safer default.
+                warn!(
+                    chunk_id = %chunk.chunk_id,
+                    tenant_id = %chunk.tenant_id,
+                    error = %e,
+                    "visibility filter: get_with_lifecycle failed, dropping hit"
+                );
+            }
+        }
+    }
+    out
+}
+
+/// Resolve the effective `VisibilityPolicy` and oversample factor for a
+/// search call. The oversample factor is capped at 10 so a pathological
+/// caller can't force a 100x ranker pull by setting it to 1000.
+fn resolve_visibility_and_oversample(params: &SearchParams) -> (VisibilityPolicy, usize) {
+    let policy = VisibilityPolicy {
+        include_superseded: params.include_superseded.unwrap_or(false),
+        include_expired: params.include_expired.unwrap_or(false),
+        include_history: params.include_history.unwrap_or(false),
+    };
+    // When every include_* is true, the filter is effectively a no-op —
+    // don't oversample.
+    let all_permissive =
+        policy.include_superseded && policy.include_expired && policy.include_history;
+    let oversample = if all_permissive {
+        1
+    } else {
+        params.oversample_factor.unwrap_or(3).clamp(1, 10)
+    };
+    (policy, oversample)
 }
 
 fn parse_tag_usize(tags: &[String], prefix: &str) -> Option<usize> {
@@ -3637,7 +3777,13 @@ pub async fn handle_memory_search<S: Store>(
     let mode = params.mode.unwrap_or_default();
     let project_id_filter = params.project_id.as_deref();
     let has_filters = has_active_search_filters(project_id_filter, &parsed_filters);
-    let fetch_k = adaptive_fetch_k(params.k, &params.query, has_filters);
+    let (visibility_policy, oversample_factor) = resolve_visibility_and_oversample(&params);
+    // Pre-visibility trim headroom: `apply_search_filters` takes a cap so
+    // we pass `k * oversample_factor` here; `apply_visibility_filter`
+    // further trims to `params.k` after hiding non-visible rows.
+    let pre_visibility_cap = params.k.saturating_mul(oversample_factor);
+    let fetch_k = adaptive_fetch_k(params.k, &params.query, has_filters)
+        .max(pre_visibility_cap);
     let digest_tenants = scoped_tenants_for_project(store, &tenant_id, project_id_filter).await?;
     let search_tenants = if project_id_filter.is_some() {
         let all = store
@@ -3680,7 +3826,7 @@ pub async fn handle_memory_search<S: Store>(
             merge_preferred_and_raw(preferred, scored_chunks, fetch_k),
             project_id_filter,
             &parsed_filters,
-            params.k,
+            pre_visibility_cap,
         );
         let mut timing = timing;
         let mut repair_info = None;
@@ -3698,7 +3844,7 @@ pub async fn handle_memory_search<S: Store>(
                     repair_scored,
                     project_id_filter,
                     &parsed_filters,
-                    params.k,
+                    pre_visibility_cap,
                 );
                 let repaired = !repaired_filtered.is_empty();
                 if repaired {
@@ -3713,6 +3859,12 @@ pub async fn handle_memory_search<S: Store>(
                 });
             }
         }
+
+        // Apply lifecycle visibility filter with oversample-and-refill to
+        // trim from `pre_visibility_cap` down to `params.k`, hiding
+        // Superseded/Expired/History rows unless the caller opted in.
+        let scored_chunks =
+            apply_visibility_filter(store, scored_chunks, &visibility_policy, params.k).await;
 
         debug!(
             results_count = scored_chunks.len(),
@@ -3785,7 +3937,7 @@ pub async fn handle_memory_search<S: Store>(
         merge_preferred_and_raw(preferred, scored_chunks, fetch_k),
         project_id_filter,
         &parsed_filters,
-        params.k,
+        pre_visibility_cap,
     );
     let mut repair_info = None;
 
@@ -3794,8 +3946,12 @@ pub async fn handle_memory_search<S: Store>(
             let repair_scored =
                 search_with_scores_for_tenants(store, &search_tenants, &repaired_query, fetch_k)
                     .await?;
-            let repaired_filtered =
-                apply_search_filters(repair_scored, project_id_filter, &parsed_filters, params.k);
+            let repaired_filtered = apply_search_filters(
+                repair_scored,
+                project_id_filter,
+                &parsed_filters,
+                pre_visibility_cap,
+            );
             let repaired = !repaired_filtered.is_empty();
             if repaired {
                 scored_chunks = repaired_filtered;
@@ -3808,6 +3964,13 @@ pub async fn handle_memory_search<S: Store>(
             });
         }
     }
+
+    // Apply lifecycle visibility filter with oversample-and-refill
+    // (standard path, no tier-debug). This is the matching call site to
+    // the debug_tiers branch above and shares the same policy +
+    // oversample cap.
+    let scored_chunks =
+        apply_visibility_filter(store, scored_chunks, &visibility_policy, params.k).await;
 
     debug!(results_count = scored_chunks.len(), "search completed");
 
@@ -6962,6 +7125,10 @@ mod tests {
             filters: None,
             debug_tiers: None,
             mode: None,
+            include_superseded: None,
+            include_expired: None,
+            include_history: None,
+            oversample_factor: None,
         };
 
         let result = handle_memory_search(&store, params).await.unwrap();
@@ -6983,6 +7150,10 @@ mod tests {
             filters: None,
             debug_tiers: None,
             mode: None,
+            include_superseded: None,
+            include_expired: None,
+            include_history: None,
+            oversample_factor: None,
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -7001,6 +7172,10 @@ mod tests {
             filters: None,
             debug_tiers: None,
             mode: None,
+            include_superseded: None,
+            include_expired: None,
+            include_history: None,
+            oversample_factor: None,
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -7102,6 +7277,10 @@ mod tests {
             filters: None,
             debug_tiers: None,
             mode: None,
+            include_superseded: None,
+            include_expired: None,
+            include_history: None,
+            oversample_factor: None,
         };
 
         let search_result = handle_memory_search(&store, search_params).await.unwrap();
@@ -7157,6 +7336,10 @@ mod tests {
                 filters: None,
                 debug_tiers: None,
                 mode: None,
+                include_superseded: None,
+                include_expired: None,
+                include_history: None,
+                oversample_factor: None,
             },
         )
         .await
@@ -7208,6 +7391,10 @@ mod tests {
                 }),
                 debug_tiers: None,
                 mode: None,
+                include_superseded: None,
+                include_expired: None,
+                include_history: None,
+                oversample_factor: None,
             },
         )
         .await
@@ -7259,6 +7446,10 @@ mod tests {
                 }),
                 debug_tiers: None,
                 mode: None,
+                include_superseded: None,
+                include_expired: None,
+                include_history: None,
+                oversample_factor: None,
             },
         )
         .await
@@ -7320,6 +7511,10 @@ mod tests {
                 }),
                 debug_tiers: None,
                 mode: None,
+                include_superseded: None,
+                include_expired: None,
+                include_history: None,
+                oversample_factor: None,
             },
         )
         .await
@@ -7376,6 +7571,10 @@ mod tests {
                 filters: None,
                 debug_tiers: None,
                 mode: None,
+                include_superseded: None,
+                include_expired: None,
+                include_history: None,
+                oversample_factor: None,
             },
         )
         .await
@@ -7430,6 +7629,10 @@ mod tests {
                 filters: None,
                 debug_tiers: None,
                 mode: None,
+                include_superseded: None,
+                include_expired: None,
+                include_history: None,
+                oversample_factor: None,
             },
         )
         .await
@@ -7658,6 +7861,10 @@ mod tests {
             filters: None,
             debug_tiers: None,
             mode: None,
+            include_superseded: None,
+            include_expired: None,
+            include_history: None,
+            oversample_factor: None,
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -7727,6 +7934,10 @@ mod tests {
             filters: None,
             debug_tiers: None,
             mode: None,
+            include_superseded: None,
+            include_expired: None,
+            include_history: None,
+            oversample_factor: None,
         };
 
         let result = handle_memory_search(&store, search_params).await.unwrap();
@@ -7761,6 +7972,10 @@ mod tests {
             filters: None,
             debug_tiers: Some(true),
             mode: None,
+            include_superseded: None,
+            include_expired: None,
+            include_history: None,
+            oversample_factor: None,
         };
 
         let result = handle_memory_search(&store, search_params).await.unwrap();
@@ -8511,6 +8726,10 @@ mod tests {
                 filters: None,
                 debug_tiers: None,
                 mode: None,
+                include_superseded: None,
+                include_expired: None,
+                include_history: None,
+                oversample_factor: None,
             },
         )
         .await
@@ -8834,6 +9053,10 @@ mod tests {
                 filters: None,
                 debug_tiers: None,
                 mode: None,
+                include_superseded: None,
+                include_expired: None,
+                include_history: None,
+                oversample_factor: None,
             },
         )
         .await
@@ -8909,6 +9132,10 @@ mod tests {
                 filters: None,
                 debug_tiers: None,
                 mode: None,
+                include_superseded: None,
+                include_expired: None,
+                include_history: None,
+                oversample_factor: None,
             },
         )
         .await
