@@ -83,6 +83,15 @@ pub struct PersistentStoreConfig {
     /// segment files); only semantic search is degraded until the task
     /// completes.
     pub backfill_hnsw_on_startup: bool,
+    /// On startup, populate `canonical_text` for any chunk row whose
+    /// value is NULL — pre-D2 production rows were inserted with
+    /// `canonical_text: None`, so Track D's `idx_chunks_canonical`
+    /// partial index never sees them and `memory.find_near_duplicates`
+    /// / exact-mode `supersede_near_duplicates` would silently miss
+    /// them. The backfill reads each row's text from its segment,
+    /// canonicalises it via `canonicalize_for_type(text, chunk_type)`,
+    /// and writes the result back. Best-effort, single-pass.
+    pub backfill_canonical_text_on_startup: bool,
 }
 
 impl Default for PersistentStoreConfig {
@@ -111,6 +120,14 @@ impl Default for PersistentStoreConfig {
                 matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
             })
             .unwrap_or(true);
+        let backfill_canonical_text_on_startup =
+            std::env::var("MEMD_BACKFILL_CANONICAL_TEXT_ON_STARTUP")
+                .ok()
+                .map(|v| {
+                    let normalized = v.trim().to_ascii_lowercase();
+                    matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+                })
+                .unwrap_or(true);
 
         Self {
             data_dir: PathBuf::from("data"),
@@ -135,6 +152,7 @@ impl Default for PersistentStoreConfig {
             async_index_batch_size,
             async_index_poll_ms,
             backfill_hnsw_on_startup,
+            backfill_canonical_text_on_startup,
         }
     }
 }
@@ -191,6 +209,16 @@ pub struct BackfillStats {
     /// Chunks encountered but not indexed (missing text, load error, or
     /// a per-batch index error).
     pub chunks_skipped: usize,
+}
+
+/// Result of a canonical_text backfill pass over legacy NULL rows.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalBackfillStats {
+    /// Rows whose canonical_text was populated by this pass.
+    pub rows_backfilled: usize,
+    /// Rows visited but not updated (missing text, load error, write
+    /// error). The next pass will retry.
+    pub rows_skipped: usize,
 }
 
 struct PendingChunkAdd {
@@ -315,6 +343,9 @@ impl PersistentStore {
         if store.config.backfill_hnsw_on_startup {
             store.spawn_startup_hnsw_backfill();
         }
+        if store.config.backfill_canonical_text_on_startup {
+            store.spawn_startup_canonical_backfill();
+        }
 
         Ok(store)
     }
@@ -400,6 +431,42 @@ impl PersistentStore {
             self.tenants.as_ref(),
         )
         .await
+    }
+
+    /// Populate `canonical_text` for any chunk row whose value is NULL.
+    ///
+    /// Pre-D2 production rows were inserted with `canonical_text: None`
+    /// and the `idx_chunks_canonical` partial index never sees them.
+    /// This pass restores Track D's exact-mode dedup contract for those
+    /// rows without requiring a destructive migration. Best-effort: a
+    /// single-row failure (deserialization, missing segment) is logged
+    /// and counted, not fatal — subsequent runs reattempt the same row.
+    pub fn backfill_canonical_text_for_legacy_chunks(&self) -> CanonicalBackfillStats {
+        run_canonical_text_backfill(self.metadata.as_ref(), self.tenants.as_ref())
+    }
+
+    /// Schedule a one-shot background task that populates canonical_text
+    /// for legacy NULL rows. Mirrors the HNSW backfill structure: no-op
+    /// when no Tokio runtime is available (sync test contexts) — call
+    /// `backfill_canonical_text_for_legacy_chunks` directly in that
+    /// case.
+    fn spawn_startup_canonical_backfill(&self) {
+        let handle = match tokio::runtime::Handle::try_current() {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        let metadata = Arc::clone(&self.metadata);
+        let tenants = Arc::clone(&self.tenants);
+        handle.spawn(async move {
+            let stats = run_canonical_text_backfill(metadata.as_ref(), tenants.as_ref());
+            if stats.rows_backfilled > 0 || stats.rows_skipped > 0 {
+                info!(
+                    backfilled = stats.rows_backfilled,
+                    skipped = stats.rows_skipped,
+                    "startup canonical_text backfill completed"
+                );
+            }
+        });
     }
 
     /// Get reference to metrics collector
@@ -1919,6 +1986,91 @@ async fn run_hnsw_backfill(
     }
 
     Ok(stats)
+}
+
+/// Backfill `canonical_text` for any chunk row whose value is NULL.
+///
+/// Iterates each tenant's snapshot of active rows once, filters those
+/// missing a canonical, loads the row's payload from the segment, and
+/// writes back `canonicalize_for_type(text, chunk_type)` via the
+/// existing `set_canonical_text` API. Errors are logged and counted as
+/// skipped rather than aborting the pass — a partial backfill is more
+/// useful than no backfill, and skipped rows will be revisited next
+/// time the pass runs.
+fn run_canonical_text_backfill(
+    metadata: &SqliteMetadataStore,
+    tenants: &RwLock<HashMap<String, Arc<TenantStore>>>,
+) -> CanonicalBackfillStats {
+    let mut stats = CanonicalBackfillStats::default();
+    let tenant_strs: Vec<String> = tenants.read().keys().cloned().collect();
+
+    for tenant_str in tenant_strs {
+        let tenant_id = match TenantId::new(&tenant_str) {
+            Ok(id) => id,
+            Err(e) => {
+                warn!(
+                    tenant_id = %tenant_str,
+                    error = %e,
+                    "skipping tenant with invalid id during canonical_text backfill"
+                );
+                continue;
+            }
+        };
+
+        // Snapshot once (same pattern as HNSW backfill — paging with
+        // OFFSET races with concurrent writes).
+        let metas = match metadata.list(&tenant_id, usize::MAX, 0) {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(
+                    tenant_id = %tenant_id,
+                    error = %e,
+                    "canonical_text backfill: list failed, skipping tenant"
+                );
+                continue;
+            }
+        };
+        let need: Vec<_> = metas
+            .into_iter()
+            .filter(|m| m.canonical_text.is_none())
+            .collect();
+        if need.is_empty() {
+            continue;
+        }
+
+        for meta in &need {
+            match load_chunk_text_for_index(tenants, metadata, &tenant_id, &meta.chunk_id) {
+                Ok(Some(text)) => {
+                    let canonical =
+                        crate::store::supersession::canonicalize_for_type(&text, meta.chunk_type);
+                    match metadata.set_canonical_text(&tenant_id, &meta.chunk_id, &canonical) {
+                        Ok(()) => stats.rows_backfilled += 1,
+                        Err(e) => {
+                            warn!(
+                                tenant_id = %tenant_id,
+                                chunk_id = %meta.chunk_id,
+                                error = %e,
+                                "canonical_text backfill: write failed"
+                            );
+                            stats.rows_skipped += 1;
+                        }
+                    }
+                }
+                Ok(None) => stats.rows_skipped += 1,
+                Err(e) => {
+                    warn!(
+                        tenant_id = %tenant_id,
+                        chunk_id = %meta.chunk_id,
+                        error = %e,
+                        "canonical_text backfill: load text failed"
+                    );
+                    stats.rows_skipped += 1;
+                }
+            }
+        }
+    }
+
+    stats
 }
 
 async fn sweep_pending_index_jobs(

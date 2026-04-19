@@ -1442,6 +1442,20 @@ impl SqliteMetadataStore {
         Ok(())
     }
 
+    /// Test-only: NULL out `canonical_text` for a chunk so the D2 startup
+    /// backfill path can be exercised against legacy-shaped rows. Same
+    /// `pub` + feature-gate rationale as `force_timestamp_created`.
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub fn force_clear_canonical_text(&self, chunk_id: &ChunkId) -> Result<()> {
+        let conn = self.pool.get();
+        conn.execute(
+            "UPDATE chunks SET canonical_text = NULL WHERE chunk_id = ?1",
+            rusqlite::params![chunk_id.to_string()],
+        )?;
+        Ok(())
+    }
+
     /// Apply a lifecycle delta and return the number of rows affected.
     ///
     /// Same semantics as `MetadataStore::update_lifecycle` but the
