@@ -1,0 +1,11 @@
+# Agent outputs are reproducible; don't commit. Regenerate with
+# `bash ../harness/run_all.sh` + `python3 ../judge/gold_match.py`.
+runs/
+runs_sweep2_partial/
+final/
+final_sweep2_partial/
+judged/
+sweep.log
+sweep_main.log
+gold_scores.json
+summary.md

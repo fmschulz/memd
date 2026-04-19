@@ -1,0 +1,82 @@
+{
+  "questions": [
+    {
+      "id": "a1_echo_id",
+      "category": "ephemeral",
+      "cwd": "fixtures/alpha_gateway",
+      "prompt": "In the Alpha Gateway project, what HTTP header convention applies to all handlers and what breaks if it's missing? Cite the exact header name. Check any memory systems or knowledge bases you have access to. If the answer isn't available after a diligent search, say 'not found'. Do not fabricate."
+    },
+    {
+      "id": "a2_quorum",
+      "category": "ephemeral",
+      "cwd": "fixtures/alpha_gateway",
+      "prompt": "In the Alpha Gateway project, what's the write-path replica quorum and why was it chosen? Cite the exact ratio. Check any available memory systems for prior decisions; if unavailable, say so rather than guessing."
+    },
+    {
+      "id": "a3_retry",
+      "category": "ephemeral",
+      "cwd": "fixtures/alpha_gateway",
+      "prompt": "What is the approved retry policy for Alpha Gateway upstream calls? Include the exact backoff parameters. Check any available memory systems for prior decisions; if unavailable, say so rather than guessing."
+    },
+    {
+      "id": "a4_fault_budget",
+      "category": "quantitative",
+      "cwd": "fixtures/alpha_gateway",
+      "prompt": "What is the Alpha Gateway Q2 2026 error budget number? Give the exact value as recorded. Check any available memory systems for prior decisions; if unavailable, say so rather than guessing."
+    },
+    {
+      "id": "b1_migration_gate",
+      "category": "ephemeral",
+      "cwd": "fixtures/beta_migrator",
+      "prompt": "In the Beta Migrator project, what is the name of the launch gate every migration must pass, and what's the p99 threshold? Check any available memory systems for prior decisions; if unavailable, say so rather than guessing."
+    },
+    {
+      "id": "b2_row_key",
+      "category": "ephemeral",
+      "cwd": "fixtures/beta_migrator",
+      "prompt": "What is the row-key format in Beta Migrator destination tables? Be exact about the separator. Check any available memory systems for prior decisions; if unavailable, say so rather than guessing."
+    },
+    {
+      "id": "b3_retry",
+      "category": "ephemeral",
+      "cwd": "fixtures/beta_migrator",
+      "prompt": "What is the Beta Migrator's retry backoff strategy? Cite the exact value. Check any available memory systems for prior decisions; if unavailable, say so rather than guessing."
+    },
+    {
+      "id": "g1_table_format",
+      "category": "ephemeral",
+      "cwd": "fixtures/gamma_datalake",
+      "prompt": "What is the Gamma Datalake standard table format, compression codec, and target row-group size? Cite the exact combination. Check any available memory systems for prior decisions; if unavailable, say so rather than guessing."
+    },
+    {
+      "id": "g2_audit_lag",
+      "category": "quantitative",
+      "cwd": "fixtures/gamma_datalake",
+      "prompt": "What is the Gamma Datalake audit lag p95 SLO as an exact numeric value? Check any available memory systems for prior decisions; if unavailable, say so rather than guessing."
+    },
+    {
+      "id": "g3_partition",
+      "category": "ephemeral",
+      "cwd": "fixtures/gamma_datalake",
+      "prompt": "In Gamma Datalake, what is the bucketing scheme applied to fact tables, and what granularity was explicitly rejected for partitions? Check any available memory systems for prior decisions; if unavailable, say so rather than guessing."
+    },
+    {
+      "id": "x1_retry_compare",
+      "category": "cross_project",
+      "cwd": "fixtures/alpha_gateway",
+      "prompt": "I'm working in the Alpha Gateway project. What does the Beta Migrator project on this machine use as its retry backoff strategy? Be exact \u2014 cite the recorded value. Check any available memory systems for prior decisions; if unavailable, say so rather than guessing."
+    },
+    {
+      "id": "x2_table_format_for_new",
+      "category": "cross_project",
+      "cwd": "fixtures/alpha_gateway",
+      "prompt": "I want to build a new datalake-style project. Does the Gamma Datalake project on this machine have an established table format standard I can adopt? If yes, name the exact combination. Check any available memory systems for prior decisions; if unavailable, say so rather than guessing."
+    },
+    {
+      "id": "x3_row_key_transfer",
+      "category": "cross_project",
+      "cwd": "fixtures/gamma_datalake",
+      "prompt": "I'm writing a migration from Gamma into a new system. Does the Beta Migrator project define a row-key convention I should match? Cite the exact format string. Check any available memory systems for prior decisions; if unavailable, say so rather than guessing."
+    }
+  ]
+}
