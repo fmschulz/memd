@@ -4221,6 +4221,97 @@ pub async fn handle_memory_supersede<S: Store>(
     Ok((response, event))
 }
 
+/// Parameters for memory.set_expiry (Track C6).
+///
+/// The nested `Option<Option<i64>>` encodes triple-state:
+/// - field absent → outer `None` → leave the overlay unchanged.
+/// - field present and `null` → `Some(None)` → clear the overlay
+///   field.
+/// - field present with a value → `Some(Some(v))` → set the field.
+#[derive(Debug, Deserialize, Default)]
+pub struct SetExpiryParams {
+    #[serde(default)]
+    pub tenant_id: String,
+    pub chunk_id: String,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub expires_at_ms: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub review_after_ms: Option<Option<i64>>,
+}
+
+/// Custom deserializer that preserves the "field present but null"
+/// signal serde would otherwise collapse to `Option<Option<T>>::None`.
+///
+/// `#[serde(default)]` alone turns an absent field AND an explicit
+/// `null` into the same value (both `None`), which defeats the
+/// triple-state contract on `memory.set_expiry`. Wrapping the field
+/// with `deserialize_with = "deserialize_some"` makes `null` round-trip
+/// as `Some(None)` (clear) while keeping absent fields as `None` (leave).
+fn deserialize_some<'de, T, D>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+/// Handle memory.set_expiry tool call (Track C6).
+///
+/// Updates the `expires_at_ms` and/or `review_after_ms` overlay fields
+/// on an existing chunk and bumps the tenant cache version when at
+/// least one field changed. Refuses to run on non-persistent stores
+/// because the overlay table only exists on `PersistentStore`.
+pub async fn handle_memory_set_expiry<S: Store>(
+    store: &S,
+    tenant_manager: Option<&TenantManager>,
+    params: SetExpiryParams,
+) -> Result<Value, McpError> {
+    let ps = store.as_persistent().ok_or_else(|| {
+        McpError::ToolError("memory.set_expiry requires a persistent store".into())
+    })?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
+    let chunk_id = ChunkId::parse(&params.chunk_id)
+        .map_err(|e| McpError::InvalidParams(format!("chunk_id: {e}")))?;
+
+    if let Some(tm) = tenant_manager {
+        tm.ensure_tenant_dir(&tenant_id)
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+    }
+
+    // Reject a no-op payload so callers that forgot to send either
+    // field get an explicit error instead of a silently-succeeding
+    // cache bump.
+    if params.expires_at_ms.is_none() && params.review_after_ms.is_none() {
+        return Err(McpError::InvalidParams(
+            "memory.set_expiry requires at least one of expires_at_ms / review_after_ms".into(),
+        ));
+    }
+
+    info!(
+        tenant_id = %tenant_id,
+        chunk_id = %chunk_id,
+        set_expires = params.expires_at_ms.is_some(),
+        set_review = params.review_after_ms.is_some(),
+        "memory.set_expiry"
+    );
+
+    let delta = LifecycleDelta {
+        expires_at_ms: params.expires_at_ms,
+        review_after_ms: params.review_after_ms,
+        lifecycle_updated_at_ms: Some(current_time_ms()),
+        ..Default::default()
+    };
+
+    ps.update_lifecycle(&tenant_id, &chunk_id, &delta)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    format_mcp_response(&json!({
+        "chunk_id": chunk_id.to_string(),
+        "updated": true,
+    }))
+}
+
 /// Handle memory.add_batch tool call
 pub async fn handle_memory_add_batch<S: Store>(
     store: &S,
