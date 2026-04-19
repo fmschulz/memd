@@ -78,15 +78,41 @@ impl CompactionRunner {
 
         tracing::info!(tenant_id = %tenant_id, "compaction started");
 
-        // 1. Get deleted chunk IDs from metadata
+        // 1. Build the HNSW-rebuild excluded set.
+        //
+        // Previously only tombstones (hard-deleted rows) were excluded.
+        // After Track A shipped lifecycle overlay, the retrieval layer
+        // also hides rows that are Superseded, Expired (status or past
+        // wall-clock), or in the History tier — they must not show up in
+        // search results (enforced by the B1 visibility filter at the
+        // handler boundary). If we rebuild HNSW with those rows still
+        // included, the tiered/dense backend carries the weight
+        // (distance, memory) for chunks that are already unreachable to
+        // callers, and over time the HNSW drifts toward a graph
+        // dominated by hidden history.
+        //
+        // Unioning lifecycle-hidden ids into the excluded set on every
+        // rebuild keeps the HNSW shape aligned with what the handler
+        // will actually surface. Metrics stay separate — tombstones
+        // (hard deletes) vs lifecycle-hidden (soft) are different
+        // accounting categories.
         let deleted_chunk_ids = metadata.get_deleted_chunk_ids(tenant_id)?;
-        let deleted_chunk_ids_set: HashSet<ChunkId> = deleted_chunk_ids.iter().cloned().collect();
+        let lifecycle_hidden_ids = metadata.list_lifecycle_hidden(tenant_id)?;
         let tombstones_processed = deleted_chunk_ids.len();
+        let lifecycle_hidden_count = lifecycle_hidden_ids.len();
+
+        let mut excluded_chunk_ids_set: HashSet<ChunkId> =
+            HashSet::with_capacity(tombstones_processed + lifecycle_hidden_count);
+        excluded_chunk_ids_set.extend(deleted_chunk_ids.iter().cloned());
+        excluded_chunk_ids_set.extend(lifecycle_hidden_ids.iter().cloned());
+        let deleted_chunk_ids_set = excluded_chunk_ids_set;
 
         tracing::debug!(
             tenant_id = %tenant_id,
             tombstones = tombstones_processed,
-            "gathered tombstones for compaction"
+            lifecycle_hidden = lifecycle_hidden_count,
+            total_excluded = deleted_chunk_ids_set.len(),
+            "gathered exclusion set for compaction"
         );
 
         // 2. Gather metrics for threshold checks
