@@ -298,6 +298,11 @@ pub struct HybridSearcher {
 }
 
 impl HybridSearcher {
+    /// Borrow the sparse index if BM25 is enabled.
+    pub fn sparse_index(&self) -> Option<&Arc<Bm25Index>> {
+        self.sparse.as_ref()
+    }
+
     /// Create a new hybrid searcher
     pub fn new(
         dense: Arc<DenseSearcher>,

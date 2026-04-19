@@ -13,7 +13,21 @@ use super::{ChunkMetadata, IndexState, MetadataStore};
 use crate::error::Result;
 use crate::store::{normalize_query, FeedbackEntry, RelevanceLabel};
 use crate::task_memory::{ArtifactKind, TaskArtifact, TaskRecord, TaskSearchFilters};
-use crate::types::{ChunkId, ChunkStatus, ChunkType, TenantId};
+use crate::types::{
+    ChunkId, ChunkStatus, ChunkType, LifecycleDelta, LifecycleMetadata, MemoryTier, TenantId,
+};
+
+/// Canonical column list for `chunks` SELECT statements that feed
+/// `row_to_metadata`.
+///
+/// Kept in one place so that every SELECT stays in sync with the row
+/// mapper's positional `row.get(N)` calls. When extending the `chunks`
+/// table, append the new column to the end of this list *and* to every
+/// SELECT that uses it; do not reorder existing columns.
+const CHUNK_COLUMNS: &str = "chunk_id, tenant_id, project_id, segment_id, ordinal, \
+                             chunk_type, status, timestamp_created, hash, source_uri, \
+                             tier, supersedes, superseded_by, expires_at_ms, review_after_ms, \
+                             lifecycle_updated_at_ms, canonical_text";
 
 /// SQLite-backed metadata store.
 ///
@@ -59,6 +73,13 @@ impl SqliteMetadataStore {
                 index_last_error TEXT,
                 indexed_at_ms INTEGER,
                 index_updated_at_ms INTEGER NOT NULL DEFAULT 0,
+                tier TEXT NOT NULL DEFAULT 'long_term',
+                supersedes TEXT,
+                superseded_by TEXT,
+                expires_at_ms INTEGER,
+                review_after_ms INTEGER,
+                lifecycle_updated_at_ms INTEGER NOT NULL DEFAULT 0,
+                canonical_text TEXT,
                 UNIQUE(segment_id, ordinal)
             )",
             [],
@@ -473,6 +494,71 @@ impl SqliteMetadataStore {
             &column_names,
             "index_updated_at_ms",
             "ALTER TABLE chunks ADD COLUMN index_updated_at_ms INTEGER NOT NULL DEFAULT 0",
+        )?;
+
+        // A3: lifecycle overlay columns.
+        Self::ensure_index_column(
+            conn,
+            &column_names,
+            "tier",
+            "ALTER TABLE chunks ADD COLUMN tier TEXT NOT NULL DEFAULT 'long_term'",
+        )?;
+        Self::ensure_index_column(
+            conn,
+            &column_names,
+            "supersedes",
+            "ALTER TABLE chunks ADD COLUMN supersedes TEXT",
+        )?;
+        Self::ensure_index_column(
+            conn,
+            &column_names,
+            "superseded_by",
+            "ALTER TABLE chunks ADD COLUMN superseded_by TEXT",
+        )?;
+        Self::ensure_index_column(
+            conn,
+            &column_names,
+            "expires_at_ms",
+            "ALTER TABLE chunks ADD COLUMN expires_at_ms INTEGER",
+        )?;
+        Self::ensure_index_column(
+            conn,
+            &column_names,
+            "review_after_ms",
+            "ALTER TABLE chunks ADD COLUMN review_after_ms INTEGER",
+        )?;
+        Self::ensure_index_column(
+            conn,
+            &column_names,
+            "lifecycle_updated_at_ms",
+            "ALTER TABLE chunks ADD COLUMN lifecycle_updated_at_ms INTEGER NOT NULL DEFAULT 0",
+        )?;
+        Self::ensure_index_column(
+            conn,
+            &column_names,
+            "canonical_text",
+            "ALTER TABLE chunks ADD COLUMN canonical_text TEXT",
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunks_expiry
+             ON chunks(tenant_id, expires_at_ms) WHERE expires_at_ms IS NOT NULL",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunks_supersedes
+             ON chunks(tenant_id, supersedes) WHERE supersedes IS NOT NULL",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunks_tier_status
+             ON chunks(tenant_id, tier, status)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunks_canonical
+             ON chunks(tenant_id, project_id, canonical_text) WHERE canonical_text IS NOT NULL",
+            [],
         )?;
 
         Ok(())
@@ -1228,7 +1314,16 @@ impl SqliteMetadataStore {
         Ok(resolved)
     }
 
-    /// Convert a database row to ChunkMetadata
+    /// Convert a database row to [`ChunkMetadata`].
+    ///
+    /// **Invariant:** the SELECT that produced `row` must project
+    /// columns in the order defined by [`CHUNK_COLUMNS`]. Any mismatch
+    /// will silently corrupt the parsed record.
+    ///
+    /// Fail-closed on unknown `status` / `tier` strings: A3 treats an
+    /// unrecognized enum value as a schema-drift bug rather than
+    /// silently defaulting, so bad rows surface as conversion errors
+    /// instead of masquerading as `Final`/`LongTerm`.
     fn row_to_metadata(row: &rusqlite::Row) -> rusqlite::Result<ChunkMetadata> {
         let chunk_id_str: String = row.get(0)?;
         let tenant_id_str: String = row.get(1)?;
@@ -1240,6 +1335,13 @@ impl SqliteMetadataStore {
         let timestamp_created: i64 = row.get(7)?;
         let hash: String = row.get(8)?;
         let source_uri: Option<String> = row.get(9)?;
+        let tier_str: String = row.get(10)?;
+        let supersedes_str: Option<String> = row.get(11)?;
+        let superseded_by_str: Option<String> = row.get(12)?;
+        let expires_at_ms: Option<i64> = row.get(13)?;
+        let review_after_ms: Option<i64> = row.get(14)?;
+        let lifecycle_updated_at_ms: i64 = row.get(15)?;
+        let canonical_text: Option<String> = row.get(16)?;
 
         // Parse chunk_id
         let chunk_id = ChunkId::parse(&chunk_id_str).map_err(|e| {
@@ -1251,26 +1353,49 @@ impl SqliteMetadataStore {
             rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e))
         })?;
 
-        // Parse chunk_type
-        let chunk_type = match chunk_type_str.as_str() {
-            "code" => ChunkType::Code,
-            "doc" => ChunkType::Doc,
-            "trace" => ChunkType::Trace,
-            "decision" => ChunkType::Decision,
-            "plan" => ChunkType::Plan,
-            "research" => ChunkType::Research,
-            "message" => ChunkType::Message,
-            "summary" => ChunkType::Summary,
-            _ => ChunkType::Other,
-        };
+        // Parse chunk_type — fail-closed via FromStr.
+        let chunk_type = chunk_type_str.parse::<ChunkType>().map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
+        })?;
 
-        // Parse status
-        let status = match status_str.as_str() {
-            "draft" => ChunkStatus::Draft,
-            "final" => ChunkStatus::Final,
-            "error" => ChunkStatus::Error,
-            "deleted" => ChunkStatus::Deleted,
-            _ => ChunkStatus::Final,
+        // Parse status — fail-closed via FromStr (A1).
+        let status = status_str.parse::<ChunkStatus>().map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(e))
+        })?;
+
+        // Parse tier — fail-closed via FromStr (A2).
+        let tier = tier_str.parse::<MemoryTier>().map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, Box::new(e))
+        })?;
+
+        let supersedes = supersedes_str
+            .map(|s| ChunkId::parse(&s))
+            .transpose()
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    11,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+        let superseded_by = superseded_by_str
+            .map(|s| ChunkId::parse(&s))
+            .transpose()
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    12,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+
+        let lifecycle = LifecycleMetadata {
+            tier,
+            supersedes,
+            superseded_by,
+            expires_at_ms,
+            review_after_ms,
+            lifecycle_updated_at_ms,
         };
 
         Ok(ChunkMetadata {
@@ -1284,7 +1409,37 @@ impl SqliteMetadataStore {
             timestamp_created,
             hash,
             source_uri,
+            lifecycle,
+            canonical_text,
         })
+    }
+
+    /// Back-date a chunk's `timestamp_created` via direct SQL.
+    ///
+    /// TEST-ONLY: used by integration tests that need a deterministic
+    /// clock when exercising history promotion / age-based behavior.
+    /// Gated behind `cfg(any(test, feature = "test-support"))` so it
+    /// never ships in release builds. Allowed-dead until Track C tests
+    /// wire it up through the `common` test-helpers module.
+    ///
+    /// Visibility note: spec called for `pub(crate)`, but the integration
+    /// tests under `crates/memd/tests/` live in a separate crate and
+    /// cannot see crate-private items. Exposing this as `pub` behind the
+    /// `test-support` feature keeps it off release builds while letting
+    /// integration tests reach it.
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub fn force_timestamp_created(
+        &self,
+        chunk_id: &ChunkId,
+        ts_ms: i64,
+    ) -> Result<()> {
+        let conn = self.pool.get();
+        conn.execute(
+            "UPDATE chunks SET timestamp_created = ?1 WHERE chunk_id = ?2",
+            rusqlite::params![ts_ms, chunk_id.to_string()],
+        )?;
+        Ok(())
     }
 }
 
@@ -1320,8 +1475,10 @@ impl MetadataStore for SqliteMetadataStore {
             let mut stmt = tx.prepare(
                 "INSERT OR REPLACE INTO chunks (
                     chunk_id, tenant_id, project_id, segment_id, ordinal,
-                    chunk_type, status, timestamp_created, hash, source_uri
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    chunk_type, status, timestamp_created, hash, source_uri,
+                    tier, supersedes, superseded_by, expires_at_ms, review_after_ms,
+                    lifecycle_updated_at_ms, canonical_text
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             )?;
             for row in metadata {
                 stmt.execute(rusqlite::params![
@@ -1335,6 +1492,13 @@ impl MetadataStore for SqliteMetadataStore {
                     row.timestamp_created,
                     &row.hash,
                     row.source_uri.as_deref(),
+                    row.lifecycle.tier.to_string(),
+                    row.lifecycle.supersedes.as_ref().map(|c| c.to_string()),
+                    row.lifecycle.superseded_by.as_ref().map(|c| c.to_string()),
+                    row.lifecycle.expires_at_ms,
+                    row.lifecycle.review_after_ms,
+                    row.lifecycle.lifecycle_updated_at_ms,
+                    row.canonical_text.as_deref(),
                 ])?;
             }
         }
@@ -1346,12 +1510,12 @@ impl MetadataStore for SqliteMetadataStore {
     fn get(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<Option<ChunkMetadata>> {
         let conn = self.pool.get();
 
-        let mut stmt = conn.prepare(
-            "SELECT chunk_id, tenant_id, project_id, segment_id, ordinal,
-                    chunk_type, status, timestamp_created, hash, source_uri
+        let sql = format!(
+            "SELECT {CHUNK_COLUMNS}
              FROM chunks
-             WHERE tenant_id = ?1 AND chunk_id = ?2 AND status != 'deleted'",
-        )?;
+             WHERE tenant_id = ?1 AND chunk_id = ?2 AND status != 'deleted'"
+        );
+        let mut stmt = conn.prepare(&sql)?;
 
         let result = stmt.query_row(
             rusqlite::params![tenant_id.as_str(), chunk_id.to_string()],
@@ -1373,14 +1537,14 @@ impl MetadataStore for SqliteMetadataStore {
     ) -> Result<Vec<ChunkMetadata>> {
         let conn = self.pool.get();
 
-        let mut stmt = conn.prepare(
-            "SELECT chunk_id, tenant_id, project_id, segment_id, ordinal,
-                    chunk_type, status, timestamp_created, hash, source_uri
+        let sql = format!(
+            "SELECT {CHUNK_COLUMNS}
              FROM chunks
              WHERE tenant_id = ?1 AND status != 'deleted'
              ORDER BY timestamp_created DESC
-             LIMIT ?2 OFFSET ?3",
-        )?;
+             LIMIT ?2 OFFSET ?3"
+        );
+        let mut stmt = conn.prepare(&sql)?;
 
         let rows = stmt.query_map(
             rusqlite::params![tenant_id.as_str(), limit as i64, offset as i64],
@@ -1410,13 +1574,13 @@ impl MetadataStore for SqliteMetadataStore {
     fn get_by_segment(&self, segment_id: u64) -> Result<Vec<ChunkMetadata>> {
         let conn = self.pool.get();
 
-        let mut stmt = conn.prepare(
-            "SELECT chunk_id, tenant_id, project_id, segment_id, ordinal,
-                    chunk_type, status, timestamp_created, hash, source_uri
+        let sql = format!(
+            "SELECT {CHUNK_COLUMNS}
              FROM chunks
              WHERE segment_id = ?1
-             ORDER BY ordinal ASC",
-        )?;
+             ORDER BY ordinal ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
 
         let rows = stmt.query_map(rusqlite::params![segment_id as i64], |row| {
             Self::row_to_metadata(row)
@@ -1637,6 +1801,283 @@ impl MetadataStore for SqliteMetadataStore {
         }
         Ok((pending, indexed, failed))
     }
+
+    fn update_lifecycle(
+        &self,
+        tenant_id: &TenantId,
+        chunk_id: &ChunkId,
+        delta: &LifecycleDelta,
+    ) -> Result<()> {
+        let conn = self.pool.get();
+        conn.execute(
+            "UPDATE chunks SET
+                status                  = COALESCE(:status, status),
+                tier                    = COALESCE(:tier, tier),
+                supersedes              = COALESCE(:supersedes, supersedes),
+                superseded_by           = COALESCE(:superseded_by, superseded_by),
+                expires_at_ms           = CASE WHEN :set_expires = 1 THEN :expires_at ELSE expires_at_ms END,
+                review_after_ms         = CASE WHEN :set_review  = 1 THEN :review_at  ELSE review_after_ms END,
+                lifecycle_updated_at_ms = COALESCE(:lifecycle_at, lifecycle_updated_at_ms)
+             WHERE tenant_id = :tenant AND chunk_id = :chunk",
+            rusqlite::named_params! {
+                ":status":        delta.status.map(|s| s.to_string()),
+                ":tier":          delta.tier.map(|t| t.to_string()),
+                ":supersedes":    delta.supersedes.as_ref().map(|c| c.to_string()),
+                ":superseded_by": delta.superseded_by.as_ref().map(|c| c.to_string()),
+                ":set_expires":   i64::from(delta.expires_at_ms.is_some()),
+                ":expires_at":    delta.expires_at_ms.flatten(),
+                ":set_review":    i64::from(delta.review_after_ms.is_some()),
+                ":review_at":     delta.review_after_ms.flatten(),
+                ":lifecycle_at":  delta.lifecycle_updated_at_ms,
+                ":tenant":        tenant_id.as_str(),
+                ":chunk":         chunk_id.to_string(),
+            },
+        )?;
+        Ok(())
+    }
+
+    fn atomic_supersede(
+        &self,
+        tenant_id: &TenantId,
+        old_id: &ChunkId,
+        new_id: &ChunkId,
+        now_ms: i64,
+    ) -> Result<()> {
+        let mut conn = self.pool.get();
+        let tx = conn.transaction()?;
+
+        // Both UPDATEs must touch exactly one row; otherwise one side of
+        // the supersession edge would dangle. Returning an error here
+        // drops the `Transaction` without commit, which rolls the
+        // partial update back on SQLite's side.
+        let old_rows = tx.execute(
+            "UPDATE chunks SET status = 'superseded', superseded_by = :new,
+                lifecycle_updated_at_ms = :now
+             WHERE tenant_id = :tenant AND chunk_id = :old",
+            rusqlite::named_params! {
+                ":new": new_id.to_string(),
+                ":now": now_ms,
+                ":tenant": tenant_id.as_str(),
+                ":old": old_id.to_string(),
+            },
+        )?;
+        if old_rows != 1 {
+            return Err(crate::error::MemdError::StorageError(format!(
+                "atomic_supersede: old chunk {old_id} not found in tenant {tenant_id} (rows={old_rows})"
+            )));
+        }
+
+        let new_rows = tx.execute(
+            "UPDATE chunks SET supersedes = :old, lifecycle_updated_at_ms = :now
+             WHERE tenant_id = :tenant AND chunk_id = :new",
+            rusqlite::named_params! {
+                ":old": old_id.to_string(),
+                ":now": now_ms,
+                ":tenant": tenant_id.as_str(),
+                ":new": new_id.to_string(),
+            },
+        )?;
+        if new_rows != 1 {
+            return Err(crate::error::MemdError::StorageError(format!(
+                "atomic_supersede: new chunk {new_id} not found in tenant {tenant_id} (rows={new_rows})"
+            )));
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn set_canonical_text(
+        &self,
+        tenant_id: &TenantId,
+        chunk_id: &ChunkId,
+        canonical: &str,
+    ) -> Result<()> {
+        let conn = self.pool.get();
+        conn.execute(
+            "UPDATE chunks SET canonical_text = ?1 WHERE tenant_id = ?2 AND chunk_id = ?3",
+            rusqlite::params![canonical, tenant_id.as_str(), chunk_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    fn list_expired_before(&self, tenant_id: &TenantId, now_ms: i64) -> Result<Vec<ChunkId>> {
+        let conn = self.pool.get();
+        let mut stmt = conn.prepare(
+            "SELECT chunk_id FROM chunks
+             WHERE tenant_id = ?1
+               AND expires_at_ms IS NOT NULL
+               AND expires_at_ms < ?2
+               AND status NOT IN ('deleted', 'expired')",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![tenant_id.as_str(), now_ms],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut ids = Vec::new();
+        for row in rows {
+            let s = row?;
+            let id = ChunkId::parse(&s).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    fn list_stale_superseded(
+        &self,
+        tenant_id: &TenantId,
+        older_than_ms: i64,
+    ) -> Result<Vec<ChunkId>> {
+        let conn = self.pool.get();
+        let mut stmt = conn.prepare(
+            "SELECT chunk_id FROM chunks
+             WHERE tenant_id = ?1
+               AND status IN ('superseded', 'expired')
+               AND tier != 'history'
+               AND lifecycle_updated_at_ms < ?2",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![tenant_id.as_str(), older_than_ms],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut ids = Vec::new();
+        for row in rows {
+            let s = row?;
+            let id = ChunkId::parse(&s).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    fn list_lifecycle_hidden(&self, tenant_id: &TenantId) -> Result<Vec<ChunkId>> {
+        let conn = self.pool.get();
+        let mut stmt = conn.prepare(
+            "SELECT chunk_id FROM chunks
+             WHERE tenant_id = ?1
+               AND (status IN ('superseded', 'expired') OR tier = 'history')",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![tenant_id.as_str()], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut ids = Vec::new();
+        for row in rows {
+            let s = row?;
+            let id = ChunkId::parse(&s).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    fn list_by_canonical_text(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        canonical: &str,
+    ) -> Result<Vec<ChunkMetadata>> {
+        let conn = self.pool.get();
+        let sql = format!(
+            "SELECT {CHUNK_COLUMNS} FROM chunks
+             WHERE tenant_id = :tenant
+               AND (:project IS NULL OR project_id = :project)
+               AND canonical_text = :canonical"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::named_params! {
+                ":tenant": tenant_id.as_str(),
+                ":project": project_id,
+                ":canonical": canonical,
+            },
+            Self::row_to_metadata,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    fn list_recent_for_project(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ChunkMetadata>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.pool.get();
+        let sql = format!(
+            "SELECT {CHUNK_COLUMNS} FROM chunks
+             WHERE tenant_id = :tenant
+               AND (:project IS NULL OR project_id = :project)
+             ORDER BY timestamp_created DESC
+             LIMIT :limit"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::named_params! {
+                ":tenant": tenant_id.as_str(),
+                ":project": project_id,
+                ":limit": limit as i64,
+            },
+            Self::row_to_metadata,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    fn list_for_export(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        include_history: bool,
+    ) -> Result<Vec<ChunkMetadata>> {
+        let conn = self.pool.get();
+        let sql = format!(
+            "SELECT {CHUNK_COLUMNS} FROM chunks
+             WHERE tenant_id = :tenant
+               AND (:project IS NULL OR project_id = :project)
+               AND (:include_history = 1 OR tier != 'history')
+               AND status NOT IN ('deleted', 'error')
+             ORDER BY timestamp_created ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::named_params! {
+                ":tenant": tenant_id.as_str(),
+                ":project": project_id,
+                ":include_history": i64::from(include_history),
+            },
+            Self::row_to_metadata,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -1659,6 +2100,8 @@ mod tests {
             timestamp_created: 1234567890,
             hash: "abc123".to_string(),
             source_uri: None,
+            lifecycle: LifecycleMetadata::default(),
+            canonical_text: None,
         }
     }
 
@@ -2098,5 +2541,492 @@ mod tests {
         assert!(names.contains("index_last_error"));
         assert!(names.contains("indexed_at_ms"));
         assert!(names.contains("index_updated_at_ms"));
+    }
+
+    #[test]
+    fn chunks_table_has_lifecycle_columns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("m.db")).unwrap();
+        let conn = store.pool.get();
+        let mut stmt = conn.prepare("PRAGMA table_info(chunks)").unwrap();
+        let rows = stmt
+            .query_map([], |r| r.get::<usize, String>(1))
+            .unwrap();
+        let mut cols: Vec<String> = Vec::new();
+        for row in rows {
+            cols.push(row.unwrap());
+        }
+        for c in &[
+            "tier",
+            "supersedes",
+            "superseded_by",
+            "expires_at_ms",
+            "review_after_ms",
+            "lifecycle_updated_at_ms",
+            "canonical_text",
+        ] {
+            assert!(cols.iter().any(|x| x == c), "missing column: {c}");
+        }
+    }
+
+    #[test]
+    fn row_to_metadata_fails_closed_on_unknown_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("m.db")).unwrap();
+        let conn = store.pool.get();
+        conn.execute(
+            "INSERT INTO chunks (chunk_id, tenant_id, segment_id, ordinal, chunk_type, status,
+                                 timestamp_created, hash, tier, lifecycle_updated_at_ms)
+             VALUES (?,?,?,?,?,?,?,?,?,?)",
+            rusqlite::params![
+                "019d0000-0000-7000-8000-000000000001",
+                "t",
+                0_i64,
+                0_i32,
+                "doc",
+                "bogus_status",
+                1_i64,
+                "h",
+                "long_term",
+                0_i64
+            ],
+        )
+        .unwrap();
+        let result = store.get(
+            &TenantId::new("t").unwrap(),
+            &ChunkId::parse("019d0000-0000-7000-8000-000000000001").unwrap(),
+        );
+        assert!(result.is_err(), "expected error on unknown status");
+    }
+
+    #[test]
+    fn legacy_db_gains_lifecycle_columns_on_reopen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("m.db");
+
+        // Simulate a DB created before A3 by opening a raw rusqlite connection and
+        // creating chunks WITHOUT the 7 new columns.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute(
+                "CREATE TABLE chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    project_id TEXT,
+                    segment_id INTEGER NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    chunk_type TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'final',
+                    timestamp_created INTEGER NOT NULL,
+                    hash TEXT NOT NULL,
+                    source_uri TEXT
+                )",
+                [],
+            )
+            .unwrap();
+            // Insert a row with the pre-A3 column set only.
+            conn.execute(
+                "INSERT INTO chunks (chunk_id, tenant_id, segment_id, ordinal, chunk_type, status, timestamp_created, hash)
+                 VALUES (?1, ?2, 0, 0, 'doc', 'final', 1, 'h')",
+                rusqlite::params![
+                    "019d0000-0000-7000-8000-000000000010",
+                    "t",
+                ],
+            )
+            .unwrap();
+        }
+
+        // Now open via SqliteMetadataStore — this should trigger
+        // ensure_index_columns to backfill the 7 new columns and
+        // indexes.
+        let store = SqliteMetadataStore::open(&db_path).unwrap();
+
+        // Verify the columns now exist.
+        let conn = store.pool.get();
+        let cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(chunks)").unwrap();
+            let rows = stmt
+                .query_map([], |r| r.get::<usize, String>(1))
+                .unwrap();
+            let mut names = Vec::new();
+            for row in rows {
+                names.push(row.unwrap());
+            }
+            names
+        };
+        for c in &[
+            "tier",
+            "supersedes",
+            "superseded_by",
+            "expires_at_ms",
+            "review_after_ms",
+            "lifecycle_updated_at_ms",
+            "canonical_text",
+        ] {
+            assert!(
+                cols.iter().any(|x| x == c),
+                "missing column after migration: {c}"
+            );
+        }
+        drop(conn);
+
+        // Verify the pre-existing row is still readable AND gains default lifecycle.
+        let meta = store
+            .get(
+                &TenantId::new("t").unwrap(),
+                &ChunkId::parse("019d0000-0000-7000-8000-000000000010").unwrap(),
+            )
+            .unwrap()
+            .expect("row survives migration");
+        assert_eq!(meta.status, ChunkStatus::Final);
+        assert_eq!(meta.lifecycle.tier, crate::types::MemoryTier::LongTerm);
+        assert_eq!(meta.lifecycle.lifecycle_updated_at_ms, 0);
+        assert!(meta.lifecycle.supersedes.is_none());
+        assert!(meta.lifecycle.superseded_by.is_none());
+        assert!(meta.lifecycle.expires_at_ms.is_none());
+        assert!(meta.lifecycle.review_after_ms.is_none());
+        assert!(meta.canonical_text.is_none());
+    }
+
+    /// Seed a fresh chunk row for the given tenant and return its
+    /// `ChunkMetadata`. Used by the A4 lifecycle tests to avoid
+    /// repeating insert boilerplate.
+    fn seed_chunk(store: &SqliteMetadataStore, tenant: &str) -> ChunkMetadata {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // Unique (segment_id, ordinal) pair per call so we do not
+        // collide with prior seeds in the same test.
+        static NEXT_SEGMENT: AtomicU64 = AtomicU64::new(1_000);
+        let segment_id = NEXT_SEGMENT.fetch_add(1, Ordering::SeqCst);
+
+        let chunk_id = ChunkId::new();
+        let mut meta = create_test_metadata(tenant, &chunk_id);
+        meta.segment_id = segment_id;
+        meta.ordinal = 0;
+        store.insert(&meta).unwrap();
+        meta
+    }
+
+    #[test]
+    fn update_lifecycle_writes_overlay_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("m.db")).unwrap();
+        let meta = seed_chunk(&store, "t");
+        let new_id = ChunkId::new();
+
+        store
+            .update_lifecycle(
+                &meta.tenant_id,
+                &meta.chunk_id,
+                &crate::types::LifecycleDelta {
+                    status: Some(ChunkStatus::Superseded),
+                    superseded_by: Some(new_id.clone()),
+                    lifecycle_updated_at_ms: Some(1_700_000_000_000),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let reloaded = store.get(&meta.tenant_id, &meta.chunk_id).unwrap().unwrap();
+        assert_eq!(reloaded.status, ChunkStatus::Superseded);
+        assert_eq!(
+            reloaded.lifecycle.superseded_by.as_ref().unwrap(),
+            &new_id
+        );
+        assert_eq!(reloaded.lifecycle.lifecycle_updated_at_ms, 1_700_000_000_000);
+    }
+
+    #[test]
+    fn update_lifecycle_triple_state_clear() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("m.db")).unwrap();
+        let meta = seed_chunk(&store, "t");
+
+        // Set expires_at_ms via Some(Some(value)).
+        store
+            .update_lifecycle(
+                &meta.tenant_id,
+                &meta.chunk_id,
+                &crate::types::LifecycleDelta {
+                    expires_at_ms: Some(Some(1_000_000)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let r1 = store.get(&meta.tenant_id, &meta.chunk_id).unwrap().unwrap();
+        assert_eq!(r1.lifecycle.expires_at_ms, Some(1_000_000));
+
+        // Clear expires_at_ms via Some(None).
+        store
+            .update_lifecycle(
+                &meta.tenant_id,
+                &meta.chunk_id,
+                &crate::types::LifecycleDelta {
+                    expires_at_ms: Some(None),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let r2 = store.get(&meta.tenant_id, &meta.chunk_id).unwrap().unwrap();
+        assert!(r2.lifecycle.expires_at_ms.is_none());
+    }
+
+    #[test]
+    fn atomic_supersede_links_both_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("m.db")).unwrap();
+        let old = seed_chunk(&store, "t");
+        let new = seed_chunk(&store, "t");
+        assert_ne!(old.chunk_id, new.chunk_id);
+
+        store
+            .atomic_supersede(
+                &old.tenant_id,
+                &old.chunk_id,
+                &new.chunk_id,
+                1_800_000_000_000,
+            )
+            .unwrap();
+
+        let old_r = store.get(&old.tenant_id, &old.chunk_id).unwrap().unwrap();
+        assert_eq!(old_r.status, ChunkStatus::Superseded);
+        assert_eq!(
+            old_r.lifecycle.superseded_by.as_ref().unwrap(),
+            &new.chunk_id
+        );
+        assert_eq!(old_r.lifecycle.lifecycle_updated_at_ms, 1_800_000_000_000);
+
+        let new_r = store.get(&new.tenant_id, &new.chunk_id).unwrap().unwrap();
+        assert_eq!(
+            new_r.lifecycle.supersedes.as_ref().unwrap(),
+            &old.chunk_id
+        );
+        assert_eq!(new_r.lifecycle.lifecycle_updated_at_ms, 1_800_000_000_000);
+    }
+
+    #[test]
+    fn list_expired_before_returns_only_old_expiring_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("m.db")).unwrap();
+        let tenant = TenantId::new("t").unwrap();
+
+        // One expires at 500 (before 1000).
+        let early = seed_chunk(&store, "t");
+        store
+            .update_lifecycle(
+                &tenant,
+                &early.chunk_id,
+                &crate::types::LifecycleDelta {
+                    expires_at_ms: Some(Some(500)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        // One expires at 2000 (after 1000).
+        let later = seed_chunk(&store, "t");
+        store
+            .update_lifecycle(
+                &tenant,
+                &later.chunk_id,
+                &crate::types::LifecycleDelta {
+                    expires_at_ms: Some(Some(2000)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        // One with no expiry.
+        let never = seed_chunk(&store, "t");
+
+        let expired = store.list_expired_before(&tenant, 1000).unwrap();
+        assert_eq!(
+            expired.len(),
+            1,
+            "only the row expiring before 1000 should appear"
+        );
+        assert_eq!(expired[0], early.chunk_id);
+        assert!(!expired.contains(&later.chunk_id));
+        assert!(!expired.contains(&never.chunk_id));
+    }
+
+    #[test]
+    fn list_by_canonical_text_filters_by_project_and_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("m.db")).unwrap();
+        let tenant = TenantId::new("t").unwrap();
+
+        // Three rows: two share canonical='alpha' but differ by project;
+        // one has canonical='beta'.
+        let mut a = seed_chunk(&store, "t");
+        a.project_id = Some("proj_a".to_string());
+        a.canonical_text = Some("alpha".to_string());
+        store.insert(&a).unwrap();
+
+        let mut b = seed_chunk(&store, "t");
+        b.project_id = Some("proj_b".to_string());
+        b.canonical_text = Some("alpha".to_string());
+        store.insert(&b).unwrap();
+
+        let mut c = seed_chunk(&store, "t");
+        c.project_id = Some("proj_a".to_string());
+        c.canonical_text = Some("beta".to_string());
+        store.insert(&c).unwrap();
+
+        // Filter by project=proj_a + canonical=alpha → only `a`.
+        let scoped = store
+            .list_by_canonical_text(&tenant, Some("proj_a"), "alpha")
+            .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].chunk_id, a.chunk_id);
+
+        // Project=None matches across all projects → both `a` and `b`.
+        let all_projects = store
+            .list_by_canonical_text(&tenant, None, "alpha")
+            .unwrap();
+        assert_eq!(all_projects.len(), 2);
+        let ids: std::collections::HashSet<_> =
+            all_projects.iter().map(|m| m.chunk_id.clone()).collect();
+        assert!(ids.contains(&a.chunk_id));
+        assert!(ids.contains(&b.chunk_id));
+
+        // Non-matching canonical returns empty.
+        let empty = store
+            .list_by_canonical_text(&tenant, None, "gamma")
+            .unwrap();
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn atomic_supersede_rolls_back_when_old_chunk_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("m.db")).unwrap();
+        let new = seed_chunk(&store, "t");
+        let bogus_old = ChunkId::new(); // never inserted
+
+        let result =
+            store.atomic_supersede(&new.tenant_id, &bogus_old, &new.chunk_id, 1_900_000_000_000);
+        assert!(result.is_err(), "expected error when old chunk missing");
+
+        // The new chunk must be untouched — supersedes should still be None.
+        let new_r = store.get(&new.tenant_id, &new.chunk_id).unwrap().unwrap();
+        assert!(
+            new_r.lifecycle.supersedes.is_none(),
+            "new row must not have been updated"
+        );
+        assert_eq!(
+            new_r.lifecycle.lifecycle_updated_at_ms, 0,
+            "lifecycle_updated_at_ms must not have been bumped"
+        );
+    }
+
+    #[test]
+    fn atomic_supersede_rolls_back_when_new_chunk_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("m.db")).unwrap();
+        let old = seed_chunk(&store, "t");
+        let bogus_new = ChunkId::new(); // never inserted
+
+        let before = store.get(&old.tenant_id, &old.chunk_id).unwrap().unwrap();
+
+        let result =
+            store.atomic_supersede(&old.tenant_id, &old.chunk_id, &bogus_new, 1_900_000_000_000);
+        assert!(result.is_err(), "expected error when new chunk missing");
+
+        // The old chunk must be untouched — status unchanged, no bump.
+        let old_r = store.get(&old.tenant_id, &old.chunk_id).unwrap().unwrap();
+        assert_eq!(
+            old_r.status, before.status,
+            "old status must not have changed"
+        );
+        assert!(
+            old_r.lifecycle.superseded_by.is_none(),
+            "old row must not have gained superseded_by"
+        );
+        assert_eq!(
+            old_r.lifecycle.lifecycle_updated_at_ms,
+            before.lifecycle.lifecycle_updated_at_ms
+        );
+    }
+
+    #[test]
+    fn update_lifecycle_triple_state_clear_review_after() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("m.db")).unwrap();
+        let meta = seed_chunk(&store, "t");
+
+        store
+            .update_lifecycle(
+                &meta.tenant_id,
+                &meta.chunk_id,
+                &crate::types::LifecycleDelta {
+                    review_after_ms: Some(Some(2_000_000)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .get(&meta.tenant_id, &meta.chunk_id)
+                .unwrap()
+                .unwrap()
+                .lifecycle
+                .review_after_ms,
+            Some(2_000_000)
+        );
+
+        store
+            .update_lifecycle(
+                &meta.tenant_id,
+                &meta.chunk_id,
+                &crate::types::LifecycleDelta {
+                    review_after_ms: Some(None),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(store
+            .get(&meta.tenant_id, &meta.chunk_id)
+            .unwrap()
+            .unwrap()
+            .lifecycle
+            .review_after_ms
+            .is_none());
+    }
+
+    #[test]
+    fn list_expired_before_skips_already_expired_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("m.db")).unwrap();
+        let a = seed_chunk(&store, "t");
+        let b = seed_chunk(&store, "t");
+
+        // A has expires_at_ms < now AND status=Final: eligible
+        store
+            .update_lifecycle(
+                &a.tenant_id,
+                &a.chunk_id,
+                &crate::types::LifecycleDelta {
+                    expires_at_ms: Some(Some(500)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        // B has expires_at_ms < now BUT status=Expired already: should be skipped
+        store
+            .update_lifecycle(
+                &b.tenant_id,
+                &b.chunk_id,
+                &crate::types::LifecycleDelta {
+                    expires_at_ms: Some(Some(500)),
+                    status: Some(ChunkStatus::Expired),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let ids = store.list_expired_before(&a.tenant_id, 1_000).unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0], a.chunk_id);
     }
 }
