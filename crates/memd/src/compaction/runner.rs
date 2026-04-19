@@ -308,17 +308,25 @@ impl CompactionRunner {
             0
         };
 
-        // Centralised cache bump for the whole cycle. Runs once at
-        // the end so multiple phase-level overlay transitions collapse
-        // into a single tenant_memory_version advance. Only bumps when
-        // hybrid is available AND at least one phase that could have
-        // invalidated a snapshot actually touched rows.
+        // Centralised cache bump for the whole cycle — narrowly
+        // scoped to C3/C4 overlay transitions. Only these two phases
+        // need a runner-level bump because:
+        //   * HNSW rebuild / segment merge have no observable overlay
+        //     effect the handler layer would cache differently, and
+        //     dense rebuild already cycles its own internal state.
+        //   * Cache invalidation for tombstones is handled by
+        //     `SemanticCache::invalidate_chunks` above.
+        //   * The sweeps are invoked with hybrid=None so they do not
+        //     bump independently; the single bump below collapses
+        //     them into one tenant_memory_version advance.
+        //
+        // Importantly, we do NOT use `tombstones_processed` as a
+        // "something happened" proxy: that number reflects the
+        // current tombstone inventory (the existing deleted-row
+        // count from `get_deleted_chunk_ids`), not whether this
+        // particular cycle mutated anything.
         if let Some(h) = hybrid {
-            if expired_count > 0
-                || promoted_count > 0
-                || tombstones_processed > 0
-                || hnsw_rebuild.is_some()
-            {
+            if expired_count > 0 || promoted_count > 0 {
                 h.bump_tenant_memory_version(tenant_id);
             }
         }
