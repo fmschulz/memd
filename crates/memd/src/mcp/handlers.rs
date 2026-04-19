@@ -4295,29 +4295,6 @@ pub async fn handle_memory_set_expiry<S: Store>(
         "memory.set_expiry"
     );
 
-    // Preflight existence + tenant check: `update_lifecycle`'s UPDATE
-    // silently affects zero rows when (tenant_id, chunk_id) doesn't
-    // match, which would otherwise let the handler return
-    // `"updated": true` for bogus chunk IDs or cross-tenant access.
-    // The row is read through the lifecycle-aware path so we fail
-    // closed on both "chunk doesn't exist in this tenant" and "chunk
-    // was deleted" — callers learn about the missing target instead
-    // of getting a silent success.
-    use crate::store::Store;
-    match <crate::store::persistent::PersistentStore as Store>::get_with_lifecycle(
-        ps, &tenant_id, &chunk_id,
-    )
-    .await
-    .map_err(|e| McpError::ToolError(e.to_string()))?
-    {
-        Some(_) => {}
-        None => {
-            return Err(McpError::ToolError(format!(
-                "memory.set_expiry: chunk {chunk_id} not found in tenant {tenant_id}"
-            )));
-        }
-    }
-
     let delta = LifecycleDelta {
         expires_at_ms: params.expires_at_ms,
         review_after_ms: params.review_after_ms,
@@ -4325,9 +4302,21 @@ pub async fn handle_memory_set_expiry<S: Store>(
         ..Default::default()
     };
 
-    ps.update_lifecycle(&tenant_id, &chunk_id, &delta)
+    // Single atomic UPDATE whose rowcount drives the response. Fails
+    // closed on both non-existent chunk IDs AND cross-tenant access
+    // (the tenant filter is part of the UPDATE's WHERE, so a wrong
+    // tenant matches zero rows and returns `Ok(false)` here). No
+    // preflight read, so no TOCTOU window.
+    let updated = ps
+        .update_lifecycle_if_exists(&tenant_id, &chunk_id, &delta)
         .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    if !updated {
+        return Err(McpError::ToolError(format!(
+            "memory.set_expiry: chunk {chunk_id} not found in tenant {tenant_id}"
+        )));
+    }
 
     format_mcp_response(&json!({
         "chunk_id": chunk_id.to_string(),

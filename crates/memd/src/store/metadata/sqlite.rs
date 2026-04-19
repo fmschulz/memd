@@ -1441,6 +1441,48 @@ impl SqliteMetadataStore {
         )?;
         Ok(())
     }
+
+    /// Apply a lifecycle delta and return the number of rows affected.
+    ///
+    /// Same semantics as `MetadataStore::update_lifecycle` but the
+    /// concrete rowcount is exposed so callers can fail closed when
+    /// the UPDATE matched zero rows (non-existent chunk_id OR
+    /// cross-tenant access — the WHERE filter silently drops both
+    /// otherwise). `memory.set_expiry` uses this to make
+    /// `{"updated": true}` a load-bearing claim.
+    pub fn update_lifecycle_counted(
+        &self,
+        tenant_id: &TenantId,
+        chunk_id: &ChunkId,
+        delta: &LifecycleDelta,
+    ) -> Result<usize> {
+        let conn = self.pool.get();
+        let rows = conn.execute(
+            "UPDATE chunks SET
+                status                  = COALESCE(:status, status),
+                tier                    = COALESCE(:tier, tier),
+                supersedes              = COALESCE(:supersedes, supersedes),
+                superseded_by           = COALESCE(:superseded_by, superseded_by),
+                expires_at_ms           = CASE WHEN :set_expires = 1 THEN :expires_at ELSE expires_at_ms END,
+                review_after_ms         = CASE WHEN :set_review  = 1 THEN :review_at  ELSE review_after_ms END,
+                lifecycle_updated_at_ms = COALESCE(:lifecycle_at, lifecycle_updated_at_ms)
+             WHERE tenant_id = :tenant AND chunk_id = :chunk",
+            rusqlite::named_params! {
+                ":status":        delta.status.map(|s| s.to_string()),
+                ":tier":          delta.tier.map(|t| t.to_string()),
+                ":supersedes":    delta.supersedes.as_ref().map(|c| c.to_string()),
+                ":superseded_by": delta.superseded_by.as_ref().map(|c| c.to_string()),
+                ":set_expires":   i64::from(delta.expires_at_ms.is_some()),
+                ":expires_at":    delta.expires_at_ms.flatten(),
+                ":set_review":    i64::from(delta.review_after_ms.is_some()),
+                ":review_at":     delta.review_after_ms.flatten(),
+                ":lifecycle_at":  delta.lifecycle_updated_at_ms,
+                ":tenant":        tenant_id.as_str(),
+                ":chunk":         chunk_id.to_string(),
+            },
+        )?;
+        Ok(rows)
+    }
 }
 
 fn relevance_to_int(relevance: RelevanceLabel) -> i64 {
@@ -1808,31 +1850,12 @@ impl MetadataStore for SqliteMetadataStore {
         chunk_id: &ChunkId,
         delta: &LifecycleDelta,
     ) -> Result<()> {
-        let conn = self.pool.get();
-        let rows = conn.execute(
-            "UPDATE chunks SET
-                status                  = COALESCE(:status, status),
-                tier                    = COALESCE(:tier, tier),
-                supersedes              = COALESCE(:supersedes, supersedes),
-                superseded_by           = COALESCE(:superseded_by, superseded_by),
-                expires_at_ms           = CASE WHEN :set_expires = 1 THEN :expires_at ELSE expires_at_ms END,
-                review_after_ms         = CASE WHEN :set_review  = 1 THEN :review_at  ELSE review_after_ms END,
-                lifecycle_updated_at_ms = COALESCE(:lifecycle_at, lifecycle_updated_at_ms)
-             WHERE tenant_id = :tenant AND chunk_id = :chunk",
-            rusqlite::named_params! {
-                ":status":        delta.status.map(|s| s.to_string()),
-                ":tier":          delta.tier.map(|t| t.to_string()),
-                ":supersedes":    delta.supersedes.as_ref().map(|c| c.to_string()),
-                ":superseded_by": delta.superseded_by.as_ref().map(|c| c.to_string()),
-                ":set_expires":   i64::from(delta.expires_at_ms.is_some()),
-                ":expires_at":    delta.expires_at_ms.flatten(),
-                ":set_review":    i64::from(delta.review_after_ms.is_some()),
-                ":review_at":     delta.review_after_ms.flatten(),
-                ":lifecycle_at":  delta.lifecycle_updated_at_ms,
-                ":tenant":        tenant_id.as_str(),
-                ":chunk":         chunk_id.to_string(),
-            },
-        )?;
+        // Forward to the counted variant and drop the rowcount so
+        // existing callers keep their Result<()> signature. Callers
+        // that need the rowcount (e.g. memory.set_expiry's
+        // atomic "did the row actually exist?" check) use
+        // `update_lifecycle_counted` directly on the concrete store.
+        let _ = self.update_lifecycle_counted(tenant_id, chunk_id, delta)?;
         Ok(())
     }
 
