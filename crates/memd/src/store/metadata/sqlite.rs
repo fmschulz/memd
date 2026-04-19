@@ -1948,10 +1948,19 @@ impl MetadataStore for SqliteMetadataStore {
         chunk_id: &ChunkId,
         now_ms: i64,
     ) -> Result<bool> {
-        // Guarded UPDATE: only matches rows still at `status='final'`.
-        // Any other status (deleted, superseded, expired, error) is
-        // treated as "raced out from under the sweep" and skipped so
-        // we never overwrite a newer lifecycle transition.
+        // Guarded UPDATE: only promote rows that are *still* eligible
+        // right now. Two predicates together:
+        //
+        // 1. `status = 'final'` — any other status (deleted,
+        //    superseded, expired, error) is treated as "raced out from
+        //    under the sweep" and skipped so we never overwrite a
+        //    newer lifecycle transition.
+        // 2. `expires_at_ms IS NOT NULL AND expires_at_ms <= :now_ms` —
+        //    re-checks the retention predicate at UPDATE time so a
+        //    concurrent writer that cleared `expires_at_ms` or pushed
+        //    it forward (while leaving status=final) does not get its
+        //    row reclassified as Expired by a sweep that selected the
+        //    row before that write landed.
         let conn = self.pool.get();
         let rows = conn.execute(
             "UPDATE chunks
@@ -1959,7 +1968,9 @@ impl MetadataStore for SqliteMetadataStore {
                     lifecycle_updated_at_ms = ?3
               WHERE tenant_id = ?1
                 AND chunk_id = ?2
-                AND status = 'final'",
+                AND status = 'final'
+                AND expires_at_ms IS NOT NULL
+                AND expires_at_ms <= ?3",
             rusqlite::params![tenant_id.as_str(), chunk_id.to_string(), now_ms],
         )?;
         Ok(rows == 1)
