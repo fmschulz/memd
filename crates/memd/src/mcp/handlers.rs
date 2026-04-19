@@ -215,6 +215,12 @@ pub struct AddParams {
     /// surface it to prompt review.
     #[serde(default)]
     pub review_after_ms: Option<i64>,
+    /// Optional ingestion mode label (e.g. `"conversation"`, `"document"`).
+    /// Accepted as part of the C1 surface so Track E can consume it
+    /// without a second schema churn. No behaviour wired to it yet at the
+    /// C1 layer — the field is persisted verbatim by Track E.
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 /// Source information for a chunk
@@ -250,6 +256,10 @@ pub struct BatchChunkParams {
     /// semantics as `AddParams::review_after_ms`.
     #[serde(default)]
     pub review_after_ms: Option<i64>,
+    /// Optional ingestion mode label for this chunk. Same semantics as
+    /// `AddParams::mode` — accepted now, consumed by Track E.
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 impl BatchChunkParams {
@@ -7379,6 +7389,8 @@ mod tests {
             tags: vec![],
         expires_at_ms: None,
         review_after_ms: None,
+        
+        mode: None,
         };
 
         let add_result = handle_memory_add(&store, None, add_params).await.unwrap();
@@ -7425,6 +7437,8 @@ mod tests {
                 tags: vec![],
             expires_at_ms: None,
             review_after_ms: None,
+            
+            mode: None,
             },
         )
         .await
@@ -7443,6 +7457,8 @@ mod tests {
                 tags: vec![],
             expires_at_ms: None,
             review_after_ms: None,
+            
+            mode: None,
             },
         )
         .await
@@ -7495,6 +7511,8 @@ mod tests {
                     tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+                
+                mode: None,
                 },
             )
             .await
@@ -7602,6 +7620,8 @@ mod tests {
                 tags: vec![],
             expires_at_ms: None,
             review_after_ms: None,
+            
+            mode: None,
             },
         )
         .await
@@ -7620,6 +7640,8 @@ mod tests {
                 tags: vec![],
             expires_at_ms: None,
             review_after_ms: None,
+            
+            mode: None,
             },
         )
         .await
@@ -7686,6 +7708,8 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+            
+            mode: None,
             },
         )
         .await
@@ -7746,6 +7770,8 @@ mod tests {
                 tags: vec![],
             expires_at_ms: None,
             review_after_ms: None,
+            
+            mode: None,
             },
         )
         .await
@@ -7805,6 +7831,8 @@ mod tests {
             tags: vec!["rust".to_string(), "function".to_string()],
             expires_at_ms: None,
             review_after_ms: None,
+        
+        mode: None,
         };
 
         let result = handle_memory_add(&store, None, add_params).await.unwrap();
@@ -7848,6 +7876,8 @@ mod tests {
                     tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+                
+                mode: None,
                 },
                 BatchChunkParams {
                     text: "chunk 2".to_string(),
@@ -7858,6 +7888,8 @@ mod tests {
                     tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+                
+                mode: None,
                 },
             ],
         };
@@ -7883,6 +7915,8 @@ mod tests {
             tags: vec![],
         expires_at_ms: None,
         review_after_ms: None,
+        
+        mode: None,
         };
 
         let add_result = handle_memory_add(&store, None, add_params).await.unwrap();
@@ -7936,6 +7970,8 @@ mod tests {
                 tags: vec![],
             expires_at_ms: None,
             review_after_ms: None,
+            
+            mode: None,
             },
         )
         .await
@@ -7976,6 +8012,8 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+            
+            mode: None,
             };
             handle_memory_add(&store, None, add_params).await.unwrap();
         }
@@ -8030,6 +8068,8 @@ mod tests {
             tags: vec![],
         expires_at_ms: None,
         review_after_ms: None,
+        
+        mode: None,
         };
 
         let result = handle_memory_add(&store, None, params).await;
@@ -8069,6 +8109,8 @@ mod tests {
             tags: vec![],
         expires_at_ms: None,
         review_after_ms: None,
+        
+        mode: None,
         };
 
         handle_memory_add(&store, None, add_params).await.unwrap();
@@ -8109,6 +8151,8 @@ mod tests {
             tags: vec![],
         expires_at_ms: None,
         review_after_ms: None,
+        
+        mode: None,
         };
 
         handle_memory_add(&store, None, add_params).await.unwrap();
@@ -8163,6 +8207,8 @@ mod tests {
             
             expires_at_ms: None,
             review_after_ms: None,
+            
+            mode: None,
             },
         )
         .await
@@ -8189,6 +8235,8 @@ mod tests {
             
             expires_at_ms: None,
             review_after_ms: None,
+            
+            mode: None,
             },
         )
         .await
@@ -8215,6 +8263,8 @@ mod tests {
             
             expires_at_ms: None,
             review_after_ms: None,
+            
+            mode: None,
             },
         )
         .await
@@ -8267,6 +8317,8 @@ mod tests {
             
             expires_at_ms: None,
             review_after_ms: None,
+            
+            mode: None,
             },
         )
         .await
@@ -8320,6 +8372,8 @@ mod tests {
                 
                 expires_at_ms: None,
                 review_after_ms: None,
+                
+                mode: None,
                 },
             )
             .await
@@ -8411,6 +8465,8 @@ mod tests {
             
             expires_at_ms: None,
             review_after_ms: None,
+            
+            mode: None,
             },
         )
         .await
@@ -8881,6 +8937,8 @@ mod tests {
                 tags: vec![],
             expires_at_ms: None,
             review_after_ms: None,
+            
+            mode: None,
             },
         )
         .await
