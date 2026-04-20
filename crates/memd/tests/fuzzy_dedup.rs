@@ -323,6 +323,195 @@ async fn add_with_lifecycle_long_split_doc_uses_per_row_canonical() {
     }
 }
 
+// ---------- Track D3 ----------
+//
+// `memory.add` with `supersede_near_duplicates` should mark prior
+// content-identical (or fuzzy-similar) rows for the same
+// (tenant, project) as Superseded with a back-edge to the new chunk.
+
+#[tokio::test]
+async fn add_with_exact_dedup_supersedes_canonical_match() {
+    use memd::types::{ChunkId, ChunkStatus};
+    let (server, _tmp) = test_server().await;
+
+    // Seed a chunk; second insert with exact-mode dedup should
+    // supersede the first.
+    let r1 = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "p1",
+            "text": "Release freeze begins Thursday.",
+            "type": "doc",
+        }),
+    )
+    .await;
+    let body1 = parse_result_text(&r1);
+    let id1 = ChunkId::parse(body1["chunk_id"].as_str().expect("chunk_id"))
+        .expect("valid id");
+
+    let r2 = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "p1",
+            "text": "release freeze begins thursday.",
+            "type": "doc",
+            "supersede_near_duplicates": { "mode": "exact" },
+        }),
+    )
+    .await;
+    let body2 = parse_result_text(&r2);
+    let id2 = ChunkId::parse(body2["chunk_id"].as_str().expect("chunk_id"))
+        .expect("valid id");
+    let supersedes: Vec<String> = body2["superseded_ids"]
+        .as_array()
+        .expect("superseded_ids array")
+        .iter()
+        .map(|v| v.as_str().expect("string").to_string())
+        .collect();
+
+    assert_ne!(id1, id2);
+    assert_eq!(supersedes, vec![id1.to_string()]);
+
+    // Old chunk now Superseded with back-edge to id2.
+    let ps = server.store().as_persistent().expect("persistent");
+    let resolved = ps
+        .get_with_lifecycle(&tenant("t"), &id1)
+        .await
+        .expect("get_with_lifecycle")
+        .expect("old chunk still resolvable");
+    assert_eq!(resolved.status, ChunkStatus::Superseded);
+    assert_eq!(
+        resolved.lifecycle.superseded_by.as_ref().map(|c| c.to_string()),
+        Some(id2.to_string())
+    );
+}
+
+#[tokio::test]
+async fn add_with_fuzzy_dedup_supersedes_paraphrase() {
+    use memd::types::ChunkId;
+    let (server, _tmp) = test_server().await;
+
+    // Seed.
+    call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "p1",
+            "text": "Release freeze begins Thursday.",
+            "type": "doc",
+        }),
+    )
+    .await;
+
+    // Paraphrase: insert one extra word. Padded char-trigram Jaccard ~ 0.86.
+    let r = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "p1",
+            "text": "Release freeze begins on Thursday.",
+            "type": "doc",
+            "supersede_near_duplicates": { "mode": "fuzzy", "threshold": 0.80 },
+        }),
+    )
+    .await;
+    let body = parse_result_text(&r);
+    let _id = ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id"))
+        .expect("valid id");
+    let supersedes: Vec<String> = body["superseded_ids"]
+        .as_array()
+        .expect("superseded_ids array")
+        .iter()
+        .map(|v| v.as_str().expect("string").to_string())
+        .collect();
+    assert_eq!(
+        supersedes.len(),
+        1,
+        "fuzzy mode at threshold 0.80 must catch the paraphrase"
+    );
+}
+
+#[tokio::test]
+async fn add_without_dedup_flag_does_not_supersede_anything() {
+    use memd::types::ChunkId;
+    let (server, _tmp) = test_server().await;
+    call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "p1",
+            "text": "Release freeze begins Thursday.",
+            "type": "doc",
+        }),
+    )
+    .await;
+    let r = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "p1",
+            "text": "release freeze begins thursday.",
+            "type": "doc",
+        }),
+    )
+    .await;
+    let body = parse_result_text(&r);
+    let _id = ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id"))
+        .expect("valid id");
+    // The default add path must NOT include superseded_ids in its
+    // response (backwards-compatible shape).
+    assert!(
+        body.get("superseded_ids").is_none(),
+        "absent dedup flag must not produce superseded_ids field"
+    );
+}
+
+#[tokio::test]
+async fn add_with_dedup_bool_true_uses_exact_mode_default() {
+    use memd::types::ChunkId;
+    let (server, _tmp) = test_server().await;
+    call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "p1",
+            "text": "Release freeze begins Thursday.",
+            "type": "doc",
+        }),
+    )
+    .await;
+    let r = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "p1",
+            "text": "release freeze begins thursday.",
+            "type": "doc",
+            "supersede_near_duplicates": true,
+        }),
+    )
+    .await;
+    let body = parse_result_text(&r);
+    let _id = ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id"))
+        .expect("valid id");
+    let supersedes = body["superseded_ids"].as_array().expect("array");
+    assert_eq!(
+        supersedes.len(),
+        1,
+        "shorthand `true` must default to exact mode and catch the canonical match"
+    );
+}
+
 // D2 round-2 LOW: backfill must handle many rows (not just one) and
 // must repopulate every NULL row in a single pass. Stays within a
 // single tenant because the chunks table's `UNIQUE(segment_id,
