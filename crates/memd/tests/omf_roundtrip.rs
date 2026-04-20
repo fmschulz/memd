@@ -787,6 +787,71 @@ async fn cli_export_markdown_refuses_outdir_inside_data_dir() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn cli_export_markdown_refuses_pre_existing_symlink_inside_outdir() {
+    // Item 3 — G3 symlink hardening. An attacker who can write into
+    // the caller's outdir before `memd export-markdown` runs could
+    // previously plant `<outdir>/<bucket_name>` as a symlink to any
+    // directory (say `/etc`). The subsequent write loop would then
+    // traverse that symlink and overwrite `/etc/<file>` with rendered
+    // markdown content. This test pins the refusal: if any path
+    // component inside outdir is a symlink, the CLI aborts before
+    // writing anything.
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store = persistent_store(tmp.path()).await;
+
+    // Seed one chunk so there's something to export.
+    use memd::types::{ChunkType, MemoryChunk, ProjectId};
+    let chunk = MemoryChunk::new(tenant("t"), "a seeded fact", ChunkType::Doc)
+        .with_project(ProjectId::new(None::<String>));
+    store.add(chunk).await.unwrap();
+
+    let outdir = tmp.path().join("outdir");
+    std::fs::create_dir_all(&outdir).unwrap();
+
+    // Plant a malicious symlink inside outdir. G1's render_markdown_tree
+    // emits unscoped (project_id=None) rows under `no_project/<type>.md`,
+    // so the attacker aims a symlink at `no_project` → `victim_dir`.
+    let victim_dir = tmp.path().join("victim");
+    std::fs::create_dir_all(&victim_dir).unwrap();
+    symlink(&victim_dir, outdir.join("no_project")).unwrap();
+
+    // Use a separate data_dir so the containment guard passes —
+    // we're verifying the symlink guard specifically.
+    let guard_data_dir = tmp.path().join("data");
+    std::fs::create_dir_all(&guard_data_dir).unwrap();
+
+    let err = memd::cli::run_cli(
+        store.as_ref(),
+        None,
+        memd::cli::CliCommand::ExportMarkdown {
+            tenant_id: "t".to_string(),
+            outdir: outdir.clone(),
+            project_id: None,
+            include_history: false,
+            data_dir: Some(guard_data_dir),
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        matches!(err, memd::error::MemdError::ValidationError(_)),
+        "expected ValidationError for pre-existing symlink, got {err:?}"
+    );
+
+    // Victim directory must have received no rendered files — the
+    // guard refused before any write happened.
+    let leaked = walk_md_files(&victim_dir);
+    assert!(
+        leaked.is_empty(),
+        "victim dir must not contain any rendered output: {leaked:?}"
+    );
+}
+
 #[tokio::test]
 async fn cli_export_markdown_refuses_outdir_via_parent_traversal() {
     // A path like `data_dir/../data_dir` normalises to `data_dir` and

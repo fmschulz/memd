@@ -614,6 +614,12 @@ pub async fn run_cli<S: Store>(
                 for segment in f.path.split('/').filter(|s| !s.is_empty()) {
                     target.push(segment);
                 }
+                // Refuse before any filesystem write if a pre-existing
+                // symlink planted inside outdir would redirect the
+                // write off to an attacker-chosen path. Runs before
+                // create_dir_all because create_dir_all happily walks
+                // through existing symlinked directories (Item 3).
+                reject_if_any_symlink_inside_outdir(&target, &outdir_abs)?;
                 if let Some(parent) = target.parent() {
                     std::fs::create_dir_all(parent).map_err(|e| {
                         crate::error::MemdError::StorageError(format!(
@@ -946,6 +952,65 @@ fn path_is_inside(child: &Path, parent: &Path) -> bool {
     {
         child.starts_with(parent)
     }
+}
+
+/// Refuse to follow any symlink planted inside `outdir_abs` along the
+/// path to `full_target`. Closes the pre-existing-symlink escape where
+/// an attacker creates `<outdir>/sub` → `/etc` before
+/// `memd export-markdown` runs, so the subsequent
+/// `std::fs::write(<outdir>/sub/<file>)` overwrites the attacker's
+/// backing file instead of a fresh file under outdir (Item 3 from the
+/// nanomem-features handoff).
+///
+/// Walks each already-existing component under `outdir_abs` and refuses
+/// if any is a symlink. The outdir itself is NOT checked — a user may
+/// legitimately point `--outdir` at a symlinked directory they own —
+/// but anything *inside* outdir that predates the export must be a
+/// regular file or directory, never a symlink. Non-existing segments
+/// are fine; they'll be created by `create_dir_all`.
+///
+/// A small TOCTOU window remains between this check and the write.
+/// Closing it fully on every platform would require `O_NOFOLLOW`,
+/// which is Unix-only; memd's CLI is already a user-trusted surface
+/// (the caller picks outdir), so narrowing the pre-planted-symlink
+/// window is the practical fix.
+fn reject_if_any_symlink_inside_outdir(
+    full_target: &Path,
+    outdir_abs: &Path,
+) -> Result<()> {
+    let rel = full_target.strip_prefix(outdir_abs).map_err(|_| {
+        crate::error::MemdError::ValidationError(format!(
+            "internal: target {} not inside outdir {}",
+            full_target.display(),
+            outdir_abs.display()
+        ))
+    })?;
+    let mut current = outdir_abs.to_path_buf();
+    for segment in rel.components() {
+        current.push(segment.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(crate::error::MemdError::ValidationError(format!(
+                    "refusing to follow symlink inside outdir: {}",
+                    current.display()
+                )));
+            }
+            Ok(_) => continue,
+            // NotFound is the expected "this component is about to be
+            // created by create_dir_all" case; everything else
+            // (PermissionDenied, ELOOP, transient I/O) is abnormal and
+            // we fail closed rather than silently skipping the guard
+            // (Codex Item 3 LOW: the helper must not fail open).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(e) => {
+                return Err(crate::error::MemdError::ValidationError(format!(
+                    "cannot verify symlink status for {}: {e}",
+                    current.display()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn absolutize_project_dir(path: &Path) -> Result<PathBuf> {
@@ -2001,5 +2066,127 @@ mod tests {
         let absolute = PathBuf::from("/already/abs/data");
         let resolved = resolve_data_dir(Some(&absolute)).unwrap();
         assert_eq!(resolved, absolute);
+    }
+
+    // --- Item 3: G3 symlink hardening ---
+
+    #[test]
+    fn reject_if_any_symlink_inside_outdir_accepts_regular_files() {
+        // Baseline — a normal file tree under outdir passes.
+        let dir = tempdir().unwrap();
+        let outdir = dir.path().to_path_buf();
+        std::fs::create_dir_all(outdir.join("a/b")).unwrap();
+        std::fs::write(outdir.join("a/b/c.md"), "content").unwrap();
+        let target = outdir.join("a/b/c.md");
+        reject_if_any_symlink_inside_outdir(&target, &outdir).unwrap();
+    }
+
+    #[test]
+    fn reject_if_any_symlink_inside_outdir_tolerates_nonexistent_components() {
+        // Non-existent components are fine — create_dir_all will
+        // materialise them freshly, so they can't be symlinks.
+        let dir = tempdir().unwrap();
+        let outdir = dir.path().to_path_buf();
+        let target = outdir.join("never").join("existed").join("yet.md");
+        reject_if_any_symlink_inside_outdir(&target, &outdir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_if_any_symlink_inside_outdir_refuses_leaf_symlink() {
+        // Attacker-planted leaf symlink inside outdir must be refused.
+        use std::os::unix::fs::symlink;
+        let dir = tempdir().unwrap();
+        let outdir = dir.path().join("outdir");
+        std::fs::create_dir_all(outdir.join("a/b")).unwrap();
+        let victim = dir.path().join("victim.md");
+        std::fs::write(&victim, "pre-existing victim content").unwrap();
+        symlink(&victim, outdir.join("a/b/leaf.md")).unwrap();
+
+        let target = outdir.join("a/b/leaf.md");
+        let err = reject_if_any_symlink_inside_outdir(&target, &outdir).unwrap_err();
+        assert!(
+            matches!(err, crate::error::MemdError::ValidationError(_)),
+            "expected ValidationError, got {err:?}"
+        );
+        // Critical: the victim file must NOT have been touched.
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "pre-existing victim content"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_if_any_symlink_inside_outdir_refuses_intermediate_symlink() {
+        // Attacker-planted directory symlink mid-path must be refused.
+        // Without the guard, create_dir_all would happily step through
+        // the symlink and std::fs::write would hit the attacker's dir.
+        use std::os::unix::fs::symlink;
+        let dir = tempdir().unwrap();
+        let outdir = dir.path().join("outdir");
+        std::fs::create_dir_all(&outdir).unwrap();
+        let victim_dir = dir.path().join("victim_dir");
+        std::fs::create_dir_all(&victim_dir).unwrap();
+        symlink(&victim_dir, outdir.join("sub")).unwrap();
+
+        let target = outdir.join("sub").join("x.md");
+        let err = reject_if_any_symlink_inside_outdir(&target, &outdir).unwrap_err();
+        assert!(matches!(err, crate::error::MemdError::ValidationError(_)));
+        assert!(
+            !target.exists() || !victim_dir.join("x.md").exists(),
+            "victim dir must not have been written into",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_if_any_symlink_inside_outdir_permits_symlinked_outdir_itself() {
+        // The outdir ITSELF is allowed to be a symlink — users may
+        // legitimately point `--outdir` at a symlinked exports dir
+        // they own. We only refuse symlinks planted BELOW outdir.
+        use std::os::unix::fs::symlink;
+        let dir = tempdir().unwrap();
+        let real_outdir = dir.path().join("real");
+        std::fs::create_dir_all(&real_outdir).unwrap();
+        let symlink_outdir = dir.path().join("linked");
+        symlink(&real_outdir, &symlink_outdir).unwrap();
+
+        let target = symlink_outdir.join("sub").join("x.md");
+        reject_if_any_symlink_inside_outdir(&target, &symlink_outdir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_if_any_symlink_inside_outdir_fails_closed_on_permission_denied() {
+        // Regression for Codex Item 3 LOW: abnormal filesystem states
+        // (PermissionDenied, ELOOP, other I/O errors) must fail closed,
+        // not silently skip the guard. An attacker-crafted directory
+        // mode that denies symlink_metadata access must not become a
+        // way to bypass the check.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let outdir = dir.path().join("outdir");
+        std::fs::create_dir_all(outdir.join("locked")).unwrap();
+        // Make the "locked" directory unreadable so symlink_metadata on
+        // its children fails with EACCES, not ENOENT.
+        std::fs::set_permissions(
+            outdir.join("locked"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+
+        let target = outdir.join("locked").join("inner").join("x.md");
+        let result = reject_if_any_symlink_inside_outdir(&target, &outdir);
+
+        // Restore perms so tempdir cleanup works regardless of outcome.
+        std::fs::set_permissions(
+            outdir.join("locked"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+
+        let err = result.expect_err("must fail closed on EACCES");
+        assert!(matches!(err, crate::error::MemdError::ValidationError(_)));
     }
 }
