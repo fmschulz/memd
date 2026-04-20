@@ -59,6 +59,7 @@ pub(crate) fn resolved_agent_id(explicit: Option<&str>) -> Option<String> {
 
 use super::error::McpError;
 use crate::metrics::{IndexStats, MetricsCollector};
+use crate::store::metadata::MetadataStore;
 use crate::store::{FeedbackEntry, RelevanceLabel, Store, StoreStats, TenantManager};
 use crate::task_memory::{
     build_library_digest_artifact, build_project_brief_digest_artifact, build_project_brief_view,
@@ -73,7 +74,8 @@ use crate::task_memory::{
 };
 use crate::tiered::TieredTiming;
 use crate::types::{
-    ChunkId, ChunkType, LifecycleDelta, MemoryChunk, ProjectId, Source, TenantId, VisibilityPolicy,
+    ChunkId, ChunkStatus, ChunkType, LifecycleDelta, MemoryChunk, ProjectId, Source, TenantId,
+    VisibilityPolicy,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -4718,6 +4720,141 @@ pub async fn handle_memory_add_batch<S: Store>(
     format_mcp_response(&AddBatchResult {
         chunk_ids: chunk_ids.iter().map(|id| id.to_string()).collect(),
     })
+}
+
+/// Parameters for memory.find_near_duplicates (Track D5).
+///
+/// Read-only preview that surfaces the same candidates the
+/// `supersede_near_duplicates` flow would have selected, without
+/// mutating store state. `fuzzy_threshold` is opt-in: when absent only
+/// exact-canonical matches are returned.
+#[derive(Debug, Deserialize)]
+pub struct FindNearDuplicatesParams {
+    #[serde(default)]
+    pub tenant_id: String,
+    pub text: String,
+    #[serde(rename = "type", default = "default_doc_type")]
+    pub chunk_type: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// When set, also returns trigram-Jaccard candidates with score ≥
+    /// this threshold. Absent = exact-only.
+    #[serde(default)]
+    pub fuzzy_threshold: Option<f32>,
+    /// `"project"` (default) restricts the candidate pool to rows with
+    /// the same project_id. `"tenant"` widens to the whole tenant.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Maximum number of recent rows to consider in fuzzy mode.
+    #[serde(default = "default_fuzzy_limit")]
+    pub limit: usize,
+}
+
+fn default_doc_type() -> String {
+    "doc".into()
+}
+
+fn default_fuzzy_limit() -> usize {
+    crate::mcp::dedup::FUZZY_RECENT_POOL_SIZE
+}
+
+/// Handle memory.find_near_duplicates (Track D5). Read-only.
+pub async fn handle_memory_find_near_duplicates<S: Store>(
+    store: &S,
+    params: FindNearDuplicatesParams,
+) -> Result<Value, McpError> {
+    let ps = store.as_persistent().ok_or_else(|| {
+        McpError::ToolError(
+            "memory.find_near_duplicates requires a persistent store".into(),
+        )
+    })?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
+    let chunk_type = parse_chunk_type(&params.chunk_type)?;
+
+    let scope_project = match params.scope.as_deref().unwrap_or("project") {
+        "project" => true,
+        "tenant" => false,
+        other => {
+            return Err(McpError::InvalidParams(format!(
+                "scope: expected 'project' or 'tenant', got '{other}'"
+            )));
+        }
+    };
+
+    let canonical = crate::store::supersession::canonicalize_for_type(&params.text, chunk_type);
+    let project_filter = if scope_project {
+        params.project_id.as_deref()
+    } else {
+        None
+    };
+
+    // Exact: SQL pre-filters by canonical, so a Rust post-filter to
+    // honour project_id IS NULL is cheap and safe.
+    let exact_metas = ps
+        .metadata()
+        .list_by_canonical_text(&tenant_id, project_filter, &canonical)
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let exact: Vec<String> = exact_metas
+        .into_iter()
+        .filter(|m| {
+            // Live-head only: don't surface previously-superseded rows
+            // (mirrors compute_dedup_candidates semantics).
+            m.status == ChunkStatus::Final && m.lifecycle.superseded_by.is_none()
+        })
+        .filter(|m| {
+            !scope_project
+                || params.project_id.is_none() && m.project_id.is_none()
+                || m.project_id.as_deref() == params.project_id.as_deref()
+        })
+        .map(|m| m.chunk_id.to_string())
+        .collect();
+
+    // Fuzzy: optional. Mirrors dedup.rs::fuzzy_candidates but emits
+    // (chunk_id, similarity) pairs ordered by score desc.
+    let mut fuzzy_pairs: Vec<(String, f32)> = Vec::new();
+    if let Some(threshold) = params.fuzzy_threshold {
+        let limit = if params.limit == 0 {
+            crate::mcp::dedup::FUZZY_RECENT_POOL_SIZE
+        } else {
+            params.limit
+        };
+        let metas = if scope_project && params.project_id.is_none() {
+            ps.metadata()
+                .list_recent_with_null_project(&tenant_id, limit)
+                .map_err(|e| McpError::ToolError(e.to_string()))?
+        } else {
+            ps.metadata()
+                .list_recent_for_project(&tenant_id, project_filter, limit)
+                .map_err(|e| McpError::ToolError(e.to_string()))?
+        };
+        for m in metas {
+            if !(m.status == ChunkStatus::Final && m.lifecycle.superseded_by.is_none()) {
+                continue;
+            }
+            if scope_project
+                && !(params.project_id.is_none() && m.project_id.is_none()
+                    || m.project_id.as_deref() == params.project_id.as_deref())
+            {
+                continue;
+            }
+            let other = m.canonical_text.as_deref().unwrap_or("");
+            let score = crate::store::supersession::jaccard_trigram_score(&canonical, other);
+            if score >= threshold {
+                fuzzy_pairs.push((m.chunk_id.to_string(), score));
+            }
+        }
+        fuzzy_pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    }
+
+    let fuzzy: Vec<serde_json::Value> = fuzzy_pairs
+        .into_iter()
+        .map(|(id, sim)| serde_json::json!({ "chunk_id": id, "similarity": sim }))
+        .collect();
+
+    format_mcp_response(&serde_json::json!({
+        "exact_matches": exact,
+        "fuzzy_matches": fuzzy,
+    }))
 }
 
 /// Handle task.start tool call.
