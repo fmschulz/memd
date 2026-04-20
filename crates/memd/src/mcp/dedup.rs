@@ -119,19 +119,7 @@ pub fn compute_dedup_candidates(
             .metadata()
             .list_by_canonical_text(tenant_id, sql_project, &canonical)
             .map_err(|e| McpError::ToolError(e.to_string()))?,
-        DedupMode::Fuzzy => ps
-            .metadata()
-            .list_recent_for_project(tenant_id, sql_project, FUZZY_RECENT_POOL_SIZE)
-            .map_err(|e| McpError::ToolError(e.to_string()))?
-            .into_iter()
-            .filter(|m| {
-                is_near_duplicate(
-                    &canonical,
-                    m.canonical_text.as_deref().unwrap_or(""),
-                    cfg.threshold,
-                )
-            })
-            .collect::<Vec<_>>(),
+        DedupMode::Fuzzy => fuzzy_candidates(ps, tenant_id, &canonical, cfg, project_id)?,
     };
 
     Ok(candidates
@@ -139,6 +127,43 @@ pub fn compute_dedup_candidates(
         .filter(|m| project_scope_matches(m, cfg.scope_project, project_id))
         .filter(|m| is_live_head_row(m))
         .map(|m| m.chunk_id)
+        .collect())
+}
+
+/// Fuzzy-mode candidate pool. Has to short-circuit on the
+/// `scope=project + project_id=None` case because
+/// `list_recent_for_project(..., None, ...)` widens to "any project"
+/// before applying LIMIT — so a valid older NULL-project candidate can
+/// be evicted by recent project-scoped traffic. Use the dedicated
+/// `list_recent_with_null_project` helper there to keep the pre-LIMIT
+/// filter aligned with the requested scope (Codex round-2 D3/D4
+/// MEDIUM finding).
+fn fuzzy_candidates(
+    ps: &PersistentStore,
+    tenant_id: &TenantId,
+    canonical: &str,
+    cfg: &ResolvedDedup,
+    project_id: Option<&str>,
+) -> std::result::Result<Vec<ChunkMetadata>, McpError> {
+    let metas = if cfg.scope_project && project_id.is_none() {
+        ps.metadata()
+            .list_recent_with_null_project(tenant_id, FUZZY_RECENT_POOL_SIZE)
+            .map_err(|e| McpError::ToolError(e.to_string()))?
+    } else {
+        let sql_project = if cfg.scope_project { project_id } else { None };
+        ps.metadata()
+            .list_recent_for_project(tenant_id, sql_project, FUZZY_RECENT_POOL_SIZE)
+            .map_err(|e| McpError::ToolError(e.to_string()))?
+    };
+    Ok(metas
+        .into_iter()
+        .filter(|m| {
+            is_near_duplicate(
+                canonical,
+                m.canonical_text.as_deref().unwrap_or(""),
+                cfg.threshold,
+            )
+        })
         .collect())
 }
 
