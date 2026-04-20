@@ -2390,6 +2390,40 @@ fn build_episode_summary_text(episode_id: &str, chunks: &[MemoryChunk]) -> Strin
 }
 
 /// Parse a chunk type string into ChunkType enum
+/// Parse the `mode` request param into an `IngestionMode`. Empty / None
+/// returns the default (`Document`). Unknown values fail-closed with a
+/// clear MCP error so callers learn about the typo immediately.
+pub(crate) fn parse_ingestion_mode(s: Option<&str>) -> Result<crate::types::IngestionMode, McpError> {
+    use crate::types::IngestionMode;
+    let trimmed = s.map(|x| x.trim()).filter(|x| !x.is_empty());
+    match trimmed {
+        None => Ok(IngestionMode::default()),
+        Some(value) => value.parse::<IngestionMode>().map_err(|e| {
+            McpError::InvalidParams(format!(
+                "invalid ingestion mode '{}': {}; expected 'conversation' or 'document'",
+                value, e
+            ))
+        }),
+    }
+}
+
+/// E2: when ingestion_mode is Conversation and the caller did not pass
+/// an explicit `review_after_ms`, default to `now() + 14 days` so the
+/// chunk surfaces in the review stream after roughly two weeks.
+/// Document-mode writes and Conversation-mode writes that already
+/// carry an explicit `review_after_ms` are passed through unchanged.
+pub(crate) fn apply_conversation_review_default(
+    mode: crate::types::IngestionMode,
+    review_after_ms: Option<i64>,
+) -> Option<i64> {
+    use crate::types::IngestionMode;
+    if review_after_ms.is_some() || mode != IngestionMode::Conversation {
+        return review_after_ms;
+    }
+    const FOURTEEN_DAYS_MS: i64 = 14 * 24 * 60 * 60 * 1000;
+    Some(current_time_ms() + FOURTEEN_DAYS_MS)
+}
+
 fn parse_chunk_type(s: &str) -> Result<ChunkType, McpError> {
     match s.to_lowercase().as_str() {
         "code" => Ok(ChunkType::Code),
@@ -4134,7 +4168,19 @@ pub async fn handle_memory_add<S: Store>(
         chunk = chunk.with_tags(tags);
     }
 
-    let has_lifecycle = params.expires_at_ms.is_some() || params.review_after_ms.is_some();
+    // Track E: parse `mode` → IngestionMode (fail-closed) and apply
+    // the conversation-mode default review window when the caller
+    // didn't pass an explicit review_after_ms.
+    let ingestion_mode = parse_ingestion_mode(params.mode.as_deref())?;
+    chunk = chunk.with_ingestion_mode(ingestion_mode);
+    let effective_review_after_ms =
+        apply_conversation_review_default(ingestion_mode, params.review_after_ms);
+
+    // `params.review_after_ms` may have been None on input; substitute
+    // the defaulted value so the rest of the handler treats it as
+    // explicitly requested.
+    let review_after_ms = effective_review_after_ms;
+    let has_lifecycle = params.expires_at_ms.is_some() || review_after_ms.is_some();
     let resolved_dedup = match params.supersede_near_duplicates.as_ref() {
         Some(spec) => crate::mcp::dedup::resolve_spec(spec)
             .map_err(|e| McpError::ToolError(e.to_string()))?,
@@ -4168,7 +4214,7 @@ pub async fn handle_memory_add<S: Store>(
         let tenant_id_for_extras = chunk.tenant_id.clone();
         let lifecycle_delta = LifecycleDelta {
             expires_at_ms: params.expires_at_ms.map(Some),
-            review_after_ms: params.review_after_ms.map(Some),
+            review_after_ms: review_after_ms.map(Some),
             ..Default::default()
         };
 
@@ -4257,7 +4303,7 @@ pub async fn handle_memory_add<S: Store>(
         })?;
         let delta = LifecycleDelta {
             expires_at_ms: params.expires_at_ms.map(Some),
-            review_after_ms: params.review_after_ms.map(Some),
+            review_after_ms: review_after_ms.map(Some),
             ..Default::default()
         };
         ps.add_chunk_with_lifecycle(chunk, delta)
@@ -4550,11 +4596,18 @@ pub async fn handle_memory_add_batch<S: Store>(
                 tags.extend(chunk_params.tags);
                 chunk = chunk.with_tags(tags);
             }
+            // Track E: per-chunk mode + conversation default review window.
+            let ingestion_mode = parse_ingestion_mode(chunk_params.mode.as_deref())?;
+            chunk = chunk.with_ingestion_mode(ingestion_mode);
+            let review_after_ms = apply_conversation_review_default(
+                ingestion_mode,
+                chunk_params.review_after_ms,
+            );
             let has_lifecycle =
-                chunk_params.expires_at_ms.is_some() || chunk_params.review_after_ms.is_some();
+                chunk_params.expires_at_ms.is_some() || review_after_ms.is_some();
             let delta = LifecycleDelta {
                 expires_at_ms: chunk_params.expires_at_ms.map(Some),
-                review_after_ms: chunk_params.review_after_ms.map(Some),
+                review_after_ms: review_after_ms.map(Some),
                 ..Default::default()
             };
             prepared.push((chunk, delta, has_lifecycle, project_id_for_dedup));
@@ -4624,11 +4677,47 @@ pub async fn handle_memory_add_batch<S: Store>(
     }
 
     // If any chunk carries a temporal overlay field, fall out of the
-    // batched fast path and write each chunk through
-    // `add_chunk_with_lifecycle` so per-row lifecycle metadata is
-    // applied. Batches without any lifecycle fields keep the original
-    // `store.add_batch` pipeline unchanged.
-    let any_lifecycle = params.chunks.iter().any(|c| c.has_lifecycle_overlay());
+    // Track E: pre-pass over every chunk to apply ingestion_mode +
+    // conversation-mode review default. This decides per-chunk whether
+    // a lifecycle delta is required and produces the (chunk, delta)
+    // tuples both branches consume. Batches without any per-chunk
+    // lifecycle (no expires_at_ms / review_after_ms / conversation
+    // mode) keep the bulk `store.add_batch` fast path unchanged.
+    let mut prepared: Vec<(MemoryChunk, LifecycleDelta, bool)> =
+        Vec::with_capacity(params.chunks.len());
+    for chunk_params in params.chunks {
+        let chunk_type = parse_chunk_type(&chunk_params.chunk_type)?;
+        let mut chunk = MemoryChunk::new(tenant_id.clone(), &chunk_params.text, chunk_type);
+        if let Some(project_id) = &chunk_params.project_id {
+            chunk = chunk.with_project(ProjectId::new(Some(project_id.clone())));
+        }
+        if let Some(episode_id) = &chunk_params.episode_id {
+            validate_episode_id(episode_id)?;
+            let mut tags = chunk.tags.clone();
+            tags.push(make_episode_tag(episode_id));
+            chunk = chunk.with_tags(tags);
+        }
+        chunk = chunk.with_source(params_to_source(chunk_params.source));
+        if !chunk_params.tags.is_empty() {
+            let mut tags = chunk.tags.clone();
+            tags.extend(chunk_params.tags);
+            chunk = chunk.with_tags(tags);
+        }
+        let ingestion_mode = parse_ingestion_mode(chunk_params.mode.as_deref())?;
+        chunk = chunk.with_ingestion_mode(ingestion_mode);
+        let review_after_ms = apply_conversation_review_default(
+            ingestion_mode,
+            chunk_params.review_after_ms,
+        );
+        let delta = LifecycleDelta {
+            expires_at_ms: chunk_params.expires_at_ms.map(Some),
+            review_after_ms: review_after_ms.map(Some),
+            ..Default::default()
+        };
+        let has_lifecycle = !delta.is_empty();
+        prepared.push((chunk, delta, has_lifecycle));
+    }
+    let any_lifecycle = prepared.iter().any(|(_, _, hl)| *hl);
 
     let chunk_ids = if any_lifecycle {
         let ps = store.as_persistent().ok_or_else(|| {
@@ -4636,44 +4725,11 @@ pub async fn handle_memory_add_batch<S: Store>(
                 "memory.add_batch with temporal fields requires a persistent store".into(),
             )
         })?;
-        // Build and validate all (chunk, delta) pairs BEFORE any write.
-        // Validation failures must not leave half-committed batches, so
-        // parse_chunk_type / validate_episode_id are hoisted into a
-        // pre-pass that either produces a full Vec or returns an error
-        // with zero writes performed.
-        let mut prepared: Vec<(MemoryChunk, LifecycleDelta)> =
-            Vec::with_capacity(params.chunks.len());
-        for chunk_params in params.chunks {
-            let chunk_type = parse_chunk_type(&chunk_params.chunk_type)?;
-            let mut chunk = MemoryChunk::new(tenant_id.clone(), &chunk_params.text, chunk_type);
-            if let Some(project_id) = &chunk_params.project_id {
-                chunk = chunk.with_project(ProjectId::new(Some(project_id.clone())));
-            }
-            if let Some(episode_id) = &chunk_params.episode_id {
-                validate_episode_id(episode_id)?;
-                let mut tags = chunk.tags.clone();
-                tags.push(make_episode_tag(episode_id));
-                chunk = chunk.with_tags(tags);
-            }
-            chunk = chunk.with_source(params_to_source(chunk_params.source));
-            if !chunk_params.tags.is_empty() {
-                let mut tags = chunk.tags.clone();
-                tags.extend(chunk_params.tags);
-                chunk = chunk.with_tags(tags);
-            }
-            let delta = LifecycleDelta {
-                expires_at_ms: chunk_params.expires_at_ms.map(Some),
-                review_after_ms: chunk_params.review_after_ms.map(Some),
-                ..Default::default()
-            };
-            prepared.push((chunk, delta));
-        }
-        // Second pass: commit every prepared pair. Any store-layer error
-        // still leaves earlier rows committed — that mirrors the existing
-        // `store.add_batch` failure contract, which is not all-or-nothing
-        // either — but validation is no longer interleaved with writes.
+        // Per-chunk through add_chunk_with_lifecycle so the per-row
+        // overlay is applied. Failures still leave earlier rows
+        // committed — same contract as the bulk add_batch fast path.
         let mut ids = Vec::with_capacity(prepared.len());
-        for (chunk, delta) in prepared {
+        for (chunk, delta, _) in prepared {
             let id = ps
                 .add_chunk_with_lifecycle(chunk, delta)
                 .await
@@ -4682,33 +4738,10 @@ pub async fn handle_memory_add_batch<S: Store>(
         }
         ids
     } else {
-        let mut chunks = Vec::with_capacity(params.chunks.len());
-        for chunk_params in params.chunks {
-            let chunk_type = parse_chunk_type(&chunk_params.chunk_type)?;
-            let mut chunk = MemoryChunk::new(tenant_id.clone(), &chunk_params.text, chunk_type);
-
-            if let Some(project_id) = &chunk_params.project_id {
-                chunk = chunk.with_project(ProjectId::new(Some(project_id.clone())));
-            }
-
-            if let Some(episode_id) = &chunk_params.episode_id {
-                validate_episode_id(episode_id)?;
-                let mut tags = chunk.tags.clone();
-                tags.push(make_episode_tag(episode_id));
-                chunk = chunk.with_tags(tags);
-            }
-
-            chunk = chunk.with_source(params_to_source(chunk_params.source));
-
-            if !chunk_params.tags.is_empty() {
-                let mut tags = chunk.tags.clone();
-                tags.extend(chunk_params.tags);
-                chunk = chunk.with_tags(tags);
-            }
-
-            chunks.push(chunk);
-        }
-
+        // No lifecycle overlay anywhere → bulk path. The chunks already
+        // carry the per-row ingestion_mode label (set in the pre-pass);
+        // store.add_batch threads that through to ChunkMetadata.
+        let chunks: Vec<MemoryChunk> = prepared.into_iter().map(|(c, _, _)| c).collect();
         store
             .add_batch(chunks)
             .await

@@ -1049,6 +1049,11 @@ impl TenantStore {
                             &chunk.text,
                             chunk.chunk_type,
                         )),
+                        // E1: mirror the chunk's ingestion_mode label into
+                        // metadata so downstream tooling can query without
+                        // touching the segment payload. Pre-E1 payloads
+                        // deserialize as Document via #[serde(default)].
+                        ingestion_mode: chunk.ingestion_mode,
                     };
                     metadata.insert(&chunk_meta)?;
 
@@ -1415,6 +1420,10 @@ impl Store for PersistentStore {
                     &row.chunk.text,
                     row.chunk.chunk_type,
                 )),
+                // E1: mirror the chunk's ingestion_mode label. Task
+                // artifacts are typically Document but the writer can
+                // override.
+                ingestion_mode: row.chunk.ingestion_mode,
             });
             index_rows.push((row.chunk_id.clone(), row.chunk.text.clone()));
         }
@@ -2300,6 +2309,8 @@ impl PersistentStore {
                         &row.chunk.text,
                         row.chunk.chunk_type,
                     )),
+                    // E1: mirror the chunk's ingestion_mode label.
+                    ingestion_mode: row.chunk.ingestion_mode,
                 });
                 index_rows.push((row.chunk_id.clone(), row.chunk.text.clone()));
             }
