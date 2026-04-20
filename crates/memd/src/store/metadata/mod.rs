@@ -280,11 +280,28 @@ pub trait MetadataStore: Send + Sync {
     ) -> Result<Vec<ChunkMetadata>>;
 
     /// List the most recently created chunks for a tenant, optionally
-    /// scoped to a project.
+    /// scoped to a project. `Option<&str>::None` means "any project"
+    /// (no filter), matching the historical semantics. For "rows
+    /// whose project_id IS NULL", call `list_recent_with_null_project`
+    /// instead — these two semantics are distinct for D3/D4 fuzzy
+    /// dedup with `scope: "project"` on an unscoped chunk.
     fn list_recent_for_project(
         &self,
         tenant_id: &TenantId,
         project_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ChunkMetadata>>;
+
+    /// List the most recently created chunks for a tenant whose
+    /// `project_id IS NULL`. Distinct from `list_recent_for_project`
+    /// with `project_id = None` because the latter widens to all
+    /// projects before applying `LIMIT`. D3/D4 fuzzy dedup with
+    /// `scope: "project"` on an unscoped incoming chunk needs this
+    /// pre-LIMIT NULL filter so a valid older NULL-project candidate
+    /// is not evicted by recent project-scoped traffic.
+    fn list_recent_with_null_project(
+        &self,
+        tenant_id: &TenantId,
         limit: usize,
     ) -> Result<Vec<ChunkMetadata>>;
 

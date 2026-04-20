@@ -850,6 +850,151 @@ async fn add_batch_respects_supersede_near_duplicates_per_chunk() {
     assert_eq!(resolved_old.status, ChunkStatus::Superseded);
 }
 
+// Codex round-2 D3/D4 MEDIUM regression: fuzzy dedup with
+// scope=project on an unscoped (project_id=None) chunk must not be
+// evicted by recent project-scoped writes. Pre-fix the SQL helper
+// pulled the most recent N rows tenant-wide and post-filtered to
+// NULL project, so a valid older NULL-project candidate could be
+// dropped entirely if N project-scoped rows arrived after it.
+#[tokio::test]
+async fn add_with_fuzzy_dedup_null_project_not_evicted_by_other_projects() {
+    use memd::types::{ChunkId, ChunkStatus};
+    let (server, _tmp) = test_server().await;
+
+    // Seed 1: the NULL-project candidate. Add it FIRST so it is
+    // older than the noise that follows.
+    let r0 = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "text": "Release freeze begins Thursday.",
+            "type": "doc",
+        }),
+    )
+    .await;
+    let id_old = ChunkId::parse(parse_result_text(&r0)["chunk_id"].as_str().unwrap())
+        .expect("valid id");
+
+    // Seed 2: dump enough recent project-scoped rows to bury the
+    // NULL-project candidate under FUZZY_RECENT_POOL_SIZE if the
+    // SQL pre-filter is wrong.
+    for i in 0..130 {
+        call_tool(
+            &server,
+            "memory.add",
+            serde_json::json!({
+                "tenant_id": "t",
+                "project_id": "noise",
+                "text": format!("noise chunk {i}"),
+                "type": "doc",
+            }),
+        )
+        .await;
+    }
+
+    // Now insert a NULL-project chunk that should fuzzy-match the
+    // original NULL-project seed. With scope=project, the match must
+    // succeed — the SQL pre-filter has to honour project_id IS NULL.
+    let r = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "text": "Release freeze begins on Thursday.",
+            "type": "doc",
+            "supersede_near_duplicates": { "mode": "fuzzy", "threshold": 0.80 },
+        }),
+    )
+    .await;
+    let body = parse_result_text(&r);
+    let supersedes: Vec<String> = body["superseded_ids"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        supersedes,
+        vec![id_old.to_string()],
+        "NULL-project fuzzy candidate must not be evicted by recent project-scoped traffic"
+    );
+
+    // Confirm the original is now Superseded.
+    let ps = server.store().as_persistent().expect("persistent");
+    let resolved = ps
+        .get_with_lifecycle(&tenant("t"), &id_old)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.status, ChunkStatus::Superseded);
+}
+
+// Codex round-2 D3/D4 LOW: D4 lacks coverage of lifecycle overlay
+// preservation on the matched-dedup path. Mirror D3's regression.
+#[tokio::test]
+async fn add_batch_with_dedup_preserves_lifecycle_overlay_on_match() {
+    use memd::types::ChunkId;
+    let (server, _tmp) = test_server().await;
+    call_tool(
+        &server,
+        "memory.add_batch",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunks": [
+                { "text": "Release freeze begins Thursday.", "type": "doc", "project_id": "p1" },
+            ],
+        }),
+    )
+    .await;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let want_expires = now_ms + 60_000;
+    let r = call_tool(
+        &server,
+        "memory.add_batch",
+        serde_json::json!({
+            "tenant_id": "t",
+            "supersede_near_duplicates": { "mode": "exact" },
+            "chunks": [
+                {
+                    "text": "release freeze begins thursday.",
+                    "type": "doc",
+                    "project_id": "p1",
+                    "expires_at_ms": want_expires,
+                },
+            ],
+        }),
+    )
+    .await;
+    let body = parse_result_text(&r);
+    let new_id = ChunkId::parse(
+        body["chunk_ids"]
+            .as_array()
+            .unwrap()
+            .first()
+            .unwrap()
+            .as_str()
+            .unwrap(),
+    )
+    .expect("valid id");
+
+    let ps = server.store().as_persistent().expect("persistent");
+    let resolved = ps
+        .get_with_lifecycle(&tenant("t"), &new_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        resolved.lifecycle.expires_at_ms,
+        Some(want_expires),
+        "batch dedup must preserve per-chunk expires_at_ms on the match path"
+    );
+}
+
 #[tokio::test]
 async fn add_batch_without_dedup_keeps_legacy_response_shape() {
     let (server, _tmp) = test_server().await;
