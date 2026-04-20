@@ -516,16 +516,27 @@ pub async fn run_cli<S: Store>(
             // a path inside memd's data directory. We use a textual
             // normalise (no `canonicalize`) so the guard works before the
             // outdir exists — std `Path::canonicalize` would error out.
-            let effective_data_dir = resolve_data_dir(data_dir.as_deref())?;
+            // Containment guard refuses if `outdir` is inside ANY of
+            // the known memd data directories. When `--data-dir` is
+            // explicit, the list is just that path. When it's absent,
+            // the list is `[<discovered from tenant_scope.json>?,
+            // $HOME/.memd/data]` — discovery AUGMENTS the default
+            // fallback, it doesn't replace it, so an untrusted
+            // ancestor config can't turn off the guard for the
+            // default-install data directory (Codex Item 4 HIGH).
+            let effective_data_dirs =
+                resolve_export_markdown_data_dirs(data_dir.as_deref())?;
             let outdir_abs = normalize_absolute(&outdir);
-            let data_dir_abs = normalize_absolute(&effective_data_dir);
-            if path_is_inside(&outdir_abs, &data_dir_abs) {
-                return Err(crate::error::MemdError::ValidationError(format!(
-                    "refusing to write markdown export into memd data directory: \
-                     outdir={} data_dir={}",
-                    outdir_abs.display(),
-                    data_dir_abs.display()
-                )));
+            for candidate in &effective_data_dirs {
+                let data_dir_abs = normalize_absolute(candidate);
+                if path_is_inside(&outdir_abs, &data_dir_abs) {
+                    return Err(crate::error::MemdError::ValidationError(format!(
+                        "refusing to write markdown export into memd data directory: \
+                         outdir={} data_dir={}",
+                        outdir_abs.display(),
+                        data_dir_abs.display()
+                    )));
+                }
             }
 
             // Walk metadata in pages so a tenant with > 10k chunks
@@ -946,12 +957,111 @@ fn absolutize_project_dir(path: &Path) -> Result<PathBuf> {
 
 fn resolve_data_dir(explicit: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = explicit {
-        return Ok(path.to_path_buf());
+        // Absolutize so a relative `--memd-data-dir ./data` passed to
+        // `memd init` from CWD=X is persisted to `tenant_scope.json`
+        // as an absolute path (/path/to/X/data). If we kept relative
+        // values, later auto-discovery would reinterpret them against
+        // the project root (the dir that contains `.memd/`), which
+        // differs from the user's CWD at init time and points the
+        // guard at the wrong directory (Codex Item 4 MEDIUM).
+        // `normalize_absolute` is textual (no canonicalize) so the
+        // path is not required to exist yet.
+        return Ok(normalize_absolute(path));
     }
     let home = dirs::home_dir().ok_or_else(|| {
         crate::error::MemdError::StorageError("cannot resolve home directory".to_string())
     })?;
     Ok(home.join(".memd").join("data"))
+}
+
+/// Walk ancestors of `start` looking for `.memd/tenant_scope.json`.
+///
+/// Returns the `data_dir` value from the first hit, or `None` if no
+/// such file exists anywhere in the walk. Relative `data_dir` values
+/// are resolved against the directory that contains `.memd/` — which
+/// is what `memd init` intends when a user opts into a project-local
+/// data dir.
+///
+/// First-match-wins: once we find any `.memd/tenant_scope.json`, that
+/// IS the project boundary. A malformed JSON, missing-`data_dir`, or
+/// unreadable file stops the walk and returns `None` — the caller
+/// falls back to `$HOME/.memd/data`, rather than silently inheriting
+/// an outer project's config (Codex Item 4 MEDIUM). Silent on IO /
+/// parse errors so a broken project config doesn't crash the CLI.
+fn discover_project_data_dir_from(start: &Path) -> Option<PathBuf> {
+    let mut current: Option<&Path> = Some(start);
+    while let Some(dir) = current {
+        let scope_path = dir.join(".memd").join("tenant_scope.json");
+        if scope_path.is_file() {
+            if let Ok(text) = std::fs::read_to_string(&scope_path) {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if let Some(raw) = value.get("data_dir").and_then(|v| v.as_str()) {
+                        let candidate = PathBuf::from(raw);
+                        return Some(if candidate.is_absolute() {
+                            candidate
+                        } else {
+                            dir.join(candidate)
+                        });
+                    }
+                }
+            }
+            // Found the boundary file but couldn't extract data_dir;
+            // stop here rather than fall through to an outer project.
+            return None;
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+/// Core resolver for `memd export-markdown`'s containment-guard
+/// data_dirs. Always returns the list of paths the guard must refuse
+/// the outdir against — never a single path — so auto-discovery can't
+/// weaken the pre-refactor `$HOME/.memd/data` default (Codex Item 4
+/// HIGH).
+///
+/// Priority / composition:
+/// 1. If `--data-dir` is explicit, the guard checks ONLY that path.
+///    This is the caller's declared intent and overrides both
+///    discovery and the home default.
+/// 2. Otherwise, the list includes `$HOME/.memd/data` AND any
+///    `data_dir` discovered from a nearest-ancestor
+///    `.memd/tenant_scope.json`. The guard refuses an outdir that is
+///    inside ANY of those candidates, so an untrusted ancestor config
+///    can't mask the default-install guard.
+///
+/// Split from `resolve_export_markdown_data_dirs` so tests can drive
+/// it with an explicit `start_dir` instead of coupling to CWD.
+fn resolve_export_markdown_data_dirs_from(
+    explicit: Option<&Path>,
+    start_dir: Option<&Path>,
+) -> Result<Vec<PathBuf>> {
+    if let Some(path) = explicit {
+        return Ok(vec![path.to_path_buf()]);
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(start) = start_dir {
+        if let Some(discovered) = discover_project_data_dir_from(start) {
+            candidates.push(discovered);
+        }
+    }
+    let home = dirs::home_dir().ok_or_else(|| {
+        crate::error::MemdError::StorageError("cannot resolve home directory".to_string())
+    })?;
+    let home_default = home.join(".memd").join("data");
+    if !candidates.contains(&home_default) {
+        candidates.push(home_default);
+    }
+    Ok(candidates)
+}
+
+/// Resolve the data_dir candidates for `memd export-markdown`'s
+/// containment guard. See `resolve_export_markdown_data_dirs_from` for
+/// priority and composition semantics. This wrapper supplies
+/// `std::env::current_dir()` as the discovery start point.
+fn resolve_export_markdown_data_dirs(explicit: Option<&Path>) -> Result<Vec<PathBuf>> {
+    let cwd = std::env::current_dir().ok();
+    resolve_export_markdown_data_dirs_from(explicit, cwd.as_deref())
 }
 
 fn discover_tenants(data_dir: &Path) -> Result<Vec<String>> {
@@ -1005,7 +1115,12 @@ fn build_tenant_scope_config(
         scope,
         allow_tenants: Vec::new(),
         read_tenants: vec![primary_tenant.to_string()],
-        data_dir: None,
+        // Always persist data_dir — not just in scope=global — so
+        // `memd export-markdown` (and any future CLI tool that needs
+        // the containment guard) can auto-discover the daemon's data
+        // directory from a nearest-ancestor `.memd/tenant_scope.json`
+        // without forcing every caller to pass `--data-dir` explicitly.
+        data_dir: Some(data_dir.display().to_string()),
     };
 
     match scope {
@@ -1054,7 +1169,6 @@ fn build_tenant_scope_config(
             discovered.dedup();
 
             config.read_tenants = discovered;
-            config.data_dir = Some(data_dir.display().to_string());
         }
     }
 
@@ -1641,5 +1755,251 @@ mod tests {
         assert!(read_tenants.iter().any(|v| v == "primary"));
         assert!(read_tenants.iter().any(|v| v == "shared_a"));
         assert!(read_tenants.iter().any(|v| v == "shared_b"));
+    }
+
+    // --- Item 4: export-markdown --data-dir auto-discovery ---
+
+    #[tokio::test]
+    async fn init_local_scope_persists_data_dir_in_tenant_scope() {
+        // Pins the behaviour-change introduced for Item 4: `data_dir`
+        // is now recorded in `tenant_scope.json` for every scope mode,
+        // not just `global`, so `memd export-markdown` can auto-discover
+        // it without forcing the user to pass `--data-dir`.
+        let store = MemoryStore::new();
+        let dir = tempdir().unwrap();
+        let project_dir = dir.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        run_cli(
+            &store,
+            None,
+            CliCommand::Init {
+                tenant_id: "t_local".to_string(),
+                scope: TenantScopeMode::Local,
+                allow_tenants: None,
+                project_dir: project_dir.clone(),
+                project_id: Some("p".to_string()),
+                memd_command: "memd".to_string(),
+                memd_data_dir: Some(PathBuf::from("/tmp/memd-data-local")),
+                memd_url: "http://127.0.0.1:8787/mcp".to_string(),
+                install_codex: false,
+                install_claude: false,
+                codex_config_path: None,
+                claude_config_path: None,
+                write_agent_files: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let tenant_scope: Value = serde_json::from_str(
+            &std::fs::read_to_string(project_dir.join(".memd/tenant_scope.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(tenant_scope["scope"], "local");
+        assert_eq!(tenant_scope["data_dir"], "/tmp/memd-data-local");
+    }
+
+    #[test]
+    fn discover_project_data_dir_returns_none_when_no_memd_dir() {
+        let dir = tempdir().unwrap();
+        assert!(discover_project_data_dir_from(dir.path()).is_none());
+    }
+
+    #[test]
+    fn discover_project_data_dir_returns_data_dir_from_tenant_scope() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".memd")).unwrap();
+        std::fs::write(
+            dir.path().join(".memd/tenant_scope.json"),
+            r#"{"primary_tenant":"t","write_tenant":"t","scope":"local","read_tenants":["t"],"data_dir":"/abs/path/to/data"}"#,
+        )
+        .unwrap();
+        let discovered = discover_project_data_dir_from(dir.path()).unwrap();
+        assert_eq!(discovered, PathBuf::from("/abs/path/to/data"));
+    }
+
+    #[test]
+    fn discover_project_data_dir_returns_none_when_field_missing() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".memd")).unwrap();
+        std::fs::write(
+            dir.path().join(".memd/tenant_scope.json"),
+            r#"{"primary_tenant":"t","write_tenant":"t","scope":"local","read_tenants":["t"]}"#,
+        )
+        .unwrap();
+        assert!(discover_project_data_dir_from(dir.path()).is_none());
+    }
+
+    #[test]
+    fn discover_project_data_dir_returns_none_on_malformed_json() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".memd")).unwrap();
+        std::fs::write(
+            dir.path().join(".memd/tenant_scope.json"),
+            "{not json",
+        )
+        .unwrap();
+        assert!(discover_project_data_dir_from(dir.path()).is_none());
+    }
+
+    #[test]
+    fn discover_project_data_dir_walks_up_to_nearest_ancestor() {
+        let dir = tempdir().unwrap();
+        let project = dir.path().join("project");
+        let nested = project.join("a").join("b").join("c");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(project.join(".memd")).unwrap();
+        std::fs::write(
+            project.join(".memd/tenant_scope.json"),
+            r#"{"primary_tenant":"t","write_tenant":"t","scope":"local","read_tenants":["t"],"data_dir":"/discovered"}"#,
+        )
+        .unwrap();
+        let discovered = discover_project_data_dir_from(&nested).unwrap();
+        assert_eq!(discovered, PathBuf::from("/discovered"));
+    }
+
+    #[test]
+    fn discover_project_data_dir_resolves_relative_path_against_memd_parent() {
+        // When `data_dir` in the JSON is a relative path, resolve it
+        // relative to the directory containing `.memd/`, not relative
+        // to the caller's CWD. This matches what `memd init` intends
+        // when a user passes a project-relative `--data-dir`.
+        let dir = tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(project.join(".memd")).unwrap();
+        std::fs::write(
+            project.join(".memd/tenant_scope.json"),
+            r#"{"primary_tenant":"t","write_tenant":"t","scope":"local","read_tenants":["t"],"data_dir":"subdir/data"}"#,
+        )
+        .unwrap();
+        let discovered = discover_project_data_dir_from(&project).unwrap();
+        assert_eq!(discovered, project.join("subdir").join("data"));
+    }
+
+    #[test]
+    fn resolve_export_markdown_data_dirs_prefers_explicit_arg() {
+        // When --data-dir is explicit, the guard checks ONLY that path
+        // (single-element vec). The caller's declared intent overrides
+        // any ambient discovery and the home default.
+        let explicit = PathBuf::from("/explicit/path");
+        let resolved = resolve_export_markdown_data_dirs(Some(&explicit)).unwrap();
+        assert_eq!(resolved, vec![explicit]);
+    }
+
+    #[test]
+    fn resolve_export_markdown_data_dirs_from_uses_discovery_alongside_home_default() {
+        // Regression for Codex Item 4 HIGH: when --data-dir is absent,
+        // discovery must AUGMENT the home default, not replace it. An
+        // ancestor config with `data_dir` = `/foo` must not silently
+        // turn off the guard for `$HOME/.memd/data`.
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".memd")).unwrap();
+        std::fs::write(
+            dir.path().join(".memd/tenant_scope.json"),
+            r#"{"primary_tenant":"t","write_tenant":"t","scope":"local","read_tenants":["t"],"data_dir":"/discovered/data"}"#,
+        )
+        .unwrap();
+        let resolved =
+            resolve_export_markdown_data_dirs_from(None, Some(dir.path())).unwrap();
+        let home_default = dirs::home_dir().unwrap().join(".memd").join("data");
+        assert!(
+            resolved.contains(&PathBuf::from("/discovered/data")),
+            "expected discovered path in list, got {:?}",
+            resolved
+        );
+        assert!(
+            resolved.contains(&home_default),
+            "expected home default in list, got {:?}",
+            resolved
+        );
+    }
+
+    #[test]
+    fn resolve_export_markdown_data_dirs_from_explicit_beats_discovery() {
+        // Explicit --data-dir is a single-element vec; neither
+        // discovery nor home default is appended. The caller takes
+        // responsibility for the path they asked the guard to check.
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".memd")).unwrap();
+        std::fs::write(
+            dir.path().join(".memd/tenant_scope.json"),
+            r#"{"primary_tenant":"t","write_tenant":"t","scope":"local","read_tenants":["t"],"data_dir":"/not-used"}"#,
+        )
+        .unwrap();
+        let explicit = PathBuf::from("/explicit/wins");
+        let resolved =
+            resolve_export_markdown_data_dirs_from(Some(&explicit), Some(dir.path()))
+                .unwrap();
+        assert_eq!(resolved, vec![explicit]);
+    }
+
+    #[test]
+    fn resolve_export_markdown_data_dirs_from_falls_back_to_home_when_no_project() {
+        let dir = tempdir().unwrap();
+        let resolved =
+            resolve_export_markdown_data_dirs_from(None, Some(dir.path())).unwrap();
+        let home_default = dirs::home_dir().unwrap().join(".memd").join("data");
+        assert_eq!(resolved, vec![home_default]);
+    }
+
+    #[test]
+    fn discover_project_data_dir_inner_broken_config_stops_walk() {
+        // Regression for Codex Item 4 MEDIUM #2: an inner project
+        // whose `.memd/tenant_scope.json` is missing `data_dir` must
+        // NOT silently inherit the outer project's value. Discovery
+        // treats the first-found `.memd/tenant_scope.json` as the
+        // project boundary.
+        let dir = tempdir().unwrap();
+        let outer = dir.path().join("outer");
+        let inner = outer.join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::create_dir_all(outer.join(".memd")).unwrap();
+        std::fs::create_dir_all(inner.join(".memd")).unwrap();
+        // Outer has a valid config…
+        std::fs::write(
+            outer.join(".memd/tenant_scope.json"),
+            r#"{"primary_tenant":"t","write_tenant":"t","scope":"local","read_tenants":["t"],"data_dir":"/outer-data"}"#,
+        )
+        .unwrap();
+        // …but the inner project's config is missing data_dir.
+        std::fs::write(
+            inner.join(".memd/tenant_scope.json"),
+            r#"{"primary_tenant":"t","write_tenant":"t","scope":"local","read_tenants":["t"]}"#,
+        )
+        .unwrap();
+        assert!(
+            discover_project_data_dir_from(&inner).is_none(),
+            "inner broken config must stop walk and not return outer's data_dir"
+        );
+    }
+
+    #[test]
+    fn resolve_data_dir_absolutizes_relative_explicit_arg() {
+        // Regression for Codex Item 4 MEDIUM #3: `memd init` must
+        // persist an absolute path even when the caller passed a
+        // relative `--memd-data-dir`. Without this, later auto-
+        // discovery would reinterpret the relative value against the
+        // project root, which differs from the user's CWD at init
+        // time.
+        let relative = PathBuf::from("rel/data");
+        let resolved = resolve_data_dir(Some(&relative)).unwrap();
+        assert!(
+            resolved.is_absolute(),
+            "resolved must be absolute; got {}",
+            resolved.display()
+        );
+        assert!(
+            resolved.ends_with("rel/data"),
+            "resolved must still end in the supplied segments; got {}",
+            resolved.display()
+        );
+    }
+
+    #[test]
+    fn resolve_data_dir_leaves_absolute_explicit_arg_unchanged() {
+        let absolute = PathBuf::from("/already/abs/data");
+        let resolved = resolve_data_dir(Some(&absolute)).unwrap();
+        assert_eq!(resolved, absolute);
     }
 }
