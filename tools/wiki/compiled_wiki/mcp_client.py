@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import json
+import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
+
+from . import __version__ as _CLIENT_PACKAGE_VERSION
+from .compat import (
+    CompatResult,
+    ServerIncompatibleError,
+    check_server_compat,
+)
 
 
 class McpClientError(RuntimeError):
@@ -17,9 +25,12 @@ class McpHttpClient:
     timeout: float = 30.0
     protocol_version: str = "2025-11-25"
     client_name: str = "memd-wiki"
-    client_version: str = "0.1.0"
+    client_version: str = _CLIENT_PACKAGE_VERSION
+    check_compat: bool = True
     _initialized: bool = field(default=False, init=False, repr=False)
     _request_id: int = field(default=0, init=False, repr=False)
+    server_version: str | None = field(default=None, init=False)
+    compat_result: CompatResult | None = field(default=None, init=False)
 
     def initialize(self) -> None:
         if self._initialized:
@@ -43,6 +54,23 @@ class McpHttpClient:
             raise McpClientError(
                 f"unexpected protocol version: {result.get('protocolVersion')!r}"
             )
+        server_info = result.get("serverInfo") or {}
+        server_version = server_info.get("version")
+        self.server_version = server_version if isinstance(server_version, str) else None
+        if self.check_compat:
+            self.compat_result = check_server_compat(
+                self.server_version, self.client_version
+            )
+            if self.compat_result.severity == "fail":
+                raise ServerIncompatibleError(
+                    client_version=self.compat_result.client_version,
+                    server_version=self.compat_result.server_version,
+                )
+            if self.compat_result.severity == "warn":
+                print(
+                    f"memd-wiki: warning: {self.compat_result.message}",
+                    file=sys.stderr,
+                )
         self._initialized = True
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:

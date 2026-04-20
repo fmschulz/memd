@@ -36,6 +36,7 @@ __pycache__/
 .pixi/
 /python/
 pyproject.toml
+!/tools/wiki/pyproject.toml
 setup-python.sh
 
 # Planning and implementation documents (internal only)

@@ -19,8 +19,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--project-id", required=True, help="memd project_id to compile.")
     parser.add_argument(
         "--output-dir",
-        default=str(Path(__file__).resolve().parents[1] / "output"),
-        help="Directory where compiled markdown files will be written.",
+        default=None,
+        help=(
+            "Directory where compiled markdown files will be written. "
+            "Defaults to ./compiled_wiki/ under the current working directory."
+        ),
     )
     parser.add_argument(
         "--max-tasks",
@@ -45,11 +48,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.output_dir is None:
+        output_dir = Path.cwd() / "compiled_wiki"
+    else:
+        output_dir = Path(args.output_dir)
     config = BuildConfig(
         memd_url=args.memd_url,
         tenant_id=args.tenant_id,
         project_id=args.project_id,
-        output_dir=Path(args.output_dir),
+        output_dir=output_dir,
         max_tasks=args.max_tasks,
         library_k=args.library_k,
         timeout=args.timeout,
