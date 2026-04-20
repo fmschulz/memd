@@ -11,7 +11,7 @@ mod common;
 use common::*;
 
 use memd::omf::export::{export_omf, ExportOptions};
-use memd::omf::import::{import_omf, ImportOptions, ImportResult};
+use memd::omf::import::{import_omf, preview_omf_import, ImportOptions, ImportResult, PreviewResult};
 use memd::omf::{OmfDocument, OmfItem, OmfSource, MEMD_EXT_VERSION, OMF_VERSION};
 use memd::store::metadata::MetadataStore;
 use memd::store::Store;
@@ -519,6 +519,130 @@ async fn import_memd_source_with_mismatched_ext_version_uses_default_lifecycle()
     assert_eq!(metas.len(), 1);
     assert_eq!(metas[0].lifecycle.tier, MemoryTier::LongTerm);
     assert_eq!(metas[0].status, memd::types::ChunkStatus::Final);
+}
+
+// --------------------------------------------------------------
+// F4 preview — dry-run counts with no writes, no cache bumps.
+// --------------------------------------------------------------
+
+#[tokio::test]
+async fn preview_omf_returns_counts_without_writing() {
+    // Seed "fact A" in p1, preview [fact A, fact B] in p1. Preview
+    // should report 1 duplicate + 1 to_import, and the post-state of
+    // the store must be unchanged (1 row, not 2).
+    let (server, _tmp) = test_server().await;
+    let _ = call_tool(
+        &server,
+        "memory.add",
+        json!({"tenant_id": "t", "text": "fact A", "type": "doc", "project_id": "p1"}),
+    )
+    .await;
+
+    let doc = make_doc(
+        "nanomem",
+        vec![make_item("fact A", Some("p1")), make_item("fact B", Some("p1"))],
+    );
+    let ps = server.store().as_persistent().unwrap();
+
+    // Take a pre-preview count of rows. The preview must not bump it.
+    let pre_rows = ps
+        .metadata()
+        .list_for_export(&tenant("t"), Some("p1"), false)
+        .unwrap()
+        .len();
+    assert_eq!(pre_rows, 1);
+
+    let preview = preview_omf_import(ps, &tenant("t"), &doc, ImportOptions::default())
+        .await
+        .unwrap();
+    let mut expected_by_project = std::collections::BTreeMap::new();
+    expected_by_project.insert("p1".to_string(), 1usize);
+    assert_eq!(
+        preview,
+        PreviewResult {
+            total: 2,
+            to_import: 1,
+            duplicates: 1,
+            filtered: 0,
+            by_project: expected_by_project,
+        }
+    );
+
+    // Post-state: still 1 row. Preview must not write.
+    let post_rows = ps
+        .metadata()
+        .list_for_export(&tenant("t"), Some("p1"), false)
+        .unwrap()
+        .len();
+    assert_eq!(post_rows, pre_rows);
+}
+
+#[tokio::test]
+async fn preview_and_real_import_agree_on_counts() {
+    // Composite: preview a doc, then import it, then assert the
+    // preview's per-bucket counts match the real import's result.
+    // Guards against preview/import drift (e.g. one path swallows
+    // trust-gate parse errors the other propagates).
+    let (server, _tmp) = test_server().await;
+    let _ = call_tool(
+        &server,
+        "memory.add",
+        json!({"tenant_id": "t", "text": "fact A", "type": "doc", "project_id": "p1"}),
+    )
+    .await;
+
+    let doc = make_doc(
+        "nanomem",
+        vec![
+            make_item("fact A", Some("p1")),
+            make_item("fact B", Some("p2")),
+            OmfItem {
+                status: Some("archived".into()),
+                ..make_item("dropped", Some("p1"))
+            },
+        ],
+    );
+    let ps = server.store().as_persistent().unwrap();
+    let opts = ImportOptions {
+        include_archived: false,
+        fuzzy_threshold: None,
+    };
+
+    let preview = preview_omf_import(ps, &tenant("t"), &doc, opts.clone())
+        .await
+        .unwrap();
+    let actual = import_omf(ps, &tenant("t"), &doc, opts).await.unwrap();
+
+    assert_eq!(preview.total, actual.total);
+    assert_eq!(preview.to_import, actual.imported);
+    assert_eq!(preview.duplicates, actual.duplicates);
+    assert_eq!(preview.filtered, actual.skipped);
+}
+
+#[tokio::test]
+async fn preview_fails_closed_on_malformed_trusted_lifecycle() {
+    // Matches import_rejects_malformed_trusted_lifecycle behaviour:
+    // a memd-trusted doc with a broken lifecycle surfaces a
+    // ValidationError from preview too, so a caller doesn't see
+    // "looks fine" only for the subsequent real import to fail.
+    let (server, _tmp) = test_server().await;
+    let bad = OmfItem {
+        content: "payload".into(),
+        extensions: json!({
+            "memd": {
+                "v": 1,
+                "project_id": "p1",
+                "lifecycle": {"tier": "galaxy_brain"}
+            }
+        }),
+        ..Default::default()
+    };
+    let doc = make_doc("memd", vec![bad]);
+    let ps = server.store().as_persistent().unwrap();
+    let err = preview_omf_import(ps, &tenant("t"), &doc, ImportOptions::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, memd::error::MemdError::ValidationError(_)));
 }
 
 #[tokio::test]
