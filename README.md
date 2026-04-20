@@ -1,6 +1,6 @@
 # memd
 
-[![Version](https://img.shields.io/badge/version-0.8.0-blue)](https://github.com/fmschulz/memd/releases/tag/v0.8.0)
+[![Version](https://img.shields.io/badge/version-0.9.0-blue)](https://github.com/fmschulz/memd/releases/tag/v0.9.0)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 `memd` is a local MCP daemon that gives coding agents and AI scientists a single
