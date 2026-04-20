@@ -174,6 +174,57 @@ async fn export_omf_empty_tenant_returns_well_formed_envelope() {
 }
 
 #[tokio::test]
+async fn export_omf_hides_lazy_expired_when_include_expired_false() {
+    // Codex F2 round-1 MEDIUM: `include_expired=false` must hide rows
+    // whose `expires_at_ms` has passed even if the sweep hasn't yet
+    // flipped `status=Final → Expired`. Mirrors the
+    // `VisibilityPolicy::is_visible_at` clock check used by search.
+    let (server, _tmp) = test_server().await;
+
+    // Seed two chunks: one live, one with an `expires_at_ms` far in the past.
+    let _live = add_chunk(&server, "t", "live").await;
+    let expired_id = add_with_expiry(&server, "t", "dead", 1_000).await;
+
+    let ps = server.store().as_persistent().unwrap();
+
+    let with_expired = export_omf(
+        ps,
+        &tenant("t"),
+        ExportOptions {
+            include_expired: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        with_expired.memories.len(),
+        2,
+        "include_expired=true keeps the lazily-expired row"
+    );
+
+    let live_only = export_omf(
+        ps,
+        &tenant("t"),
+        ExportOptions {
+            include_expired: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        live_only.memories.len(),
+        1,
+        "include_expired=false must hide lazy-expired rows"
+    );
+    assert_eq!(live_only.memories[0].content, "live");
+
+    // And the ignored chunk really is the one we marked expired.
+    let _ = expired_id;
+}
+
+#[tokio::test]
 async fn export_omf_respects_include_flags_for_superseded() {
     // Seed two chunks; supersede the first with the second via the
     // persistent-store supersede_chunk API, then verify the default

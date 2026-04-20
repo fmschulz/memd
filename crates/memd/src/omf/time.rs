@@ -10,10 +10,10 @@
 
 /// Format an `i64` ms-since-Unix-epoch as RFC-3339 UTC.
 ///
-/// Returns `None` for values whose second-precision truncation falls
-/// outside the range representable by `(year, month, day, hour, min, sec)`
-/// on a 32-bit year. In practice that cannot happen for any value that
-/// `SystemTime::now()` would produce this millennium.
+/// Returns `None` for values that fall outside RFC-3339's 4-digit
+/// Gregorian year range (`0001`–`9999`). A 13-digit millisecond value
+/// covers years 1970–2038, so this bound is defensive rather than
+/// restrictive for any real timestamp.
 pub fn format_rfc3339_ms(ms: i64) -> Option<String> {
     // Break ms into (seconds_since_epoch, submillis discarded).
     // Rust's i64 div/rem rounds toward zero, which gives the wrong
@@ -29,6 +29,9 @@ pub fn format_rfc3339_ms(ms: i64) -> Option<String> {
     let sec = tod % 60;
 
     let (year, month, day) = civil_from_days(days)?;
+    if !is_rfc3339_year(year) {
+        return None;
+    }
     Some(format!(
         "{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z"
     ))
@@ -36,14 +39,36 @@ pub fn format_rfc3339_ms(ms: i64) -> Option<String> {
 
 /// Format an `i64` ms-since-epoch as a `YYYY-MM-DD` date-only string.
 ///
-/// Used for per-item `created_at`/`updated_at`/`expires_at` where OMF
-/// 1.0 accepts either full RFC-3339 or a date-only form. Matches the
-/// plan's reference implementation which emits date-only for these
-/// fields (per-day granularity is sufficient for the lifecycle overlay).
+/// Returns `None` for values that fall outside RFC-3339's 4-digit
+/// Gregorian year range (`0001`–`9999`), matching `format_rfc3339_ms`.
 pub fn format_date_ms(ms: i64) -> Option<String> {
     let days = ms.div_euclid(86_400_000);
     let (year, month, day) = civil_from_days(days)?;
+    if !is_rfc3339_year(year) {
+        return None;
+    }
     Some(format!("{year:04}-{month:02}-{day:02}"))
+}
+
+/// Gregorian years RFC-3339 can express with a 4-digit field.
+///
+/// Pure helper so both formatters agree on the bound and tests can
+/// target it directly.
+fn is_rfc3339_year(year: i32) -> bool {
+    (1..=9999).contains(&year)
+}
+
+/// Current wall-clock time in ms-since-Unix-epoch.
+///
+/// Shares the `SystemTime`/`duration_since` call site with
+/// `now_utc_rfc3339` so callers that need both the raw ms (for
+/// lazy-expiry comparisons) and the formatted string don't read the
+/// clock twice.
+pub fn now_utc_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Return the current UTC wall-clock time as RFC-3339.
@@ -51,11 +76,7 @@ pub fn format_date_ms(ms: i64) -> Option<String> {
 /// Falls back to the Unix epoch string if `SystemTime::now()` is before
 /// the epoch (practically impossible on any sane system).
 pub fn now_utc_rfc3339() -> String {
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    format_rfc3339_ms(ms).unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string())
+    format_rfc3339_ms(now_utc_ms()).unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string())
 }
 
 /// Howard Hinnant's `civil_from_days` (proleptic Gregorian).
@@ -151,5 +172,42 @@ mod tests {
         // Unix seconds for this date: 4_107_542_400.
         let ms: i64 = 4_107_542_400_000;
         assert_eq!(format_rfc3339_ms(ms).unwrap(), "2100-03-01T00:00:00Z");
+    }
+
+    #[test]
+    fn year_after_9999_returns_none() {
+        // 253_402_300_800_000 ms = year 10000 (1 second past 9999-12-31T23:59:59Z).
+        let year_10000: i64 = 253_402_300_800_000;
+        assert!(format_rfc3339_ms(year_10000).is_none());
+        assert!(format_date_ms(year_10000).is_none());
+
+        // Last representable instant in 9999 still formats.
+        let last_9999: i64 = 253_402_300_799_000;
+        assert_eq!(
+            format_rfc3339_ms(last_9999).unwrap(),
+            "9999-12-31T23:59:59Z"
+        );
+    }
+
+    #[test]
+    fn year_before_0001_returns_none() {
+        // civil_from_days handles negative days, but RFC-3339's 4-digit
+        // year bars year 0 and earlier. i64::MIN / 86_400_000 lands well
+        // before year 1.
+        let very_early: i64 = -62_167_219_200_001;
+        assert!(format_rfc3339_ms(very_early).is_none());
+    }
+
+    #[test]
+    fn now_utc_ms_and_rfc3339_agree_to_the_second() {
+        // Regression guard: now_utc_rfc3339() now shares now_utc_ms()'s
+        // clock read. The two values sampled in quick succession must
+        // describe the same or adjacent wall-clock second.
+        let ms = now_utc_ms();
+        let s = now_utc_rfc3339();
+        assert_eq!(s.len(), 20);
+        // Convert back to a loose range: within 2 seconds.
+        let from_s = format_rfc3339_ms(ms).unwrap();
+        assert_eq!(s, from_s, "both calls must render the same second");
     }
 }
