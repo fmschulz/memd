@@ -2185,6 +2185,37 @@ impl MetadataStore for SqliteMetadataStore {
         Ok(out)
     }
 
+    fn list_recent_with_null_project(
+        &self,
+        tenant_id: &TenantId,
+        limit: usize,
+    ) -> Result<Vec<ChunkMetadata>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.pool.get();
+        let sql = format!(
+            "SELECT {CHUNK_COLUMNS} FROM chunks
+             WHERE tenant_id = :tenant
+               AND project_id IS NULL
+             ORDER BY timestamp_created DESC
+             LIMIT :limit"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::named_params! {
+                ":tenant": tenant_id.as_str(),
+                ":limit": limit as i64,
+            },
+            Self::row_to_metadata,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     fn list_for_export(
         &self,
         tenant_id: &TenantId,
