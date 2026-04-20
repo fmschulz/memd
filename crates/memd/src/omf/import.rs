@@ -34,6 +34,7 @@ use crate::store::supersession::{canonicalize_for_type, is_near_duplicate};
 use crate::types::lifecycle::{LifecycleDelta, MemoryTier};
 use crate::types::{ChunkId, ChunkStatus, ChunkType, IngestionMode, MemoryChunk, ProjectId, TenantId};
 
+#[allow(unused_imports)]
 use super::{validate_omf, OmfDocument, OmfItem, MEMD_EXT_VERSION, MEMD_SOURCE_APP};
 
 /// Tuning knobs for one `import_omf` / `preview_omf_import` call.
