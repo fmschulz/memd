@@ -7,6 +7,7 @@ pub mod dedup;
 pub mod digest_sweeper;
 pub mod error;
 pub mod handlers;
+pub mod markdown_export;
 pub mod protocol;
 pub mod server;
 pub mod tools;
