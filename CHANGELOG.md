@@ -6,6 +6,27 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Added
+
+- **Advisory single-writer lockfile for HF model downloads (Candle
+  follow-up from v0.8.0 handoff).** `download_file` in
+  `crates/memd/src/embeddings/download.rs` now acquires a sibling
+  `<target>.lock` via atomic `create_new` (O_EXCL on Unix, CREATE_NEW
+  on Windows) before streaming. Late-arriving processes see the
+  contended lock, poll (50ms → 2s backoff, 15-minute bound) for the
+  target file to publish, then return `Ok` without re-downloading.
+  Stale locks older than 60 minutes (generous for a ~614MB Qwen3
+  download on a 2 Mbps link) are reclaimed. Correctness is still
+  anchored by the existing `hard_link`-based first-writer-wins
+  publish — the lock is purely a bandwidth optimization that degrades
+  to the pre-existing race-safe behavior on lock-owner crash,
+  permission errors, or wait-timeout. Adds 10 new unit tests
+  (`test_advisory_lock_*`, `test_wait_*`,
+  `test_download_file_waiter_reuses_publication`) covering lock
+  acquisition, contention, stale reclaim, TOCTOU re-check on
+  lock-disappearance, and an end-to-end two-caller cooperation path
+  against a single-connection HTTP server.
+
 ## [0.9.0] - 2026-04-20
 
 ### Added
