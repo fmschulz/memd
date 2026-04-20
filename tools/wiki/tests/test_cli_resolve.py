@@ -183,7 +183,7 @@ class EndToEndArgvTests(unittest.TestCase):
                 '"wiki": {"max_tasks": 11, "library_k": 3}}',
                 encoding="utf-8",
             )
-            argv = ["--config-start", str(project), "--max-tasks", "5"]
+            argv = ["build", "--config-start", str(project), "--max-tasks", "5"]
             args = parse_args(argv)
             discovered = load_config(args.config_start)
             cfg = resolve_build_config(args, discovered)
