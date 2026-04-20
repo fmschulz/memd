@@ -43,6 +43,11 @@ pub async fn persistent_store(data_dir: &Path) -> Arc<PersistentStore> {
         // `PersistentStoreConfig` directly.
         enable_dense_search: false,
         enable_hybrid_search: false,
+        // Suppress the spawn_startup_*_backfill side effects so per-test
+        // state stays deterministic — otherwise the background passes
+        // race with the test's own writes / metadata mutations.
+        backfill_hnsw_on_startup: false,
+        backfill_canonical_text_on_startup: false,
         ..Default::default()
     };
     Arc::new(PersistentStore::open(config).expect("persistent store"))

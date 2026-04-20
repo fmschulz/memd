@@ -1406,7 +1406,15 @@ impl Store for PersistentStore {
                 source_uri: row.chunk.source.uri.clone(),
                 // A8: writer will populate lifecycle overlay directly once update_lifecycle is wired in.
                 lifecycle: crate::types::LifecycleMetadata::default(),
-                canonical_text: None,
+                // D2 round-2: task artifacts are still chunks; populating
+                // canonical_text here keeps `idx_chunks_canonical`
+                // coverage repo-wide so new task artifacts written after
+                // startup are not silently absent from the dedup index.
+                // (Codex round-2 D2 MEDIUM finding.)
+                canonical_text: Some(crate::store::supersession::canonicalize_for_type(
+                    &row.chunk.text,
+                    row.chunk.chunk_type,
+                )),
             });
             index_rows.push((row.chunk_id.clone(), row.chunk.text.clone()));
         }
