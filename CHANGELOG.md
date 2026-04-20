@@ -6,6 +6,60 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Added
+
+- **memd-wiki: first-class sibling surface (Item 7 / plan
+  `docs/plans/active/2026-04-20-item7-compiled-wiki-promotion.md`).**
+  Relocated `prototypes/compiled_wiki/` to `tools/wiki/` as a tracked
+  Python package with its own `pyproject.toml` (`requires-python>=3.11`,
+  `console_scripts memd-wiki = compiled_wiki.cli:main`), version-
+  aligned with the `memd` workspace. Ships:
+  - **Server-version compat gate** via parsed MAJOR.MINOR
+    (`compiled_wiki.compat`), stderr WARN on patch skew, hard fail
+    `ServerIncompatibleError` on MAJOR.MINOR mismatch. Vendored
+    stdlib semver parser (`_semver.py`).
+  - **Config loader** (`compiled_wiki.config_loader`): nearest-
+    ancestor `.memd/config.json` with `wiki` subsection (`outdir`,
+    `max_tasks`, `library_k`, `memd_url`); CLI > config > built-in
+    defaults precedence; typed `ConfigLoadError` with file path on
+    malformed input; stops at the first scope-file hit even if
+    incomplete.
+  - **Containment guard** (`compiled_wiki.containment`), a verbatim
+    port of `memd export-markdown`'s three refusal rules: reject
+    `outdir` inside `$HOME/.memd/data`, reject `outdir` inside the
+    scope-resolved `data_dir` from the nearest-ancestor
+    `.memd/tenant_scope.json`, and reject any pre-existing symlink
+    component below `outdir`. Uses `os.lstat` + `stat.S_ISLNK` so
+    `ELOOP` / `ENOTDIR` / permission errors surface as refusals.
+  - **Deterministic rebuild contract.** Second run on unchanged
+    memd state yields `written=0` and byte-identical `manifest.json`.
+    Stable secondary sorts (`task_id`, `artifact_id`) on tasks /
+    thread artifacts / library results / log entries so the
+    invariant holds under arbitrary backend reordering of a
+    logically identical payload.
+  - **Manifest v1**: `manifest.json` now embeds `schema_version: 1`
+    and `compiler_owned_prefixes`, scaffolding the v2 LLM-authored /
+    human-edited ownership split without changing the format.
+  - **Force-emit referenced task pages.** Libraries and the project
+    page can link to any task returned by a digest query; the
+    compiler now emits `tasks/<id>.md` for every referenced task
+    (primary window union with `grounding_refs` + library
+    `results.task_id`) so internal links never dangle.
+  - **Lint subcommand** (`memd-wiki lint`): 5 health checks with
+    exit codes `0` / `1` / `2` — library-missing-grounding
+    (ERROR), dead-backlink (ERROR, scoped to compiler-owned
+    prefixes), trust-tier-ungrounded (WARN), manifest-drift (ERROR,
+    force-emit task pages accepted), manifest-missing /
+    -invalid (ERROR).
+  - **MCP tool contract pin** (`compiled_wiki.mcp_contract`): the
+    7 tools memd-wiki depends on (`context.brief_project`,
+    `task.resume`, `artifact.list_thread`, and the 4
+    `artifact.find_*` surfaces) are pinned as typed expectations.
+    Offline test asserts the contract matches compiler.py call
+    sites; live integration test (skippable when no daemon reachable)
+    asserts the running memd honors it.
+  - Full operator README at `tools/wiki/README.md`.
+
 ### Fixed
 
 - **Candle embedder `RelativeUrlWithoutBase` boot failure.** Replaced
