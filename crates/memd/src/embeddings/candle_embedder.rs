@@ -9,11 +9,11 @@ use async_trait::async_trait;
 use candle_core::{Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config, DTYPE};
-use hf_hub::{api::sync::Api, Repo, RepoType};
 use parking_lot::Mutex;
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 use tokio::sync::Semaphore;
 
+use crate::embeddings::download::get_candle_bert_paths;
 use crate::embeddings::traits::{Embedder, EmbeddingConfig, EmbeddingResult, PoolingStrategy};
 use crate::error::{MemdError, Result};
 
@@ -115,24 +115,19 @@ impl CandleEmbedder {
             }
         };
 
-        // Download model files from Hugging Face Hub
-        let api = Api::new().map_err(|e| {
-            MemdError::EmbeddingError(format!("Failed to initialize HF API: {}", e))
-        })?;
-
-        let repo = api.repo(Repo::new(DEFAULT_MODEL.to_string(), RepoType::Model));
-
-        let config_path = repo
-            .get("config.json")
-            .map_err(|e| MemdError::EmbeddingError(format!("Failed to download config: {}", e)))?;
-
-        let tokenizer_path = repo.get("tokenizer.json").map_err(|e| {
-            MemdError::EmbeddingError(format!("Failed to download tokenizer: {}", e))
-        })?;
-
-        let weights_path = repo
-            .get("model.safetensors")
-            .map_err(|e| MemdError::EmbeddingError(format!("Failed to download weights: {}", e)))?;
+        // Download model files from Hugging Face via the memd download helper.
+        // Historically this used `hf-hub` 0.3.2, which fed huggingface.co's
+        // relative 307 Location URLs verbatim to `ureq::get` and bubbled up
+        // `Bad URL: RelativeUrlWithoutBase`. Plain `ureq::get` (inside
+        // `download_file`) resolves relative redirects against the request
+        // URL, so the Candle embedder now boots in environments where hf-hub
+        // used to crash the harness.
+        //
+        // Files land under `~/.cache/memd/models/`, not the hf-hub cache
+        // (`~/.cache/huggingface/hub` or `$HF_HOME/hub`). Hosts with a
+        // populated hf-hub cache but no network will re-download on first
+        // upgrade — see CHANGELOG.
+        let (config_path, tokenizer_path, weights_path) = get_candle_bert_paths()?;
 
         // Load and validate model config
         let config_str = std::fs::read_to_string(&config_path)
