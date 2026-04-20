@@ -83,6 +83,28 @@ Releases of `memd-wiki` and `memd` are tagged in lockstep. To override
 the gate (not recommended), construct `McpHttpClient(..., check_compat=False)`
 from Python — the CLI keeps the gate on.
 
+## Containment guard
+
+`memd-wiki` refuses to write under the memd data directory. The
+guard matches the Rust `memd export-markdown` containment rules
+verbatim:
+
+- Refuses when `--output-dir` resolves inside `$HOME/.memd/data/`
+  (the default data dir).
+- Refuses when `--output-dir` resolves inside a `data_dir` declared
+  in the nearest-ancestor `.memd/tenant_scope.json`. Discovery stops
+  at the first scope file found even if malformed or missing
+  `data_dir` — an outer project's config cannot silently take over.
+- Refuses when any pre-existing symlink sits BELOW the outdir root.
+  The outdir itself may be a symlink (operators may point the CLI at
+  symlinked directories they own); only intermediate and leaf
+  components inside outdir are inspected. Non-existing components
+  are fine (they will be created on write).
+
+`--data-dir PATH` overrides the default+discovery composition and
+makes the guard check only that path (matches Rust's explicit-
+override semantics).
+
 ## Configuration
 
 `memd-wiki` reads the nearest-ancestor `.memd/config.json`, using the

@@ -35,6 +35,7 @@ def _args(**overrides: object) -> argparse.Namespace:
         library_k=None,
         timeout=DEFAULT_TIMEOUT,
         config_start=None,
+        data_dir=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
