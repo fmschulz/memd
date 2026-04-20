@@ -552,6 +552,11 @@ async fn preview_omf_returns_counts_without_writing() {
         .len();
     assert_eq!(pre_rows, 1);
 
+    let version_before = ps
+        .hybrid()
+        .and_then(|h| h.tenant_memory_version(&tenant("t")))
+        .unwrap_or(0);
+
     let preview = preview_omf_import(ps, &tenant("t"), &doc, ImportOptions::default())
         .await
         .unwrap();
@@ -564,6 +569,7 @@ async fn preview_omf_returns_counts_without_writing() {
             to_import: 1,
             duplicates: 1,
             filtered: 0,
+            unscoped: 0,
             by_project: expected_by_project,
         }
     );
@@ -575,6 +581,48 @@ async fn preview_omf_returns_counts_without_writing() {
         .unwrap()
         .len();
     assert_eq!(post_rows, pre_rows);
+
+    // And: tenant memory version must not have advanced. When hybrid is
+    // disabled (test_server harness), both sides resolve via the
+    // `unwrap_or(0)` fallback and this still signals that preview didn't
+    // reach a bump site; when hybrid is enabled the equality is strict.
+    let version_after = ps
+        .hybrid()
+        .and_then(|h| h.tenant_memory_version(&tenant("t")))
+        .unwrap_or(0);
+    assert_eq!(
+        version_before, version_after,
+        "preview must not bump tenant_memory_version"
+    );
+}
+
+#[tokio::test]
+async fn preview_reports_unscoped_separately_from_real_project_underscore() {
+    // Regression for the "_" sentinel collision flagged in F4 review:
+    // a user project literally named "_" must be counted under
+    // by_project["_"], not under the `unscoped` bucket used for
+    // project_id=None items. Mixing them was the LOW finding.
+    let (server, _tmp) = test_server().await;
+
+    let items = vec![
+        make_item("in real underscore", Some("_")),
+        make_item("no project at all", None),
+        make_item("also unscoped", None),
+    ];
+    let doc = make_doc("nanomem", items);
+    let ps = server.store().as_persistent().unwrap();
+    let preview = preview_omf_import(ps, &tenant("t"), &doc, ImportOptions::default())
+        .await
+        .unwrap();
+
+    assert_eq!(preview.total, 3);
+    assert_eq!(preview.to_import, 3);
+    assert_eq!(preview.unscoped, 2, "None-project items go to unscoped");
+    assert_eq!(
+        preview.by_project.get("_").copied(),
+        Some(1),
+        "real project named '_' is not collapsed into unscoped"
+    );
 }
 
 #[tokio::test]
