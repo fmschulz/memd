@@ -26,6 +26,7 @@ use std::str::FromStr;
 use serde_json::Value;
 
 use crate::error::{MemdError, Result};
+use crate::mcp::dedup::FUZZY_RECENT_POOL_SIZE;
 use crate::store::metadata::MetadataStore;
 use crate::store::persistent::PersistentStore;
 use crate::store::supersession::{canonicalize_for_type, is_near_duplicate};
@@ -71,11 +72,6 @@ pub struct ImportResult {
     pub duplicates: usize,
     pub skipped: usize,
 }
-
-/// Recent-chunk pool size for fuzzy dedup. Matches the write-path
-/// constant used by `memory.add` so import and add agree on which
-/// candidate set a fuzzy match is taken against.
-const FUZZY_RECENT_POOL_SIZE: usize = 128;
 
 /// Import an OMF 1.0 document into a tenant.
 ///
@@ -165,10 +161,20 @@ fn is_exact_duplicate(
     project_id: Option<&str>,
     canonical: &str,
 ) -> Result<bool> {
-    let existing = store
+    // `list_by_canonical_text` widens to every project when project_id
+    // is None (SQL `:project IS NULL OR project_id = :project`), so an
+    // unscoped OMF item would otherwise be falsely deduped against any
+    // scoped row carrying the same canonical text. D3 hit the same trap
+    // and solved it with a NULL-only helper — for exact dedup we just
+    // post-filter to rows whose metadata.project_id is also None.
+    let matches = store
         .metadata()
         .list_by_canonical_text(tenant_id, project_id, canonical)?;
-    Ok(!existing.is_empty())
+    let hit = match project_id {
+        Some(_) => !matches.is_empty(),
+        None => matches.iter().any(|m| m.project_id.is_none()),
+    };
+    Ok(hit)
 }
 
 fn is_fuzzy_duplicate(
@@ -182,11 +188,22 @@ fn is_fuzzy_duplicate(
     // populated at INSERT time (Track D2), and `canonical` above is
     // canonicalized for the probe item. Comparing the raw `text` column
     // would re-introduce the case/whitespace sensitivity D1 fixed.
-    let recent = store.metadata().list_recent_for_project(
-        tenant_id,
-        project_id,
-        FUZZY_RECENT_POOL_SIZE,
-    )?;
+    //
+    // NULL-project scope: `list_recent_for_project(tenant, None, limit)`
+    // widens to "any project, then LIMIT" which can evict valid older
+    // NULL-project candidates under recent scoped traffic. For
+    // project_id=None we use `list_recent_with_null_project` which
+    // filters BEFORE LIMIT — same reasoning as D3/D4.
+    let recent = match project_id {
+        Some(p) => store.metadata().list_recent_for_project(
+            tenant_id,
+            Some(p),
+            FUZZY_RECENT_POOL_SIZE,
+        )?,
+        None => store
+            .metadata()
+            .list_recent_with_null_project(tenant_id, FUZZY_RECENT_POOL_SIZE)?,
+    };
     Ok(recent.iter().any(|m| {
         m.canonical_text
             .as_deref()
