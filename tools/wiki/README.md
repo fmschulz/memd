@@ -183,16 +183,21 @@ ancestor walk.
 
 ## Usage
 
+`memd-wiki` ships two subcommands: `build` (the default when no
+subcommand is given) and `lint`.
+
+### Build
+
 After install, with a `.memd/config.json` in the project:
 
 ```bash
-memd-wiki
+memd-wiki build
 ```
 
 Or override individual fields from the CLI:
 
 ```bash
-memd-wiki \
+memd-wiki build \
   --tenant-id memd \
   --project-id memd \
   --memd-url http://127.0.0.1:8787/mcp
@@ -201,13 +206,39 @@ memd-wiki \
 From a source checkout without install:
 
 ```bash
-python -m compiled_wiki.cli \
+python -m compiled_wiki.cli build \
   --tenant-id memd \
   --project-id memd
 ```
 
 Generated wiki is written to the resolved output directory (CLI flag,
 config, or `./compiled_wiki/` under CWD).
+
+### Lint
+
+```bash
+memd-wiki lint
+```
+
+Runs 5 health checks over the compiled tree. Exit codes:
+
+- `0` — clean
+- `1` — warnings only
+- `2` — errors
+
+Checks (plan §5):
+
+| Check | Severity | What it flags |
+|---|---|---|
+| `library-missing-grounding` | ERROR | digest-backed library page has no grounded_by refs |
+| `dead-backlink` | ERROR | a library / project / index / log page links to a `tasks/<id>.md` that was not emitted |
+| `trust-tier-ungrounded` | WARN | task page renders from `compiled_digest_hint` with `requires_verification=True` and no grounded sibling |
+| `manifest-drift` | ERROR | extra file under compiler-owned prefixes, or a manifest-implied page missing from disk (scoped to `manifest.compiler_owned_prefixes`; force-emit task pages are accepted) |
+| `manifest-missing` / `manifest-invalid` | ERROR | `manifest.json` missing, non-JSON, or shape-wrong |
+
+`task-snapshot-stale` is reserved for a future memd-backed lookup; the
+v1 offline lint leaves that slot as a skippable callback rather than
+ship a wrong heuristic.
 
 ## Tests
 
