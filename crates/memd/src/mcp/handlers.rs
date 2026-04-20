@@ -58,6 +58,13 @@ pub(crate) fn resolved_agent_id(explicit: Option<&str>) -> Option<String> {
 }
 
 use super::error::McpError;
+// `pub use` (not plain `use`) so the legacy public path
+// `memd::mcp::handlers::PostWriteEvent` keeps resolving for downstream
+// code that named it directly before the Item 6 relocation. The
+// canonical home is now `memd::mcp::post_write_hooks::PostWriteEvent`
+// (re-exported at `memd::mcp::PostWriteEvent`), but dropping the
+// nested path would be a silent semver shrink.
+pub use super::post_write_hooks::PostWriteEvent;
 use crate::metrics::{IndexStats, MetricsCollector};
 use crate::store::metadata::MetadataStore;
 use crate::store::{FeedbackEntry, RelevanceLabel, Store, StoreStats, TenantManager};
@@ -4323,25 +4330,6 @@ pub async fn handle_memory_add<S: Store>(
     })
 }
 
-/// Per-write event emitted by any handler that creates or updates a chunk
-/// payload. The server dispatch arm consumes these to run structural
-/// indexing and any other server-owned side effects that must happen
-/// after a store write succeeds.
-///
-/// Defined inline in handlers.rs for now; once a second consumer lands
-/// (e.g. memory.add migrating off its ad-hoc `(tenant_id, project_id,
-/// chunk_type, source_path, text)` tuple), this type can move into a
-/// dedicated `mcp::post_write_hooks` module without touching call sites.
-#[derive(Debug, Clone)]
-pub struct PostWriteEvent {
-    pub tenant_id: String,
-    pub chunk_id: ChunkId,
-    pub chunk_type: String,
-    pub project_id: Option<String>,
-    pub source_path: Option<String>,
-    pub text: String,
-}
-
 /// Parameters for memory.supersede
 #[derive(Debug, Deserialize)]
 pub struct SupersedeParams {
@@ -5097,18 +5085,7 @@ pub async fn handle_memory_import_omf<S: Store>(
     let tenant_id_str = tenant_id.to_string();
     let events: Vec<PostWriteEvent> = imported
         .into_iter()
-        .map(|ic| PostWriteEvent {
-            tenant_id: tenant_id_str.clone(),
-            chunk_id: ic.chunk_id,
-            chunk_type: ic.chunk_type.to_string(),
-            project_id: ic.project_id,
-            // OMF imports carry no filesystem source path; nanomem has
-            // no concept of one, and memd's own export doesn't emit one
-            // either. The structural indexer short-circuits on
-            // source_path=None, so this is the correct signal.
-            source_path: None,
-            text: ic.text,
-        })
+        .map(|ic| PostWriteEvent::from_imported_chunk(ic, &tenant_id_str))
         .collect();
 
     let response = format_mcp_response(&json!({
