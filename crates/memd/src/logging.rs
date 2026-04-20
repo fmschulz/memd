@@ -18,7 +18,7 @@ pub fn init_logging(format: &str, level: &str) {
         // Keep memd logs at requested level while suppressing noisy third-party info logs
         // that significantly slow benchmark runs.
         EnvFilter::new(format!(
-            "{level},tantivy=warn,hnsw_rs=warn,hf_hub=warn,tokenizers=warn"
+            "{level},tantivy=warn,hnsw_rs=warn,tokenizers=warn"
         ))
     });
 

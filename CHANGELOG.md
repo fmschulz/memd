@@ -6,6 +6,44 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Fixed
+
+- **Candle embedder `RelativeUrlWithoutBase` boot failure.** Replaced
+  `hf-hub` 0.3.2 in `CandleEmbedder::with_config` with a direct `ureq`
+  download helper (`embeddings::download::get_candle_bert_paths`). The
+  old path passed huggingface.co's relative 307 Location headers verbatim
+  to `ureq::get`, which failed URL parse with `Bad URL: failed to parse
+  URL: RelativeUrlWithoutBase`. Plain `ureq::get` follows the relative
+  redirect correctly against the request base. Fixes the pre-existing
+  env-block that forced the v0.8.0 Item 1 retrieval gate to close by
+  constructive argument instead of Recall@10 / MRR / Precision@10
+  metrics.
+
+### Changed
+
+- **Dropped `hf-hub` workspace dependency.** Only consumer was the
+  Candle embedder; replaced with the existing `download.rs` ureq
+  plumbing.
+- **Candle model cache moved to `~/.cache/memd/models/`.** Previously
+  the Candle embedder used `hf-hub`'s cache at `~/.cache/huggingface/hub`
+  (or `$HF_HOME/hub`). A host upgrading from v0.8.0 with a warm hf-hub
+  cache but no network access will re-download `config.json`,
+  `tokenizer.json`, and `model.safetensors` (~91MB) on first use. Once
+  downloaded, the memd cache is stable across versions.
+- **`download_file` writes atomically with first-writer-wins publish.**
+  Downloads now stream into `<target>.partial.<pid>.<thread>.<counter>`,
+  call `sync_all()`, then publish via `hard_link` — which fails
+  atomically with `AlreadyExists` when a racing caller has already
+  published the same target. The loser cleans up its tmp and keeps the
+  winner's bytes; `rename` is deliberately avoided because it would
+  silently clobber a concurrent publisher on Unix. An interrupted
+  download, a crash mid-stream, or two racing processes/threads can
+  now never leave a half-written `config.json` / safetensors blob at
+  the canonical cache path where `verify_file_size` would either wedge
+  boot or (worse) let a truncated model through. Applies to both the
+  new Candle path and the existing ONNX `get_model_path_for` /
+  `get_tokenizer_path_for` callers (Codex LOW round-1 + MEDIUM round-2).
+
 ## [0.8.0] - 2026-04-20
 
 Post-nanomem cleanup release. Closes the remaining items from the
