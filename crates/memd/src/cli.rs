@@ -510,13 +510,11 @@ pub async fn run_cli<S: Store>(
         } => {
             let tenant = TenantId::new(&tenant_id)?;
 
-            // Ensure tenant directory exists for real imports. Preview-only
-            // calls don't touch storage but materialising the dir costs
-            // nothing and keeps CLI ordering consistent.
-            if let Some(tm) = tenant_manager {
-                tm.ensure_tenant_dir(&tenant)?;
-            }
-
+            // Read + parse BEFORE any side effect so a malformed input
+            // or a missing file errors out without touching disk. Only
+            // the non-dry-run branch calls `ensure_tenant_dir` — dry-run
+            // stays fully read-only, matching preview_omf_import's MCP
+            // semantics (Codex F6 review MEDIUM).
             let raw = read_omf_input(input.as_deref())?;
             let doc: crate::omf::OmfDocument = serde_json::from_str(&raw).map_err(|e| {
                 crate::error::MemdError::ValidationError(format!(
@@ -549,6 +547,12 @@ pub async fn run_cli<S: Store>(
                 });
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
+                // Real import: now we can materialise the tenant dir.
+                // Done AFTER parse so bad input doesn't create artefacts
+                // on disk.
+                if let Some(tm) = tenant_manager {
+                    tm.ensure_tenant_dir(&tenant)?;
+                }
                 let result = crate::omf::import::import_omf(ps, &tenant, &doc, opts).await?;
                 let output = json!({
                     "tenant_id": tenant.to_string(),

@@ -826,6 +826,84 @@ async fn cli_import_omf_dry_run_does_not_write() {
 }
 
 #[tokio::test]
+async fn cli_import_omf_dry_run_does_not_create_tenant_dir() {
+    // Codex F6 round-1 MEDIUM regression: `ensure_tenant_dir` used to
+    // run before the dry-run branch, materialising `tenants/<id>/...`
+    // even when the caller asked for a read-only preview. Now the dir
+    // only appears on the real-write path. This test pins that
+    // contract by passing a real `TenantManager` and asserting no
+    // tenant directory exists after a successful dry-run.
+    let tmp = tempfile::tempdir().unwrap();
+    let store = persistent_store(tmp.path()).await;
+    let tenant_manager = memd::store::TenantManager::new(tmp.path().to_path_buf());
+
+    let doc = memd::omf::OmfDocument {
+        omf: OMF_VERSION.into(),
+        exported_at: "2026-04-18T00:00:00Z".into(),
+        source: Some(memd::omf::OmfSource {
+            app: "nanomem".into(),
+        }),
+        memories: vec![memd::omf::OmfItem {
+            content: "preview".into(),
+            ..Default::default()
+        }],
+    };
+    let input_path = tmp.path().join("preview.omf.json");
+    std::fs::write(&input_path, serde_json::to_string(&doc).unwrap()).unwrap();
+
+    let tenant_dir = tmp.path().join("tenants").join("preview_tenant");
+    assert!(!tenant_dir.exists(), "precondition: tenant dir absent");
+
+    memd::cli::run_cli(
+        store.as_ref(),
+        Some(&tenant_manager),
+        memd::cli::CliCommand::ImportOmf {
+            tenant_id: "preview_tenant".to_string(),
+            input: Some(input_path),
+            include_archived: true,
+            fuzzy_threshold: None,
+            dry_run: true,
+        },
+    )
+    .await
+    .expect("dry-run succeeds");
+
+    assert!(
+        !tenant_dir.exists(),
+        "dry-run must not create the tenant directory at {}",
+        tenant_dir.display()
+    );
+}
+
+#[tokio::test]
+async fn cli_import_omf_rejects_malformed_json() {
+    // Codex F6 round-1 LOW (neg-test coverage): a malformed input file
+    // must surface as ValidationError, not a panic or silent success.
+    let tmp = tempfile::tempdir().unwrap();
+    let store = persistent_store(tmp.path()).await;
+    let bad = tmp.path().join("bad.omf.json");
+    std::fs::write(&bad, "{not json").unwrap();
+
+    let err = memd::cli::run_cli(
+        store.as_ref(),
+        None,
+        memd::cli::CliCommand::ImportOmf {
+            tenant_id: "t".to_string(),
+            input: Some(bad),
+            include_archived: true,
+            fuzzy_threshold: None,
+            dry_run: true,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(err, memd::error::MemdError::ValidationError(_)),
+        "expected ValidationError for malformed JSON, got: {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn cli_export_omf_no_output_prints_to_stdout_roundtripable() {
     // This test is a belt-and-braces check that the stdout path compiles
     // and runs without a file argument. We don't capture stdout here —
