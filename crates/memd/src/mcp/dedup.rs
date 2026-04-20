@@ -7,10 +7,10 @@
 use crate::error::{MemdError, Result};
 use crate::mcp::error::McpError;
 use crate::mcp::handlers::{DedupConfig, DedupSpec};
-use crate::store::metadata::MetadataStore;
+use crate::store::metadata::{ChunkMetadata, MetadataStore};
 use crate::store::persistent::PersistentStore;
 use crate::store::supersession::{canonicalize_for_type, is_near_duplicate};
-use crate::types::{ChunkId, ChunkType, TenantId};
+use crate::types::{ChunkId, ChunkStatus, ChunkType, TenantId};
 
 /// Default fuzzy threshold: tuned for the padded-char-trigram Jaccard
 /// implementation. ~0.92 is a strict paraphrase tier where the
@@ -81,6 +81,19 @@ fn resolve_config(cfg: &DedupConfig) -> Result<ResolvedDedup> {
 /// Compute the chunk_ids the incoming `(text, chunk_type, project_id)`
 /// should atomically supersede on its way in, given a resolved dedup
 /// config. Read-only on the store.
+///
+/// Two safety filters apply on top of the canonical / fuzzy match:
+/// * `scope: "project"` and the incoming chunk has `project_id = None`
+///   matches only rows whose `project_id` is also NULL — without this
+///   post-filter the SQL helpers treat a `None` project as "any
+///   project", which would silently widen "scope: project" to the
+///   whole tenant for unscoped writes (Codex round-1 D3 MEDIUM).
+/// * Only "live head" rows (status == Final, superseded_by IS NONE)
+///   are returned. Without this filter a historical chain (A → B → C)
+///   would surface A and B as candidates, which then fail
+///   `supersede_chunk`'s head-only guard or — worse — get rewritten by
+///   blind `update_lifecycle` calls that overwrite an existing
+///   `superseded_by` edge (Codex round-1 D3 HIGH-2).
 pub fn compute_dedup_candidates(
     ps: &PersistentStore,
     tenant_id: &TenantId,
@@ -90,32 +103,60 @@ pub fn compute_dedup_candidates(
     cfg: &ResolvedDedup,
 ) -> std::result::Result<Vec<ChunkId>, McpError> {
     let canonical = canonicalize_for_type(text, chunk_type);
-    let scope = if cfg.scope_project { project_id } else { None };
 
-    match cfg.mode {
-        DedupMode::Exact => {
-            let metas = ps
-                .metadata()
-                .list_by_canonical_text(tenant_id, scope, &canonical)
-                .map_err(|e| McpError::ToolError(e.to_string()))?;
-            Ok(metas.into_iter().map(|m| m.chunk_id).collect())
-        }
-        DedupMode::Fuzzy => {
-            let metas = ps
-                .metadata()
-                .list_recent_for_project(tenant_id, scope, FUZZY_RECENT_POOL_SIZE)
-                .map_err(|e| McpError::ToolError(e.to_string()))?;
-            Ok(metas
-                .into_iter()
-                .filter(|m| {
-                    is_near_duplicate(
-                        &canonical,
-                        m.canonical_text.as_deref().unwrap_or(""),
-                        cfg.threshold,
-                    )
-                })
-                .map(|m| m.chunk_id)
-                .collect())
-        }
+    // SQL pre-filter: tenant scope means "no project filter"; project
+    // scope means "filter to this project_id" — but the SQL helpers
+    // can only filter when project_id is Some. The Rust scope filter
+    // below covers the project_id-is-None case.
+    let sql_project = if cfg.scope_project {
+        project_id
+    } else {
+        None
+    };
+
+    let candidates = match cfg.mode {
+        DedupMode::Exact => ps
+            .metadata()
+            .list_by_canonical_text(tenant_id, sql_project, &canonical)
+            .map_err(|e| McpError::ToolError(e.to_string()))?,
+        DedupMode::Fuzzy => ps
+            .metadata()
+            .list_recent_for_project(tenant_id, sql_project, FUZZY_RECENT_POOL_SIZE)
+            .map_err(|e| McpError::ToolError(e.to_string()))?
+            .into_iter()
+            .filter(|m| {
+                is_near_duplicate(
+                    &canonical,
+                    m.canonical_text.as_deref().unwrap_or(""),
+                    cfg.threshold,
+                )
+            })
+            .collect::<Vec<_>>(),
+    };
+
+    Ok(candidates
+        .into_iter()
+        .filter(|m| project_scope_matches(m, cfg.scope_project, project_id))
+        .filter(|m| is_live_head_row(m))
+        .map(|m| m.chunk_id)
+        .collect())
+}
+
+fn project_scope_matches(
+    m: &ChunkMetadata,
+    scope_project: bool,
+    requested_project: Option<&str>,
+) -> bool {
+    if !scope_project {
+        return true;
     }
+    m.project_id.as_deref() == requested_project
+}
+
+/// A row is a valid supersession target only when it is the live head
+/// of its chain: status == Final AND superseded_by IS NULL. Anything
+/// else (Superseded, Expired, Deleted, or already-superseded Final) is
+/// either non-mutable or owned by another writer's edge.
+fn is_live_head_row(m: &ChunkMetadata) -> bool {
+    m.status == ChunkStatus::Final && m.lifecycle.superseded_by.is_none()
 }

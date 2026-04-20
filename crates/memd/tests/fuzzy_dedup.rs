@@ -475,6 +475,252 @@ async fn add_without_dedup_flag_does_not_supersede_anything() {
 }
 
 #[tokio::test]
+async fn add_with_dedup_preserves_lifecycle_overlay_on_match() {
+    // Codex round-1 D3 HIGH-1 regression: when a dedup match is found,
+    // the requested expires_at_ms / review_after_ms must still apply
+    // to the new chunk. Previously supersede_chunk was called with the
+    // raw chunk and no delta, dropping the overlay.
+    use memd::types::ChunkId;
+    let (server, _tmp) = test_server().await;
+
+    call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "p1",
+            "text": "Release freeze begins Thursday.",
+            "type": "doc",
+        }),
+    )
+    .await;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let want_expires = now_ms + 60_000;
+    let r = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "p1",
+            "text": "release freeze begins thursday.",
+            "type": "doc",
+            "expires_at_ms": want_expires,
+            "supersede_near_duplicates": { "mode": "exact" },
+        }),
+    )
+    .await;
+    let body = parse_result_text(&r);
+    let new_id =
+        ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id")).expect("valid id");
+
+    let ps = server.store().as_persistent().expect("persistent");
+    let resolved = ps
+        .get_with_lifecycle(&tenant("t"), &new_id)
+        .await
+        .expect("get_with_lifecycle")
+        .expect("new chunk");
+    assert_eq!(
+        resolved.lifecycle.expires_at_ms,
+        Some(want_expires),
+        "expires_at_ms must be preserved on the matched-dedup path"
+    );
+}
+
+#[tokio::test]
+async fn add_with_exact_dedup_skips_already_superseded_candidate() {
+    // Codex round-1 D3 HIGH-2 regression: compute_dedup_candidates must
+    // filter out non-head rows. Build a chain (A → B head), then run a
+    // dedup add that should find ONLY B, not A. Without the head-only
+    // filter, supersede_chunk on A would fail-closed (A is not head)
+    // or update_lifecycle would overwrite A's existing back-edge.
+    use memd::types::{ChunkId, ChunkStatus};
+    let (server, _tmp) = test_server().await;
+
+    let r1 = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "p1",
+            "text": "Release freeze begins Thursday.",
+            "type": "doc",
+        }),
+    )
+    .await;
+    let id_a =
+        ChunkId::parse(parse_result_text(&r1)["chunk_id"].as_str().expect("a"))
+            .expect("valid");
+
+    // Build a 2-deep chain: B supersedes A.
+    let r2 = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "p1",
+            "text": "release freeze begins thursday.",
+            "type": "doc",
+            "supersede_near_duplicates": { "mode": "exact" },
+        }),
+    )
+    .await;
+    let body2 = parse_result_text(&r2);
+    let id_b = ChunkId::parse(body2["chunk_id"].as_str().expect("b"))
+        .expect("valid");
+
+    // Third dedup add — must find ONLY B (head), not A (already
+    // superseded). New chunk C supersedes B. A's superseded_by edge
+    // (still pointing at B) must be preserved.
+    let r3 = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "p1",
+            "text": "RELEASE FREEZE BEGINS Thursday.",
+            "type": "doc",
+            "supersede_near_duplicates": { "mode": "exact" },
+        }),
+    )
+    .await;
+    let body3 = parse_result_text(&r3);
+    let id_c = ChunkId::parse(body3["chunk_id"].as_str().expect("c"))
+        .expect("valid");
+    let supersedes: Vec<String> = body3["superseded_ids"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+
+    assert_eq!(
+        supersedes,
+        vec![id_b.to_string()],
+        "third dedup add must supersede only the live head (B), not the historical A"
+    );
+
+    // A still points at B (preserved from r2).
+    let ps = server.store().as_persistent().expect("persistent");
+    let resolved_a = ps
+        .get_with_lifecycle(&tenant("t"), &id_a)
+        .await
+        .expect("get_with_lifecycle")
+        .expect("a");
+    assert_eq!(resolved_a.status, ChunkStatus::Superseded);
+    assert_eq!(
+        resolved_a.lifecycle.superseded_by.as_ref().map(|c| c.to_string()),
+        Some(id_b.to_string()),
+        "A's edge to B must be preserved — not overwritten by the C dedup"
+    );
+
+    // B now points at C.
+    let resolved_b = ps
+        .get_with_lifecycle(&tenant("t"), &id_b)
+        .await
+        .expect("get_with_lifecycle")
+        .expect("b");
+    assert_eq!(resolved_b.status, ChunkStatus::Superseded);
+    assert_eq!(
+        resolved_b.lifecycle.superseded_by.as_ref().map(|c| c.to_string()),
+        Some(id_c.to_string())
+    );
+}
+
+#[tokio::test]
+async fn add_with_dedup_scope_project_does_not_match_other_project() {
+    // Codex round-1 D3 MEDIUM regression: scope=project must filter to
+    // the SAME project_id even when the incoming chunk has no
+    // project_id (project_id IS NULL bucket). Without the post-filter,
+    // a `None` project_id wildcards the SQL filter and matches across
+    // the whole tenant.
+    let (server, _tmp) = test_server().await;
+    // Prior chunk in project_a.
+    call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "project_a",
+            "text": "shared canonical text",
+            "type": "doc",
+        }),
+    )
+    .await;
+
+    // Dedup add to project_b — exact canonical matches project_a's
+    // chunk, but scope=project should reject the cross-project hit.
+    let r = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "project_b",
+            "text": "shared canonical text",
+            "type": "doc",
+            "supersede_near_duplicates": { "mode": "exact" },
+        }),
+    )
+    .await;
+    let body = parse_result_text(&r);
+    let supersedes = body["superseded_ids"].as_array().expect("array");
+    assert!(
+        supersedes.is_empty(),
+        "scope=project must not cross project boundaries (got {supersedes:?})"
+    );
+}
+
+#[tokio::test]
+async fn add_with_dedup_scope_tenant_crosses_project_boundary() {
+    // Symmetric to the previous test: scope=tenant should bridge
+    // projects within the same tenant.
+    let (server, _tmp) = test_server().await;
+    let r1 = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "project_a",
+            "text": "shared canonical text",
+            "type": "doc",
+        }),
+    )
+    .await;
+    let id_a = parse_result_text(&r1)["chunk_id"]
+        .as_str()
+        .expect("chunk_id")
+        .to_string();
+
+    let r = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "project_b",
+            "text": "shared canonical text",
+            "type": "doc",
+            "supersede_near_duplicates": { "mode": "exact", "scope": "tenant" },
+        }),
+    )
+    .await;
+    let body = parse_result_text(&r);
+    let supersedes: Vec<String> = body["superseded_ids"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        supersedes,
+        vec![id_a],
+        "scope=tenant must bridge project boundaries"
+    );
+}
+
+#[tokio::test]
 async fn add_with_dedup_bool_true_uses_exact_mode_default() {
     use memd::types::ChunkId;
     let (server, _tmp) = test_server().await;
