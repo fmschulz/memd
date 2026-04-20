@@ -1650,6 +1650,32 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                 "required": ["chunk_id"]
             }),
         ),
+        // EXPORT-01: memory.export_markdown (Track G2)
+        ToolDefinition::new(
+            "memory.export_markdown",
+            "Render the tenant's chunks as a tree of markdown files. Returns `{files: [{path, content}]}` — \
+             never writes to disk; the CLI consumes the payload and writes locally. Files are grouped \
+             one-per-(project, chunk_type) bucket with stable sort order. Requires a persistent store.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier"
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional project filter — only chunks under this project are exported"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 10000,
+                        "description": "Max chunks to read from metadata before grouping"
+                    }
+                }
+            }),
+        ),
         // LIFECYCLE-03: memory.find_near_duplicates (Track D5)
         ToolDefinition::new(
             "memory.find_near_duplicates",
@@ -1958,6 +1984,7 @@ pub fn tool_names() -> Vec<&'static str> {
         "memory.supersede",
         "memory.set_expiry",
         "memory.find_near_duplicates",
+        "memory.export_markdown",
         "memory.consolidate_episode",
         "context.list_subsystems",
         "context.get_files_for_subsystem",
@@ -1987,7 +2014,8 @@ mod tests {
         // Track A (A7): + memory.supersede.
         // Track C (C6): + memory.set_expiry.
         // Track D (D5): + memory.find_near_duplicates.
-        assert_eq!(tools.len(), 49);
+        // Track G (G2): + memory.export_markdown.
+        assert_eq!(tools.len(), 50);
     }
 
     #[test]
@@ -2309,10 +2337,12 @@ mod tests {
         // Track A (A7): + memory.supersede.
         // Track C (C6): + memory.set_expiry.
         // Track D (D5): + memory.find_near_duplicates.
-        assert_eq!(names.len(), 49);
+        // Track G (G2): + memory.export_markdown.
+        assert_eq!(names.len(), 50);
         assert!(names.contains(&"memory.supersede"));
         assert!(names.contains(&"memory.set_expiry"));
         assert!(names.contains(&"memory.find_near_duplicates"));
+        assert!(names.contains(&"memory.export_markdown"));
         assert!(names.contains(&"artifact.find_related"));
         assert!(names.contains(&"artifact.review"));
         assert!(names.contains(&"artifact.revision"));

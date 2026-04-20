@@ -4755,6 +4755,76 @@ pub async fn handle_memory_add_batch<S: Store>(
     })
 }
 
+/// Parameters for memory.export_markdown (Track G2).
+#[derive(Debug, Deserialize)]
+pub struct ExportMarkdownParams {
+    #[serde(default)]
+    pub tenant_id: String,
+    /// Optional project filter — when set, only chunks under this
+    /// project are exported.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// Maximum chunks to read from metadata. Defaults to 10_000;
+    /// callers can raise it for whole-tenant exports.
+    #[serde(default = "default_export_limit")]
+    pub limit: usize,
+}
+
+fn default_export_limit() -> usize {
+    10_000
+}
+
+/// Handle memory.export_markdown (Track G2). Read-only — never writes
+/// to disk; the CLI (G3) consumes the returned `{path, content}`
+/// tuples and writes them on the user's machine.
+pub async fn handle_memory_export_markdown<S: Store>(
+    store: &S,
+    params: ExportMarkdownParams,
+) -> Result<Value, McpError> {
+    let ps = store.as_persistent().ok_or_else(|| {
+        McpError::ToolError("memory.export_markdown requires a persistent store".into())
+    })?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
+
+    // Snapshot all live metadata rows for the tenant in one shot, then
+    // optionally filter by project_id. Hydrating chunks one-at-a-time
+    // via store.get keeps memory usage bounded — we don't slurp every
+    // segment payload into a single Vec.
+    let metas = ps
+        .metadata()
+        .list(&tenant_id, params.limit, 0)
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    let project_filter = params.project_id.as_deref();
+    let mut chunks: Vec<MemoryChunk> = Vec::with_capacity(metas.len());
+    for meta in metas {
+        if meta.status != ChunkStatus::Final || meta.lifecycle.superseded_by.is_some() {
+            continue;
+        }
+        if let Some(pid) = project_filter {
+            if meta.project_id.as_deref() != Some(pid) {
+                continue;
+            }
+        }
+        match store
+            .get(&tenant_id, &meta.chunk_id)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?
+        {
+            Some(chunk) => chunks.push(chunk),
+            None => continue,
+        }
+    }
+
+    let files = crate::mcp::markdown_export::render_markdown_tree(&chunks);
+    let payload: Vec<serde_json::Value> = files
+        .into_iter()
+        .map(|f| serde_json::json!({ "path": f.path, "content": f.content }))
+        .collect();
+
+    format_mcp_response(&serde_json::json!({ "files": payload }))
+}
+
 /// Parameters for memory.find_near_duplicates (Track D5).
 ///
 /// Read-only preview that surfaces the same candidates the
