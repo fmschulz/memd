@@ -28,11 +28,28 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
 _TASK_LINK_RE = re.compile(r"\(\.\./tasks/(?P<task_id>[^)\s]+)\.md\)")
 _TOP_LEVEL_TASK_LINK_RE = re.compile(r"\(tasks/(?P<task_id>[^)\s]+)\.md\)")
+_ISO_FMT = "%Y-%m-%d %H:%M:%SZ"
+
+
+def _parse_iso_to_ms(iso: str) -> int | None:
+    """Parse the compiler's iso_timestamp() output back to ms since epoch.
+
+    Returns None on anything non-conforming (including the literal
+    "unknown" sentinel the compiler emits for a zero/missing timestamp).
+    Keep this tolerant: a failed parse must not turn into a false
+    "stale" finding.
+    """
+    try:
+        dt = datetime.strptime(iso, _ISO_FMT).replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+    return int(dt.timestamp() * 1000)
 
 
 @dataclass(frozen=True)
@@ -69,15 +86,26 @@ class LintReport:
         return 0
 
 
-def lint_output_dir(outdir: Path) -> LintReport:
+def lint_output_dir(
+    outdir: Path,
+    *,
+    lookup_latest_ms: Callable[[str], int | None] | None = None,
+) -> LintReport:
     """Run the full 5-check lint over a compiled output tree.
+
+    ``lookup_latest_ms`` is an optional memd-backed oracle: given a
+    task_id, return the latest canonical updated timestamp in ms, or
+    None when the oracle has no opinion. When omitted, the
+    task-snapshot-stale check is skipped entirely (default, offline).
 
     Returns findings in a stable order so CI diffs are meaningful:
     sort key is (check_name, path, message).
     """
     findings: list[LintFinding] = []
     findings.extend(_check_library_grounding_refs(outdir))
-    findings.extend(_check_task_snapshots_stale(outdir))
+    findings.extend(
+        _check_task_snapshots_stale(outdir, lookup_latest_ms=lookup_latest_ms)
+    )
     findings.extend(_check_dead_backlinks(outdir))
     findings.extend(_check_trust_tier_surfacing(outdir))
     findings.extend(_check_manifest_drift(outdir))
@@ -136,26 +164,26 @@ def _check_task_snapshots_stale(
         if updated_match is None or snapshot_match is None:
             continue
         latest = lookup_latest_ms(task_id)
-        if latest is None:
+        # Callback returns None to mean "unknown, skip". <=0 is also
+        # meaningless (no data) and must not flag.
+        if latest is None or latest <= 0:
             continue
-        # The lint is fast-path: only flag if the current memd state
-        # shows newer timestamps than what the page claims. Callback
-        # returns None to mean "unknown, skip".
-        # We compare by ISO ordering after confirming both parse.
-        try:
-            page_updated = updated_match.group("iso")
-            page_snap = snapshot_match.group("iso")
-        except IndexError:
+        page_updated = updated_match.group("iso")
+        page_snap = snapshot_match.group("iso")
+        snap_ms = _parse_iso_to_ms(page_snap)
+        if snap_ms is None:
+            # Unknown / unparseable snapshot → can't tell if stale.
+            # Don't guess. Skip silently (matches file-only default).
             continue
-        if latest > 0:
+        if latest > snap_ms:
             yield LintFinding(
                 severity="warn",
                 check="task-snapshot-stale",
                 path=str(page.relative_to(outdir)),
                 message=(
-                    f"task {task_id}: page snapshot {page_snap} may be "
-                    f"older than latest canonical source (memd: {latest} ms); "
-                    f"page claims updated={page_updated}"
+                    f"task {task_id}: page snapshot {page_snap} is "
+                    f"older than latest canonical source "
+                    f"(memd: {latest} ms); page claims updated={page_updated}"
                 ),
             )
 

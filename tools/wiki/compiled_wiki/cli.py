@@ -141,6 +141,30 @@ def _add_lint_subparser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     _add_shared_config_args(lint)
+    lint.add_argument(
+        "--check-staleness",
+        action="store_true",
+        help=(
+            "Query memd via MCP HTTP and warn when a task page snapshot "
+            "is older than the task's current updated_at_ms. Default is "
+            "offline filesystem-only; this flag adds one `task.resume` "
+            "call per emitted task page."
+        ),
+    )
+    lint.add_argument(
+        "--memd-url",
+        default=None,
+        help=(
+            f"HTTP MCP endpoint (lint --check-staleness only). Default: "
+            f"`wiki.memd_url` from config, else {DEFAULT_MEMD_URL!r}."
+        ),
+    )
+    lint.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT,
+        help=f"HTTP timeout for MCP requests. Default: {DEFAULT_TIMEOUT}s.",
+    )
 
 
 def _normalize(raw: str | None) -> str | None:
@@ -237,7 +261,12 @@ def _run_lint(args: argparse.Namespace, discovered: DiscoveredConfig) -> int:
             file=sys.stderr,
         )
         return 2
-    report: LintReport = lint_output_dir(outdir)
+    lookup_latest_ms = None
+    if args.check_staleness:
+        lookup_latest_ms = _build_staleness_lookup(args, discovered)
+    report: LintReport = lint_output_dir(
+        outdir, lookup_latest_ms=lookup_latest_ms
+    )
     for finding in report.findings:
         print(finding.render())
     summary = (
@@ -245,6 +274,83 @@ def _run_lint(args: argparse.Namespace, discovered: DiscoveredConfig) -> int:
     )
     print(summary, file=sys.stderr)
     return report.exit_code()
+
+
+def _build_staleness_lookup(
+    args: argparse.Namespace,
+    discovered: DiscoveredConfig,
+):
+    """Build a memd-backed `lookup_latest_ms(task_id)` closure.
+
+    One ``task.resume`` call per distinct task_id, memoised across the
+    lint run. Daemon errors degrade gracefully: the first failure logs
+    to stderr and subsequent lookups return None so the lint falls back
+    to file-only behavior for the remaining pages.
+    """
+    from .mcp_client import McpHttpClient
+
+    tenant_id = _normalize(args.tenant_id) or discovered.tenant_id
+    project_id = _normalize(args.project_id) or discovered.project_id
+    if not tenant_id or not project_id:
+        print(
+            "memd-wiki: warning: --check-staleness requires tenant_id and "
+            "project_id; skipping staleness check",
+            file=sys.stderr,
+        )
+        return lambda _task_id: None
+
+    memd_url = args.memd_url or discovered.memd_url or DEFAULT_MEMD_URL
+    client = McpHttpClient(memd_url, timeout=args.timeout)
+    try:
+        client.initialize()
+    except Exception as exc:  # noqa: BLE001 — daemon is an opaque dep here.
+        print(
+            f"memd-wiki: warning: could not initialize memd client at "
+            f"{memd_url}: {exc}; skipping staleness check",
+            file=sys.stderr,
+        )
+        return lambda _task_id: None
+
+    cache: dict[str, int | None] = {}
+    disabled = {"flag": False}
+
+    def _lookup(task_id: str) -> int | None:
+        if disabled["flag"]:
+            return None
+        if task_id in cache:
+            return cache[task_id]
+        try:
+            payload = client.call_tool(
+                "task.resume",
+                {
+                    "tenant_id": tenant_id,
+                    "project_id": project_id,
+                    "task_id": task_id,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"memd-wiki: warning: task.resume failed for {task_id}: "
+                f"{exc}; disabling staleness checks for remainder of run",
+                file=sys.stderr,
+            )
+            disabled["flag"] = True
+            cache[task_id] = None
+            return None
+        task = (payload or {}).get("task", {}) if isinstance(payload, dict) else {}
+        latest = (
+            task.get("updated_at_ms")
+            or task.get("finished_at_ms")
+            or task.get("started_at_ms")
+        )
+        try:
+            latest_ms = int(latest) if latest is not None else None
+        except (TypeError, ValueError):
+            latest_ms = None
+        cache[task_id] = latest_ms
+        return latest_ms
+
+    return _lookup
 
 
 def main(argv: list[str] | None = None) -> int:
