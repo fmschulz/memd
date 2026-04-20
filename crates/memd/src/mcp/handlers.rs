@@ -4959,6 +4959,167 @@ pub async fn handle_memory_find_near_duplicates<S: Store>(
     }))
 }
 
+// ----------------------------------------------------------------
+// Track F5 — OMF MCP handlers.
+// ----------------------------------------------------------------
+
+/// Parameters for memory.export_omf (Track F5).
+#[derive(Debug, Deserialize, Default)]
+pub struct ExportOmfParams {
+    #[serde(default)]
+    pub tenant_id: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// Include history-tier rows in the export (false = live-only).
+    #[serde(default)]
+    pub include_history: bool,
+    /// When absent, defaults to true (matches `ExportOptions`).
+    #[serde(default)]
+    pub include_superseded: Option<bool>,
+    /// When absent, defaults to true (matches `ExportOptions`).
+    #[serde(default)]
+    pub include_expired: Option<bool>,
+}
+
+/// Handle memory.export_omf (Track F5). Read-only.
+pub async fn handle_memory_export_omf<S: Store>(
+    store: &S,
+    params: ExportOmfParams,
+) -> Result<Value, McpError> {
+    let ps = store
+        .as_persistent()
+        .ok_or_else(|| McpError::ToolError("memory.export_omf requires a persistent store".into()))?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
+
+    let opts = crate::omf::export::ExportOptions {
+        project_id: params.project_id,
+        include_history: params.include_history,
+        include_superseded: params.include_superseded.unwrap_or(true),
+        include_expired: params.include_expired.unwrap_or(true),
+    };
+    let doc = crate::omf::export::export_omf(ps, &tenant_id, opts)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    format_mcp_response(&json!({ "document": doc }))
+}
+
+/// Parameters for memory.preview_omf_import (Track F5).
+#[derive(Debug, Deserialize)]
+pub struct PreviewOmfImportParams {
+    #[serde(default)]
+    pub tenant_id: String,
+    /// The OMF document to preview. Required.
+    pub document: crate::omf::OmfDocument,
+    /// Include items whose top-level status is "archived"/"expired".
+    /// Defaults to true (matches `ImportOptions`).
+    #[serde(default)]
+    pub include_archived: Option<bool>,
+    /// Optional fuzzy threshold. Absent = exact-only.
+    #[serde(default)]
+    pub fuzzy_threshold: Option<f32>,
+}
+
+/// Handle memory.preview_omf_import (Track F5). Read-only dry-run.
+pub async fn handle_memory_preview_omf_import<S: Store>(
+    store: &S,
+    params: PreviewOmfImportParams,
+) -> Result<Value, McpError> {
+    let ps = store.as_persistent().ok_or_else(|| {
+        McpError::ToolError("memory.preview_omf_import requires a persistent store".into())
+    })?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
+
+    let opts = crate::omf::import::ImportOptions {
+        include_archived: params.include_archived.unwrap_or(true),
+        fuzzy_threshold: params.fuzzy_threshold,
+    };
+    let preview = crate::omf::import::preview_omf_import(ps, &tenant_id, &params.document, opts)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    format_mcp_response(&json!({
+        "total": preview.total,
+        "to_import": preview.to_import,
+        "duplicates": preview.duplicates,
+        "filtered": preview.filtered,
+        "unscoped": preview.unscoped,
+        "by_project": preview.by_project,
+    }))
+}
+
+/// Parameters for memory.import_omf (Track F5).
+#[derive(Debug, Deserialize)]
+pub struct ImportOmfParams {
+    #[serde(default)]
+    pub tenant_id: String,
+    /// The OMF document to import. Required.
+    pub document: crate::omf::OmfDocument,
+    /// Include items whose top-level status is "archived"/"expired".
+    /// Defaults to true.
+    #[serde(default)]
+    pub include_archived: Option<bool>,
+    /// Optional fuzzy threshold. Absent = exact-only.
+    #[serde(default)]
+    pub fuzzy_threshold: Option<f32>,
+}
+
+/// Handle memory.import_omf (Track F5).
+///
+/// Returns both the formatted MCP response and a list of
+/// `PostWriteEvent`s — one per newly imported chunk — so the server
+/// dispatch arm can run structural indexing identically to how
+/// memory.add_batch + memory.supersede already do.
+pub async fn handle_memory_import_omf<S: Store>(
+    store: &S,
+    tenant_manager: Option<&TenantManager>,
+    params: ImportOmfParams,
+) -> Result<(Value, Vec<PostWriteEvent>), McpError> {
+    let ps = store
+        .as_persistent()
+        .ok_or_else(|| McpError::ToolError("memory.import_omf requires a persistent store".into()))?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
+
+    if let Some(tm) = tenant_manager {
+        tm.ensure_tenant_dir(&tenant_id)
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+    }
+
+    let opts = crate::omf::import::ImportOptions {
+        include_archived: params.include_archived.unwrap_or(true),
+        fuzzy_threshold: params.fuzzy_threshold,
+    };
+    let (result, imported) =
+        crate::omf::import::import_omf_with_events(ps, &tenant_id, &params.document, opts)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    let tenant_id_str = tenant_id.to_string();
+    let events: Vec<PostWriteEvent> = imported
+        .into_iter()
+        .map(|ic| PostWriteEvent {
+            tenant_id: tenant_id_str.clone(),
+            chunk_id: ic.chunk_id,
+            chunk_type: ic.chunk_type.to_string(),
+            project_id: ic.project_id,
+            // OMF imports carry no filesystem source path; nanomem has
+            // no concept of one, and memd's own export doesn't emit one
+            // either. The structural indexer short-circuits on
+            // source_path=None, so this is the correct signal.
+            source_path: None,
+            text: ic.text,
+        })
+        .collect();
+
+    let response = format_mcp_response(&json!({
+        "total": result.total,
+        "imported": result.imported,
+        "duplicates": result.duplicates,
+        "skipped": result.skipped,
+    }))?;
+    Ok((response, events))
+}
+
 /// Handle task.start tool call.
 pub async fn handle_task_start<S: Store>(
     store: &S,

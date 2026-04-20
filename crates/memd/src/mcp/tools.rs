@@ -1717,6 +1717,96 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                 "required": ["text"]
             }),
         ),
+        // OMF-01: memory.export_omf (Track F5)
+        ToolDefinition::new(
+            "memory.export_omf",
+            "Export the tenant's memory as an OMF 1.0 document. Each item's `extensions.memd` namespace round-trips \
+             chunk_id, project_id, chunk_type, ingestion_mode, and the lifecycle overlay (status, tier, \
+             supersedes, superseded_by, expires_at_ms, review_after_ms, lifecycle_updated_at_ms) so a subsequent \
+             memd↔memd import can preserve state under the F3 trust gate. Returns `{document: OmfDocument}`. \
+             Read-only. Requires a persistent store.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": { "type": "string", "description": "Tenant identifier" },
+                    "project_id": { "type": "string", "description": "Optional project filter" },
+                    "include_history": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Include history-tier rows (default: live-only)"
+                    },
+                    "include_superseded": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "Include status=Superseded rows"
+                    },
+                    "include_expired": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "Include status=Expired and lazily-expired rows"
+                    }
+                }
+            }),
+        ),
+        // OMF-02: memory.preview_omf_import (Track F5)
+        ToolDefinition::new(
+            "memory.preview_omf_import",
+            "Dry-run an OMF 1.0 import. Walks the same dedup + filter + trust-gate path as memory.import_omf \
+             and reports `{total, to_import, duplicates, filtered, unscoped, by_project}`. Never writes, \
+             never bumps cache versions. Requires a persistent store.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": { "type": "string", "description": "Tenant identifier" },
+                    "document": {
+                        "type": "object",
+                        "description": "OMF 1.0 document to preview (same shape as memory.export_omf output)"
+                    },
+                    "include_archived": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "Include items whose top-level status is 'archived' or 'expired'"
+                    },
+                    "fuzzy_threshold": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                        "description": "Optional trigram Jaccard threshold. Absent = exact-only."
+                    }
+                },
+                "required": ["document"]
+            }),
+        ),
+        // OMF-03: memory.import_omf (Track F5)
+        ToolDefinition::new(
+            "memory.import_omf",
+            "Import an OMF 1.0 document into the tenant. Exact-canonical dedup by default; optional fuzzy \
+             (`fuzzy_threshold`). Lifecycle overlay fields are honoured only when `document.source.app == \"memd\"` \
+             and `extensions.memd.v == 1` (F3 trust gate). Returns `{total, imported, duplicates, skipped}`. \
+             Requires a persistent store.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": { "type": "string", "description": "Tenant identifier" },
+                    "document": {
+                        "type": "object",
+                        "description": "OMF 1.0 document to import"
+                    },
+                    "include_archived": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "Include items whose top-level status is 'archived' or 'expired'"
+                    },
+                    "fuzzy_threshold": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                        "description": "Optional trigram Jaccard threshold. Absent = exact-only."
+                    }
+                },
+                "required": ["document"]
+            }),
+        ),
         // MEMORY-09: memory.consolidate_episode
         ToolDefinition::new(
             "memory.consolidate_episode",
@@ -1979,6 +2069,9 @@ pub fn tool_names() -> Vec<&'static str> {
         "memory.set_expiry",
         "memory.find_near_duplicates",
         "memory.export_markdown",
+        "memory.export_omf",
+        "memory.preview_omf_import",
+        "memory.import_omf",
         "memory.consolidate_episode",
         "context.list_subsystems",
         "context.get_files_for_subsystem",
@@ -2009,7 +2102,8 @@ mod tests {
         // Track C (C6): + memory.set_expiry.
         // Track D (D5): + memory.find_near_duplicates.
         // Track G (G2): + memory.export_markdown.
-        assert_eq!(tools.len(), 50);
+        // Track F (F5): + memory.export_omf + memory.preview_omf_import + memory.import_omf.
+        assert_eq!(tools.len(), 53);
     }
 
     #[test]
@@ -2332,11 +2426,15 @@ mod tests {
         // Track C (C6): + memory.set_expiry.
         // Track D (D5): + memory.find_near_duplicates.
         // Track G (G2): + memory.export_markdown.
-        assert_eq!(names.len(), 50);
+        // Track F (F5): + memory.export_omf + memory.preview_omf_import + memory.import_omf.
+        assert_eq!(names.len(), 53);
         assert!(names.contains(&"memory.supersede"));
         assert!(names.contains(&"memory.set_expiry"));
         assert!(names.contains(&"memory.find_near_duplicates"));
         assert!(names.contains(&"memory.export_markdown"));
+        assert!(names.contains(&"memory.export_omf"));
+        assert!(names.contains(&"memory.preview_omf_import"));
+        assert!(names.contains(&"memory.import_omf"));
         assert!(names.contains(&"artifact.find_related"));
         assert!(names.contains(&"artifact.review"));
         assert!(names.contains(&"artifact.revision"));

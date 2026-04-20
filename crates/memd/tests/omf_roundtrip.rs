@@ -693,6 +693,170 @@ async fn preview_fails_closed_on_malformed_trusted_lifecycle() {
     assert!(matches!(err, memd::error::MemdError::ValidationError(_)));
 }
 
+// --------------------------------------------------------------
+// F5 MCP tools — export_omf / preview_omf_import / import_omf.
+// --------------------------------------------------------------
+
+#[tokio::test]
+async fn mcp_export_then_import_roundtrip_preserves_content_and_lifecycle() {
+    // End-to-end cover of the three new MCP tools:
+    // 1. Seed 3 chunks in server1 with varied lifecycle (one tier flip).
+    // 2. Call memory.export_omf on server1; capture the returned document.
+    // 3. Call memory.import_omf on server2 with that document.
+    // 4. Assert count + content parity and that the trusted lifecycle
+    //    round-tripped (the working-tier chunk stays at Working).
+    let (server1, _tmp1) = test_server().await;
+    let ps1 = server1.store().as_persistent().unwrap();
+
+    let mut ids = Vec::new();
+    for (i, proj) in [("alpha", "p1"), ("beta", "p1"), ("gamma", "p2")]
+        .iter()
+        .enumerate()
+    {
+        let _ = i;
+        let r = call_tool(
+            &server1,
+            "memory.add",
+            json!({"tenant_id": "t", "text": proj.0, "type": "doc", "project_id": proj.1}),
+        )
+        .await;
+        let id_str = parse_result_text(&r)["chunk_id"].as_str().unwrap().to_string();
+        ids.push(memd::types::ChunkId::parse(&id_str).unwrap());
+    }
+    // Flip the first chunk to Working tier so the trusted import must honour it.
+    ps1.update_lifecycle(
+        &tenant("t"),
+        &ids[0],
+        &LifecycleDelta {
+            tier: Some(MemoryTier::Working),
+            lifecycle_updated_at_ms: Some(1_900_000_000_000),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // Export via MCP.
+    let export_resp = call_tool(&server1, "memory.export_omf", json!({"tenant_id": "t"})).await;
+    let body = parse_result_text(&export_resp);
+    let doc_value = &body["document"];
+    assert_eq!(doc_value["omf"].as_str().unwrap(), OMF_VERSION);
+    let memories = doc_value["memories"].as_array().unwrap();
+    assert_eq!(memories.len(), 3, "all three seeded chunks exported");
+
+    // Fresh server2. Preview first (dry-run).
+    let (server2, _tmp2) = test_server().await;
+    let preview_resp = call_tool(
+        &server2,
+        "memory.preview_omf_import",
+        json!({"tenant_id": "t", "document": doc_value}),
+    )
+    .await;
+    let preview = parse_result_text(&preview_resp);
+    assert_eq!(preview["total"].as_u64().unwrap(), 3);
+    assert_eq!(preview["to_import"].as_u64().unwrap(), 3);
+    assert_eq!(preview["duplicates"].as_u64().unwrap(), 0);
+
+    // Real import.
+    let import_resp = call_tool(
+        &server2,
+        "memory.import_omf",
+        json!({"tenant_id": "t", "document": doc_value}),
+    )
+    .await;
+    let result = parse_result_text(&import_resp);
+    assert_eq!(result["total"].as_u64().unwrap(), 3);
+    assert_eq!(result["imported"].as_u64().unwrap(), 3);
+    assert_eq!(result["duplicates"].as_u64().unwrap(), 0);
+
+    // Post-state on server2: trusted lifecycle (Working tier on "alpha") must round-trip.
+    let ps2 = server2.store().as_persistent().unwrap();
+    let metas = ps2
+        .metadata()
+        .list_for_export(&tenant("t"), None, false)
+        .unwrap();
+    assert_eq!(metas.len(), 3);
+    let alpha_meta = metas
+        .iter()
+        .find(|m| m.canonical_text.as_deref() == Some("alpha"))
+        .expect("alpha chunk present on server2");
+    assert_eq!(
+        alpha_meta.lifecycle.tier,
+        MemoryTier::Working,
+        "trusted lifecycle must round-trip memd↔memd"
+    );
+}
+
+#[tokio::test]
+async fn mcp_import_omf_is_idempotent_via_dedup() {
+    // Calling memory.import_omf twice with the same document should land
+    // 3 chunks then 0 (all dedupe on the second pass).
+    let (server1, _tmp1) = test_server().await;
+    for (text, proj) in [("a1", "p1"), ("a2", "p1"), ("a3", "p1")] {
+        let _ = call_tool(
+            &server1,
+            "memory.add",
+            json!({"tenant_id": "t", "text": text, "type": "doc", "project_id": proj}),
+        )
+        .await;
+    }
+    let export = call_tool(&server1, "memory.export_omf", json!({"tenant_id": "t"})).await;
+    let doc_value = parse_result_text(&export)["document"].clone();
+
+    let (server2, _tmp2) = test_server().await;
+    let r1 = call_tool(
+        &server2,
+        "memory.import_omf",
+        json!({"tenant_id": "t", "document": &doc_value}),
+    )
+    .await;
+    assert_eq!(parse_result_text(&r1)["imported"].as_u64().unwrap(), 3);
+
+    let r2 = call_tool(
+        &server2,
+        "memory.import_omf",
+        json!({"tenant_id": "t", "document": &doc_value}),
+    )
+    .await;
+    let second = parse_result_text(&r2);
+    assert_eq!(second["imported"].as_u64().unwrap(), 0);
+    assert_eq!(second["duplicates"].as_u64().unwrap(), 3);
+}
+
+#[tokio::test]
+async fn mcp_preview_omf_import_does_not_write() {
+    // Tool-layer version of preview_omf_returns_counts_without_writing.
+    let (server, _tmp) = test_server().await;
+    let doc_value = json!({
+        "omf": "1.0",
+        "exported_at": "2026-04-18T00:00:00Z",
+        "source": {"app": "nanomem"},
+        "memories": [
+            {"content": "first", "extensions": {"memd": {"project_id": "p1"}}},
+            {"content": "second", "extensions": {"memd": {"project_id": "p1"}}},
+        ]
+    });
+    let pre = server.store().as_persistent().unwrap()
+        .metadata()
+        .list_for_export(&tenant("t"), None, false)
+        .unwrap()
+        .len();
+    let preview = call_tool(
+        &server,
+        "memory.preview_omf_import",
+        json!({"tenant_id": "t", "document": doc_value}),
+    )
+    .await;
+    let body = parse_result_text(&preview);
+    assert_eq!(body["to_import"].as_u64().unwrap(), 2);
+    let post = server.store().as_persistent().unwrap()
+        .metadata()
+        .list_for_export(&tenant("t"), None, false)
+        .unwrap()
+        .len();
+    assert_eq!(post, pre);
+}
+
 #[tokio::test]
 async fn import_unscoped_item_does_not_dedupe_against_scoped_rows() {
     // Seed a scoped chunk in p1 with canonical "shared fact". Import an
