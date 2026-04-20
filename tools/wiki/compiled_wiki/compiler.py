@@ -101,9 +101,26 @@ def build_wiki(config: BuildConfig) -> BuildResult:
         ),
     }
 
-    task_ids = project_payload["brief"].get("source_task_ids", [])[: config.max_tasks]
+    primary_task_ids = list(
+        project_payload["brief"].get("source_task_ids", [])
+    )[: config.max_tasks]
+    # Plan §5 / step 6 force-emit: union the top-max_tasks primary set
+    # with every task_id referenced by emitted library or project
+    # pages, so library links never dangle even when the referenced
+    # task sits outside the top window. Deduplicated; primary order
+    # preserved; referenced-only tasks appended in deterministic order.
+    referenced_task_ids = collect_referenced_task_ids(project_payload, libraries)
+    all_task_ids: list[str] = []
+    seen: set[str] = set()
+    for task_id in primary_task_ids + sorted(referenced_task_ids):
+        if task_id and task_id not in seen:
+            all_task_ids.append(task_id)
+            seen.add(task_id)
+    primary_set = set(primary_task_ids)
+
     tasks: list[dict[str, Any]] = []
-    for task_id in task_ids:
+    force_emit_tasks: list[dict[str, Any]] = []
+    for task_id in all_task_ids:
         resume_payload = client.call_tool(
             "task.resume",
             {"tenant_id": config.tenant_id, "task_id": task_id, "k": 8},
@@ -112,15 +129,17 @@ def build_wiki(config: BuildConfig) -> BuildResult:
             "artifact.list_thread",
             {"tenant_id": config.tenant_id, "thread_id": task_id},
         )
-        tasks.append(
-            {
-                "task_id": task_id,
-                "resume_payload": resume_payload,
-                "resume": resume_payload["resume"],
-                "resume_artifact": resume_payload["artifact"],
-                "thread": thread_payload,
-            }
-        )
+        bundle = {
+            "task_id": task_id,
+            "resume_payload": resume_payload,
+            "resume": resume_payload["resume"],
+            "resume_artifact": resume_payload["artifact"],
+            "thread": thread_payload,
+        }
+        if task_id in primary_set:
+            tasks.append(bundle)
+        else:
+            force_emit_tasks.append(bundle)
 
     # Primary: most-recently-updated first. Secondary: task_id for
     # stable ordering when timestamps tie or when the MCP backend
@@ -200,7 +219,19 @@ def build_wiki(config: BuildConfig) -> BuildResult:
         ),
     }
 
-    for task in tasks:
+    # Sort force-emit tasks and their thread artifacts for determinism.
+    force_emit_tasks.sort(key=lambda item: item["task_id"])
+    for task_payload in force_emit_tasks:
+        thread = task_payload["thread"]
+        artifacts = thread.get("artifacts", [])
+        artifacts.sort(
+            key=lambda artifact: (
+                -int(artifact.get("timestamp_created") or 0),
+                str(artifact.get("artifact_id") or ""),
+            )
+        )
+        thread["artifacts"] = artifacts
+    for task in tasks + force_emit_tasks:
         files[config.output_dir / "tasks" / f"{task['task_id']}.md"] = render_task_page(
             config.tenant_id,
             config.project_id,
@@ -222,6 +253,41 @@ def build_wiki(config: BuildConfig) -> BuildResult:
         log_entry_count=len(log_entries),
         output_dir=config.output_dir,
     )
+
+
+def collect_referenced_task_ids(
+    project_payload: dict[str, Any],
+    libraries: dict[str, dict[str, Any]],
+) -> set[str]:
+    """Return every task_id referenced by emitted library or project pages.
+
+    Step 6 invariant: the compiler force-emits ``tasks/<id>.md`` for
+    every task_id that a library or project page links to, not just
+    the top ``max_tasks`` primary set. This prevents the "linked task
+    outside the top window" dead-backlink class documented in plan
+    §5 (dead-backlink primitive).
+
+    Sources scanned:
+      - ``project_payload.grounding_refs[].task_id``
+      - ``libraries[*].results[].task_id``
+      - ``libraries[*].grounding_refs[].task_id``
+    """
+    ids: set[str] = set()
+    for ref in project_payload.get("grounding_refs") or []:
+        _add_id(ids, ref.get("task_id") if isinstance(ref, dict) else None)
+    for library_payload in libraries.values():
+        for result in library_payload.get("results") or []:
+            if isinstance(result, dict):
+                _add_id(ids, result.get("task_id"))
+        for ref in library_payload.get("grounding_refs") or []:
+            if isinstance(ref, dict):
+                _add_id(ids, ref.get("task_id"))
+    return ids
+
+
+def _add_id(acc: set[str], raw: Any) -> None:
+    if isinstance(raw, str) and raw.strip():
+        acc.add(raw)
 
 
 def build_log_entries(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
