@@ -694,6 +694,150 @@ async fn preview_fails_closed_on_malformed_trusted_lifecycle() {
 }
 
 // --------------------------------------------------------------
+// G3 CLI — memd export-markdown.
+// --------------------------------------------------------------
+
+#[tokio::test]
+async fn cli_export_markdown_writes_tree_under_outdir() {
+    // Seed a couple of chunks across two projects; export as markdown;
+    // verify the outdir contains files, each `<relative>.md` shape.
+    let tmp = tempfile::tempdir().unwrap();
+    let store = persistent_store(tmp.path()).await;
+
+    use memd::types::{ChunkType, MemoryChunk, ProjectId};
+    for (text, proj) in [("alpha", "p1"), ("beta", "p1"), ("gamma", "p2")] {
+        let chunk = MemoryChunk::new(tenant("t"), text, ChunkType::Doc)
+            .with_project(ProjectId::new(Some(proj)));
+        store.add(chunk).await.unwrap();
+    }
+
+    let outdir = tempfile::tempdir().unwrap();
+    memd::cli::run_cli(
+        store.as_ref(),
+        None,
+        memd::cli::CliCommand::ExportMarkdown {
+            tenant_id: "t".to_string(),
+            outdir: outdir.path().to_path_buf(),
+            project_id: None,
+            include_history: false,
+            data_dir: Some(tmp.path().to_path_buf()), // won't collide
+        },
+    )
+    .await
+    .expect("export-markdown succeeds");
+
+    let written: Vec<_> = walk_md_files(outdir.path());
+    assert!(
+        !written.is_empty(),
+        "outdir must contain at least one markdown file after export"
+    );
+    // Every rendered file must carry YAML frontmatter and at least one
+    // chunk body; the exact metadata labels live in
+    // `render_markdown_tree` (G1) and are covered by its unit tests.
+    for path in &written {
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(
+            content.starts_with("---\n"),
+            "rendered file should start with YAML frontmatter: {}",
+            path.display()
+        );
+        assert!(
+            content.contains("hash:"),
+            "rendered file should carry per-chunk metadata: {}",
+            path.display()
+        );
+    }
+    // The p1 bucket ends up in `by_project/p1/doc.md` (alpha + beta);
+    // the p2 bucket ends up in `by_project/p2/doc.md` (gamma).
+    let all_paths: Vec<String> = written.iter().map(|p| p.display().to_string()).collect();
+    assert!(all_paths.iter().any(|s| s.contains("by_project/p1/doc.md")));
+    assert!(all_paths.iter().any(|s| s.contains("by_project/p2/doc.md")));
+}
+
+#[tokio::test]
+async fn cli_export_markdown_refuses_outdir_inside_data_dir() {
+    // The containment guard must refuse an outdir whose normalised path
+    // is a descendant of `data_dir`. Pick an outdir that does NOT yet
+    // exist (under a nested path inside data_dir) to also confirm the
+    // guard works before the directory is created.
+    let tmp = tempfile::tempdir().unwrap();
+    let store = persistent_store(tmp.path()).await;
+    let bad_outdir = tmp.path().join("nested").join("would_corrupt");
+
+    let err = memd::cli::run_cli(
+        store.as_ref(),
+        None,
+        memd::cli::CliCommand::ExportMarkdown {
+            tenant_id: "t".to_string(),
+            outdir: bad_outdir.clone(),
+            project_id: None,
+            include_history: false,
+            data_dir: Some(tmp.path().to_path_buf()),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(err, memd::error::MemdError::ValidationError(_)),
+        "expected ValidationError for in-data-dir outdir, got: {err:?}"
+    );
+    assert!(
+        !bad_outdir.exists(),
+        "refused outdir must not have been created"
+    );
+}
+
+#[tokio::test]
+async fn cli_export_markdown_refuses_outdir_via_parent_traversal() {
+    // A path like `data_dir/../data_dir` normalises to `data_dir` and
+    // must still be caught by the containment guard. This test pins
+    // that behaviour (so a caller can't escape it by hand-crafted
+    // `..` segments).
+    let tmp = tempfile::tempdir().unwrap();
+    let store = persistent_store(tmp.path()).await;
+
+    // Build a path that walks up then back down into data_dir.
+    let mut tricky = tmp.path().to_path_buf();
+    tricky.push("..");
+    tricky.push(tmp.path().file_name().unwrap());
+    tricky.push("also_bad");
+
+    let err = memd::cli::run_cli(
+        store.as_ref(),
+        None,
+        memd::cli::CliCommand::ExportMarkdown {
+            tenant_id: "t".to_string(),
+            outdir: tricky.clone(),
+            project_id: None,
+            include_history: false,
+            data_dir: Some(tmp.path().to_path_buf()),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, memd::error::MemdError::ValidationError(_)));
+}
+
+/// Walk `root` recursively, returning every `.md` file's absolute path.
+fn walk_md_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    fn visit(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    visit(&p, out);
+                } else if p.extension().and_then(|s| s.to_str()) == Some("md") {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    visit(root, &mut out);
+    out
+}
+
+// --------------------------------------------------------------
 // F6 CLI — memd export-omf / memd import-omf.
 // --------------------------------------------------------------
 
