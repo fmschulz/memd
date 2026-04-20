@@ -117,6 +117,63 @@ async fn export_markdown_handles_empty_tenant_returns_empty_files_array() {
     );
 }
 
+// Codex round-1 G1/G2 HIGH regression at the MCP layer: distinct raw
+// project_ids whose sanitised names would collide must produce
+// distinct files in the MCP response too. Pre-fix the bucket key was
+// the sanitised string, so `"a/b"` and `"a:b"` collapsed.
+#[tokio::test]
+async fn export_markdown_keeps_collision_prone_project_ids_distinct() {
+    let (server, _tmp) = test_server().await;
+    call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "a/b",
+            "text": "from a/b",
+            "type": "doc",
+        }),
+    )
+    .await;
+    call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "a:b",
+            "text": "from a:b",
+            "type": "doc",
+        }),
+    )
+    .await;
+
+    let r = call_tool(
+        &server,
+        "memory.export_markdown",
+        serde_json::json!({ "tenant_id": "t" }),
+    )
+    .await;
+    let body = parse_result_text(&r);
+    let files = body["files"].as_array().expect("files array");
+    assert_eq!(
+        files.len(),
+        2,
+        "raw projects 'a/b' and 'a:b' must produce two files"
+    );
+    let paths: Vec<String> = files
+        .iter()
+        .map(|f| f["path"].as_str().unwrap().to_string())
+        .collect();
+    assert_ne!(paths[0], paths[1], "paths must differ — got {paths:?}");
+    // Frontmatter preserves the raw project_id (sanitisation is path-only).
+    let raw_projects: Vec<&str> = files
+        .iter()
+        .map(|f| f["content"].as_str().unwrap())
+        .collect();
+    assert!(raw_projects.iter().any(|c| c.contains("project: a/b")));
+    assert!(raw_projects.iter().any(|c| c.contains("project: a:b")));
+}
+
 #[tokio::test]
 async fn export_markdown_can_filter_by_project_id() {
     let (server, _tmp) = test_server().await;

@@ -4786,16 +4786,20 @@ pub async fn handle_memory_export_markdown<S: Store>(
     })?;
     let tenant_id = resolve_tenant_id(&params.tenant_id)?;
 
-    // Snapshot all live metadata rows for the tenant in one shot, then
-    // optionally filter by project_id. Hydrating chunks one-at-a-time
-    // via store.get keeps memory usage bounded — we don't slurp every
-    // segment payload into a single Vec.
-    let metas = ps
-        .metadata()
-        .list(&tenant_id, params.limit, 0)
-        .map_err(|e| McpError::ToolError(e.to_string()))?;
-
+    // SQL-level project filter when scoped, so a noisy tenant doesn't
+    // starve the scoped export by burning the row budget on rows from
+    // other projects (Codex round-1 G2 MEDIUM finding).
     let project_filter = params.project_id.as_deref();
+    let metas = if let Some(pid) = project_filter {
+        ps.metadata()
+            .list_recent_for_project(&tenant_id, Some(pid), params.limit)
+            .map_err(|e| McpError::ToolError(e.to_string()))?
+    } else {
+        ps.metadata()
+            .list(&tenant_id, params.limit, 0)
+            .map_err(|e| McpError::ToolError(e.to_string()))?
+    };
+
     let mut chunks: Vec<MemoryChunk> = Vec::with_capacity(metas.len());
     for meta in metas {
         if meta.status != ChunkStatus::Final || meta.lifecycle.superseded_by.is_some() {
@@ -4827,10 +4831,11 @@ pub async fn handle_memory_export_markdown<S: Store>(
 
 /// Parameters for memory.find_near_duplicates (Track D5).
 ///
-/// Read-only preview that surfaces the same candidates the
-/// `supersede_near_duplicates` flow would have selected, without
-/// mutating store state. `fuzzy_threshold` is opt-in: when absent only
-/// exact-canonical matches are returned.
+/// Read-only preview that mirrors the candidates
+/// `memory.add(supersede_near_duplicates=...)` would actually link.
+/// Pool sizes and scope semantics match the write path exactly so the
+/// preview never reports a candidate the write path would miss (or
+/// vice versa) — Codex round-1 D5 MEDIUM finding.
 #[derive(Debug, Deserialize)]
 pub struct FindNearDuplicatesParams {
     #[serde(default)]
@@ -4841,24 +4846,19 @@ pub struct FindNearDuplicatesParams {
     #[serde(default)]
     pub project_id: Option<String>,
     /// When set, also returns trigram-Jaccard candidates with score ≥
-    /// this threshold. Absent = exact-only.
+    /// this threshold over the same FUZZY_RECENT_POOL_SIZE pool the
+    /// write path uses. Absent = exact-only.
     #[serde(default)]
     pub fuzzy_threshold: Option<f32>,
     /// `"project"` (default) restricts the candidate pool to rows with
-    /// the same project_id. `"tenant"` widens to the whole tenant.
+    /// the same project_id (incl. project_id IS NULL when the probe
+    /// has no project). `"tenant"` widens to the whole tenant.
     #[serde(default)]
     pub scope: Option<String>,
-    /// Maximum number of recent rows to consider in fuzzy mode.
-    #[serde(default = "default_fuzzy_limit")]
-    pub limit: usize,
 }
 
 fn default_doc_type() -> String {
     "doc".into()
-}
-
-fn default_fuzzy_limit() -> usize {
-    crate::mcp::dedup::FUZZY_RECENT_POOL_SIZE
 }
 
 /// Handle memory.find_near_duplicates (Track D5). Read-only.
@@ -4912,15 +4912,14 @@ pub async fn handle_memory_find_near_duplicates<S: Store>(
         .map(|m| m.chunk_id.to_string())
         .collect();
 
-    // Fuzzy: optional. Mirrors dedup.rs::fuzzy_candidates but emits
-    // (chunk_id, similarity) pairs ordered by score desc.
+    // Fuzzy: optional. Pool size is fixed at FUZZY_RECENT_POOL_SIZE
+    // so the preview's candidate set is exactly the one
+    // `compute_dedup_candidates` would consider on the write path
+    // (Codex round-1 D5 MEDIUM finding). Emits (chunk_id, similarity)
+    // pairs ordered by score desc.
     let mut fuzzy_pairs: Vec<(String, f32)> = Vec::new();
     if let Some(threshold) = params.fuzzy_threshold {
-        let limit = if params.limit == 0 {
-            crate::mcp::dedup::FUZZY_RECENT_POOL_SIZE
-        } else {
-            params.limit
-        };
+        let limit = crate::mcp::dedup::FUZZY_RECENT_POOL_SIZE;
         let metas = if scope_project && params.project_id.is_none() {
             ps.metadata()
                 .list_recent_with_null_project(&tenant_id, limit)
