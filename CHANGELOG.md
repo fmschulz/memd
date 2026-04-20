@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-04-20
+
 ### Added
 
 - **memd-wiki: first-class sibling surface (Item 7 / plan
