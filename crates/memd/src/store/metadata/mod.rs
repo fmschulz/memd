@@ -53,6 +53,11 @@ pub struct ChunkMetadata {
     /// by content identity. Orthogonal to the chunk payload; empty for
     /// regular chunks.
     pub canonical_text: Option<String>,
+    /// Track E: write-time label declaring whether the chunk came from
+    /// a `conversation` (rapidly-evolving session memory) or a
+    /// `document` (curated, durable) ingestion. Defaults to Document
+    /// for legacy rows whose row was inserted before E1 shipped.
+    pub ingestion_mode: crate::types::IngestionMode,
 }
 
 /// Metadata store trait

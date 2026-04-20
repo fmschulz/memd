@@ -476,6 +476,12 @@ pub struct MemoryChunk {
     pub tags: Vec<String>,
     /// Content hash for deduplication
     pub hash: String,
+    /// Track E: write-time label declaring whether this chunk came
+    /// from a `conversation` (rapidly-evolving session memory) or a
+    /// `document` (curated, durable) ingestion. Defaults to `Document`
+    /// so segment payloads written before E1 deserialize unchanged.
+    #[serde(default)]
+    pub ingestion_mode: IngestionMode,
 }
 
 impl MemoryChunk {
@@ -504,7 +510,16 @@ impl MemoryChunk {
             text,
             tags: Vec::new(),
             hash,
+            ingestion_mode: IngestionMode::Document,
         }
+    }
+
+    /// Override the ingestion_mode label set by `new()`. Used by the
+    /// MCP `memory.add(_batch)` handler to honour the `mode` request
+    /// param before write.
+    pub fn with_ingestion_mode(mut self, mode: IngestionMode) -> Self {
+        self.ingestion_mode = mode;
+        self
     }
 
     /// Compute a simple hash of the content for deduplication
