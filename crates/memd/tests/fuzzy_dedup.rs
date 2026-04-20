@@ -277,16 +277,22 @@ async fn add_with_lifecycle_long_split_doc_uses_per_row_canonical() {
         .as_persistent()
         .expect("test_server uses PersistentStore");
 
-    // Pull every row for the tenant. If split_for_add fired, there will
-    // be multiple. If splitting did not actually fire (e.g. chunking
-    // config changes), the test still asserts the primary row's
-    // canonical equals the full canonicalised doc — both branches
-    // exercise the contract that canonical_text matches its own row.
+    // Pull every row for the tenant. The 1760-char input above MUST
+    // trigger split_for_add under current chunking defaults (1000-char
+    // threshold, ~1200-char target) so the regression is exercised
+    // every time. If chunking defaults ever change such that this
+    // input no longer splits, fail loudly so the test author updates
+    // the input rather than silently degrading coverage.
     let metas = ps
         .metadata()
         .list(&tenant("t"), usize::MAX, 0)
         .expect("list rows");
-    let split_count = metas.len();
+    assert!(
+        metas.len() > 1,
+        "test input must trigger split_for_add — got {} rows. Update the \
+         test input if chunking defaults changed.",
+        metas.len()
+    );
 
     let full_canonical = long_text
         .to_lowercase()
@@ -294,36 +300,73 @@ async fn add_with_lifecycle_long_split_doc_uses_per_row_canonical() {
         .collect::<Vec<_>>()
         .join(" ");
 
-    let primary_meta = metas
+    // The previous bug would have left the primary row with
+    // full_canonical from the post-add overwrite. Assert no row carries
+    // the WHOLE document's canonical.
+    let _primary_meta = metas
         .iter()
         .find(|m| m.chunk_id == primary_id)
         .expect("primary row present");
-
-    if split_count > 1 {
-        // Split case: every row must canonicalise from its own text,
-        // shorter than the full doc canonical. The previous bug would
-        // have left the primary row with full_canonical.
-        for m in &metas {
-            let c = m.canonical_text.as_deref().unwrap_or("");
-            assert!(
-                !c.is_empty(),
-                "every split row must carry canonical_text (chunk_id={})",
-                m.chunk_id
-            );
-            assert_ne!(
-                c, full_canonical,
-                "no row's canonical may equal the WHOLE document's canonical \
-                 — that was the round-1 bug (chunk_id={})",
-                m.chunk_id
-            );
-        }
-    } else {
-        // No-split case: primary row's canonical should match the
-        // full-doc canonical, since the row's text IS the full doc.
-        assert_eq!(
-            primary_meta.canonical_text.as_deref(),
-            Some(full_canonical.as_str()),
-            "single-row writes still canonicalise from the row's own text"
+    for m in &metas {
+        let c = m.canonical_text.as_deref().unwrap_or("");
+        assert!(
+            !c.is_empty(),
+            "every split row must carry canonical_text (chunk_id={})",
+            m.chunk_id
         );
+        assert_ne!(
+            c, full_canonical,
+            "no row's canonical may equal the WHOLE document's canonical \
+             — that was the round-1 bug (chunk_id={})",
+            m.chunk_id
+        );
+    }
+}
+
+// D2 round-2 LOW: backfill must handle many rows (not just one) and
+// must repopulate every NULL row in a single pass. Stays within a
+// single tenant because the chunks table's `UNIQUE(segment_id,
+// ordinal)` constraint plus per-tenant `next_segment_id()` allocators
+// can collide across tenants on (1, 0) — a pre-existing schema bug
+// out of Track D2 scope. Multi-tenant coverage will land once that
+// gap is fixed.
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn backfill_canonical_text_repopulates_many_legacy_rows_in_one_pass() {
+    let (server, _tmp) = test_server().await;
+
+    let mut ids = Vec::new();
+    let texts = ["Apple Pie", "Banana Bread", "Cherry Cobbler", "Date Loaf"];
+    for text in &texts {
+        ids.push(add_chunk(&server, "tenant_a", text).await);
+    }
+
+    let ps = server
+        .store()
+        .as_persistent()
+        .expect("test_server uses PersistentStore");
+
+    for id in &ids {
+        ps.metadata()
+            .force_clear_canonical_text(id)
+            .expect("force_clear_canonical_text");
+    }
+
+    let stats = ps.backfill_canonical_text_for_legacy_chunks();
+    assert_eq!(
+        stats.rows_backfilled,
+        texts.len(),
+        "every legacy row must be repopulated in a single pass"
+    );
+    assert_eq!(stats.rows_skipped, 0);
+
+    let want = ["apple pie", "banana bread", "cherry cobbler", "date loaf"];
+    for (id, expected) in ids.iter().zip(want.iter()) {
+        let meta = ps
+            .metadata()
+            .get(&tenant("tenant_a"), id)
+            .expect("metadata.get")
+            .expect("row");
+        assert_eq!(meta.canonical_text.as_deref(), Some(*expected));
     }
 }
