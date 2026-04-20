@@ -6,7 +6,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
-Items from the post-nanomem handoff shipped direct to `main`.
+## [0.8.0] - 2026-04-20
+
+Post-nanomem cleanup release. Closes the remaining items from the
+nanomem-inspired follow-up handoff (Items 2, 3, 4, 5, 6, and the
+Item 2 PRAGMA-detection NIT), plus a verification-gate write-up for
+F-track. Item 2 is a one-way schema migration; downgrade is not
+supported.
 
 ### Changed
 
