@@ -161,6 +161,65 @@ pub enum CliCommand {
         page_size: usize,
     },
 
+    /// Export tenant memory as an OMF 1.0 JSON document.
+    ///
+    /// Writes to `--output` if provided, else stdout. Runs on the user's
+    /// machine outside the MCP daemon trust boundary; the opened path is
+    /// honoured as-is (no data-dir containment guard — CLI callers are
+    /// already on the writer side).
+    ExportOmf {
+        /// Tenant identifier
+        #[arg(long)]
+        tenant_id: String,
+
+        /// Optional project filter
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Output file path (defaults to stdout when omitted)
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Include history-tier rows (default: live-only)
+        #[arg(long, default_value_t = false, action = ArgAction::Set)]
+        include_history: bool,
+
+        /// Include rows whose status is Superseded
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        include_superseded: bool,
+
+        /// Include rows whose status is Expired (or whose expires_at_ms has passed)
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        include_expired: bool,
+    },
+
+    /// Import an OMF 1.0 JSON document into a tenant.
+    ///
+    /// Reads the document from `--input` (or stdin if `-` / omitted).
+    /// Use `--dry-run` for a read-only preview that reports counts
+    /// without writing.
+    ImportOmf {
+        /// Tenant identifier
+        #[arg(long)]
+        tenant_id: String,
+
+        /// Input file path. `-` or omitted reads from stdin.
+        #[arg(long)]
+        input: Option<PathBuf>,
+
+        /// Include items whose top-level status is "archived" or "expired"
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        include_archived: bool,
+
+        /// Optional trigram Jaccard threshold. Absent = exact-canonical only.
+        #[arg(long)]
+        fuzzy_threshold: Option<f32>,
+
+        /// Preview only — compute counts without writing.
+        #[arg(long, default_value_t = false, action = ArgAction::Set)]
+        dry_run: bool,
+    },
+
     /// Initialize memd guardrails and MCP config snippets for agent workflows
     Init {
         /// Tenant identifier to enforce in generated policies
@@ -405,6 +464,104 @@ pub async fn run_cli<S: Store>(
             }
         }
 
+        CliCommand::ExportOmf {
+            tenant_id,
+            project_id,
+            output,
+            include_history,
+            include_superseded,
+            include_expired,
+        } => {
+            let tenant = TenantId::new(&tenant_id)?;
+            let ps = store.as_persistent().ok_or_else(|| {
+                crate::error::MemdError::StorageError(
+                    "export-omf requires a persistent store".to_string(),
+                )
+            })?;
+
+            let opts = crate::omf::export::ExportOptions {
+                project_id,
+                include_history,
+                include_superseded,
+                include_expired,
+            };
+            let doc = crate::omf::export::export_omf(ps, &tenant, opts).await?;
+            let rendered = serde_json::to_string_pretty(&doc)?;
+
+            if let Some(path) = output {
+                std::fs::write(&path, format!("{rendered}\n"))?;
+                let summary = json!({
+                    "tenant_id": tenant.to_string(),
+                    "memories": doc.memories.len(),
+                    "output_path": path,
+                });
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+            } else {
+                println!("{rendered}");
+            }
+        }
+
+        CliCommand::ImportOmf {
+            tenant_id,
+            input,
+            include_archived,
+            fuzzy_threshold,
+            dry_run,
+        } => {
+            let tenant = TenantId::new(&tenant_id)?;
+
+            // Ensure tenant directory exists for real imports. Preview-only
+            // calls don't touch storage but materialising the dir costs
+            // nothing and keeps CLI ordering consistent.
+            if let Some(tm) = tenant_manager {
+                tm.ensure_tenant_dir(&tenant)?;
+            }
+
+            let raw = read_omf_input(input.as_deref())?;
+            let doc: crate::omf::OmfDocument = serde_json::from_str(&raw).map_err(|e| {
+                crate::error::MemdError::ValidationError(format!(
+                    "input is not a valid OMF 1.0 document: {e}"
+                ))
+            })?;
+
+            let ps = store.as_persistent().ok_or_else(|| {
+                crate::error::MemdError::StorageError(
+                    "import-omf requires a persistent store".to_string(),
+                )
+            })?;
+            let opts = crate::omf::import::ImportOptions {
+                include_archived,
+                fuzzy_threshold,
+            };
+
+            if dry_run {
+                let preview =
+                    crate::omf::import::preview_omf_import(ps, &tenant, &doc, opts).await?;
+                let output = json!({
+                    "tenant_id": tenant.to_string(),
+                    "dry_run": true,
+                    "total": preview.total,
+                    "to_import": preview.to_import,
+                    "duplicates": preview.duplicates,
+                    "filtered": preview.filtered,
+                    "unscoped": preview.unscoped,
+                    "by_project": preview.by_project,
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                let result = crate::omf::import::import_omf(ps, &tenant, &doc, opts).await?;
+                let output = json!({
+                    "tenant_id": tenant.to_string(),
+                    "dry_run": false,
+                    "total": result.total,
+                    "imported": result.imported,
+                    "duplicates": result.duplicates,
+                    "skipped": result.skipped,
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
+        }
+
         CliCommand::Init {
             tenant_id,
             scope,
@@ -523,6 +680,40 @@ pub async fn run_cli<S: Store>(
     }
 
     Ok(())
+}
+
+/// Read an OMF document payload for `memd import-omf`.
+///
+/// `None` or a path of `-` reads from stdin; any other path reads the
+/// file contents. Errors surface as `ValidationError` so the CLI's top-
+/// level error reporting treats them as user-correctable input issues
+/// rather than storage failures.
+fn read_omf_input(path: Option<&Path>) -> Result<String> {
+    let raw = match path {
+        None => read_stdin_to_string()?,
+        Some(p) if p.as_os_str() == std::ffi::OsStr::new("-") => read_stdin_to_string()?,
+        Some(p) => std::fs::read_to_string(p).map_err(|e| {
+            crate::error::MemdError::ValidationError(format!(
+                "failed to read {}: {e}",
+                p.display()
+            ))
+        })?,
+    };
+    if raw.trim().is_empty() {
+        return Err(crate::error::MemdError::ValidationError(
+            "OMF input is empty".to_string(),
+        ));
+    }
+    Ok(raw)
+}
+
+fn read_stdin_to_string() -> Result<String> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin().read_to_string(&mut buf).map_err(|e| {
+        crate::error::MemdError::ValidationError(format!("failed to read stdin: {e}"))
+    })?;
+    Ok(buf)
 }
 
 fn absolutize_project_dir(path: &Path) -> Result<PathBuf> {

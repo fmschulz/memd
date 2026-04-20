@@ -694,6 +694,171 @@ async fn preview_fails_closed_on_malformed_trusted_lifecycle() {
 }
 
 // --------------------------------------------------------------
+// F6 CLI — memd export-omf / memd import-omf.
+// --------------------------------------------------------------
+
+#[tokio::test]
+async fn cli_export_omf_writes_json_document_to_output_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = persistent_store(tmp.path()).await;
+
+    // Seed via the Store trait (no MCP layer needed for this CLI test).
+    store
+        .add(memd::types::MemoryChunk::new(
+            tenant("t"),
+            "cli exported fact",
+            memd::types::ChunkType::Doc,
+        ))
+        .await
+        .unwrap();
+
+    let out_path = tmp.path().join("export.omf.json");
+    memd::cli::run_cli(
+        store.as_ref(),
+        None,
+        memd::cli::CliCommand::ExportOmf {
+            tenant_id: "t".to_string(),
+            project_id: None,
+            output: Some(out_path.clone()),
+            include_history: false,
+            include_superseded: true,
+            include_expired: true,
+        },
+    )
+    .await
+    .expect("export-omf succeeds");
+
+    let written = std::fs::read_to_string(&out_path).unwrap();
+    let doc: memd::omf::OmfDocument =
+        serde_json::from_str(&written).expect("exported file parses as OmfDocument");
+    assert_eq!(doc.omf, OMF_VERSION);
+    assert_eq!(doc.memories.len(), 1);
+    assert_eq!(doc.memories[0].content, "cli exported fact");
+}
+
+#[tokio::test]
+async fn cli_import_omf_reads_json_file_and_writes_chunks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = persistent_store(tmp.path()).await;
+
+    // Write a nanomem-source OMF file to disk, then import it through the CLI.
+    let doc = memd::omf::OmfDocument {
+        omf: OMF_VERSION.into(),
+        exported_at: "2026-04-18T00:00:00Z".into(),
+        source: Some(memd::omf::OmfSource {
+            app: "nanomem".into(),
+        }),
+        memories: vec![
+            memd::omf::OmfItem {
+                content: "cli imported A".into(),
+                extensions: json!({"memd": {"project_id": "p1"}}),
+                ..Default::default()
+            },
+            memd::omf::OmfItem {
+                content: "cli imported B".into(),
+                extensions: json!({"memd": {"project_id": "p1"}}),
+                ..Default::default()
+            },
+        ],
+    };
+    let input_path = tmp.path().join("import.omf.json");
+    std::fs::write(&input_path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+    memd::cli::run_cli(
+        store.as_ref(),
+        None,
+        memd::cli::CliCommand::ImportOmf {
+            tenant_id: "t".to_string(),
+            input: Some(input_path),
+            include_archived: true,
+            fuzzy_threshold: None,
+            dry_run: false,
+        },
+    )
+    .await
+    .expect("import-omf succeeds");
+
+    let metas = store
+        .metadata()
+        .list_for_export(&tenant("t"), Some("p1"), false)
+        .unwrap();
+    assert_eq!(metas.len(), 2);
+}
+
+#[tokio::test]
+async fn cli_import_omf_dry_run_does_not_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = persistent_store(tmp.path()).await;
+
+    let doc = memd::omf::OmfDocument {
+        omf: OMF_VERSION.into(),
+        exported_at: "2026-04-18T00:00:00Z".into(),
+        source: Some(memd::omf::OmfSource {
+            app: "nanomem".into(),
+        }),
+        memories: vec![memd::omf::OmfItem {
+            content: "dry run candidate".into(),
+            ..Default::default()
+        }],
+    };
+    let input_path = tmp.path().join("preview.omf.json");
+    std::fs::write(&input_path, serde_json::to_string(&doc).unwrap()).unwrap();
+
+    memd::cli::run_cli(
+        store.as_ref(),
+        None,
+        memd::cli::CliCommand::ImportOmf {
+            tenant_id: "t".to_string(),
+            input: Some(input_path),
+            include_archived: true,
+            fuzzy_threshold: None,
+            dry_run: true,
+        },
+    )
+    .await
+    .expect("dry-run succeeds");
+
+    let metas = store
+        .metadata()
+        .list_for_export(&tenant("t"), None, false)
+        .unwrap();
+    assert!(metas.is_empty(), "dry_run=true must not write");
+}
+
+#[tokio::test]
+async fn cli_export_omf_no_output_prints_to_stdout_roundtripable() {
+    // This test is a belt-and-braces check that the stdout path compiles
+    // and runs without a file argument. We don't capture stdout here —
+    // just confirm the call succeeds. The output-to-file path is covered
+    // above with content assertions.
+    let tmp = tempfile::tempdir().unwrap();
+    let store = persistent_store(tmp.path()).await;
+    store
+        .add(memd::types::MemoryChunk::new(
+            tenant("t"),
+            "any",
+            memd::types::ChunkType::Doc,
+        ))
+        .await
+        .unwrap();
+
+    memd::cli::run_cli(
+        store.as_ref(),
+        None,
+        memd::cli::CliCommand::ExportOmf {
+            tenant_id: "t".to_string(),
+            project_id: None,
+            output: None,
+            include_history: false,
+            include_superseded: true,
+            include_expired: true,
+        },
+    )
+    .await
+    .expect("stdout export succeeds");
+}
+
+// --------------------------------------------------------------
 // F5 MCP tools — export_omf / preview_omf_import / import_omf.
 // --------------------------------------------------------------
 
