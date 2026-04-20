@@ -316,6 +316,13 @@ pub struct AddBatchParams {
     #[serde(default)]
     pub tenant_id: String,
     pub chunks: Vec<BatchChunkParams>,
+    /// Optional Track D conflict-aware ingestion knob, applied per
+    /// chunk in the batch. Same shape and semantics as
+    /// `AddParams::supersede_near_duplicates`. When set, the response
+    /// gains a `superseded_ids: [[...], ...]` parallel array (one
+    /// inner array per input chunk).
+    #[serde(default)]
+    pub supersede_near_duplicates: Option<DedupSpec>,
 }
 
 /// Dataset reference supplied to task tools.
@@ -4495,6 +4502,125 @@ pub async fn handle_memory_add_batch<S: Store>(
             .map_err(|e| McpError::ToolError(e.to_string()))?;
     }
 
+    // Resolve the optional Track D dedup spec once for the whole batch.
+    let resolved_dedup = match params.supersede_near_duplicates.as_ref() {
+        Some(spec) => crate::mcp::dedup::resolve_spec(spec)
+            .map_err(|e| McpError::ToolError(e.to_string()))?,
+        None => None,
+    };
+
+    // Track D path: when dedup is requested, fall out of the batched
+    // fast path entirely and treat each chunk independently — same
+    // contract as D3 on memory.add. The response gains a parallel
+    // `superseded_ids` array of arrays so callers can correlate.
+    if let Some(cfg) = resolved_dedup {
+        let ps = store.as_persistent().ok_or_else(|| {
+            McpError::ToolError(
+                "memory.add_batch with supersede_near_duplicates requires a persistent store"
+                    .into(),
+            )
+        })?;
+
+        // Pre-pass: consume params.chunks once and build the (chunk,
+        // delta, has_lifecycle, project_id) tuples up front so
+        // validation failures abort cleanly without committing half a
+        // batch. SourceParams is not Clone, so we have to move it out
+        // of chunk_params here rather than borrow inside the second
+        // pass.
+        let mut prepared: Vec<(MemoryChunk, LifecycleDelta, bool, Option<String>)> =
+            Vec::with_capacity(params.chunks.len());
+        for chunk_params in params.chunks {
+            let chunk_type = parse_chunk_type(&chunk_params.chunk_type)?;
+            let project_id_for_dedup = chunk_params.project_id.clone();
+            let mut chunk = MemoryChunk::new(tenant_id.clone(), &chunk_params.text, chunk_type);
+            if let Some(project_id) = &chunk_params.project_id {
+                chunk = chunk.with_project(ProjectId::new(Some(project_id.clone())));
+            }
+            if let Some(episode_id) = &chunk_params.episode_id {
+                validate_episode_id(episode_id)?;
+                let mut tags = chunk.tags.clone();
+                tags.push(make_episode_tag(episode_id));
+                chunk = chunk.with_tags(tags);
+            }
+            chunk = chunk.with_source(params_to_source(chunk_params.source));
+            if !chunk_params.tags.is_empty() {
+                let mut tags = chunk.tags.clone();
+                tags.extend(chunk_params.tags);
+                chunk = chunk.with_tags(tags);
+            }
+            let has_lifecycle =
+                chunk_params.expires_at_ms.is_some() || chunk_params.review_after_ms.is_some();
+            let delta = LifecycleDelta {
+                expires_at_ms: chunk_params.expires_at_ms.map(Some),
+                review_after_ms: chunk_params.review_after_ms.map(Some),
+                ..Default::default()
+            };
+            prepared.push((chunk, delta, has_lifecycle, project_id_for_dedup));
+        }
+
+        // Second pass: per-chunk dedup-or-add. Failures still leave
+        // earlier rows committed, matching the existing add_batch
+        // failure contract.
+        let mut chunk_ids: Vec<String> = Vec::with_capacity(prepared.len());
+        let mut superseded_ids: Vec<Vec<String>> = Vec::with_capacity(prepared.len());
+        for (chunk, delta, has_lifecycle, project_id) in prepared {
+            let candidates = crate::mcp::dedup::compute_dedup_candidates(
+                ps,
+                &tenant_id,
+                &chunk.text,
+                chunk.chunk_type,
+                project_id.as_deref(),
+                &cfg,
+            )?;
+            let new_id = if candidates.is_empty() {
+                if has_lifecycle {
+                    ps.add_chunk_with_lifecycle(chunk, delta.clone())
+                        .await
+                        .map_err(|e| McpError::ToolError(e.to_string()))?
+                } else {
+                    store
+                        .add(chunk)
+                        .await
+                        .map_err(|e| McpError::ToolError(e.to_string()))?
+                }
+            } else {
+                let first_old = &candidates[0];
+                let new_id = ps
+                    .supersede_chunk(&tenant_id, first_old, chunk)
+                    .await
+                    .map_err(|e| McpError::ToolError(e.to_string()))?;
+                if has_lifecycle {
+                    let mut d = delta.clone();
+                    if d.lifecycle_updated_at_ms.is_none() {
+                        d.lifecycle_updated_at_ms = Some(current_time_ms());
+                    }
+                    ps.update_lifecycle(&tenant_id, &new_id, &d)
+                        .await
+                        .map_err(|e| McpError::ToolError(e.to_string()))?;
+                }
+                new_id
+            };
+            // Mirror D3: only the first candidate is actually linked
+            // by supersede_chunk; report only what we changed.
+            let linked = if candidates.is_empty() {
+                Vec::new()
+            } else {
+                vec![candidates[0].to_string()]
+            };
+            chunk_ids.push(new_id.to_string());
+            superseded_ids.push(linked);
+        }
+
+        info!(
+            count = chunk_ids.len(),
+            "batch add (with dedup) completed"
+        );
+        return format_mcp_response(&serde_json::json!({
+            "chunk_ids": chunk_ids,
+            "superseded_ids": superseded_ids,
+        }));
+    }
+
     // If any chunk carries a temporal overlay field, fall out of the
     // batched fast path and write each chunk through
     // `add_chunk_with_lifecycle` so per-row lifecycle metadata is
@@ -8129,6 +8255,7 @@ mod tests {
 
         let params = AddBatchParams {
             tenant_id: "test".to_string(),
+            supersede_near_duplicates: None,
             chunks: vec![
                 BatchChunkParams {
                     text: "chunk 1".to_string(),
@@ -8151,7 +8278,7 @@ mod tests {
                     tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
-                
+
                 mode: None,
                 },
             ],
