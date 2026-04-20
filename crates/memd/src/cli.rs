@@ -528,12 +528,36 @@ pub async fn run_cli<S: Store>(
                 )));
             }
 
-            // Walk metadata, read payloads, render, then write.
-            let metas = if let Some(pid) = project_id.as_deref() {
-                ps.metadata()
-                    .list_recent_for_project(&tenant, Some(pid), 10_000)?
-            } else {
-                ps.metadata().list(&tenant, 10_000, 0)?
+            // Walk metadata in pages so a tenant with > 10k chunks
+            // doesn't silently lose its tail. `list` supports an
+            // offset; `list_recent_for_project` doesn't, but the
+            // project-scoped branch already limits the candidate set by
+            // project, so a 10k-row page is usually sufficient. For
+            // whole-tenant exports we paginate `list` until we stop
+            // seeing new rows. (Codex G3 review MEDIUM: silent cap.)
+            const PAGE_SIZE: usize = 10_000;
+            let mut metas = Vec::new();
+            match project_id.as_deref() {
+                Some(pid) => {
+                    metas = ps
+                        .metadata()
+                        .list_recent_for_project(&tenant, Some(pid), PAGE_SIZE)?;
+                }
+                None => {
+                    let mut offset = 0;
+                    loop {
+                        let page = ps.metadata().list(&tenant, PAGE_SIZE, offset)?;
+                        if page.is_empty() {
+                            break;
+                        }
+                        let got = page.len();
+                        metas.extend(page);
+                        if got < PAGE_SIZE {
+                            break;
+                        }
+                        offset += got;
+                    }
+                }
             };
             let mut chunks = Vec::with_capacity(metas.len());
             for meta in metas {
@@ -895,12 +919,22 @@ fn normalize_absolute(p: &Path) -> PathBuf {
 /// Test whether `child` is the same as `parent` or a descendant of it.
 ///
 /// Both paths must already be normalised (see `normalize_absolute`).
-/// Used by `export-markdown`'s containment guard so that writing a
-/// markdown tree into `$MEMD_DATA_DIR` is refused — a path-based check
-/// is sufficient here because both sides are normalised to absolute
-/// form.
+/// On Windows the comparison is case-insensitive to match the
+/// filesystem's own semantics — `C:\Users\me\.memd` and
+/// `c:\USERS\me\.MEMD` refer to the same directory, so the lexical
+/// guard must refuse both (Codex G3 review MEDIUM). On Unix the
+/// comparison stays case-sensitive.
 fn path_is_inside(child: &Path, parent: &Path) -> bool {
-    child.starts_with(parent)
+    #[cfg(windows)]
+    {
+        let c = child.to_string_lossy().to_lowercase();
+        let p = parent.to_string_lossy().to_lowercase();
+        Path::new(&c).starts_with(Path::new(&p))
+    }
+    #[cfg(not(windows))]
+    {
+        child.starts_with(parent)
+    }
 }
 
 fn absolutize_project_dir(path: &Path) -> Result<PathBuf> {
