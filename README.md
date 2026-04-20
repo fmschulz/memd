@@ -25,6 +25,7 @@ restarts without copy-paste.
 - [Observability](#observability)
 - [Benchmarks](#benchmarks)
 - [Optional ONNX cross-encoder](#optional-onnx-cross-encoder)
+- [Compiled Wiki](#compiled-wiki)
 - [Agent skill](#agent-skill)
 - [More](#more)
 
@@ -406,6 +407,30 @@ Real ONNX smoke test (requires network on first run):
 cargo test -p memd --features cross-encoder-reranker \
   smoke_real_onnx_scores_relevant_pair_higher -- --ignored --nocapture
 ```
+
+## Compiled Wiki
+
+[`tools/wiki/`](tools/wiki) ships `memd-wiki`, a Python console script
+that compiles a Karpathy-style markdown wiki from live `memd` project
+state through the MCP HTTP API. Pages include `index.md`, `log.md`,
+`projects/<project_id>.md`, `tasks/<task_id>.md`, and
+`libraries/{failures,decisions,evidence,highlights}.md`, each
+trust-aware (displays `trust_tier`, `requires_verification`, and
+`grounded_by` links).
+
+Install (stdlib-only, Python ≥ 3.11):
+
+```bash
+pip install -e tools/wiki/
+memd-wiki build
+memd-wiki lint
+```
+
+`memd-wiki` is version-aligned with the `memd` binary it talks to
+(MAJOR.MINOR must match; patch skew warns). See
+[`tools/wiki/README.md`](tools/wiki/README.md) for install paths,
+`.memd/config.json` `wiki` subsection, containment guard, determinism
+contract, and the 5-check lint table.
 
 ## Agent skill
 
