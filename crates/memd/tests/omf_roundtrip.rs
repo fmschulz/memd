@@ -14,6 +14,7 @@ use memd::omf::export::{export_omf, ExportOptions};
 use memd::omf::import::{import_omf, preview_omf_import, ImportOptions, ImportResult, PreviewResult};
 use memd::omf::{OmfDocument, OmfItem, OmfSource, MEMD_EXT_VERSION, OMF_VERSION};
 use memd::store::metadata::MetadataStore;
+use memd::store::persistent::PersistentStore;
 use memd::store::Store;
 use memd::types::lifecycle::{LifecycleDelta, MemoryTier};
 use memd::types::ProjectId;
@@ -1457,4 +1458,402 @@ async fn export_omf_respects_include_flags_for_superseded() {
         "opt-out drops the superseded row"
     );
     assert_eq!(without_superseded.memories[0].content, "superseding fact");
+}
+
+// Item 5 — memd↔memd supersession round-trip.
+//
+// Target: a supersession chain A → B → C, exported from source tenant
+// and re-imported into a fresh tenant, MUST preserve the supersession
+// edges. Today the export emits `extensions.memd.chunk_id` and the
+// `supersedes` / `superseded_by` fields but the importer drops them
+// unconditionally, so the round-trip lost the graph.
+#[tokio::test]
+async fn import_omf_roundtrips_supersession_chain() {
+    use memd::types::{ChunkId, ChunkType, MemoryChunk};
+
+    let (src_server, _src_tmp) = test_server().await;
+    let src_ps = src_server.store().as_persistent().unwrap();
+
+    // Build a 3-chunk chain A → B → C in the source tenant via the
+    // persistent-store supersede API, which is the same code path that
+    // `memory.supersede` uses and which writes atomic supersession
+    // edges.
+    let a_id: ChunkId = add_chunk(&src_server, "src", "revision A").await;
+
+    let b_chunk = MemoryChunk::new(tenant("src"), "revision B", ChunkType::Doc)
+        .with_project(ProjectId::none());
+    let b_id: ChunkId = src_ps
+        .supersede_chunk(&tenant("src"), &a_id, b_chunk)
+        .await
+        .expect("supersede A → B");
+
+    let c_chunk = MemoryChunk::new(tenant("src"), "revision C", ChunkType::Doc)
+        .with_project(ProjectId::none());
+    let c_id: ChunkId = src_ps
+        .supersede_chunk(&tenant("src"), &b_id, c_chunk)
+        .await
+        .expect("supersede B → C");
+
+    // Sanity: the source chain is well-formed before we touch OMF.
+    let src_a_meta = src_ps
+        .metadata()
+        .get(&tenant("src"), &a_id)
+        .expect("src A metadata")
+        .expect("A exists");
+    assert_eq!(src_a_meta.lifecycle.superseded_by.as_ref(), Some(&b_id));
+    let src_b_meta = src_ps
+        .metadata()
+        .get(&tenant("src"), &b_id)
+        .expect("src B metadata")
+        .expect("B exists");
+    assert_eq!(src_b_meta.lifecycle.supersedes.as_ref(), Some(&a_id));
+    assert_eq!(src_b_meta.lifecycle.superseded_by.as_ref(), Some(&c_id));
+
+    // Export the whole chain. include_superseded=true is the default,
+    // so A and B survive the export.
+    let doc = export_omf(src_ps, &tenant("src"), ExportOptions::default())
+        .await
+        .expect("export_omf");
+    assert_eq!(doc.memories.len(), 3, "chain ABC exported intact");
+
+    // Import into a pristine tenant. Trust gate ON (source.app='memd',
+    // v=MEMD_EXT_VERSION) — the export writer sets these.
+    let (dst_server, _dst_tmp) = test_server().await;
+    let dst_ps = dst_server.store().as_persistent().unwrap();
+    let res = import_omf(dst_ps, &tenant("dst"), &doc, ImportOptions::default())
+        .await
+        .expect("import_omf");
+    assert_eq!(
+        res,
+        ImportResult {
+            total: 3,
+            imported: 3,
+            duplicates: 0,
+            skipped: 0
+        }
+    );
+
+    // Walk the imported tenant. Source chunk IDs were NEW ChunkIds on
+    // import (UUIDv7 generated inside add_chunk_with_lifecycle), so the
+    // dest-side IDs are different. Look up by content text.
+    let dst_rows = dst_ps
+        .metadata()
+        .list_for_export(&tenant("dst"), None, true)
+        .expect("list_for_export dst");
+    let mut by_text: std::collections::HashMap<String, memd::store::metadata::ChunkMetadata> =
+        std::collections::HashMap::new();
+    for meta in dst_rows {
+        let chunk = <PersistentStore as Store>::get(dst_ps, &tenant("dst"), &meta.chunk_id)
+            .await
+            .expect("dst get")
+            .expect("dst chunk present");
+        by_text.insert(chunk.text, meta);
+    }
+    let dst_a = by_text.remove("revision A").expect("revision A imported");
+    let dst_b = by_text.remove("revision B").expect("revision B imported");
+    let dst_c = by_text.remove("revision C").expect("revision C imported");
+
+    // The chain edges are reconstructed on the DEST-side chunk IDs.
+    assert_eq!(
+        dst_a.lifecycle.superseded_by.as_ref(),
+        Some(&dst_b.chunk_id),
+        "A.superseded_by → dest-B"
+    );
+    assert_eq!(
+        dst_b.lifecycle.supersedes.as_ref(),
+        Some(&dst_a.chunk_id),
+        "B.supersedes → dest-A"
+    );
+    assert_eq!(
+        dst_b.lifecycle.superseded_by.as_ref(),
+        Some(&dst_c.chunk_id),
+        "B.superseded_by → dest-C"
+    );
+    assert_eq!(
+        dst_c.lifecycle.supersedes.as_ref(),
+        Some(&dst_b.chunk_id),
+        "C.supersedes → dest-B"
+    );
+    // C is the current head: no onward pointer.
+    assert!(dst_c.lifecycle.superseded_by.is_none());
+    // A is the oldest: no back-pointer.
+    assert!(dst_a.lifecycle.supersedes.is_none());
+
+    // Statuses round-trip: A and B were superseded on the source; C
+    // was the head (Final). The importer honors lifecycle.status for
+    // trusted docs via extract_lifecycle_strict.
+    assert_eq!(dst_a.status.to_string(), "superseded");
+    assert_eq!(dst_b.status.to_string(), "superseded");
+    assert_eq!(dst_c.status.to_string(), "final");
+}
+
+// Item 5 — partial-chain round-trip: when the middle of a chain is
+// excluded from the export, the importer must silently drop the edges
+// it cannot translate rather than fabricating a pointer to a chunk
+// that wasn't imported.
+#[tokio::test]
+async fn import_omf_drops_edges_with_missing_sides_on_partial_export() {
+    use memd::types::{ChunkId, ChunkType, MemoryChunk};
+
+    let (src_server, _src_tmp) = test_server().await;
+    let src_ps = src_server.store().as_persistent().unwrap();
+
+    // Build A → B (no further chunk — B is the live head).
+    let a_id: ChunkId = add_chunk(&src_server, "src", "original").await;
+    let b_chunk = MemoryChunk::new(tenant("src"), "replacement", ChunkType::Doc)
+        .with_project(ProjectId::none());
+    let b_id: ChunkId = src_ps
+        .supersede_chunk(&tenant("src"), &a_id, b_chunk)
+        .await
+        .expect("supersede A → B");
+    let _ = b_id;
+
+    // Export only the LIVE subset (drop the superseded A). This leaves
+    // B pointing to a chunk that isn't in the doc.
+    let doc = export_omf(
+        src_ps,
+        &tenant("src"),
+        ExportOptions {
+            include_superseded: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("export_omf live-only");
+    assert_eq!(doc.memories.len(), 1, "only B exported");
+
+    // Import into a fresh tenant.
+    let (dst_server, _dst_tmp) = test_server().await;
+    let dst_ps = dst_server.store().as_persistent().unwrap();
+    let res = import_omf(dst_ps, &tenant("dst"), &doc, ImportOptions::default())
+        .await
+        .expect("import_omf");
+    assert_eq!(res.imported, 1);
+
+    // B's `supersedes` edge pointed to A (which wasn't imported), so
+    // the importer MUST drop the pointer rather than translate it to a
+    // bogus ID.
+    let rows = dst_ps
+        .metadata()
+        .list_for_export(&tenant("dst"), None, true)
+        .expect("dst list");
+    assert_eq!(rows.len(), 1);
+    let dst_b = &rows[0];
+    assert!(
+        dst_b.lifecycle.supersedes.is_none(),
+        "unreachable source A → supersedes dropped, not translated to a dangling ID"
+    );
+    assert!(dst_b.lifecycle.superseded_by.is_none());
+}
+
+// Item 5 — untrusted source-app docs get default lifecycle AND no
+// supersession edges reconstructed, matching the F3 trust gate.
+#[tokio::test]
+async fn import_omf_does_not_reconstruct_supersession_for_untrusted_source() {
+    use memd::types::ChunkId;
+
+    // Build a hand-rolled OMF doc that claims to carry a supersession
+    // chain but declares source.app != 'memd'. The untrusted gate must
+    // prevent edge replay even though the chunk_id markers are present.
+    let a_src_id = ChunkId::new().to_string();
+    let b_src_id = ChunkId::new().to_string();
+
+    let mk_item = |text: &str, src_id: &str, supersedes: Option<&str>, superseded_by: Option<&str>| {
+        OmfItem {
+            content: text.to_string(),
+            extensions: json!({
+                "memd": {
+                    "v": MEMD_EXT_VERSION,
+                    "chunk_id": src_id,
+                    "project_id": null,
+                    "chunk_type": "doc",
+                    "ingestion_mode": "document",
+                    "lifecycle": {
+                        "status": "final",
+                        "tier": "long_term",
+                        "supersedes": supersedes,
+                        "superseded_by": superseded_by,
+                    },
+                },
+            }),
+            ..Default::default()
+        }
+    };
+
+    let doc = OmfDocument {
+        omf: OMF_VERSION.to_string(),
+        exported_at: "2026-04-20T00:00:00Z".to_string(),
+        source: Some(OmfSource { app: "nanomem".to_string() }),
+        memories: vec![
+            mk_item("older", &a_src_id, None, Some(&b_src_id)),
+            mk_item("newer", &b_src_id, Some(&a_src_id), None),
+        ],
+    };
+
+    let (dst_server, _dst_tmp) = test_server().await;
+    let dst_ps = dst_server.store().as_persistent().unwrap();
+    let res = import_omf(dst_ps, &tenant("dst"), &doc, ImportOptions::default())
+        .await
+        .expect("import_omf");
+    assert_eq!(res.imported, 2);
+
+    // Untrusted source → no edges replayed. Both rows are Final, with
+    // supersedes / superseded_by None.
+    let rows = dst_ps
+        .metadata()
+        .list_for_export(&tenant("dst"), None, true)
+        .expect("dst list");
+    assert_eq!(rows.len(), 2);
+    for r in &rows {
+        assert!(r.lifecycle.supersedes.is_none(), "untrusted: no reconstructed back-edge");
+        assert!(r.lifecycle.superseded_by.is_none(), "untrusted: no reconstructed forward-edge");
+        assert_eq!(r.status.to_string(), "final", "untrusted imports default to Final");
+    }
+}
+
+// Codex Item 5 round-1 MEDIUM: a trusted doc that declares a forked
+// `supersedes` graph (two successors of the same old chunk) or
+// duplicate source chunk_ids must FAIL before writing any chunks, so
+// a malformed input can't leave the dest tenant half-imported.
+#[tokio::test]
+async fn import_omf_rejects_forked_supersession_graph_before_any_write() {
+    use memd::types::ChunkId;
+
+    let a_src = ChunkId::new().to_string();
+    let b_src = ChunkId::new().to_string();
+    let c_src = ChunkId::new().to_string();
+
+    let mk_item = |text: &str, src_id: &str, supersedes: Option<&str>| OmfItem {
+        content: text.to_string(),
+        extensions: json!({
+            "memd": {
+                "v": MEMD_EXT_VERSION,
+                "chunk_id": src_id,
+                "project_id": null,
+                "chunk_type": "doc",
+                "ingestion_mode": "document",
+                "lifecycle": {
+                    "status": "final",
+                    "tier": "long_term",
+                    "supersedes": supersedes,
+                    "superseded_by": null,
+                },
+            },
+        }),
+        ..Default::default()
+    };
+
+    // Two successors of A: B.supersedes=A AND C.supersedes=A. Forked graph.
+    let doc = OmfDocument {
+        omf: OMF_VERSION.to_string(),
+        exported_at: "2026-04-20T00:00:00Z".to_string(),
+        source: Some(OmfSource { app: "memd".to_string() }),
+        memories: vec![
+            mk_item("A", &a_src, None),
+            mk_item("B", &b_src, Some(&a_src)),
+            mk_item("C", &c_src, Some(&a_src)),
+        ],
+    };
+
+    let (dst_server, _dst_tmp) = test_server().await;
+    let dst_ps = dst_server.store().as_persistent().unwrap();
+    let err = import_omf(dst_ps, &tenant("dst"), &doc, ImportOptions::default())
+        .await
+        .expect_err("forked supersession must fail-closed");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("forks") || msg.contains("multiple successors"),
+        "error should name the fork: {msg}"
+    );
+
+    // Nothing was written.
+    let rows = dst_ps
+        .metadata()
+        .list_for_export(&tenant("dst"), None, true)
+        .expect("dst list after failed import");
+    assert!(rows.is_empty(), "no chunks written on pre-flight fail");
+}
+
+#[tokio::test]
+async fn import_omf_rejects_duplicate_source_chunk_ids_before_any_write() {
+    use memd::types::ChunkId;
+
+    let same_id = ChunkId::new().to_string();
+
+    let mk_item = |text: &str| OmfItem {
+        content: text.to_string(),
+        extensions: json!({
+            "memd": {
+                "v": MEMD_EXT_VERSION,
+                "chunk_id": same_id,  // intentionally the same
+                "project_id": null,
+                "chunk_type": "doc",
+                "ingestion_mode": "document",
+                "lifecycle": {
+                    "status": "final",
+                    "tier": "long_term",
+                },
+            },
+        }),
+        ..Default::default()
+    };
+
+    let doc = OmfDocument {
+        omf: OMF_VERSION.to_string(),
+        exported_at: "2026-04-20T00:00:00Z".to_string(),
+        source: Some(OmfSource { app: "memd".to_string() }),
+        memories: vec![mk_item("first"), mk_item("second")],
+    };
+
+    let (dst_server, _dst_tmp) = test_server().await;
+    let dst_ps = dst_server.store().as_persistent().unwrap();
+    let err = import_omf(dst_ps, &tenant("dst"), &doc, ImportOptions::default())
+        .await
+        .expect_err("duplicate source chunk_ids must fail-closed");
+    assert!(err.to_string().contains("duplicates"), "error should name the duplicate: {err}");
+
+    let rows = dst_ps
+        .metadata()
+        .list_for_export(&tenant("dst"), None, true)
+        .expect("dst list after failed import");
+    assert!(rows.is_empty(), "no chunks written on pre-flight fail");
+}
+
+// Codex Item 5 round-1 MEDIUM: preview must share fail-closed
+// behavior with real import on malformed trusted supersession data,
+// or callers get a false "would import" on a doc the real import
+// will reject.
+#[tokio::test]
+async fn preview_omf_import_matches_real_import_on_malformed_supersession_refs() {
+    let doc = OmfDocument {
+        omf: OMF_VERSION.to_string(),
+        exported_at: "2026-04-20T00:00:00Z".to_string(),
+        source: Some(OmfSource { app: "memd".to_string() }),
+        memories: vec![OmfItem {
+            content: "bad".to_string(),
+            extensions: json!({
+                "memd": {
+                    "v": MEMD_EXT_VERSION,
+                    "chunk_id": "not-a-uuid",
+                    "lifecycle": {
+                        "status": "final",
+                        "tier": "long_term",
+                    },
+                },
+            }),
+            ..Default::default()
+        }],
+    };
+
+    let (dst_server, _dst_tmp) = test_server().await;
+    let dst_ps = dst_server.store().as_persistent().unwrap();
+    let preview_err = preview_omf_import(dst_ps, &tenant("dst"), &doc, ImportOptions::default())
+        .await
+        .expect_err("preview must fail when real import would");
+    let import_err = import_omf(dst_ps, &tenant("dst"), &doc, ImportOptions::default())
+        .await
+        .expect_err("real import must fail on malformed chunk_id");
+    // Both errors share the same shape/message, so a caller can't
+    // tell preview apart from real import on validity decisions.
+    assert_eq!(preview_err.to_string(), import_err.to_string());
 }

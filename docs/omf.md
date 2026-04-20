@@ -96,19 +96,30 @@ The `lifecycle` object carries:
 |-------|------|---------|----------------------------|
 | `status` | string | yes | yes — `final` / `superseded` / `expired` / `draft` / `error` / `deleted` |
 | `tier` | string | yes | yes — `working` / `long_term` / `history` |
-| `supersedes` | string or null | yes | **no** (informational; see note) |
-| `superseded_by` | string or null | yes | **no** (informational; see note) |
+| `supersedes` | string or null | yes | yes — reconstructed via source→target ID translation (see note) |
+| `superseded_by` | string or null | yes | derived from the sibling item's `supersedes` (see note) |
 | `expires_at_ms` | integer or null | yes | yes |
 | `review_after_ms` | integer or null | yes | yes |
 | `lifecycle_updated_at_ms` | integer | yes | yes |
 
-**Note on supersession edges.** `supersedes` and `superseded_by` carry
-the *source server's* `chunk_id` values. Because import mints a fresh
-`chunk_id` for each row, the edge would dangle on the target server.
-memd's import intentionally drops these two fields rather than
-preserving broken references. A future version that wants round-trip
-fidelity across servers would need ordered-import + ID translation, or
-a `source_chunk_id → target_chunk_id` remap pass after the main import.
+**Supersession edges round-trip (Item 5).** `supersedes` and
+`superseded_by` carry the *source server's* `chunk_id` values, and the
+item's own `extensions.memd.chunk_id` carries its own source-side id.
+`import_omf` writes each chunk first (pass 1) to assign fresh
+target-side ids, then replays each `supersedes` edge via a
+`source_chunk_id → target_chunk_id` map through
+`MetadataStore::atomic_supersede` (pass 2). Only the `supersedes`
+side is replayed; the symmetric `superseded_by` pointer is written by
+`atomic_supersede` as part of the same transaction.
+
+An edge whose other side is NOT in the document (partial export — for
+example `include_superseded=false` drops the older side; or a chain
+where only the live head is exported) is silently dropped rather than
+translated to a dangling id. The resulting dest-side row keeps its
+parsed `status` (e.g. `Superseded`) but has `superseded_by = None`,
+honestly labelling "I was superseded on the source, but my successor
+is not in this document". This is symmetric: an orphaned `supersedes`
+pointer is likewise dropped.
 
 ## Trust gate
 
