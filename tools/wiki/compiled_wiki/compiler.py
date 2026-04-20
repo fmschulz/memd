@@ -122,7 +122,41 @@ def build_wiki(config: BuildConfig) -> BuildResult:
             }
         )
 
-    tasks.sort(key=lambda item: task_updated_at(item["resume"]), reverse=True)
+    # Primary: most-recently-updated first. Secondary: task_id for
+    # stable ordering when timestamps tie or when the MCP backend
+    # does not guarantee a specific order across runs.
+    tasks.sort(
+        key=lambda item: (
+            -task_updated_at(item["resume"]),
+            item["task_id"],
+        ),
+    )
+    # Sort each thread's artifacts by (timestamp desc, artifact_id asc)
+    # so render output does not depend on backend intra-thread order.
+    for task_payload in tasks:
+        thread = task_payload["thread"]
+        artifacts = thread.get("artifacts", [])
+        artifacts.sort(
+            key=lambda artifact: (
+                -int(artifact.get("timestamp_created") or 0),
+                str(artifact.get("artifact_id") or ""),
+            )
+        )
+        thread["artifacts"] = artifacts
+    # Sort each library's results by (task_id, artifact_id) so render
+    # output is stable across arbitrary backend permutations of the
+    # same logical result set. The backend's own ranking is lost for
+    # libraries that rely on it; plan §6 accepts this in exchange for
+    # true state-level determinism.
+    for library_payload in libraries.values():
+        results = library_payload.get("results", [])
+        results.sort(
+            key=lambda item: (
+                str(item.get("task_id") or ""),
+                str(item.get("artifact_id") or ""),
+            )
+        )
+        library_payload["results"] = results
     snapshot_at_ms = determine_snapshot_timestamp(project_payload, libraries, tasks)
     log_entries = build_log_entries(tasks)
 
@@ -206,8 +240,32 @@ def build_log_entries(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "summary": artifact_summary(artifact),
                 }
             )
-    entries.sort(key=lambda entry: entry["timestamp_created"], reverse=True)
+    # Primary: most-recent first. Secondary: artifact_id for stable
+    # ordering when timestamps tie.
+    entries.sort(
+        key=lambda entry: (
+            -int(entry["timestamp_created"]),
+            str(entry["artifact_id"]),
+        )
+    )
     return entries
+
+
+MANIFEST_SCHEMA_VERSION = 1
+
+# Plan §6.1: prefixes of `output/` that the memd-wiki compiler owns.
+# v1 lints only within these; anything outside (e.g. a future
+# human-authored `concepts/` tree) is the caller's concern and the
+# compiler will not manage it. Pinned now so v2 can add LLM-authored
+# prefixes without changing the manifest format.
+COMPILER_OWNED_PREFIXES: tuple[str, ...] = (
+    "index.md",
+    "log.md",
+    "manifest.json",
+    "projects/",
+    "tasks/",
+    "libraries/",
+)
 
 
 def render_manifest(
@@ -218,6 +276,8 @@ def render_manifest(
     project_payload: dict[str, Any],
 ) -> str:
     manifest = {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "compiler_owned_prefixes": list(COMPILER_OWNED_PREFIXES),
         "source_snapshot_at_ms": snapshot_at_ms,
         "memd_url": config.memd_url,
         "tenant_id": config.tenant_id,
