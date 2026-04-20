@@ -21,6 +21,7 @@
 //!   (non-string status, unknown tier, non-integer ms) returns
 //!   `MemdError::ValidationError` rather than silently degrading.
 
+use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use serde_json::Value;
@@ -71,6 +72,22 @@ pub struct ImportResult {
     pub imported: usize,
     pub duplicates: usize,
     pub skipped: usize,
+}
+
+/// Outcome of one `preview_omf_import` call — Task F4 dry-run shape.
+///
+/// Counters mirror `ImportResult` semantically (`to_import` ↔ `imported`,
+/// `filtered` ↔ `skipped`), with one addition: `by_project` summarises
+/// how many prospective imports bucket under each project scope. The
+/// empty project slot is keyed as `"_"` so JSON marshallers don't have
+/// to pick between `null` and an omitted key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewResult {
+    pub total: usize,
+    pub to_import: usize,
+    pub duplicates: usize,
+    pub filtered: usize,
+    pub by_project: BTreeMap<String, usize>,
 }
 
 /// Import an OMF 1.0 document into a tenant.
@@ -144,6 +161,77 @@ pub async fn import_omf(
 
         store.add_chunk_with_lifecycle(chunk, initial).await?;
         result.imported += 1;
+    }
+
+    Ok(result)
+}
+
+/// Dry-run `import_omf`: walk the same dedup + filter path, count what
+/// would happen, and return. Never writes, never bumps cache versions,
+/// never calls `add_chunk_with_lifecycle`.
+///
+/// Shares the dedup helpers with `import_omf` so the preview cannot
+/// diverge from what the real import would do.
+pub async fn preview_omf_import(
+    store: &PersistentStore,
+    tenant_id: &TenantId,
+    doc: &OmfDocument,
+    opts: ImportOptions,
+) -> Result<PreviewResult> {
+    validate_omf(doc)?;
+
+    let mut result = PreviewResult {
+        total: doc.memories.len(),
+        to_import: 0,
+        duplicates: 0,
+        filtered: 0,
+        by_project: BTreeMap::new(),
+    };
+
+    for item in &doc.memories {
+        if !opts.include_archived
+            && matches!(item.status.as_deref(), Some("archived") | Some("expired"))
+        {
+            result.filtered += 1;
+            continue;
+        }
+
+        let project_id = extract_project_id(&item.extensions).or_else(|| item.category.clone());
+        let chunk_type = extract_chunk_type(&item.extensions).unwrap_or(ChunkType::Doc);
+        let canonical = canonicalize_for_type(&item.content, chunk_type);
+
+        if is_exact_duplicate(store, tenant_id, project_id.as_deref(), &canonical)? {
+            result.duplicates += 1;
+            continue;
+        }
+
+        if let Some(thr) = opts.fuzzy_threshold {
+            if is_fuzzy_duplicate(
+                store,
+                tenant_id,
+                project_id.as_deref(),
+                &canonical,
+                thr,
+            )? {
+                result.duplicates += 1;
+                continue;
+            }
+        }
+
+        // Trust gate: if the preview would fail-closed on a malformed
+        // trusted lifecycle, surface that here too. Callers expect the
+        // preview to predict import success/failure, not paper over a
+        // parse error that would block the subsequent real import.
+        let trusted = is_trusted(doc) && ext_version_supported(&item.extensions);
+        if trusted {
+            let _ = extract_lifecycle_strict(&item.extensions)?;
+        }
+
+        result.to_import += 1;
+        *result
+            .by_project
+            .entry(project_id.unwrap_or_else(|| "_".into()))
+            .or_default() += 1;
     }
 
     Ok(result)
