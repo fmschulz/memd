@@ -2304,3 +2304,111 @@ async fn preview_count_matches_real_import_count_on_valid_trusted_doc() {
     assert_eq!(preview.total, real.total);
     assert_eq!(preview.duplicates, real.duplicates);
 }
+
+// Fuzzy-threshold parity: codex LOW from the v0.8.0 parity audit. Both
+// preview and import call the same `is_fuzzy_duplicate` helper at
+// mirrored sites (import.rs:212 vs import.rs:418), so structural risk
+// is low — but until now the harness didn't exercise the
+// `ImportOptions { fuzzy_threshold: Some(_) }` branch at all. If a
+// future refactor accidentally dropped the fuzzy check from one side,
+// preview would still report `to_import = N` while import would write
+// only the exact-dedup survivors.
+//
+// This case seeds a chunk whose canonical text differs from the
+// incoming OMF item by one stop-word ("on"). With threshold=0.8 the
+// trigram Jaccard clears the bar (same pair verified in
+// fuzzy_dedup::find_near_duplicates_returns_fuzzy_with_similarity_score),
+// so both paths must count it as duplicate and neither may write.
+#[tokio::test]
+async fn preview_and_import_agree_under_fuzzy_threshold_match() {
+    let (dst_server, _dst_tmp) = test_server().await;
+    let dst_ps = dst_server.store().as_persistent().unwrap();
+    let dst_tenant = tenant("dst");
+
+    let seed_text = "Release freeze begins Thursday.";
+    let _ = dst_ps
+        .add_chunk_with_lifecycle(
+            memd::types::MemoryChunk::new(
+                dst_tenant.clone(),
+                seed_text.to_string(),
+                memd::types::ChunkType::Doc,
+            ),
+            LifecycleDelta::default(),
+        )
+        .await
+        .expect("seed chunk");
+
+    // Near-duplicate (single stopword inserted) — exact dedup misses,
+    // fuzzy Jaccard clears 0.80.
+    let doc = OmfDocument {
+        omf: OMF_VERSION.into(),
+        exported_at: "2026-04-20T00:00:00Z".into(),
+        source: Some(OmfSource {
+            app: "nanomem".into(),
+        }),
+        memories: vec![OmfItem {
+            content: "Release freeze begins on Thursday.".into(),
+            ..Default::default()
+        }],
+    };
+    let opts = ImportOptions {
+        include_archived: true,
+        fuzzy_threshold: Some(0.80),
+    };
+
+    let preview: PreviewResult = preview_omf_import(dst_ps, &dst_tenant, &doc, opts.clone())
+        .await
+        .expect("preview under fuzzy");
+    let real: ImportResult = import_omf(dst_ps, &dst_tenant, &doc, opts)
+        .await
+        .expect("import under fuzzy");
+
+    assert_eq!(
+        preview.duplicates, 1,
+        "preview must count the near-dup as a fuzzy duplicate"
+    );
+    assert_eq!(preview.to_import, 0, "preview must report no new writes");
+    assert_eq!(
+        real.duplicates, 1,
+        "import must count the near-dup as a fuzzy duplicate"
+    );
+    assert_eq!(real.imported, 0, "import must not write the near-dup");
+    assert_eq!(
+        preview.total, real.total,
+        "totals must agree (envelope identical)"
+    );
+
+    // And confirm the fuzzy is load-bearing: dropping the threshold
+    // must make both sides agree the item is NOT a duplicate.
+    let (dst_server2, _dst_tmp2) = test_server().await;
+    let dst_ps2 = dst_server2.store().as_persistent().unwrap();
+    let dst_tenant2 = tenant("dst");
+    let _ = dst_ps2
+        .add_chunk_with_lifecycle(
+            memd::types::MemoryChunk::new(
+                dst_tenant2.clone(),
+                seed_text.to_string(),
+                memd::types::ChunkType::Doc,
+            ),
+            LifecycleDelta::default(),
+        )
+        .await
+        .expect("seed chunk");
+    let opts_no_fuzzy = ImportOptions::default();
+    let preview_plain = preview_omf_import(dst_ps2, &dst_tenant2, &doc, opts_no_fuzzy.clone())
+        .await
+        .expect("preview without fuzzy");
+    let real_plain = import_omf(dst_ps2, &dst_tenant2, &doc, opts_no_fuzzy)
+        .await
+        .expect("import without fuzzy");
+    assert_eq!(
+        preview_plain.duplicates, 0,
+        "without fuzzy, near-dup is not a duplicate on preview"
+    );
+    assert_eq!(preview_plain.to_import, 1);
+    assert_eq!(
+        real_plain.duplicates, 0,
+        "without fuzzy, near-dup is not a duplicate on import"
+    );
+    assert_eq!(real_plain.imported, 1);
+}
