@@ -4154,19 +4154,20 @@ pub async fn handle_memory_add<S: Store>(
             &cfg,
         )?;
 
-        // Snapshot tenant_id before `chunk` is consumed by either the
-        // dedup branch's `supersede_chunk` or the no-candidate fallback.
+        // Snapshot tenant_id before `chunk` is consumed by either
+        // dedup branch.
         let tenant_id_for_extras = chunk.tenant_id.clone();
+        let lifecycle_delta = LifecycleDelta {
+            expires_at_ms: params.expires_at_ms.map(Some),
+            review_after_ms: params.review_after_ms.map(Some),
+            ..Default::default()
+        };
+
         let new_chunk_id = if candidates.is_empty() {
             // No prior matches — fall back to a normal add. Lifecycle
             // overlay still applies if requested.
             if has_lifecycle {
-                let delta = LifecycleDelta {
-                    expires_at_ms: params.expires_at_ms.map(Some),
-                    review_after_ms: params.review_after_ms.map(Some),
-                    ..Default::default()
-                };
-                ps.add_chunk_with_lifecycle(chunk, delta)
+                ps.add_chunk_with_lifecycle(chunk, lifecycle_delta.clone())
                     .await
                     .map_err(|e| McpError::ToolError(e.to_string()))?
             } else {
@@ -4177,39 +4178,61 @@ pub async fn handle_memory_add<S: Store>(
             }
         } else {
             // Atomically replace the FIRST candidate with the new chunk
-            // — this writes the payload + supersession edge in one
-            // logical op via supersede_chunk. Any additional candidates
-            // get a separate `update_lifecycle` so they all point at
-            // the new chunk_id.
-            let mut iter = candidates.iter();
-            let first_old = iter.next().expect("candidates non-empty");
-            let new_chunk_id = ps
+            // — `supersede_chunk` writes the payload + supersession
+            // edge in one logical op. `compute_dedup_candidates`
+            // already filtered to live-head rows (status=Final,
+            // superseded_by=None), so the head-only guard inside
+            // supersede_chunk will not fail-closed on stale candidates
+            // (Codex round-1 D3 HIGH-2).
+            let first_old = &candidates[0];
+            let new_id = ps
                 .supersede_chunk(&tenant_id_for_extras, first_old, chunk)
                 .await
                 .map_err(|e| McpError::ToolError(e.to_string()))?;
-            for old_id in iter {
-                let now = current_time_ms();
-                let delta = LifecycleDelta {
-                    status: Some(crate::types::ChunkStatus::Superseded),
-                    superseded_by: Some(new_chunk_id.clone()),
-                    lifecycle_updated_at_ms: Some(now),
-                    ..Default::default()
-                };
-                ps.update_lifecycle(&tenant_id_for_extras, old_id, &delta)
+
+            // Codex round-1 D3 HIGH-1: supersede_chunk does not carry a
+            // lifecycle delta through, so the requested temporal overlay
+            // (expires_at_ms / review_after_ms) is dropped on the
+            // matched-dedup path. Apply it explicitly to the new
+            // chunk_id so the dedup-vs-no-dedup behaviour is identical
+            // when temporal fields are present.
+            if has_lifecycle {
+                let mut delta = lifecycle_delta.clone();
+                if delta.lifecycle_updated_at_ms.is_none() {
+                    delta.lifecycle_updated_at_ms = Some(current_time_ms());
+                }
+                ps.update_lifecycle(&tenant_id_for_extras, &new_id, &delta)
                     .await
                     .map_err(|e| McpError::ToolError(e.to_string()))?;
             }
-            new_chunk_id
+            new_id
+        };
+
+        // We only atomically superseded the FIRST candidate via
+        // `supersede_chunk` — the call only handles a 1:1 edge.
+        // Additional candidates (rare: only when the prior state
+        // already contained multiple live-head duplicates of the same
+        // canonical, e.g. a legacy backlog or a concurrent
+        // no-dedup writer) are intentionally left untouched. The
+        // response reflects exactly what changed so callers don't
+        // think they got a stronger guarantee than supersede_chunk
+        // actually delivers. A follow-up dedup run will clean up the
+        // remaining duplicates one at a time.
+        let superseded_ids = if candidates.is_empty() {
+            Vec::new()
+        } else {
+            vec![candidates[0].to_string()]
         };
 
         info!(
             chunk_id = %new_chunk_id,
-            superseded = candidates.len(),
+            superseded_total = candidates.len(),
+            superseded_linked = superseded_ids.len(),
             "chunk added with dedup"
         );
         return format_mcp_response(&serde_json::json!({
             "chunk_id": new_chunk_id.to_string(),
-            "superseded_ids": candidates.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+            "superseded_ids": superseded_ids,
         }));
     }
 
