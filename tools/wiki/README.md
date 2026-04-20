@@ -83,6 +83,43 @@ Releases of `memd-wiki` and `memd` are tagged in lockstep. To override
 the gate (not recommended), construct `McpHttpClient(..., check_compat=False)`
 from Python — the CLI keeps the gate on.
 
+## Determinism contract (v1)
+
+`memd-wiki build` commits to the following narrow-but-honest
+determinism contract on unchanged memd state:
+
+1. Running the compiler a second time with no memd state change
+   yields `written=0` (every page was byte-identical to the prior
+   run).
+2. `manifest.json` is byte-identical between consecutive runs on
+   unchanged state.
+
+The prototype already behaves this way; step 5 of the Item 7 plan
+pins it with a unit test (`tests/test_determinism.py`) using a mocked
+MCP transport so the invariant survives future refactors.
+
+**What the contract does NOT claim in v1:** that a single new memd
+artifact changes only one page. The compiler derives a global
+`source_snapshot_at_ms` from the max over project/library/task
+artifact timestamps and renders it into every page's footer, so any
+new artifact legitimately churns aggregate surfaces (`log.md`,
+`index.md`, `projects/*.md`). The v2 may strengthen this once the
+snapshot-footer model is reworked; v1 accepts the churn as honest.
+
+## Manifest ownership (plan §6.1)
+
+`manifest.json` carries `schema_version` (currently `1`) and
+`compiler_owned_prefixes`, the set of output paths the compiler
+manages. v1 emits:
+
+```
+["index.md", "log.md", "manifest.json", "projects/", "tasks/", "libraries/"]
+```
+
+Paths outside these prefixes are ignored by the compiler entirely.
+v2 may add LLM-authored / human-edited prefixes (e.g. `concepts/`)
+without changing the manifest format.
+
 ## Containment guard
 
 `memd-wiki` refuses to write under the memd data directory. The
