@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memd-wiki"
+version = "0.8.0"
+description = "Deterministic compiled markdown wiki over memd project state (MCP HTTP)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "memd maintainers" }]
+keywords = ["memd", "mcp", "wiki", "markdown", "knowledge-base"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+]
+# stdlib only; no runtime dependencies
+dependencies = []
+
+[project.scripts]
+memd-wiki = "compiled_wiki.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/fmschulz/memd"
+Source = "https://github.com/fmschulz/memd/tree/main/tools/wiki"
+Issues = "https://github.com/fmschulz/memd/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["compiled_wiki*"]
+exclude = ["tests*", "output*"]
