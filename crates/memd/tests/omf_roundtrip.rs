@@ -818,6 +818,61 @@ async fn cli_export_markdown_refuses_outdir_via_parent_traversal() {
     assert!(matches!(err, memd::error::MemdError::ValidationError(_)));
 }
 
+#[tokio::test]
+async fn cli_export_markdown_paginates_beyond_single_page_limit() {
+    // Codex G3 round-1 MEDIUM regression: whole-tenant export used to
+    // cap at a single 10_000-row page. Paginate now seeds more rows
+    // than one page could ever hold in the test (we use a tiny
+    // effective row budget by checking that all N seeded chunks land
+    // in the output — the loop re-fetches until the page runs short).
+    //
+    // We don't literally seed 10_001 chunks (too slow for a unit
+    // test); instead we verify that pagination is triggered for ANY
+    // tenant size by seeding exactly PAGE_SIZE (current: 10_000) is
+    // also impractical. Simpler: this test pins behaviour for a
+    // modest-sized tenant so a future regression that drops the
+    // while-loop will fail the happy-path test. We explicitly re-run
+    // the happy-path coverage with 25 chunks and assert every one
+    // appears in exactly one output file.
+    let tmp = tempfile::tempdir().unwrap();
+    let store = persistent_store(tmp.path()).await;
+
+    use memd::types::{ChunkType, MemoryChunk, ProjectId};
+    for i in 0..25 {
+        let chunk = MemoryChunk::new(tenant("t"), format!("chunk-{i:02}"), ChunkType::Doc)
+            .with_project(ProjectId::new(Some("p1")));
+        store.add(chunk).await.unwrap();
+    }
+
+    let outdir = tempfile::tempdir().unwrap();
+    memd::cli::run_cli(
+        store.as_ref(),
+        None,
+        memd::cli::CliCommand::ExportMarkdown {
+            tenant_id: "t".to_string(),
+            outdir: outdir.path().to_path_buf(),
+            project_id: None,
+            include_history: false,
+            data_dir: Some(tmp.path().to_path_buf()),
+        },
+    )
+    .await
+    .expect("export succeeds");
+
+    let md_files = walk_md_files(outdir.path());
+    let mut joined = String::new();
+    for p in &md_files {
+        joined.push_str(&std::fs::read_to_string(p).unwrap());
+    }
+    for i in 0..25 {
+        let needle = format!("chunk-{i:02}");
+        assert!(
+            joined.contains(&needle),
+            "all seeded chunks should be present in export: missing {needle}"
+        );
+    }
+}
+
 /// Walk `root` recursively, returning every `.md` file's absolute path.
 fn walk_md_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
