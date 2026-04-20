@@ -77,16 +77,19 @@ pub struct ImportResult {
 /// Outcome of one `preview_omf_import` call — Task F4 dry-run shape.
 ///
 /// Counters mirror `ImportResult` semantically (`to_import` ↔ `imported`,
-/// `filtered` ↔ `skipped`), with one addition: `by_project` summarises
-/// how many prospective imports bucket under each project scope. The
-/// empty project slot is keyed as `"_"` so JSON marshallers don't have
-/// to pick between `null` and an omitted key.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `filtered` ↔ `skipped`), with two additions for per-scope visibility:
+/// `by_project` summarises prospective imports keyed by a real
+/// project_id string, and `unscoped` carries the count of items that
+/// resolved to `project_id = None` so it can't collide with a user
+/// project literally named `"_"` (an earlier draft used `"_"` as a
+/// sentinel and Codex flagged the collision).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PreviewResult {
     pub total: usize,
     pub to_import: usize,
     pub duplicates: usize,
     pub filtered: usize,
+    pub unscoped: usize,
     pub by_project: BTreeMap<String, usize>,
 }
 
@@ -182,10 +185,7 @@ pub async fn preview_omf_import(
 
     let mut result = PreviewResult {
         total: doc.memories.len(),
-        to_import: 0,
-        duplicates: 0,
-        filtered: 0,
-        by_project: BTreeMap::new(),
+        ..Default::default()
     };
 
     for item in &doc.memories {
@@ -228,10 +228,10 @@ pub async fn preview_omf_import(
         }
 
         result.to_import += 1;
-        *result
-            .by_project
-            .entry(project_id.unwrap_or_else(|| "_".into()))
-            .or_default() += 1;
+        match project_id {
+            Some(p) => *result.by_project.entry(p).or_default() += 1,
+            None => result.unscoped += 1,
+        }
     }
 
     Ok(result)
