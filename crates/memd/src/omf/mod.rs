@@ -1,17 +1,14 @@
-//! OMF 1.0 (Open Memory Format) — JSON interchange for memory exports/imports.
+//! OMF 1.0 (Open Memory Format) — JSON interchange types and top-level
+//! validator.
 //!
-//! The wire shape is a minimal nanomem-compatible envelope (`omf`, `exported_at`,
-//! `source`, `memories`) plus a versioned `extensions.memd` namespace on each
-//! item for round-tripping memd-internal state (chunk_id, project_id,
-//! chunk_type, ingestion_mode, lifecycle overlay).
+//! This module currently covers Task F1 of the nanomem-inspired features
+//! plan: the wire envelope (`omf`, `exported_at`, `source`, `memories`)
+//! plus a placeholder `extensions` field per item. Export (F2), import
+//! with trust-gated lifecycle (F3), and preview (F4) land as separate
+//! submodules in later tasks and are not yet present on the module tree.
 //!
-//! Lifecycle metadata is honoured on import **only** when
-//! `source.app == "memd"` AND `extensions.memd.v == MEMD_EXT_VERSION`; any other
-//! source has its lifecycle block silently ignored (untrusted). Within a
-//! trusted source, malformed lifecycle fields fail closed with
-//! `MemdError::ValidationError` rather than degrading silently.
-//!
-//! Tracks F1–F7 of the nanomem-inspired features plan.
+//! Wire shape is nanomem-compatible; memd-specific state will round-trip
+//! through a versioned `extensions.memd` namespace once F2/F3 land.
 
 use serde::{Deserialize, Serialize};
 
@@ -33,7 +30,6 @@ pub struct OmfDocument {
     pub exported_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<OmfSource>,
-    #[serde(default)]
     pub memories: Vec<OmfItem>,
 }
 
@@ -170,5 +166,24 @@ mod tests {
     #[test]
     fn memd_ext_version_constant_is_stable() {
         assert_eq!(MEMD_EXT_VERSION, 1);
+    }
+
+    #[test]
+    fn omf_document_rejects_missing_memories_key() {
+        // `memories` is a required envelope field. Missing the key entirely
+        // (as opposed to an explicit empty array) must fail deserialization
+        // so downstream validators never see a false-empty document.
+        let no_memories = r#"{"omf":"1.0","exported_at":"2026-04-18T00:00:00Z","source":{"app":"memd"}}"#;
+        let err = serde_json::from_str::<OmfDocument>(no_memories).unwrap_err();
+        assert!(
+            err.to_string().contains("memories"),
+            "error should mention missing memories field: {err}"
+        );
+
+        // Empty array is a valid envelope — a deliberate "nothing to export".
+        let empty_array = r#"{"omf":"1.0","exported_at":"2026-04-18T00:00:00Z","source":{"app":"memd"},"memories":[]}"#;
+        let doc: OmfDocument = serde_json::from_str(empty_array).unwrap();
+        assert!(doc.memories.is_empty());
+        validate_omf(&doc).unwrap();
     }
 }
