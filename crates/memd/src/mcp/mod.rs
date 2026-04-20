@@ -3,6 +3,7 @@
 //! Implements the MCP server for agent integration via JSON-RPC over stdio
 //! and streamable HTTP.
 
+pub mod dedup;
 pub mod digest_sweeper;
 pub mod error;
 pub mod handlers;

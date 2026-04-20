@@ -221,6 +221,47 @@ pub struct AddParams {
     /// C1 layer — the field is persisted verbatim by Track E.
     #[serde(default)]
     pub mode: Option<String>,
+    /// Optional Track D conflict-aware ingestion knob. When set, prior
+    /// rows in the same `(tenant, project)` (or whole tenant if
+    /// `scope: "tenant"`) that match the new chunk's canonical form
+    /// (exact mode) or trigram-Jaccard similarity (fuzzy mode) are
+    /// atomically superseded with a back-edge to the new row. Absent or
+    /// `false` keeps the legacy "always insert, never supersede"
+    /// behaviour and the response shape stays backwards-compatible.
+    #[serde(default)]
+    pub supersede_near_duplicates: Option<DedupSpec>,
+}
+
+/// Track D conflict-aware ingestion descriptor. Accepts either:
+/// * a bare boolean — `true` means "exact mode, scope: project, no
+///   threshold" (matches the most common shorthand);
+/// * a structured config that picks mode / threshold / scope.
+///
+/// Untagged so callers can pass the bare boolean form without naming
+/// the struct.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum DedupSpec {
+    Bool(bool),
+    Config(DedupConfig),
+}
+
+/// Structured Track D dedup configuration.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct DedupConfig {
+    /// `"exact"` (default) — match on canonical_text equality.
+    /// `"fuzzy"` — match on trigram Jaccard ≥ `threshold` over the
+    /// most recent N rows for the same scope.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Required when `mode == "fuzzy"`; ignored otherwise. If absent in
+    /// fuzzy mode the handler picks 0.92 (paraphrase tier).
+    #[serde(default)]
+    pub threshold: Option<f32>,
+    /// `"project"` (default) restricts the candidate pool to rows with
+    /// the same project_id. `"tenant"` widens to the whole tenant.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 /// Source information for a chunk
@@ -4085,6 +4126,93 @@ pub async fn handle_memory_add<S: Store>(
     }
 
     let has_lifecycle = params.expires_at_ms.is_some() || params.review_after_ms.is_some();
+    let resolved_dedup = match params.supersede_near_duplicates.as_ref() {
+        Some(spec) => crate::mcp::dedup::resolve_spec(spec)
+            .map_err(|e| McpError::ToolError(e.to_string()))?,
+        None => None,
+    };
+
+    // Track D path: when dedup is requested, find candidates first
+    // (read-only on the store), then atomically supersede each one with
+    // the new chunk via PersistentStore::supersede_chunk. The
+    // supersede_chunk call already writes the new chunk + the
+    // supersession edge in one logical op, so we drive the loop from
+    // here rather than calling Store::add separately.
+    if let Some(cfg) = resolved_dedup {
+        let ps = store.as_persistent().ok_or_else(|| {
+            McpError::ToolError(
+                "memory.add with supersede_near_duplicates requires a persistent store".into(),
+            )
+        })?;
+        let project_scope = chunk.project_id.as_option().map(|s| s.to_string());
+        let candidates = crate::mcp::dedup::compute_dedup_candidates(
+            ps,
+            &chunk.tenant_id,
+            &chunk.text,
+            chunk.chunk_type,
+            project_scope.as_deref(),
+            &cfg,
+        )?;
+
+        // Snapshot tenant_id before `chunk` is consumed by either the
+        // dedup branch's `supersede_chunk` or the no-candidate fallback.
+        let tenant_id_for_extras = chunk.tenant_id.clone();
+        let new_chunk_id = if candidates.is_empty() {
+            // No prior matches — fall back to a normal add. Lifecycle
+            // overlay still applies if requested.
+            if has_lifecycle {
+                let delta = LifecycleDelta {
+                    expires_at_ms: params.expires_at_ms.map(Some),
+                    review_after_ms: params.review_after_ms.map(Some),
+                    ..Default::default()
+                };
+                ps.add_chunk_with_lifecycle(chunk, delta)
+                    .await
+                    .map_err(|e| McpError::ToolError(e.to_string()))?
+            } else {
+                store
+                    .add(chunk)
+                    .await
+                    .map_err(|e| McpError::ToolError(e.to_string()))?
+            }
+        } else {
+            // Atomically replace the FIRST candidate with the new chunk
+            // — this writes the payload + supersession edge in one
+            // logical op via supersede_chunk. Any additional candidates
+            // get a separate `update_lifecycle` so they all point at
+            // the new chunk_id.
+            let mut iter = candidates.iter();
+            let first_old = iter.next().expect("candidates non-empty");
+            let new_chunk_id = ps
+                .supersede_chunk(&tenant_id_for_extras, first_old, chunk)
+                .await
+                .map_err(|e| McpError::ToolError(e.to_string()))?;
+            for old_id in iter {
+                let now = current_time_ms();
+                let delta = LifecycleDelta {
+                    status: Some(crate::types::ChunkStatus::Superseded),
+                    superseded_by: Some(new_chunk_id.clone()),
+                    lifecycle_updated_at_ms: Some(now),
+                    ..Default::default()
+                };
+                ps.update_lifecycle(&tenant_id_for_extras, old_id, &delta)
+                    .await
+                    .map_err(|e| McpError::ToolError(e.to_string()))?;
+            }
+            new_chunk_id
+        };
+
+        info!(
+            chunk_id = %new_chunk_id,
+            superseded = candidates.len(),
+            "chunk added with dedup"
+        );
+        return format_mcp_response(&serde_json::json!({
+            "chunk_id": new_chunk_id.to_string(),
+            "superseded_ids": candidates.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+        }));
+    }
+
     let chunk_id = if has_lifecycle {
         // Temporal overlay requires the persistent-store write path that
         // updates the lifecycle row in the same logical op. Non-persistent
@@ -7494,6 +7622,7 @@ mod tests {
         review_after_ms: None,
         
         mode: None,
+        supersede_near_duplicates: None,
         };
 
         let add_result = handle_memory_add(&store, None, add_params).await.unwrap();
@@ -7542,6 +7671,7 @@ mod tests {
             review_after_ms: None,
             
             mode: None,
+            supersede_near_duplicates: None,
             },
         )
         .await
@@ -7562,6 +7692,7 @@ mod tests {
             review_after_ms: None,
             
             mode: None,
+            supersede_near_duplicates: None,
             },
         )
         .await
@@ -7616,6 +7747,7 @@ mod tests {
                 review_after_ms: None,
                 
                 mode: None,
+                supersede_near_duplicates: None,
                 },
             )
             .await
@@ -7725,6 +7857,7 @@ mod tests {
             review_after_ms: None,
             
             mode: None,
+            supersede_near_duplicates: None,
             },
         )
         .await
@@ -7745,6 +7878,7 @@ mod tests {
             review_after_ms: None,
             
             mode: None,
+            supersede_near_duplicates: None,
             },
         )
         .await
@@ -7813,6 +7947,7 @@ mod tests {
                 review_after_ms: None,
             
             mode: None,
+            supersede_near_duplicates: None,
             },
         )
         .await
@@ -7875,6 +8010,7 @@ mod tests {
             review_after_ms: None,
             
             mode: None,
+            supersede_near_duplicates: None,
             },
         )
         .await
@@ -7936,6 +8072,7 @@ mod tests {
             review_after_ms: None,
         
         mode: None,
+        supersede_near_duplicates: None,
         };
 
         let result = handle_memory_add(&store, None, add_params).await.unwrap();
@@ -8020,6 +8157,7 @@ mod tests {
         review_after_ms: None,
         
         mode: None,
+        supersede_near_duplicates: None,
         };
 
         let add_result = handle_memory_add(&store, None, add_params).await.unwrap();
@@ -8075,6 +8213,7 @@ mod tests {
             review_after_ms: None,
             
             mode: None,
+            supersede_near_duplicates: None,
             },
         )
         .await
@@ -8117,6 +8256,7 @@ mod tests {
                 review_after_ms: None,
             
             mode: None,
+            supersede_near_duplicates: None,
             };
             handle_memory_add(&store, None, add_params).await.unwrap();
         }
@@ -8173,6 +8313,7 @@ mod tests {
         review_after_ms: None,
         
         mode: None,
+        supersede_near_duplicates: None,
         };
 
         let result = handle_memory_add(&store, None, params).await;
@@ -8214,6 +8355,7 @@ mod tests {
         review_after_ms: None,
         
         mode: None,
+        supersede_near_duplicates: None,
         };
 
         handle_memory_add(&store, None, add_params).await.unwrap();
@@ -8256,6 +8398,7 @@ mod tests {
         review_after_ms: None,
         
         mode: None,
+        supersede_near_duplicates: None,
         };
 
         handle_memory_add(&store, None, add_params).await.unwrap();
@@ -8312,6 +8455,7 @@ mod tests {
             review_after_ms: None,
             
             mode: None,
+            supersede_near_duplicates: None,
             },
         )
         .await
@@ -8340,6 +8484,7 @@ mod tests {
             review_after_ms: None,
             
             mode: None,
+            supersede_near_duplicates: None,
             },
         )
         .await
@@ -8368,6 +8513,7 @@ mod tests {
             review_after_ms: None,
             
             mode: None,
+            supersede_near_duplicates: None,
             },
         )
         .await
@@ -8422,6 +8568,7 @@ mod tests {
             review_after_ms: None,
             
             mode: None,
+            supersede_near_duplicates: None,
             },
         )
         .await
@@ -8477,6 +8624,7 @@ mod tests {
                 review_after_ms: None,
                 
                 mode: None,
+                supersede_near_duplicates: None,
                 },
             )
             .await
@@ -8570,6 +8718,7 @@ mod tests {
             review_after_ms: None,
             
             mode: None,
+            supersede_near_duplicates: None,
             },
         )
         .await
@@ -9042,6 +9191,7 @@ mod tests {
             review_after_ms: None,
             
             mode: None,
+            supersede_near_duplicates: None,
             },
         )
         .await

@@ -198,6 +198,20 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "mode": {
                         "type": "string",
                         "description": "Optional ingestion mode label (e.g. \"conversation\", \"document\"). Accepted now for Track C/E forward-compat; consumed by Track E."
+                    },
+                    "supersede_near_duplicates": {
+                        "description": "Track D: when set, prior chunks in the same (tenant, project) that match the new chunk's canonical form (exact mode) or trigram-Jaccard similarity (fuzzy mode) are atomically superseded with a back-edge to the new chunk. Accepts either `true` (shorthand for {mode: 'exact', scope: 'project'}) or a config object {mode, threshold, scope}. Requires a persistent store. Response gains a `superseded_ids` array.",
+                        "oneOf": [
+                            { "type": "boolean" },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "mode": { "type": "string", "enum": ["exact", "fuzzy"] },
+                                    "threshold": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                                    "scope": { "type": "string", "enum": ["project", "tenant"] }
+                                }
+                            }
+                        ]
                     }
                 },
                 "required": ["text", "type"]
