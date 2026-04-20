@@ -484,6 +484,93 @@ async fn import_rejects_unsupported_wire_version() {
 }
 
 #[tokio::test]
+async fn import_memd_source_with_mismatched_ext_version_uses_default_lifecycle() {
+    // Trust gate has two factors: `source.app=="memd"` AND `ext.memd.v==MEMD_EXT_VERSION`.
+    // With the app match but version mismatch, the import must NOT attempt to parse
+    // `extensions.memd.lifecycle` — it should fall back to the default delta.
+    // Regression guard: if a future version mismatch were accidentally treated as
+    // trusted, a malformed lifecycle block would ValidationError out here.
+    let (server, _tmp) = test_server().await;
+    let future_claim = OmfItem {
+        content: "future payload".into(),
+        extensions: json!({
+            "memd": {
+                // Intentionally mismatched; this writer claims to be memd
+                // but speaks an extension version we don't support.
+                "v": 999,
+                "project_id": "p1",
+                "lifecycle": {"tier": "galaxy_brain"} // malformed, would fail fail-closed parse
+            }
+        }),
+        ..Default::default()
+    };
+    let doc = make_doc("memd", vec![future_claim]);
+    let ps = server.store().as_persistent().unwrap();
+    let res = import_omf(ps, &tenant("t"), &doc, ImportOptions::default())
+        .await
+        .expect("mismatched ext version should not reach strict lifecycle parse");
+    assert_eq!(res.imported, 1);
+
+    // Row was persisted with default overlay, not "galaxy_brain" or History.
+    let metas = ps
+        .metadata()
+        .list_for_export(&tenant("t"), Some("p1"), false)
+        .unwrap();
+    assert_eq!(metas.len(), 1);
+    assert_eq!(metas[0].lifecycle.tier, MemoryTier::LongTerm);
+    assert_eq!(metas[0].status, memd::types::ChunkStatus::Final);
+}
+
+#[tokio::test]
+async fn import_unscoped_item_does_not_dedupe_against_scoped_rows() {
+    // Seed a scoped chunk in p1 with canonical "shared fact". Import an
+    // unscoped OMF item with the SAME content. `list_by_canonical_text(None)`
+    // widens to every project, so a naive exact-dedup check would falsely
+    // mark the unscoped item as duplicate of the scoped row and refuse to
+    // import it. Correct behaviour: unscoped dedup targets NULL-project
+    // rows only — the import must land.
+    let (server, _tmp) = test_server().await;
+    let _seed = call_tool(
+        &server,
+        "memory.add",
+        json!({
+            "tenant_id": "t",
+            "text": "shared fact",
+            "type": "doc",
+            "project_id": "p1",
+        }),
+    )
+    .await;
+
+    // Import the same canonical text with no project_id — expect it to
+    // land (1 new NULL-project row), not dedupe to 0.
+    let unscoped = make_item("shared fact", None); // None project in extensions
+    let doc = make_doc("nanomem", vec![unscoped]);
+    let ps = server.store().as_persistent().unwrap();
+    let res = import_omf(ps, &tenant("t"), &doc, ImportOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        res,
+        ImportResult {
+            total: 1,
+            imported: 1,
+            duplicates: 0,
+            skipped: 0
+        },
+        "unscoped dedup must not cross into scoped rows"
+    );
+
+    // Second import of the same unscoped item DOES dedupe (same NULL-project canonical).
+    let doc2 = make_doc("nanomem", vec![make_item("shared fact", None)]);
+    let res2 = import_omf(ps, &tenant("t"), &doc2, ImportOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(res2.imported, 0);
+    assert_eq!(res2.duplicates, 1);
+}
+
+#[tokio::test]
 async fn export_omf_respects_include_flags_for_superseded() {
     // Seed two chunks; supersede the first with the second via the
     // persistent-store supersede_chunk API, then verify the default
