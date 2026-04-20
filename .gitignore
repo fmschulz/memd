@@ -50,6 +50,7 @@ setup-python.sh
 !/docs/scientific-task-memory/benchmark-results/task_memory_benchmark_corpus.json
 !/docs/scientific-task-memory/benchmark-results/task_memory_benchmark_results.json
 !/docs/scientific-task-memory/benchmark-results/task_memory_benchmark_results.md
+!/docs/omf.md
 QUICK_START_PYTHON.md
 START_HERE.md
 DOCKER.md
