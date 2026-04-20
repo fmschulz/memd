@@ -701,6 +701,67 @@ mod tests {
         std::fs::remove_dir_all(&tmp_dir).ok();
     }
 
+    /// Network-gated integration test: actually fetch a small real
+    /// asset from huggingface.co and verify `download_file` lands it
+    /// atomically in a cache dir. Guards against regressions in the
+    /// ureq-based HF redirect handling (the RelativeUrlWithoutBase
+    /// issue that hf-hub 0.3.2 had; fixed by switching to plain ureq
+    /// which follows HF's relative 307 Location headers correctly).
+    ///
+    /// Opt-in to keep the default `cargo test` hermetic. Enable with
+    /// `MEMD_NETWORK_TESTS=1 cargo test -p memd test_download_file_hf_config_integration`.
+    /// Uses the ~600-byte `config.json` asset so the test finishes in
+    /// well under a second on a normal connection.
+    #[test]
+    fn test_download_file_hf_config_integration() {
+        if std::env::var("MEMD_NETWORK_TESTS").ok().as_deref() != Some("1") {
+            eprintln!(
+                "skipping HF network test; set MEMD_NETWORK_TESTS=1 to run"
+            );
+            return;
+        }
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "memd-hf-config-net-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let target = tmp_dir.join(CANDLE_BERT_CONFIG_FILENAME);
+
+        let result = download_file(CANDLE_BERT_CONFIG_URL, &target, "BERT config");
+        assert!(
+            result.is_ok(),
+            "HF config download should succeed (network required): {:?}",
+            result
+        );
+        assert!(target.exists(), "config file should exist at target");
+        let meta = std::fs::metadata(&target).expect("metadata");
+        assert!(
+            meta.len() >= MIN_CANDLE_BERT_CONFIG_SIZE,
+            "downloaded config is too small ({} bytes, expected >= {})",
+            meta.len(),
+            MIN_CANDLE_BERT_CONFIG_SIZE
+        );
+        // No leftover `.partial.*` sibling.
+        let leftovers: Vec<_> = std::fs::read_dir(&tmp_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("partial"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no partial tmp files should remain after a clean HF download, found: {:?}",
+            leftovers
+        );
+
+        std::fs::remove_dir_all(&tmp_dir).ok();
+    }
+
     #[test]
     fn test_download_file_is_first_writer_wins() {
         // Simulate the race-loser branch: the canonical target already
