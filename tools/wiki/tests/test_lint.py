@@ -244,6 +244,178 @@ class ManifestDriftTests(unittest.TestCase):
             self.assertTrue(drift)
 
 
+class TaskSnapshotStaleTests(unittest.TestCase):
+    """task-snapshot-stale check (opt-in via lookup_latest_ms callback)."""
+
+    def _seed_task_page(
+        self,
+        outdir: Path,
+        task_id: str,
+        *,
+        snapshot_iso: str,
+        updated_iso: str,
+    ) -> None:
+        (outdir / "tasks" / f"{task_id}.md").write_text(
+            (
+                f"# Task: {task_id}\n"
+                f"- Task ID: `{task_id}`\n"
+                f"- Source snapshot at: `{snapshot_iso}`\n"
+                f"- Updated at: `{updated_iso}`\n"
+            ),
+            encoding="utf-8",
+        )
+
+    def test_skip_when_no_lookup(self) -> None:
+        """Default behavior: no callback → check is a no-op."""
+        with tempfile.TemporaryDirectory() as tmp:
+            outdir = Path(tmp) / "compiled_wiki"
+            outdir.mkdir()
+            _seed_base_tree(outdir, task_ids=["t1"])
+            self._seed_task_page(
+                outdir,
+                "t1",
+                snapshot_iso="2026-01-01 00:00:00Z",
+                updated_iso="2026-01-01 00:00:00Z",
+            )
+            report = lint_output_dir(outdir)
+            stale = [f for f in report.findings if f.check == "task-snapshot-stale"]
+            self.assertEqual(stale, [])
+
+    def test_flags_when_memd_is_newer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            outdir = Path(tmp) / "compiled_wiki"
+            outdir.mkdir()
+            _seed_base_tree(outdir, task_ids=["t1"])
+            self._seed_task_page(
+                outdir,
+                "t1",
+                snapshot_iso="2026-01-01 00:00:00Z",
+                updated_iso="2026-01-01 00:00:00Z",
+            )
+            # 2026-01-02 00:00:00Z == 1767312000000 ms.
+            report = lint_output_dir(
+                outdir, lookup_latest_ms=lambda _tid: 1767312000000
+            )
+            stale = [f for f in report.warnings if f.check == "task-snapshot-stale"]
+            self.assertEqual(len(stale), 1)
+            self.assertEqual(stale[0].path, "tasks/t1.md")
+            self.assertIn("older than latest canonical source", stale[0].message)
+            self.assertEqual(report.exit_code(), 1)
+
+    def test_clean_when_memd_matches_snapshot(self) -> None:
+        """Same-ms memd timestamp is NOT stale (strict >)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            outdir = Path(tmp) / "compiled_wiki"
+            outdir.mkdir()
+            _seed_base_tree(outdir, task_ids=["t1"])
+            self._seed_task_page(
+                outdir,
+                "t1",
+                snapshot_iso="2026-01-01 00:00:00Z",
+                updated_iso="2026-01-01 00:00:00Z",
+            )
+            report = lint_output_dir(
+                outdir, lookup_latest_ms=lambda _tid: 1767225600000
+            )
+            stale = [f for f in report.findings if f.check == "task-snapshot-stale"]
+            self.assertEqual(stale, [])
+
+    def test_clean_when_memd_is_older(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            outdir = Path(tmp) / "compiled_wiki"
+            outdir.mkdir()
+            _seed_base_tree(outdir, task_ids=["t1"])
+            self._seed_task_page(
+                outdir,
+                "t1",
+                snapshot_iso="2026-02-01 00:00:00Z",
+                updated_iso="2026-02-01 00:00:00Z",
+            )
+            report = lint_output_dir(
+                outdir, lookup_latest_ms=lambda _tid: 1767225600000
+            )
+            stale = [f for f in report.findings if f.check == "task-snapshot-stale"]
+            self.assertEqual(stale, [])
+
+    def test_callback_returning_none_skips(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            outdir = Path(tmp) / "compiled_wiki"
+            outdir.mkdir()
+            _seed_base_tree(outdir, task_ids=["t1"])
+            self._seed_task_page(
+                outdir,
+                "t1",
+                snapshot_iso="2026-01-01 00:00:00Z",
+                updated_iso="2026-01-01 00:00:00Z",
+            )
+            report = lint_output_dir(
+                outdir, lookup_latest_ms=lambda _tid: None
+            )
+            stale = [f for f in report.findings if f.check == "task-snapshot-stale"]
+            self.assertEqual(stale, [])
+
+    def test_callback_returning_zero_skips(self) -> None:
+        """latest<=0 means memd has no timestamp — treat as skip, not flag."""
+        with tempfile.TemporaryDirectory() as tmp:
+            outdir = Path(tmp) / "compiled_wiki"
+            outdir.mkdir()
+            _seed_base_tree(outdir, task_ids=["t1"])
+            self._seed_task_page(
+                outdir,
+                "t1",
+                snapshot_iso="2026-01-01 00:00:00Z",
+                updated_iso="2026-01-01 00:00:00Z",
+            )
+            report = lint_output_dir(
+                outdir, lookup_latest_ms=lambda _tid: 0
+            )
+            stale = [f for f in report.findings if f.check == "task-snapshot-stale"]
+            self.assertEqual(stale, [])
+
+    def test_unparseable_snapshot_is_skipped(self) -> None:
+        """Page with a non-conforming snapshot string must not flag."""
+        with tempfile.TemporaryDirectory() as tmp:
+            outdir = Path(tmp) / "compiled_wiki"
+            outdir.mkdir()
+            _seed_base_tree(outdir, task_ids=["t1"])
+            self._seed_task_page(
+                outdir,
+                "t1",
+                snapshot_iso="unknown",
+                updated_iso="unknown",
+            )
+            report = lint_output_dir(
+                outdir, lookup_latest_ms=lambda _tid: 1767312000000
+            )
+            stale = [f for f in report.findings if f.check == "task-snapshot-stale"]
+            self.assertEqual(stale, [])
+
+    def test_callback_invoked_once_per_task(self) -> None:
+        """Ensure the caller's callback is the single oracle per page."""
+        calls: list[str] = []
+
+        def _lookup(task_id: str) -> int | None:
+            calls.append(task_id)
+            return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            outdir = Path(tmp) / "compiled_wiki"
+            outdir.mkdir()
+            _seed_base_tree(outdir, task_ids=["t1", "t2"])
+            self._seed_task_page(
+                outdir, "t1",
+                snapshot_iso="2026-01-01 00:00:00Z",
+                updated_iso="2026-01-01 00:00:00Z",
+            )
+            self._seed_task_page(
+                outdir, "t2",
+                snapshot_iso="2026-01-01 00:00:00Z",
+                updated_iso="2026-01-01 00:00:00Z",
+            )
+            lint_output_dir(outdir, lookup_latest_ms=_lookup)
+        self.assertEqual(sorted(calls), ["t1", "t2"])
+
+
 class LintReportOrderingTests(unittest.TestCase):
     def test_exit_code_zero_for_clean(self) -> None:
         self.assertEqual(LintReport(findings=()).exit_code(), 0)
