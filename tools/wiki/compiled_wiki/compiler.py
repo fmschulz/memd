@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .containment import (
+    check_outdir_containment,
+    reject_if_any_symlink_inside_outdir,
+)
 from .mcp_client import McpHttpClient
 from .render import (
     artifact_heading,
@@ -29,6 +33,12 @@ class BuildConfig:
     max_tasks: int = 25
     library_k: int = 20
     timeout: float = 30.0
+    # If non-empty, refuse to build when output_dir is inside any of
+    # these paths. Ported from the Rust export-markdown containment
+    # guard; see compiled_wiki.containment. The CLI populates this via
+    # resolve_forbidden_data_dirs. Leave empty to skip the guard in
+    # library use.
+    forbidden_data_dirs: list[Path] = field(default_factory=list)
 
 
 @dataclass
@@ -41,6 +51,10 @@ class BuildResult:
 
 
 def build_wiki(config: BuildConfig) -> BuildResult:
+    outdir_abs = check_outdir_containment(
+        config.output_dir,
+        config.forbidden_data_dirs,
+    )
     client = McpHttpClient(url=config.memd_url, timeout=config.timeout)
 
     project_payload = client.call_tool(
@@ -161,7 +175,7 @@ def build_wiki(config: BuildConfig) -> BuildResult:
         )
 
     for path, content in files.items():
-        changed = write_text_if_changed(path, content)
+        changed = write_text_if_changed(path, content, outdir_abs=outdir_abs)
         if changed:
             written_files += 1
         else:
@@ -242,7 +256,14 @@ def determine_snapshot_timestamp(
     return max(timestamps) if timestamps else int(time.time() * 1000)
 
 
-def write_text_if_changed(path: Path, content: str) -> bool:
+def write_text_if_changed(
+    path: Path,
+    content: str,
+    *,
+    outdir_abs: Path | None = None,
+) -> bool:
+    if outdir_abs is not None:
+        reject_if_any_symlink_inside_outdir(path, outdir_abs)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         existing = path.read_text(encoding="utf-8")

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .compiler import BuildConfig, build_wiki
 from .config_loader import ConfigLoadError, DiscoveredConfig, load_config
+from .containment import OutdirContainmentError, resolve_forbidden_data_dirs
 
 DEFAULT_MEMD_URL = "http://127.0.0.1:8787/mcp"
 DEFAULT_MAX_TASKS = 25
@@ -96,6 +97,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "from. Defaults to the current working directory."
         ),
     )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Explicit memd data directory. When set, the containment "
+            "guard refuses only this path (CLI declared intent overrides "
+            "the default $HOME/.memd/data + tenant_scope discovery)."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -146,6 +157,10 @@ def resolve_build_config(
     library_k = args.library_k if args.library_k is not None else (
         discovered.library_k if discovered.library_k is not None else DEFAULT_LIBRARY_K
     )
+    forbidden_data_dirs = resolve_forbidden_data_dirs(
+        explicit=args.data_dir,
+        start=args.config_start or Path.cwd(),
+    )
     return BuildConfig(
         memd_url=memd_url,
         tenant_id=tenant_id,
@@ -154,6 +169,7 @@ def resolve_build_config(
         max_tasks=max_tasks,
         library_k=library_k,
         timeout=args.timeout,
+        forbidden_data_dirs=forbidden_data_dirs,
     )
 
 
@@ -171,7 +187,11 @@ def main(argv: list[str] | None = None) -> int:
             f"memd-wiki: using config {discovered.source_path}",
             file=sys.stderr,
         )
-    result = build_wiki(config)
+    try:
+        result = build_wiki(config)
+    except OutdirContainmentError as exc:
+        print(f"memd-wiki: error: {exc}", file=sys.stderr)
+        return 2
     print(
         f"compiled wiki written to {result.output_dir} "
         f"(written={result.written_files}, unchanged={result.unchanged_files}, "
