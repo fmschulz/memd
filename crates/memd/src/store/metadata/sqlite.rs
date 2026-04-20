@@ -27,7 +27,7 @@ use crate::types::{
 const CHUNK_COLUMNS: &str = "chunk_id, tenant_id, project_id, segment_id, ordinal, \
                              chunk_type, status, timestamp_created, hash, source_uri, \
                              tier, supersedes, superseded_by, expires_at_ms, review_after_ms, \
-                             lifecycle_updated_at_ms, canonical_text";
+                             lifecycle_updated_at_ms, canonical_text, ingestion_mode";
 
 /// SQLite-backed metadata store.
 ///
@@ -80,6 +80,7 @@ impl SqliteMetadataStore {
                 review_after_ms INTEGER,
                 lifecycle_updated_at_ms INTEGER NOT NULL DEFAULT 0,
                 canonical_text TEXT,
+                ingestion_mode TEXT NOT NULL DEFAULT 'document',
                 UNIQUE(segment_id, ordinal)
             )",
             [],
@@ -538,6 +539,12 @@ impl SqliteMetadataStore {
             &column_names,
             "canonical_text",
             "ALTER TABLE chunks ADD COLUMN canonical_text TEXT",
+        )?;
+        Self::ensure_index_column(
+            conn,
+            &column_names,
+            "ingestion_mode",
+            "ALTER TABLE chunks ADD COLUMN ingestion_mode TEXT NOT NULL DEFAULT 'document'",
         )?;
 
         conn.execute(
@@ -1342,6 +1349,7 @@ impl SqliteMetadataStore {
         let review_after_ms: Option<i64> = row.get(14)?;
         let lifecycle_updated_at_ms: i64 = row.get(15)?;
         let canonical_text: Option<String> = row.get(16)?;
+        let ingestion_mode_str: String = row.get(17)?;
 
         // Parse chunk_id
         let chunk_id = ChunkId::parse(&chunk_id_str).map_err(|e| {
@@ -1398,6 +1406,17 @@ impl SqliteMetadataStore {
             lifecycle_updated_at_ms,
         };
 
+        // Parse ingestion_mode — fail-closed via FromStr (E1).
+        let ingestion_mode = ingestion_mode_str
+            .parse::<crate::types::IngestionMode>()
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    17,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+
         Ok(ChunkMetadata {
             chunk_id,
             tenant_id,
@@ -1411,6 +1430,7 @@ impl SqliteMetadataStore {
             source_uri,
             lifecycle,
             canonical_text,
+            ingestion_mode,
         })
     }
 
@@ -1543,8 +1563,8 @@ impl MetadataStore for SqliteMetadataStore {
                     chunk_id, tenant_id, project_id, segment_id, ordinal,
                     chunk_type, status, timestamp_created, hash, source_uri,
                     tier, supersedes, superseded_by, expires_at_ms, review_after_ms,
-                    lifecycle_updated_at_ms, canonical_text
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                    lifecycle_updated_at_ms, canonical_text, ingestion_mode
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             )?;
             for row in metadata {
                 stmt.execute(rusqlite::params![
@@ -1565,6 +1585,7 @@ impl MetadataStore for SqliteMetadataStore {
                     row.lifecycle.review_after_ms,
                     row.lifecycle.lifecycle_updated_at_ms,
                     row.canonical_text.as_deref(),
+                    row.ingestion_mode.to_string(),
                 ])?;
             }
         }
@@ -2270,6 +2291,7 @@ mod tests {
             source_uri: None,
             lifecycle: LifecycleMetadata::default(),
             canonical_text: None,
+            ingestion_mode: crate::types::IngestionMode::Document,
         }
     }
 
