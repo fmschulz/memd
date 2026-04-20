@@ -1712,12 +1712,6 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "type": "string",
                         "enum": ["project", "tenant"],
                         "default": "project"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "default": 128,
-                        "description": "Fuzzy-mode candidate pool cap (most-recent rows considered per scope)."
                     }
                 },
                 "required": ["text"]

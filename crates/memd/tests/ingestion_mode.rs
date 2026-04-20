@@ -159,6 +159,65 @@ async fn add_with_mode_document_does_not_set_default_review_window() {
     );
 }
 
+// Codex round-1 E2 LOW: prove the post-default `any_lifecycle` flip
+// works in the BATCH path. A batch with no expires_at_ms /
+// review_after_ms but mode=conversation must still route through
+// `add_chunk_with_lifecycle` so the 14d default lands per chunk.
+#[tokio::test]
+async fn add_batch_with_mode_conversation_applies_default_review_window() {
+    let (server, _tmp) = test_server().await;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let r = call_tool(
+        &server,
+        "memory.add_batch",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunks": [
+                { "text": "session note one", "type": "doc", "mode": "conversation" },
+                { "text": "session note two", "type": "doc", "mode": "conversation" },
+            ],
+        }),
+    )
+    .await;
+    let body = parse_result_text(&r);
+    let ids: Vec<String> = body["chunk_ids"]
+        .as_array()
+        .expect("chunk_ids")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids.len(), 2);
+
+    let ps = server.store().as_persistent().expect("persistent");
+    let fourteen_days_ms: i64 = 14 * 24 * 3600 * 1000;
+    for id_str in &ids {
+        let id = ChunkId::parse(id_str).expect("valid");
+        let resolved = ps
+            .get_with_lifecycle(&tenant("t"), &id)
+            .await
+            .unwrap()
+            .unwrap();
+        let review = resolved
+            .lifecycle
+            .review_after_ms
+            .expect("conversation batch row must default review_after_ms");
+        let drift = (review - (now_ms + fourteen_days_ms)).abs();
+        assert!(drift < 5_000, "review drift > 5s for {id}");
+
+        // ingestion_mode lives on ChunkMetadata, not on ResolvedChunk;
+        // pull it via metadata.get directly.
+        let meta = ps
+            .metadata()
+            .get(&tenant("t"), &id)
+            .expect("metadata.get")
+            .expect("row");
+        assert_eq!(meta.ingestion_mode, IngestionMode::Conversation);
+    }
+}
+
 #[tokio::test]
 async fn add_with_mode_conversation_explicit_review_after_ms_wins() {
     let (server, _tmp) = test_server().await;
