@@ -88,6 +88,11 @@ impl TombstoneAudit {
     /// # Arguments
     /// * `reader` - Segment reader to audit
     /// * `metadata` - Metadata store to check for deleted status
+    /// * `tenant_id` - Tenant whose segment is being audited (required
+    ///   because `segment_id` is only unique within a tenant after
+    ///   Item 2's UNIQUE migration; reading segment=1 across all
+    ///   tenants would cross-match rows from unrelated tenants onto
+    ///   the single `SegmentReader` under test).
     /// * `segment_id` - Segment ID to audit
     ///
     /// # Returns
@@ -96,12 +101,13 @@ impl TombstoneAudit {
         &self,
         reader: &SegmentReader,
         metadata: &SqliteMetadataStore,
+        tenant_id: &TenantId,
         segment_id: u64,
     ) -> Result<AuditResult> {
         use crate::store::metadata::MetadataStore;
 
-        // Get all metadata for this segment
-        let chunks = metadata.get_by_segment(segment_id)?;
+        // Get all metadata for this segment, scoped to the tenant.
+        let chunks = metadata.get_by_segment(tenant_id, segment_id)?;
 
         let mut total_deleted = 0;
         let mut tombstone_leaks = Vec::new();
