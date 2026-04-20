@@ -11,6 +11,7 @@
 //! extensions are defined as per-app scratch space.
 
 use serde_json::json;
+use tracing::debug;
 
 use crate::error::Result;
 use crate::store::metadata::{ChunkMetadata, MetadataStore};
@@ -19,7 +20,7 @@ use crate::store::Store;
 use crate::types::lifecycle::MemoryTier;
 use crate::types::{ChunkStatus, MemoryChunk, TenantId};
 
-use super::time::{format_date_ms, now_utc_rfc3339};
+use super::time::{format_date_ms, now_utc_ms, now_utc_rfc3339};
 use super::{OmfDocument, OmfItem, OmfSource, MEMD_EXT_VERSION, MEMD_SOURCE_APP, OMF_VERSION};
 
 /// Export options.
@@ -66,6 +67,7 @@ pub async fn export_omf(
         opts.include_history,
     )?;
 
+    let now_ms = now_utc_ms();
     let mut memories = Vec::with_capacity(rows.len());
     for meta in rows {
         if matches!(meta.status, ChunkStatus::Deleted | ChunkStatus::Error) {
@@ -74,8 +76,20 @@ pub async fn export_omf(
         if !opts.include_superseded && meta.status == ChunkStatus::Superseded {
             continue;
         }
-        if !opts.include_expired && meta.status == ChunkStatus::Expired {
-            continue;
+        // Lazy-expiry clock check: a row whose sweep hasn't run yet may
+        // still be `status=Final` with an `expires_at_ms` in the past.
+        // Mirror `VisibilityPolicy::is_visible_at` here so a caller
+        // asking for "live only" can't observe a lazily-expired row
+        // leak into the export.
+        if !opts.include_expired {
+            if meta.status == ChunkStatus::Expired {
+                continue;
+            }
+            if let Some(exp) = meta.lifecycle.expires_at_ms {
+                if exp <= now_ms {
+                    continue;
+                }
+            }
         }
         // History-tier rows are SQL-filtered by `list_for_export` unless
         // `include_history` is set, so this guard is defence-in-depth
@@ -86,7 +100,21 @@ pub async fn export_omf(
 
         let chunk = match <PersistentStore as Store>::get(store, tenant_id, &meta.chunk_id).await? {
             Some(c) => c,
-            None => continue,
+            None => {
+                // list_for_export just surfaced this row; a None here
+                // means the payload is missing for a metadata-present
+                // chunk. That is narrow (compaction race, or real
+                // metadata/payload drift). Log at debug so the row
+                // isn't lost to silence, then move on — returning an
+                // error here would poison full-tenant exports for a
+                // single rogue chunk.
+                debug!(
+                    tenant_id = %tenant_id,
+                    chunk_id = %meta.chunk_id,
+                    "export_omf: metadata row has no payload, skipping"
+                );
+                continue;
+            }
         };
         memories.push(to_omf_item(&chunk, &meta));
     }
