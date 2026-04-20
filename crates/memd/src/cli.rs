@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use tracing::info;
 
 use crate::error::Result;
+use crate::store::metadata::MetadataStore;
 use crate::store::{Store, TenantManager};
 use crate::types::{ChunkId, ChunkType, MemoryChunk, ProjectId, Source, TenantId};
 
@@ -159,6 +160,39 @@ pub enum CliCommand {
         /// Pagination size for chunk collection
         #[arg(long, default_value_t = 500)]
         page_size: usize,
+    },
+
+    /// Export tenant chunks as a tree of markdown files.
+    ///
+    /// Uses G1's `render_markdown_tree` (one file per `(project, chunk_type)`
+    /// bucket) and writes each `(path, content)` under `<outdir>` on the
+    /// user's machine. Refuses to write if the normalised `<outdir>` is a
+    /// descendant of memd's data directory — the CLI runs outside the
+    /// daemon trust boundary, but writing a markdown tree into `$MEMD_DATA_DIR`
+    /// would silently corrupt segment / SQLite layouts.
+    ExportMarkdown {
+        /// Tenant identifier
+        #[arg(long)]
+        tenant_id: String,
+
+        /// Output directory. Created if missing. Must not be inside memd's
+        /// data directory.
+        #[arg(long)]
+        outdir: PathBuf,
+
+        /// Optional project filter
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Include history-tier rows (default: live-only)
+        #[arg(long, default_value_t = false, action = ArgAction::Set)]
+        include_history: bool,
+
+        /// Data directory used for the containment guard. Defaults to
+        /// `~/.memd/data`; typically set by a wrapper when the daemon's
+        /// data dir lives elsewhere.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
     },
 
     /// Export tenant memory as an OMF 1.0 JSON document.
@@ -464,6 +498,113 @@ pub async fn run_cli<S: Store>(
             }
         }
 
+        CliCommand::ExportMarkdown {
+            tenant_id,
+            outdir,
+            project_id,
+            include_history,
+            data_dir,
+        } => {
+            let tenant = TenantId::new(&tenant_id)?;
+            let ps = store.as_persistent().ok_or_else(|| {
+                crate::error::MemdError::StorageError(
+                    "export-markdown requires a persistent store".to_string(),
+                )
+            })?;
+
+            // Containment guard: refuse if the user pointed `--outdir` at
+            // a path inside memd's data directory. We use a textual
+            // normalise (no `canonicalize`) so the guard works before the
+            // outdir exists — std `Path::canonicalize` would error out.
+            let effective_data_dir = resolve_data_dir(data_dir.as_deref())?;
+            let outdir_abs = normalize_absolute(&outdir);
+            let data_dir_abs = normalize_absolute(&effective_data_dir);
+            if path_is_inside(&outdir_abs, &data_dir_abs) {
+                return Err(crate::error::MemdError::ValidationError(format!(
+                    "refusing to write markdown export into memd data directory: \
+                     outdir={} data_dir={}",
+                    outdir_abs.display(),
+                    data_dir_abs.display()
+                )));
+            }
+
+            // Walk metadata, read payloads, render, then write.
+            let metas = if let Some(pid) = project_id.as_deref() {
+                ps.metadata()
+                    .list_recent_for_project(&tenant, Some(pid), 10_000)?
+            } else {
+                ps.metadata().list(&tenant, 10_000, 0)?
+            };
+            let mut chunks = Vec::with_capacity(metas.len());
+            for meta in metas {
+                // Match the G2 handler's visibility rule: only Final,
+                // non-superseded rows; tier filter depends on flag.
+                if meta.status != crate::types::ChunkStatus::Final
+                    || meta.lifecycle.superseded_by.is_some()
+                {
+                    continue;
+                }
+                if !include_history
+                    && meta.lifecycle.tier == crate::types::lifecycle::MemoryTier::History
+                {
+                    continue;
+                }
+                if let Some(pid) = project_id.as_deref() {
+                    if meta.project_id.as_deref() != Some(pid) {
+                        continue;
+                    }
+                }
+                if let Some(chunk) = <crate::store::persistent::PersistentStore as Store>::get(
+                    ps, &tenant, &meta.chunk_id,
+                )
+                .await?
+                {
+                    chunks.push(chunk);
+                }
+            }
+
+            let files = crate::mcp::markdown_export::render_markdown_tree(&chunks);
+            std::fs::create_dir_all(&outdir_abs).map_err(|e| {
+                crate::error::MemdError::StorageError(format!(
+                    "failed to create outdir {}: {e}",
+                    outdir_abs.display()
+                ))
+            })?;
+
+            let mut written_paths: Vec<String> = Vec::with_capacity(files.len());
+            for f in &files {
+                // RenderedFile.path is a POSIX relative string; join it
+                // onto the outdir so we write into the right bucket.
+                let mut target = outdir_abs.clone();
+                for segment in f.path.split('/').filter(|s| !s.is_empty()) {
+                    target.push(segment);
+                }
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        crate::error::MemdError::StorageError(format!(
+                            "failed to create parent {}: {e}",
+                            parent.display()
+                        ))
+                    })?;
+                }
+                std::fs::write(&target, &f.content).map_err(|e| {
+                    crate::error::MemdError::StorageError(format!(
+                        "failed to write {}: {e}",
+                        target.display()
+                    ))
+                })?;
+                written_paths.push(target.display().to_string());
+            }
+
+            let summary = json!({
+                "tenant_id": tenant.to_string(),
+                "outdir": outdir_abs.display().to_string(),
+                "files_written": written_paths.len(),
+                "paths": written_paths,
+            });
+            println!("{}", serde_json::to_string_pretty(&summary)?);
+        }
+
         CliCommand::ExportOmf {
             tenant_id,
             project_id,
@@ -718,6 +859,48 @@ fn read_stdin_to_string() -> Result<String> {
         crate::error::MemdError::ValidationError(format!("failed to read stdin: {e}"))
     })?;
     Ok(buf)
+}
+
+/// Clean + absolutize a path without requiring it (or any parent) to
+/// exist. Textually resolves `.` and `..`, and prefixes
+/// `std::env::current_dir()` for relative inputs. `std::Path::canonicalize`
+/// is not used because it errors on non-existent paths — we need the
+/// check to run *before* `memd export-markdown <outdir>` has created
+/// `<outdir>`, so that a user can't slip past the containment guard
+/// by pointing at a path that doesn't yet exist.
+fn normalize_absolute(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(p))
+            .unwrap_or_else(|_| p.to_path_buf())
+    };
+    let mut out = PathBuf::new();
+    for comp in abs.components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir => out.push(comp.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Walk up one component, but never past the root.
+                out.pop();
+            }
+            Component::Normal(seg) => out.push(seg),
+        }
+    }
+    out
+}
+
+/// Test whether `child` is the same as `parent` or a descendant of it.
+///
+/// Both paths must already be normalised (see `normalize_absolute`).
+/// Used by `export-markdown`'s containment guard so that writing a
+/// markdown tree into `$MEMD_DATA_DIR` is refused — a path-based check
+/// is sufficient here because both sides are normalised to absolute
+/// form.
+fn path_is_inside(child: &Path, parent: &Path) -> bool {
+    child.starts_with(parent)
 }
 
 fn absolutize_project_dir(path: &Path) -> Result<PathBuf> {
