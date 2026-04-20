@@ -80,8 +80,18 @@ pub trait MetadataStore: Send + Sync {
     /// Mark chunk as deleted (soft delete)
     fn mark_deleted(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<bool>;
 
-    /// Get all chunk_ids for a segment (for tombstone sync)
-    fn get_by_segment(&self, segment_id: u64) -> Result<Vec<ChunkMetadata>>;
+    /// Get all chunk metadata for a tenant's segment (for tombstone
+    /// sync and compaction audits). Scoped by `tenant_id` because
+    /// `segment_id` is only unique within a tenant — the chunks
+    /// UNIQUE constraint is `(tenant_id, segment_id, ordinal)` and
+    /// `PersistentStore::next_segment_id()` allocates per-tenant, so
+    /// segment_id=1 legitimately exists in every tenant independently
+    /// (Item 2).
+    fn get_by_segment(
+        &self,
+        tenant_id: &TenantId,
+        segment_id: u64,
+    ) -> Result<Vec<ChunkMetadata>>;
 
     /// Count chunks by status for a tenant
     fn count_by_status(&self, tenant_id: &TenantId) -> Result<(usize, usize)>;

@@ -1134,12 +1134,11 @@ async fn add_batch_without_dedup_keeps_legacy_response_shape() {
 }
 
 // D2 round-2 LOW: backfill must handle many rows (not just one) and
-// must repopulate every NULL row in a single pass. Stays within a
-// single tenant because the chunks table's `UNIQUE(segment_id,
-// ordinal)` constraint plus per-tenant `next_segment_id()` allocators
-// can collide across tenants on (1, 0) — a pre-existing schema bug
-// out of Track D2 scope. Multi-tenant coverage will land once that
-// gap is fixed.
+// must repopulate every NULL row in a single pass. This version stays
+// within a single tenant; see
+// `backfill_canonical_text_repopulates_many_rows_across_tenants` for
+// the multi-tenant regression that pins Item 2 (cross-tenant UNIQUE
+// fix).
 #[cfg(feature = "test-support")]
 #[tokio::test]
 async fn backfill_canonical_text_repopulates_many_legacy_rows_in_one_pass() {
@@ -1177,6 +1176,70 @@ async fn backfill_canonical_text_repopulates_many_legacy_rows_in_one_pass() {
             .get(&tenant("tenant_a"), id)
             .expect("metadata.get")
             .expect("row");
+        assert_eq!(meta.canonical_text.as_deref(), Some(*expected));
+    }
+}
+
+// Item 2 regression: after the chunks UNIQUE constraint is scoped to
+// (tenant_id, segment_id, ordinal), multiple tenants writing the same
+// (segment_id, ordinal) pair must coexist, and backfill must
+// repopulate their canonical_text independently — the legacy global
+// UNIQUE would have silently overwritten one tenant's row on INSERT
+// OR REPLACE. This test writes multiple chunks per tenant across two
+// tenants (so each tenant's `next_segment_id()` allocator produces
+// its own starting segment), clears their canonical_text, and
+// verifies that backfill repopulates every row across both tenants.
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn backfill_canonical_text_repopulates_many_rows_across_tenants() {
+    let (server, _tmp) = test_server().await;
+
+    let mut ids_a = Vec::new();
+    let mut ids_b = Vec::new();
+    let texts_a = ["Apple Pie", "Banana Bread", "Cherry Cobbler"];
+    let texts_b = ["Date Loaf", "Eggnog", "Fig Cake"];
+    for text in &texts_a {
+        ids_a.push(add_chunk(&server, "tenant_a", text).await);
+    }
+    for text in &texts_b {
+        ids_b.push(add_chunk(&server, "tenant_b", text).await);
+    }
+
+    let ps = server
+        .store()
+        .as_persistent()
+        .expect("test_server uses PersistentStore");
+
+    for id in ids_a.iter().chain(ids_b.iter()) {
+        ps.metadata()
+            .force_clear_canonical_text(id)
+            .expect("force_clear_canonical_text");
+    }
+
+    let stats = ps.backfill_canonical_text_for_legacy_chunks();
+    assert_eq!(
+        stats.rows_backfilled,
+        texts_a.len() + texts_b.len(),
+        "every legacy row across both tenants must be repopulated in one pass"
+    );
+    assert_eq!(stats.rows_skipped, 0);
+
+    let want_a = ["apple pie", "banana bread", "cherry cobbler"];
+    let want_b = ["date loaf", "eggnog", "fig cake"];
+    for (id, expected) in ids_a.iter().zip(want_a.iter()) {
+        let meta = ps
+            .metadata()
+            .get(&tenant("tenant_a"), id)
+            .expect("metadata.get")
+            .expect("tenant_a row survives both independent segment allocation AND backfill");
+        assert_eq!(meta.canonical_text.as_deref(), Some(*expected));
+    }
+    for (id, expected) in ids_b.iter().zip(want_b.iter()) {
+        let meta = ps
+            .metadata()
+            .get(&tenant("tenant_b"), id)
+            .expect("metadata.get")
+            .expect("tenant_b row survives both independent segment allocation AND backfill");
         assert_eq!(meta.canonical_text.as_deref(), Some(*expected));
     }
 }

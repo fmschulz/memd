@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use super::pool::SqliteConnectionPool;
 use super::{ChunkMetadata, IndexState, MetadataStore};
@@ -55,7 +55,14 @@ impl SqliteMetadataStore {
     fn init_schema(&self) -> Result<()> {
         let conn = self.pool.get();
 
-        // Create chunks table
+        // Create chunks table. UNIQUE is scoped to
+        // (tenant_id, segment_id, ordinal) because `next_segment_id()`
+        // allocates per-tenant — two tenants legitimately produce
+        // segment_id=1 at the same time, and they must be distinct
+        // rows. The legacy inline `UNIQUE(segment_id, ordinal)` would
+        // collide cross-tenant and let `INSERT OR REPLACE` silently
+        // overwrite the first-written row (handoff Item 2). Legacy
+        // databases are migrated in `migrate_chunks_unique_to_tenant_scoped`.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS chunks (
                 chunk_id TEXT PRIMARY KEY,
@@ -81,7 +88,7 @@ impl SqliteMetadataStore {
                 lifecycle_updated_at_ms INTEGER NOT NULL DEFAULT 0,
                 canonical_text TEXT,
                 ingestion_mode TEXT NOT NULL DEFAULT 'document',
-                UNIQUE(segment_id, ordinal)
+                UNIQUE(tenant_id, segment_id, ordinal)
             )",
             [],
         )?;
@@ -102,10 +109,11 @@ impl SqliteMetadataStore {
             [],
         )?;
 
-        // Segment index for tombstone sync
+        // Segment index for tombstone sync. Scoped to tenant_id
+        // because segment_id is only unique within a tenant (Item 2).
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_chunks_segment
-             ON chunks(segment_id)",
+             ON chunks(tenant_id, segment_id)",
             [],
         )?;
 
@@ -547,6 +555,14 @@ impl SqliteMetadataStore {
             "ALTER TABLE chunks ADD COLUMN ingestion_mode TEXT NOT NULL DEFAULT 'document'",
         )?;
 
+        // Item 2 — migrate legacy `UNIQUE(segment_id, ordinal)` to
+        // tenant-scoped `UNIQUE(tenant_id, segment_id, ordinal)`. Runs
+        // AFTER the column adds above so the rebuild's explicit column
+        // list can reference every current column; runs BEFORE the
+        // partial indexes below because the rebuild drops all indexes
+        // along with the old table.
+        Self::migrate_chunks_unique_to_tenant_scoped(conn)?;
+
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_chunks_expiry
              ON chunks(tenant_id, expires_at_ms) WHERE expires_at_ms IS NOT NULL",
@@ -580,6 +596,100 @@ impl SqliteMetadataStore {
         if !column_names.contains(column_name) {
             conn.execute(alter_sql, [])?;
         }
+        Ok(())
+    }
+
+    /// Item 2 — migrate the legacy `UNIQUE(segment_id, ordinal)`
+    /// constraint on chunks to `UNIQUE(tenant_id, segment_id, ordinal)`.
+    ///
+    /// Pre-existing bug: `PersistentStore::next_segment_id()` allocates
+    /// segment ids per-tenant, but the legacy table had a global
+    /// UNIQUE, so tenant_a's first segment (segment_id=1, ordinal=0)
+    /// and tenant_b's first segment (segment_id=1, ordinal=0) would
+    /// hit the same UNIQUE and `INSERT OR REPLACE` into chunks would
+    /// silently overwrite whichever row landed first. Tenant isolation
+    /// still held for retrieval (indexes include tenant_id), but row
+    /// metadata was lost.
+    ///
+    /// SQLite can't `ALTER TABLE` a `UNIQUE` constraint in place, so
+    /// this does a full table rebuild into `chunks_migration_tenant_scoped`,
+    /// copies every row via an explicit column list, drops the
+    /// legacy table, and renames. Idempotent — fresh databases are
+    /// created with the tenant-scoped constraint directly and this
+    /// early-returns on the first check.
+    fn migrate_chunks_unique_to_tenant_scoped(conn: &Connection) -> Result<()> {
+        let schema_sql: Option<String> = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunks'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let sql = match schema_sql {
+            Some(s) => s,
+            // No chunks table yet (very early in init_schema path
+            // before CREATE TABLE has been called) — nothing to
+            // migrate. CREATE TABLE IF NOT EXISTS will land the new
+            // constraint directly.
+            None => return Ok(()),
+        };
+        // Idempotent: already tenant-scoped, or uses a uniqueness
+        // mechanism other than the legacy inline tuple.
+        if sql.contains("UNIQUE(tenant_id, segment_id, ordinal)")
+            || !sql.contains("UNIQUE(segment_id, ordinal)")
+        {
+            return Ok(());
+        }
+
+        // Legacy schema detected. Rebuild.
+        conn.execute_batch(
+            "BEGIN;
+             CREATE TABLE chunks_migration_tenant_scoped (
+                 chunk_id TEXT PRIMARY KEY,
+                 tenant_id TEXT NOT NULL,
+                 project_id TEXT,
+                 segment_id INTEGER NOT NULL,
+                 ordinal INTEGER NOT NULL,
+                 chunk_type TEXT NOT NULL,
+                 status TEXT NOT NULL DEFAULT 'final',
+                 timestamp_created INTEGER NOT NULL,
+                 hash TEXT NOT NULL,
+                 source_uri TEXT,
+                 index_state TEXT NOT NULL DEFAULT 'indexed',
+                 index_attempts INTEGER NOT NULL DEFAULT 0,
+                 index_last_error TEXT,
+                 indexed_at_ms INTEGER,
+                 index_updated_at_ms INTEGER NOT NULL DEFAULT 0,
+                 tier TEXT NOT NULL DEFAULT 'long_term',
+                 supersedes TEXT,
+                 superseded_by TEXT,
+                 expires_at_ms INTEGER,
+                 review_after_ms INTEGER,
+                 lifecycle_updated_at_ms INTEGER NOT NULL DEFAULT 0,
+                 canonical_text TEXT,
+                 ingestion_mode TEXT NOT NULL DEFAULT 'document',
+                 UNIQUE(tenant_id, segment_id, ordinal)
+             );
+             INSERT INTO chunks_migration_tenant_scoped (
+                 chunk_id, tenant_id, project_id, segment_id, ordinal,
+                 chunk_type, status, timestamp_created, hash, source_uri,
+                 index_state, index_attempts, index_last_error, indexed_at_ms,
+                 index_updated_at_ms, tier, supersedes, superseded_by,
+                 expires_at_ms, review_after_ms, lifecycle_updated_at_ms,
+                 canonical_text, ingestion_mode
+             )
+             SELECT
+                 chunk_id, tenant_id, project_id, segment_id, ordinal,
+                 chunk_type, status, timestamp_created, hash, source_uri,
+                 index_state, index_attempts, index_last_error, indexed_at_ms,
+                 index_updated_at_ms, tier, supersedes, superseded_by,
+                 expires_at_ms, review_after_ms, lifecycle_updated_at_ms,
+                 canonical_text, ingestion_mode
+             FROM chunks;
+             DROP TABLE chunks;
+             ALTER TABLE chunks_migration_tenant_scoped RENAME TO chunks;
+             COMMIT;",
+        )?;
         Ok(())
     }
 
@@ -1658,20 +1768,27 @@ impl MetadataStore for SqliteMetadataStore {
         Ok(rows_affected > 0)
     }
 
-    fn get_by_segment(&self, segment_id: u64) -> Result<Vec<ChunkMetadata>> {
+    fn get_by_segment(
+        &self,
+        tenant_id: &TenantId,
+        segment_id: u64,
+    ) -> Result<Vec<ChunkMetadata>> {
         let conn = self.pool.get();
 
+        // Tenant-scoped because (segment_id, ordinal) is no longer
+        // globally unique after Item 2's UNIQUE constraint migration.
         let sql = format!(
             "SELECT {CHUNK_COLUMNS}
              FROM chunks
-             WHERE segment_id = ?1
+             WHERE tenant_id = ?1 AND segment_id = ?2
              ORDER BY ordinal ASC"
         );
         let mut stmt = conn.prepare(&sql)?;
 
-        let rows = stmt.query_map(rusqlite::params![segment_id as i64], |row| {
-            Self::row_to_metadata(row)
-        })?;
+        let rows = stmt.query_map(
+            rusqlite::params![tenant_id.as_str(), segment_id as i64],
+            |row| Self::row_to_metadata(row),
+        )?;
 
         let mut results = Vec::new();
         for row in rows {
@@ -2473,6 +2590,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let store = SqliteMetadataStore::open(&db_path).unwrap();
+        let tenant_id = TenantId::new("tenant_a").unwrap();
 
         // Insert chunks in different segments
         for seg in 0..3u64 {
@@ -2485,8 +2603,8 @@ mod tests {
             }
         }
 
-        // Get chunks from segment 1
-        let segment_1_chunks = store.get_by_segment(1).unwrap();
+        // Get chunks from segment 1 (scoped to tenant_a).
+        let segment_1_chunks = store.get_by_segment(&tenant_id, 1).unwrap();
         assert_eq!(segment_1_chunks.len(), 3);
 
         // Verify ordinal ordering
@@ -2876,6 +2994,183 @@ mod tests {
         assert!(meta.lifecycle.expires_at_ms.is_none());
         assert!(meta.lifecycle.review_after_ms.is_none());
         assert!(meta.canonical_text.is_none());
+    }
+
+    // --- Item 2: chunks UNIQUE constraint migrated to tenant-scoped ---
+
+    #[test]
+    fn fresh_db_uses_tenant_scoped_unique_constraint() {
+        // Pins the new CREATE TABLE in init_schema: fresh databases
+        // are created with UNIQUE(tenant_id, segment_id, ordinal).
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("fresh.db")).unwrap();
+        let conn = store.pool.get();
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunks'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            sql.contains("UNIQUE(tenant_id, segment_id, ordinal)"),
+            "fresh DB must have tenant-scoped UNIQUE; got: {sql}"
+        );
+        assert!(
+            !sql.contains("UNIQUE(segment_id, ordinal)")
+                || sql.contains("UNIQUE(tenant_id, segment_id, ordinal)"),
+            "fresh DB must not have the legacy global UNIQUE",
+        );
+    }
+
+    #[test]
+    fn legacy_db_migrates_unique_constraint_to_tenant_scoped() {
+        // Simulate a pre-Item-2 database and verify that re-opening it
+        // via SqliteMetadataStore rebuilds the chunks table with the
+        // tenant-scoped UNIQUE. Also verifies data survives the
+        // rebuild.
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("legacy_unique.db");
+
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            // Legacy shape with the global UNIQUE(segment_id, ordinal).
+            conn.execute(
+                "CREATE TABLE chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    project_id TEXT,
+                    segment_id INTEGER NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    chunk_type TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'final',
+                    timestamp_created INTEGER NOT NULL,
+                    hash TEXT NOT NULL,
+                    source_uri TEXT,
+                    UNIQUE(segment_id, ordinal)
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO chunks (chunk_id, tenant_id, segment_id, ordinal, chunk_type, status, timestamp_created, hash)
+                 VALUES (?1, ?2, ?3, ?4, 'doc', 'final', 1, 'h')",
+                rusqlite::params![
+                    "019d0000-0000-7000-8000-0000000000aa",
+                    "tenant_a",
+                    1_i64,
+                    0_i32,
+                ],
+            )
+            .unwrap();
+        }
+
+        // Opening via SqliteMetadataStore runs ensure_index_columns,
+        // which drives the rebuild migration.
+        let store = SqliteMetadataStore::open(&db_path).unwrap();
+        let conn = store.pool.get();
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunks'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            sql.contains("UNIQUE(tenant_id, segment_id, ordinal)"),
+            "legacy DB must be rebuilt with tenant-scoped UNIQUE; got: {sql}"
+        );
+
+        drop(conn);
+
+        // Existing row survives the rebuild.
+        let meta = store
+            .get(
+                &TenantId::new("tenant_a").unwrap(),
+                &ChunkId::parse("019d0000-0000-7000-8000-0000000000aa").unwrap(),
+            )
+            .unwrap()
+            .expect("pre-migration row must survive rebuild");
+        assert_eq!(meta.segment_id, 1);
+        assert_eq!(meta.ordinal, 0);
+    }
+
+    #[test]
+    fn get_by_segment_is_tenant_scoped_after_migration() {
+        // Regression for Codex Item 2 LOW: once cross-tenant same
+        // (segment_id, ordinal) rows coexist, `get_by_segment` must
+        // not cross-contaminate. A caller auditing tenant_a's segment
+        // must never see tenant_b's rows.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("scoped.db")).unwrap();
+
+        let make = |tenant: &str, chunk_uuid: &str, seg: u64, ord: u32| {
+            let chunk_id = ChunkId::parse(chunk_uuid).unwrap();
+            let mut meta = create_test_metadata(tenant, &chunk_id);
+            meta.segment_id = seg;
+            meta.ordinal = ord;
+            store.insert(&meta).unwrap();
+        };
+
+        make("tenant_a", "019d0000-0000-7000-8000-000000000a01", 1, 0);
+        make("tenant_a", "019d0000-0000-7000-8000-000000000a02", 1, 1);
+        make("tenant_b", "019d0000-0000-7000-8000-000000000b01", 1, 0);
+        make("tenant_b", "019d0000-0000-7000-8000-000000000b02", 1, 1);
+
+        let t_a = TenantId::new("tenant_a").unwrap();
+        let t_b = TenantId::new("tenant_b").unwrap();
+
+        let a_rows = store.get_by_segment(&t_a, 1).unwrap();
+        assert_eq!(a_rows.len(), 2);
+        for row in &a_rows {
+            assert_eq!(row.tenant_id, t_a, "tenant_a query must not leak tenant_b");
+        }
+
+        let b_rows = store.get_by_segment(&t_b, 1).unwrap();
+        assert_eq!(b_rows.len(), 2);
+        for row in &b_rows {
+            assert_eq!(row.tenant_id, t_b);
+        }
+    }
+
+    #[test]
+    fn cross_tenant_same_segment_ordinal_coexist() {
+        // Regression for Item 2: the legacy global UNIQUE let
+        // `INSERT OR REPLACE` silently overwrite tenant_a's
+        // (segment_id=1, ordinal=0) when tenant_b's first segment
+        // allocated the same pair. The new tenant-scoped UNIQUE means
+        // both rows must coexist.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SqliteMetadataStore::open(&tmp.path().join("mt.db")).unwrap();
+
+        let make = |tenant: &str, chunk_uuid: &str| {
+            let chunk_id = ChunkId::parse(chunk_uuid).unwrap();
+            let mut meta = create_test_metadata(tenant, &chunk_id);
+            meta.segment_id = 1;
+            meta.ordinal = 0;
+            store.insert(&meta).unwrap();
+        };
+
+        make("tenant_a", "019d0000-0000-7000-8000-0000000000a1");
+        make("tenant_b", "019d0000-0000-7000-8000-0000000000b1");
+
+        let a = store
+            .get(
+                &TenantId::new("tenant_a").unwrap(),
+                &ChunkId::parse("019d0000-0000-7000-8000-0000000000a1").unwrap(),
+            )
+            .unwrap()
+            .expect("tenant_a row");
+        let b = store
+            .get(
+                &TenantId::new("tenant_b").unwrap(),
+                &ChunkId::parse("019d0000-0000-7000-8000-0000000000b1").unwrap(),
+            )
+            .unwrap()
+            .expect("tenant_b row");
+        assert_eq!(a.segment_id, b.segment_id);
+        assert_eq!(a.ordinal, b.ordinal);
+        assert_ne!(a.chunk_id, b.chunk_id);
     }
 
     /// Seed a fresh chunk row for the given tenant and return its
