@@ -1857,3 +1857,450 @@ async fn preview_omf_import_matches_real_import_on_malformed_supersession_refs()
     // tell preview apart from real import on validity decisions.
     assert_eq!(preview_err.to_string(), import_err.to_string());
 }
+
+// -------------------------------------------------------------------------
+// Generic preview ↔ import fail-closed parity harness.
+//
+// The v0.8.0 handoff flagged a broader parity audit: the only existing
+// test (above) pinned `chunk_id = not-a-uuid`. Any future parse-time
+// check added to `import_omf_with_events` without the matching
+// `preview_omf_import` branch would silently break the "preview
+// predicts import" contract, producing `to_import = N` for docs the
+// real import will reject.
+//
+// The harness below enumerates every fail-closed input shape the
+// trusted OMF parser currently rejects. For each case, both
+// `preview_omf_import` and `import_omf` must return `Err` with
+// **identical error text**. That makes drift loud: add a new check to
+// import and omit it in preview → the `preview_err` becomes `Ok(...)`
+// and the test fails.
+//
+// Cases covered (one per fail-closed branch in the trusted parser
+// + envelope validator, so adding a new check to `import_omf` without
+// the matching preview branch breaks the test here):
+//   validate_omf envelope:
+//     1. unsupported `omf` top-level version
+//     2. empty/whitespace `content`
+//   validate_trusted_supersession_invariants pre-flight
+//   (runs extract_source_chunk_id + extract_supersession_ref, both
+//   of which also reject a non-object `lifecycle`):
+//     3. non-UUID `extensions.memd.chunk_id`
+//     4. non-string `extensions.memd.chunk_id` (number)
+//     5. duplicate `extensions.memd.chunk_id` between items
+//     6. non-UUID `extensions.memd.lifecycle.supersedes`
+//     7. non-string `extensions.memd.lifecycle.supersedes`
+//     8. non-UUID `extensions.memd.lifecycle.superseded_by`
+//     9. non-string `extensions.memd.lifecycle.superseded_by`
+//    10. forked `supersedes` graph — two successors to the same old
+//    11. non-object `extensions.memd.lifecycle` (caught by
+//        `extract_supersession_ref`, not `extract_lifecycle_strict`
+//        — the pre-flight runs first)
+//   extract_lifecycle_strict:
+//    12. unknown `lifecycle.tier` string
+//    13. non-string `lifecycle.tier`
+//    14. unknown `lifecycle.status` string
+//    15. non-string `lifecycle.status`
+//    16. non-integer `lifecycle.review_after_ms`
+//    17. non-integer `lifecycle.expires_at_ms`
+//    18. non-integer `lifecycle.lifecycle_updated_at_ms`
+// -------------------------------------------------------------------------
+
+fn trusted_doc_with(memories: Vec<OmfItem>) -> OmfDocument {
+    OmfDocument {
+        omf: OMF_VERSION.to_string(),
+        exported_at: "2026-04-20T00:00:00Z".to_string(),
+        source: Some(OmfSource {
+            app: "memd".to_string(),
+        }),
+        memories,
+    }
+}
+
+fn trusted_item_with(content: &str, memd_ext: serde_json::Value) -> OmfItem {
+    OmfItem {
+        content: content.to_string(),
+        extensions: json!({ "memd": memd_ext }),
+        ..Default::default()
+    }
+}
+
+/// Every malformed document the trusted OMF parser rejects. Each
+/// entry's `doc` is run through both preview and import and their
+/// `Err` text must match exactly.
+fn fail_closed_parity_cases() -> Vec<(&'static str, OmfDocument)> {
+    let valid_uuid_a = "019dab00-0000-7000-8000-000000000001";
+    let valid_uuid_b = "019dab00-0000-7000-8000-000000000002";
+    let valid_uuid_c = "019dab00-0000-7000-8000-000000000003";
+    vec![
+        // -- validate_omf envelope
+        ("unsupported_omf_envelope_version", {
+            let mut doc = trusted_doc_with(vec![trusted_item_with(
+                "x",
+                json!({"v": MEMD_EXT_VERSION}),
+            )]);
+            doc.omf = "9.9".to_string();
+            doc
+        }),
+        (
+            "empty_content",
+            trusted_doc_with(vec![OmfItem {
+                content: "   \n\t".to_string(),
+                extensions: json!({ "memd": {"v": MEMD_EXT_VERSION} }),
+                ..Default::default()
+            }]),
+        ),
+        // -- validate_trusted_supersession_invariants (chunk_id)
+        (
+            "chunk_id_not_uuid",
+            trusted_doc_with(vec![trusted_item_with(
+                "x",
+                json!({"v": MEMD_EXT_VERSION, "chunk_id": "not-a-uuid"}),
+            )]),
+        ),
+        (
+            "chunk_id_not_string",
+            trusted_doc_with(vec![trusted_item_with(
+                "x",
+                json!({"v": MEMD_EXT_VERSION, "chunk_id": 42}),
+            )]),
+        ),
+        (
+            "duplicate_chunk_ids",
+            trusted_doc_with(vec![
+                trusted_item_with(
+                    "a",
+                    json!({"v": MEMD_EXT_VERSION, "chunk_id": valid_uuid_a}),
+                ),
+                trusted_item_with(
+                    "b",
+                    json!({"v": MEMD_EXT_VERSION, "chunk_id": valid_uuid_a}),
+                ),
+            ]),
+        ),
+        // -- validate_trusted_supersession_invariants (supersedes)
+        (
+            "supersedes_not_uuid",
+            trusted_doc_with(vec![trusted_item_with(
+                "x",
+                json!({
+                    "v": MEMD_EXT_VERSION,
+                    "chunk_id": valid_uuid_a,
+                    "lifecycle": {"supersedes": "nope"},
+                }),
+            )]),
+        ),
+        (
+            "supersedes_not_string",
+            trusted_doc_with(vec![trusted_item_with(
+                "x",
+                json!({
+                    "v": MEMD_EXT_VERSION,
+                    "chunk_id": valid_uuid_a,
+                    "lifecycle": {"supersedes": 7},
+                }),
+            )]),
+        ),
+        (
+            "superseded_by_not_uuid",
+            trusted_doc_with(vec![trusted_item_with(
+                "x",
+                json!({
+                    "v": MEMD_EXT_VERSION,
+                    "chunk_id": valid_uuid_a,
+                    "lifecycle": {"superseded_by": "nope"},
+                }),
+            )]),
+        ),
+        (
+            "superseded_by_not_string",
+            trusted_doc_with(vec![trusted_item_with(
+                "x",
+                json!({
+                    "v": MEMD_EXT_VERSION,
+                    "chunk_id": valid_uuid_a,
+                    "lifecycle": {"superseded_by": true},
+                }),
+            )]),
+        ),
+        (
+            "forked_supersedes_graph",
+            trusted_doc_with(vec![
+                trusted_item_with(
+                    "a",
+                    json!({
+                        "v": MEMD_EXT_VERSION,
+                        "chunk_id": valid_uuid_a,
+                        "lifecycle": {"supersedes": valid_uuid_b},
+                    }),
+                ),
+                trusted_item_with(
+                    "b",
+                    json!({
+                        "v": MEMD_EXT_VERSION,
+                        "chunk_id": valid_uuid_c,
+                        "lifecycle": {"supersedes": valid_uuid_b},
+                    }),
+                ),
+            ]),
+        ),
+        // -- caught by pre-flight via extract_supersession_ref's
+        //    lifecycle-is-object guard
+        (
+            "lifecycle_not_object",
+            trusted_doc_with(vec![trusted_item_with(
+                "x",
+                json!({"v": MEMD_EXT_VERSION, "lifecycle": "not an object"}),
+            )]),
+        ),
+        // -- extract_lifecycle_strict
+        (
+            "tier_unknown",
+            trusted_doc_with(vec![trusted_item_with(
+                "x",
+                json!({"v": MEMD_EXT_VERSION, "lifecycle": {"tier": "cold_storage"}}),
+            )]),
+        ),
+        (
+            "tier_not_string",
+            trusted_doc_with(vec![trusted_item_with(
+                "x",
+                json!({"v": MEMD_EXT_VERSION, "lifecycle": {"tier": 42}}),
+            )]),
+        ),
+        (
+            "status_unknown",
+            trusted_doc_with(vec![trusted_item_with(
+                "x",
+                json!({"v": MEMD_EXT_VERSION, "lifecycle": {"status": "limbo"}}),
+            )]),
+        ),
+        (
+            "status_not_string",
+            trusted_doc_with(vec![trusted_item_with(
+                "x",
+                json!({"v": MEMD_EXT_VERSION, "lifecycle": {"status": 1}}),
+            )]),
+        ),
+        (
+            "review_after_ms_not_integer",
+            trusted_doc_with(vec![trusted_item_with(
+                "x",
+                json!({"v": MEMD_EXT_VERSION, "lifecycle": {"review_after_ms": "soon"}}),
+            )]),
+        ),
+        (
+            "expires_at_ms_not_integer",
+            trusted_doc_with(vec![trusted_item_with(
+                "x",
+                json!({"v": MEMD_EXT_VERSION, "lifecycle": {"expires_at_ms": "later"}}),
+            )]),
+        ),
+        (
+            "lifecycle_updated_at_ms_not_integer",
+            trusted_doc_with(vec![trusted_item_with(
+                "x",
+                json!({"v": MEMD_EXT_VERSION, "lifecycle": {"lifecycle_updated_at_ms": "now"}}),
+            )]),
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn preview_and_import_fail_closed_in_lockstep_on_all_malformed_inputs() {
+    use memd::error::MemdError;
+    for (label, doc) in fail_closed_parity_cases() {
+        // Fresh (cold) destination for each case. Dedup runs BEFORE the
+        // strict-lifecycle parse, so tier_unknown / ms_not_integer style
+        // cases would stop erroring on a warm destination if they deduped
+        // first. Codex round-1 parity LOW.
+        let (dst_server, _dst_tmp) = test_server().await;
+        let dst_ps = dst_server.store().as_persistent().unwrap();
+
+        let preview_res =
+            preview_omf_import(dst_ps, &tenant("dst"), &doc, ImportOptions::default()).await;
+        let import_res =
+            import_omf(dst_ps, &tenant("dst"), &doc, ImportOptions::default()).await;
+
+        let preview_err = preview_res.as_ref().err().unwrap_or_else(|| {
+            panic!(
+                "[{label}] preview unexpectedly succeeded on malformed doc: {:?}",
+                preview_res
+            )
+        });
+        let import_err = import_res.as_ref().err().unwrap_or_else(|| {
+            panic!(
+                "[{label}] import unexpectedly succeeded on malformed doc: {:?}",
+                import_res
+            )
+        });
+        // Tighter variant check before string equality: a future regression
+        // that turned a ValidationError into a different variant on one
+        // side would produce a clearer failure here than comparing Display
+        // strings alone.
+        assert!(
+            matches!(preview_err, MemdError::ValidationError(_)),
+            "[{label}] preview error must be ValidationError, got: {preview_err:?}"
+        );
+        assert!(
+            matches!(import_err, MemdError::ValidationError(_)),
+            "[{label}] import error must be ValidationError, got: {import_err:?}"
+        );
+        assert_eq!(
+            preview_err.to_string(),
+            import_err.to_string(),
+            "[{label}] preview and import error messages diverged"
+        );
+    }
+}
+
+// Ordering parity: a malformed trusted item that is filtered (archived)
+// or dedup-skipped BEFORE the strict lifecycle parse must produce the
+// same non-Err outcome on both paths. Catches a future reordering of
+// "filter / dedup" vs "strict parse" that would surface errors in one
+// path but not the other. Codex round-1 parity "Anything else" note.
+#[tokio::test]
+async fn preview_and_import_agree_when_filter_short_circuits_strict_parse() {
+    // Archived status with include_archived=false should skip the item
+    // before any strict-lifecycle parse. Preview increments `filtered`,
+    // import increments `skipped`, neither errors — even though the same
+    // item would be rejected for `tier_unknown` if it reached the strict
+    // parser.
+    let doc_archived = trusted_doc_with(vec![OmfItem {
+        content: "archived x".to_string(),
+        status: Some("archived".to_string()),
+        extensions: json!({
+            "memd": {
+                "v": MEMD_EXT_VERSION,
+                "lifecycle": {"tier": "cold_storage"}, // would fail strict parse
+            },
+        }),
+        ..Default::default()
+    }]);
+    let opts = ImportOptions {
+        include_archived: false,
+        fuzzy_threshold: None,
+    };
+    let (dst_server, _dst_tmp) = test_server().await;
+    let dst_ps = dst_server.store().as_persistent().unwrap();
+    let preview = preview_omf_import(dst_ps, &tenant("dst"), &doc_archived, opts.clone())
+        .await
+        .expect("preview should skip before strict parse");
+    let import = import_omf(dst_ps, &tenant("dst"), &doc_archived, opts)
+        .await
+        .expect("import should skip before strict parse");
+    assert_eq!(preview.filtered, 1);
+    assert_eq!(preview.to_import, 0);
+    assert_eq!(import.skipped, 1);
+    assert_eq!(import.imported, 0);
+}
+
+#[tokio::test]
+async fn preview_and_import_agree_when_exact_dedup_short_circuits_strict_parse() {
+    // Pre-seed a chunk whose canonical text matches the incoming OMF
+    // item. Both preview and import must short-circuit via the exact-
+    // dedup check (is_exact_duplicate) BEFORE the strict-lifecycle
+    // parser would otherwise reject the item's malformed `tier`. This
+    // pins dedup-before-parse ordering; reversing would surface errors
+    // in one path but not the other. Codex round-2 parity LOW.
+    let (dst_server, _dst_tmp) = test_server().await;
+    let dst_ps = dst_server.store().as_persistent().unwrap();
+    let dst_tenant = tenant("dst");
+
+    let seed_text = "already here";
+    let _ = dst_ps
+        .add_chunk_with_lifecycle(
+            memd::types::MemoryChunk::new(
+                dst_tenant.clone(),
+                seed_text.to_string(),
+                memd::types::ChunkType::Doc,
+            ),
+            LifecycleDelta::default(),
+        )
+        .await
+        .expect("seed chunk");
+
+    let doc = trusted_doc_with(vec![trusted_item_with(
+        seed_text,
+        json!({
+            "v": MEMD_EXT_VERSION,
+            "lifecycle": {"tier": "cold_storage"}, // would fail strict parse
+        }),
+    )]);
+    let opts = ImportOptions::default();
+    let preview = preview_omf_import(dst_ps, &dst_tenant, &doc, opts.clone())
+        .await
+        .expect("preview should dedupe before strict parse");
+    let import = import_omf(dst_ps, &dst_tenant, &doc, opts)
+        .await
+        .expect("import should dedupe before strict parse");
+    assert_eq!(preview.duplicates, 1);
+    assert_eq!(preview.to_import, 0);
+    assert_eq!(import.duplicates, 1);
+    assert_eq!(import.imported, 0);
+}
+
+// Positive-case parity: for a trusted VALID document, preview's
+// `to_import` count must equal what a subsequent real `import_omf` call
+// actually writes (imported count). Guards against a future change that
+// makes preview count items import would reject via some silent filter,
+// or vice versa.
+#[tokio::test]
+async fn preview_count_matches_real_import_count_on_valid_trusted_doc() {
+    let (src_server, _src_tmp) = test_server().await;
+    let src_ps = src_server.store().as_persistent().unwrap();
+    let src_tenant = tenant("src");
+
+    let a = src_ps
+        .add_chunk_with_lifecycle(
+            memd::types::MemoryChunk::new(
+                src_tenant.clone(),
+                "project_scoped_content".to_string(),
+                memd::types::ChunkType::Doc,
+            )
+            .with_project(ProjectId::new(Some("p".to_string()))),
+            LifecycleDelta::default(),
+        )
+        .await
+        .unwrap();
+    let _b = src_ps
+        .add_chunk_with_lifecycle(
+            memd::types::MemoryChunk::new(
+                src_tenant.clone(),
+                "unscoped_content".to_string(),
+                memd::types::ChunkType::Doc,
+            ),
+            LifecycleDelta::default(),
+        )
+        .await
+        .unwrap();
+
+    let doc = export_omf(src_ps, &src_tenant, ExportOptions::default())
+        .await
+        .unwrap();
+    assert!(doc.memories.len() >= 2, "seeded 2 chunks");
+    assert!(
+        doc.source.as_ref().map(|s| s.app.as_str()) == Some("memd"),
+        "trusted export"
+    );
+    let _ = a;
+
+    // Destination tenant is cold, so every item is new.
+    let (dst_server, _dst_tmp) = test_server().await;
+    let dst_ps = dst_server.store().as_persistent().unwrap();
+    let dst_tenant = tenant("dst");
+
+    let preview: PreviewResult =
+        preview_omf_import(dst_ps, &dst_tenant, &doc, ImportOptions::default())
+            .await
+            .unwrap();
+    let real: ImportResult = import_omf(dst_ps, &dst_tenant, &doc, ImportOptions::default())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        preview.to_import, real.imported,
+        "preview.to_import must equal import.imported on a cold destination"
+    );
+    assert_eq!(preview.total, real.total);
+    assert_eq!(preview.duplicates, real.duplicates);
+}
