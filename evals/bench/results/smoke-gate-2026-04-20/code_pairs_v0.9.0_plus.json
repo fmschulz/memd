@@ -1,0 +1,118 @@
+{
+  "generated_unix_seconds": 1776720871,
+  "dataset_path": "evals/bench/datasets/retrieval/code_pairs.json",
+  "dataset_description": "Code similarity pairs for retrieval quality evaluation. Handcrafted realistic code samples covering common patterns (JSON, APIs, validation, sorting, error handling, database, auth, file I/O).",
+  "dataset_version": "1.0",
+  "system_variant": "hybrid-feature",
+  "embedding_model": "all-minilm",
+  "bootstrap_iterations": 1000,
+  "seed": 42,
+  "queries_evaluated": 8,
+  "documents_indexed": 16,
+  "thresholds": {
+    "recall": 0.8,
+    "mrr": 0.6,
+    "precision": null
+  },
+  "summary": {
+    "recall": {
+      "mean": 1.0,
+      "ci_lower": 1.0,
+      "ci_upper": 1.0,
+      "std_dev": 0.0,
+      "n": 8
+    },
+    "mrr": {
+      "mean": 1.0,
+      "ci_lower": 1.0,
+      "ci_upper": 1.0,
+      "std_dev": 0.0,
+      "n": 8
+    },
+    "precision": {
+      "mean": 0.19999999999999998,
+      "ci_lower": 0.19999999999999998,
+      "ci_upper": 0.19999999999999998,
+      "std_dev": 2.967195843610875e-17,
+      "n": 8
+    },
+    "latency_ms": {
+      "mean": 105.110079125,
+      "ci_lower": 89.055963,
+      "ci_upper": 125.759309,
+      "std_dev": 29.60062952683763,
+      "n": 8
+    }
+  },
+  "phase_timing": {
+    "load_convert_ms": 0.054914000000000004,
+    "cap_filter_ms": 0.003277,
+    "index_ms": 13450.515067999999,
+    "query_ms": 840.888608,
+    "measured_total_ms": 14291.461866999998,
+    "load_convert_pct": 0.00038424340708489963,
+    "cap_filter_pct": 0.000022929774647944352,
+    "index_pct": 94.11573982545617,
+    "query_pct": 5.883853001362104
+  },
+  "quality_gate_passed": true,
+  "quality_gate_message": "All configured thresholds satisfied",
+  "query_metrics": [
+    {
+      "query_id": "Q1",
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "precision_at_10": 0.2,
+      "latency_ms": 169.631858
+    },
+    {
+      "query_id": "Q2",
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "precision_at_10": 0.2,
+      "latency_ms": 128.514483
+    },
+    {
+      "query_id": "Q3",
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "precision_at_10": 0.2,
+      "latency_ms": 92.94322100000001
+    },
+    {
+      "query_id": "Q4",
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "precision_at_10": 0.2,
+      "latency_ms": 96.908064
+    },
+    {
+      "query_id": "Q5",
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "precision_at_10": 0.2,
+      "latency_ms": 88.58675600000001
+    },
+    {
+      "query_id": "Q6",
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "precision_at_10": 0.2,
+      "latency_ms": 86.261531
+    },
+    {
+      "query_id": "Q7",
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "precision_at_10": 0.2,
+      "latency_ms": 83.494221
+    },
+    {
+      "query_id": "Q8",
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "precision_at_10": 0.2,
+      "latency_ms": 94.540499
+    }
+  ]
+}
