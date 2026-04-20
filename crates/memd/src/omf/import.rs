@@ -32,7 +32,7 @@ use crate::store::metadata::MetadataStore;
 use crate::store::persistent::PersistentStore;
 use crate::store::supersession::{canonicalize_for_type, is_near_duplicate};
 use crate::types::lifecycle::{LifecycleDelta, MemoryTier};
-use crate::types::{ChunkStatus, ChunkType, IngestionMode, MemoryChunk, ProjectId, TenantId};
+use crate::types::{ChunkId, ChunkStatus, ChunkType, IngestionMode, MemoryChunk, ProjectId, TenantId};
 
 use super::{validate_omf, OmfDocument, OmfItem, MEMD_EXT_VERSION, MEMD_SOURCE_APP};
 
@@ -74,6 +74,19 @@ pub struct ImportResult {
     pub skipped: usize,
 }
 
+/// Minimal per-write record emitted by `import_omf_with_events` so the
+/// MCP handler can run `post_write_hooks` for each newly-written chunk
+/// without cross-module awareness of the concrete `PostWriteEvent`
+/// type. One instance per actually-imported item (skipped/duplicate
+/// items emit none).
+#[derive(Debug, Clone)]
+pub struct ImportedChunk {
+    pub chunk_id: ChunkId,
+    pub chunk_type: ChunkType,
+    pub project_id: Option<String>,
+    pub text: String,
+}
+
 /// Outcome of one `preview_omf_import` call — Task F4 dry-run shape.
 ///
 /// Counters mirror `ImportResult` semantically (`to_import` ↔ `imported`,
@@ -93,18 +106,34 @@ pub struct PreviewResult {
     pub by_project: BTreeMap<String, usize>,
 }
 
-/// Import an OMF 1.0 document into a tenant.
+/// Import an OMF 1.0 document into a tenant. Discards per-write events.
 ///
-/// Walks `doc.memories` once, applying dedup and the optional
-/// archival-filter. Writes matched-accept items through
-/// `PersistentStore::add_chunk_with_lifecycle` with a trust-gated
-/// lifecycle delta. `ImportResult` reports per-bucket counts.
+/// Thin wrapper over `import_omf_with_events` for call sites that only
+/// need the `ImportResult` (direct store callers, tests, CLI). The MCP
+/// handler consumes `import_omf_with_events` so it can run
+/// `post_write_hooks` per imported chunk.
 pub async fn import_omf(
     store: &PersistentStore,
     tenant_id: &TenantId,
     doc: &OmfDocument,
     opts: ImportOptions,
 ) -> Result<ImportResult> {
+    let (result, _events) = import_omf_with_events(store, tenant_id, doc, opts).await?;
+    Ok(result)
+}
+
+/// Import an OMF 1.0 document and return both the result counters and
+/// one `ImportedChunk` event per actually-imported item. Duplicate /
+/// skipped items emit no event.
+///
+/// The MCP handler calls this variant so it can run the server-owned
+/// post-write hooks (structural indexing) for each newly written chunk.
+pub async fn import_omf_with_events(
+    store: &PersistentStore,
+    tenant_id: &TenantId,
+    doc: &OmfDocument,
+    opts: ImportOptions,
+) -> Result<(ImportResult, Vec<ImportedChunk>)> {
     validate_omf(doc)?;
     let trusted = is_trusted(doc);
 
@@ -114,6 +143,7 @@ pub async fn import_omf(
         duplicates: 0,
         skipped: 0,
     };
+    let mut events: Vec<ImportedChunk> = Vec::new();
 
     for item in &doc.memories {
         if !opts.include_archived
@@ -152,8 +182,8 @@ pub async fn import_omf(
         };
 
         let mut chunk = MemoryChunk::new(tenant_id.clone(), item.content.clone(), chunk_type);
-        if let Some(p) = project_id {
-            chunk = chunk.with_project(ProjectId::new(Some(p)));
+        if let Some(ref p) = project_id {
+            chunk = chunk.with_project(ProjectId::new(Some(p.clone())));
         }
         if !item.tags.is_empty() {
             chunk = chunk.with_tags(item.tags.clone());
@@ -162,11 +192,18 @@ pub async fn import_omf(
             chunk = chunk.with_ingestion_mode(mode);
         }
 
-        store.add_chunk_with_lifecycle(chunk, initial).await?;
+        let text = chunk.text.clone();
+        let chunk_id = store.add_chunk_with_lifecycle(chunk, initial).await?;
+        events.push(ImportedChunk {
+            chunk_id,
+            chunk_type,
+            project_id,
+            text,
+        });
         result.imported += 1;
     }
 
-    Ok(result)
+    Ok((result, events))
 }
 
 /// Dry-run `import_omf`: walk the same dedup + filter path, count what
