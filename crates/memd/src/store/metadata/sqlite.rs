@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 
 use super::pool::SqliteConnectionPool;
 use super::{ChunkMetadata, IndexState, MetadataStore};
@@ -617,28 +617,25 @@ impl SqliteMetadataStore {
     /// legacy table, and renames. Idempotent — fresh databases are
     /// created with the tenant-scoped constraint directly and this
     /// early-returns on the first check.
+    ///
+    /// Schema detection uses `PRAGMA index_list` / `pragma_index_info`
+    /// (Item 2 NIT, post-64c7edd): asks SQLite for the concrete UNIQUE
+    /// columns on `chunks` instead of grepping the `CREATE TABLE` text.
+    /// This tolerates whitespace / casing / column-order variations in
+    /// the source DDL that the substring-match version could not (e.g.
+    /// `UNIQUE  (tenant_id,segment_id,ordinal)` or a named constraint),
+    /// and refuses to rebuild when the chunks table uses an unrelated
+    /// UNIQUE shape.
     fn migrate_chunks_unique_to_tenant_scoped(conn: &Connection) -> Result<()> {
-        let schema_sql: Option<String> = conn
-            .query_row(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunks'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        let sql = match schema_sql {
-            Some(s) => s,
-            // No chunks table yet (very early in init_schema path
-            // before CREATE TABLE has been called) — nothing to
-            // migrate. CREATE TABLE IF NOT EXISTS will land the new
-            // constraint directly.
-            None => return Ok(()),
-        };
-        // Idempotent: already tenant-scoped, or uses a uniqueness
-        // mechanism other than the legacy inline tuple.
-        if sql.contains("UNIQUE(tenant_id, segment_id, ordinal)")
-            || !sql.contains("UNIQUE(segment_id, ordinal)")
-        {
-            return Ok(());
+        match detect_chunks_unique_shape(conn)? {
+            ChunksUniqueShape::TenantScoped => return Ok(()),
+            // Not a memd-shaped chunks table — no CREATE TABLE yet, or
+            // a custom/foreign schema with a different UNIQUE layout.
+            // Leave alone; init_schema's CREATE TABLE IF NOT EXISTS
+            // will either land the new constraint (empty DB) or the
+            // foreign schema will keep whatever shape it already has.
+            ChunksUniqueShape::Other => return Ok(()),
+            ChunksUniqueShape::Legacy => {}
         }
 
         // Legacy schema detected. Rebuild.
@@ -1651,6 +1648,79 @@ fn int_to_relevance(value: i64) -> RelevanceLabel {
         RelevanceLabel::Irrelevant
     } else {
         RelevanceLabel::Relevant
+    }
+}
+
+/// Item 2 NIT — classify the UNIQUE shape on the `chunks` table via
+/// SQLite's pragma VTab (not via substring match on the CREATE TABLE
+/// text).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunksUniqueShape {
+    /// A UNIQUE index covers `(tenant_id, segment_id, ordinal)` in
+    /// that column order — the post-Item-2 shape.
+    TenantScoped,
+    /// A UNIQUE index covers exactly `(segment_id, ordinal)` — the
+    /// pre-Item-2 global-uniqueness bug. Rebuild the table.
+    Legacy,
+    /// No `chunks` table, or its UNIQUE indexes match neither shape.
+    /// Do not migrate (a custom / foreign schema).
+    Other,
+}
+
+/// Classify the UNIQUE shape on the `chunks` table by asking SQLite
+/// directly via `pragma_index_list` / `pragma_index_info`.
+///
+/// Considers only indexes SQLite auto-generated from an inline or
+/// table-level `UNIQUE` constraint (`origin='u'`). Excludes:
+/// - `origin='c'` — these are `CREATE UNIQUE INDEX` (manual / foreign
+///   tool), not memd-created constraints. Including them would cause
+///   a custom `chunks` table with a `CREATE UNIQUE INDEX ... (segment_id,
+///   ordinal)` to be misclassified as `Legacy` and rebuilt, breaking
+///   the "Other → no-op" contract (Codex Item 2 NIT round-1 MEDIUM).
+/// - `origin='pk'` — primary-key auto-indexes (`chunk_id TEXT PRIMARY
+///   KEY`) are unrelated to the Item 2 migration target.
+///
+/// Expression indexes are excluded by the `origin='u'` filter
+/// (expression indexes are always `origin='c'`), so
+/// `pragma_index_info` here always returns non-null column names.
+fn detect_chunks_unique_shape(conn: &Connection) -> Result<ChunksUniqueShape> {
+    // Empty when the chunks table doesn't exist yet (brand-new DB
+    // before CREATE TABLE) or has no UNIQUE constraint indexes.
+    let mut list_stmt = conn.prepare(
+        "SELECT name FROM pragma_index_list('chunks') \
+         WHERE \"unique\" = 1 AND origin = 'u'",
+    )?;
+    let index_names: Vec<String> = list_stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, rusqlite::Error>>()?;
+
+    let mut has_tenant_scoped = false;
+    let mut has_legacy = false;
+    for name in &index_names {
+        let mut info_stmt =
+            conn.prepare("SELECT name FROM pragma_index_info(?1) ORDER BY seqno")?;
+        let cols: Vec<String> = info_stmt
+            .query_map([name.as_str()], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, rusqlite::Error>>()?;
+        match cols.as_slice() {
+            [a, b, c]
+                if a == "tenant_id" && b == "segment_id" && c == "ordinal" =>
+            {
+                has_tenant_scoped = true;
+            }
+            [a, b] if a == "segment_id" && b == "ordinal" => {
+                has_legacy = true;
+            }
+            _ => {}
+        }
+    }
+
+    if has_tenant_scoped {
+        Ok(ChunksUniqueShape::TenantScoped)
+    } else if has_legacy {
+        Ok(ChunksUniqueShape::Legacy)
+    } else {
+        Ok(ChunksUniqueShape::Other)
     }
 }
 
@@ -3093,6 +3163,231 @@ mod tests {
             .expect("pre-migration row must survive rebuild");
         assert_eq!(meta.segment_id, 1);
         assert_eq!(meta.ordinal, 0);
+    }
+
+    // Item 2 NIT regression — PRAGMA-based migration detection.
+    //
+    // The substring check was brittle on DDL variations it couldn't
+    // easily normalise: `UNIQUE (segment_id, ordinal)` with a space,
+    // `CONSTRAINT name UNIQUE (...)`, upper-case / mixed-case keyword,
+    // etc. These tests feed SQLite legacy tables whose CREATE TABLE
+    // text does not literally contain `UNIQUE(segment_id, ordinal)`,
+    // verify `detect_chunks_unique_shape` still classifies them as
+    // `Legacy`, and that the migration fires.
+    #[test]
+    fn detect_chunks_unique_shape_recognises_legacy_with_spaced_ddl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("spaced_legacy.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            // Note the space between UNIQUE and (.
+            conn.execute_batch(
+                "CREATE TABLE chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    project_id TEXT,
+                    segment_id INTEGER NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    chunk_type TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'final',
+                    timestamp_created INTEGER NOT NULL,
+                    hash TEXT NOT NULL,
+                    source_uri TEXT,
+                    UNIQUE (segment_id, ordinal)
+                );",
+            )
+            .unwrap();
+        }
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        assert_eq!(
+            detect_chunks_unique_shape(&conn).unwrap(),
+            ChunksUniqueShape::Legacy,
+            "substring match would miss the space; PRAGMA should not"
+        );
+    }
+
+    #[test]
+    fn detect_chunks_unique_shape_recognises_legacy_with_named_constraint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("named_legacy.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    project_id TEXT,
+                    segment_id INTEGER NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    chunk_type TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'final',
+                    timestamp_created INTEGER NOT NULL,
+                    hash TEXT NOT NULL,
+                    source_uri TEXT,
+                    CONSTRAINT chunks_legacy_uniq UNIQUE(segment_id, ordinal)
+                );",
+            )
+            .unwrap();
+        }
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        assert_eq!(
+            detect_chunks_unique_shape(&conn).unwrap(),
+            ChunksUniqueShape::Legacy,
+            "named UNIQUE constraints must still classify as legacy"
+        );
+    }
+
+    #[test]
+    fn detect_chunks_unique_shape_recognises_tenant_scoped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("tenant_scoped.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    project_id TEXT,
+                    segment_id INTEGER NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    chunk_type TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'final',
+                    timestamp_created INTEGER NOT NULL,
+                    hash TEXT NOT NULL,
+                    source_uri TEXT,
+                    UNIQUE(tenant_id, segment_id, ordinal)
+                );",
+            )
+            .unwrap();
+        }
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        assert_eq!(
+            detect_chunks_unique_shape(&conn).unwrap(),
+            ChunksUniqueShape::TenantScoped
+        );
+    }
+
+    // Codex Item 2 NIT round-1 MEDIUM regression: `CREATE UNIQUE
+    // INDEX ... (segment_id, ordinal)` is origin='c', not 'u'. It must
+    // NOT classify as `Legacy` — that would cause
+    // `migrate_chunks_unique_to_tenant_scoped` to rebuild a foreign
+    // chunks schema when the owner only wanted a manual unique index.
+    #[test]
+    fn detect_chunks_unique_shape_ignores_create_unique_index_origin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("manual_unique_idx.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            // Foreign chunks schema with NO table-level UNIQUE
+            // constraint, just a manual CREATE UNIQUE INDEX on the
+            // columns the legacy-detector looks for.
+            conn.execute_batch(
+                "CREATE TABLE chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    segment_id INTEGER NOT NULL,
+                    ordinal INTEGER NOT NULL
+                );
+                 CREATE UNIQUE INDEX chunks_manual_uniq ON chunks(segment_id, ordinal);",
+            )
+            .unwrap();
+        }
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        assert_eq!(
+            detect_chunks_unique_shape(&conn).unwrap(),
+            ChunksUniqueShape::Other,
+            "CREATE UNIQUE INDEX (origin='c') must NOT classify as Legacy"
+        );
+    }
+
+    #[test]
+    fn detect_chunks_unique_shape_returns_other_for_no_table_or_foreign_schema() {
+        // Empty DB → no chunks table at all.
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("empty.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        assert_eq!(
+            detect_chunks_unique_shape(&conn).unwrap(),
+            ChunksUniqueShape::Other,
+            "no chunks table → Other, not a rebuild trigger"
+        );
+
+        // Foreign schema: a chunks table exists but its UNIQUE is on
+        // unrelated columns. Don't touch.
+        let foreign_path = tmp.path().join("foreign.db");
+        {
+            let c = rusqlite::Connection::open(&foreign_path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    foreign_field TEXT,
+                    UNIQUE(foreign_field)
+                );",
+            )
+            .unwrap();
+        }
+        let foreign_conn = rusqlite::Connection::open(&foreign_path).unwrap();
+        assert_eq!(
+            detect_chunks_unique_shape(&foreign_conn).unwrap(),
+            ChunksUniqueShape::Other,
+            "foreign chunks schema with a different UNIQUE must NOT classify as Legacy"
+        );
+    }
+
+    #[test]
+    fn legacy_db_with_spaced_unique_ddl_is_rebuilt_end_to_end() {
+        // End-to-end guarantee: a pre-Item-2 DB whose CREATE TABLE
+        // text uses `UNIQUE (segment_id, ordinal)` (with a space) is
+        // still rebuilt by the PRAGMA-based migration when opened via
+        // SqliteMetadataStore. The substring-match version would have
+        // missed this and left the legacy constraint live.
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("spaced_legacy_end_to_end.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    project_id TEXT,
+                    segment_id INTEGER NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    chunk_type TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'final',
+                    timestamp_created INTEGER NOT NULL,
+                    hash TEXT NOT NULL,
+                    source_uri TEXT,
+                    UNIQUE (segment_id, ordinal)
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO chunks (chunk_id, tenant_id, segment_id, ordinal, chunk_type, status, timestamp_created, hash)
+                 VALUES (?1, ?2, ?3, ?4, 'doc', 'final', 1, 'h')",
+                rusqlite::params![
+                    "019d0000-0000-7000-8000-000000000ac1",
+                    "tenant_a",
+                    7_i64,
+                    3_i32,
+                ],
+            )
+            .unwrap();
+        }
+
+        let store = SqliteMetadataStore::open(&db_path).unwrap();
+        let conn = store.pool.get();
+        let shape = detect_chunks_unique_shape(&conn).unwrap();
+        assert_eq!(
+            shape,
+            ChunksUniqueShape::TenantScoped,
+            "spaced legacy DDL must be rebuilt to the tenant-scoped shape"
+        );
+
+        // Row survived the rebuild.
+        let chunk_id = ChunkId::parse("019d0000-0000-7000-8000-000000000ac1").unwrap();
+        let t_a = TenantId::new("tenant_a").unwrap();
+        let meta = store.get(&t_a, &chunk_id).unwrap().unwrap();
+        assert_eq!(meta.segment_id, 7);
+        assert_eq!(meta.ordinal, 3);
     }
 
     #[test]
