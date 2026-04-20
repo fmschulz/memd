@@ -11,10 +11,13 @@ mod common;
 use common::*;
 
 use memd::omf::export::{export_omf, ExportOptions};
-use memd::omf::{MEMD_EXT_VERSION, OMF_VERSION};
+use memd::omf::import::{import_omf, ImportOptions, ImportResult};
+use memd::omf::{OmfDocument, OmfItem, OmfSource, MEMD_EXT_VERSION, OMF_VERSION};
+use memd::store::metadata::MetadataStore;
 use memd::store::Store;
 use memd::types::lifecycle::{LifecycleDelta, MemoryTier};
 use memd::types::ProjectId;
+use serde_json::json;
 
 #[tokio::test]
 async fn export_omf_emits_memd_namespace_versioned() {
@@ -222,6 +225,262 @@ async fn export_omf_hides_lazy_expired_when_include_expired_false() {
 
     // And the ignored chunk really is the one we marked expired.
     let _ = expired_id;
+}
+
+// --------------------------------------------------------------
+// F3 import — trust-gated lifecycle + exact-canonical dedup.
+// --------------------------------------------------------------
+
+fn make_item(content: &str, project: Option<&str>) -> OmfItem {
+    OmfItem {
+        content: content.into(),
+        extensions: project
+            .map(|p| json!({"memd": {"v": MEMD_EXT_VERSION, "project_id": p}}))
+            .unwrap_or_else(|| json!({"memd": {"v": MEMD_EXT_VERSION}})),
+        ..Default::default()
+    }
+}
+
+fn make_doc(source_app: &str, memories: Vec<OmfItem>) -> OmfDocument {
+    OmfDocument {
+        omf: OMF_VERSION.into(),
+        exported_at: "2026-04-18T00:00:00Z".into(),
+        source: Some(OmfSource {
+            app: source_app.into(),
+        }),
+        memories,
+    }
+}
+
+#[tokio::test]
+async fn import_omf_is_semantic_merge_not_append() {
+    // Seed "fact A" in project p1. Import [fact A (case-variant), fact B].
+    // The case-variant canonicalizes to the same string, so it must be
+    // deduplicated; only fact B is new.
+    let (server, _tmp) = test_server().await;
+    let _ = call_tool(
+        &server,
+        "memory.add",
+        json!({"tenant_id": "t", "text": "fact A", "type": "doc", "project_id": "p1"}),
+    )
+    .await;
+
+    let doc = make_doc(
+        "nanomem",
+        vec![make_item("FACT A", Some("p1")), make_item("fact B", Some("p1"))],
+    );
+    let ps = server.store().as_persistent().unwrap();
+    let res = import_omf(ps, &tenant("t"), &doc, ImportOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        res,
+        ImportResult {
+            total: 2,
+            imported: 1,
+            duplicates: 1,
+            skipped: 0
+        }
+    );
+
+    // Post-state: 2 chunks total (seeded A + imported B), both under p1.
+    let metas = ps
+        .metadata()
+        .list_for_export(&tenant("t"), Some("p1"), false)
+        .unwrap();
+    let texts: Vec<_> = metas
+        .iter()
+        .map(|m| m.canonical_text.as_deref().unwrap_or(""))
+        .collect();
+    assert!(texts.contains(&"fact a"));
+    assert!(texts.contains(&"fact b"));
+    assert_eq!(metas.len(), 2);
+}
+
+#[tokio::test]
+async fn import_ignores_lifecycle_from_untrusted_source() {
+    // A non-memd source claiming a hostile lifecycle (tier=history,
+    // status=expired) must NOT be honoured. The imported row is live
+    // (status=Final, tier=LongTerm).
+    let (server, _tmp) = test_server().await;
+    let hostile = OmfItem {
+        content: "hostile payload".into(),
+        extensions: json!({
+            "memd": {
+                "v": 1,
+                "project_id": "p1",
+                "lifecycle": {"tier": "history", "status": "expired"}
+            }
+        }),
+        ..Default::default()
+    };
+    let doc = make_doc("nanomem", vec![hostile]);
+    let ps = server.store().as_persistent().unwrap();
+    let res = import_omf(ps, &tenant("t"), &doc, ImportOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(res.imported, 1);
+
+    let metas = ps
+        .metadata()
+        .list_for_export(&tenant("t"), Some("p1"), true) // include history just in case
+        .unwrap();
+    assert_eq!(metas.len(), 1);
+    assert_eq!(
+        metas[0].status,
+        memd::types::ChunkStatus::Final,
+        "untrusted lifecycle must not force Expired"
+    );
+    assert_eq!(
+        metas[0].lifecycle.tier,
+        MemoryTier::LongTerm,
+        "untrusted lifecycle must not force History"
+    );
+}
+
+#[tokio::test]
+async fn import_honors_lifecycle_when_source_is_memd_and_version_matches() {
+    // A memd source with matching v stamps the overlay — tier=Working,
+    // review_after_ms=5_000_000 — which the row must adopt on write.
+    let (server, _tmp) = test_server().await;
+    let trusted = OmfItem {
+        content: "trusted payload".into(),
+        extensions: json!({
+            "memd": {
+                "v": 1,
+                "project_id": "p1",
+                "lifecycle": {"tier": "working", "review_after_ms": 5_000_000i64}
+            }
+        }),
+        ..Default::default()
+    };
+    let doc = make_doc("memd", vec![trusted]);
+    let ps = server.store().as_persistent().unwrap();
+    let res = import_omf(ps, &tenant("t"), &doc, ImportOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(res.imported, 1);
+
+    let metas = ps
+        .metadata()
+        .list_for_export(&tenant("t"), Some("p1"), false)
+        .unwrap();
+    assert_eq!(metas.len(), 1);
+    assert_eq!(metas[0].lifecycle.tier, MemoryTier::Working);
+    assert_eq!(metas[0].lifecycle.review_after_ms, Some(5_000_000));
+}
+
+#[tokio::test]
+async fn import_rejects_malformed_trusted_lifecycle() {
+    // Trusted source with a garbage tier string must fail closed, not
+    // silently fall back to LongTerm.
+    let (server, _tmp) = test_server().await;
+    let bad = OmfItem {
+        content: "payload".into(),
+        extensions: json!({
+            "memd": {
+                "v": 1,
+                "project_id": "p1",
+                "lifecycle": {"tier": "galaxy_brain"}
+            }
+        }),
+        ..Default::default()
+    };
+    let doc = make_doc("memd", vec![bad]);
+    let ps = server.store().as_persistent().unwrap();
+    let err = import_omf(ps, &tenant("t"), &doc, ImportOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, memd::error::MemdError::ValidationError(_)),
+        "malformed trusted lifecycle must fail closed, got: {err:?}"
+    );
+
+    // Pre-write failure: no rows should exist.
+    let metas = ps
+        .metadata()
+        .list_for_export(&tenant("t"), Some("p1"), true)
+        .unwrap();
+    assert!(metas.is_empty());
+}
+
+#[tokio::test]
+async fn import_skips_archived_items_when_include_archived_false() {
+    // Two items: one active, one with top-level status=archived. With
+    // include_archived=false, only the active one imports; the other
+    // counts as `skipped`.
+    let (server, _tmp) = test_server().await;
+    let active = make_item("keep me", Some("p1"));
+    let archived = OmfItem {
+        status: Some("archived".into()),
+        ..make_item("drop me", Some("p1"))
+    };
+    let doc = make_doc("nanomem", vec![active, archived]);
+    let ps = server.store().as_persistent().unwrap();
+    let res = import_omf(
+        ps,
+        &tenant("t"),
+        &doc,
+        ImportOptions {
+            include_archived: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        res,
+        ImportResult {
+            total: 2,
+            imported: 1,
+            duplicates: 0,
+            skipped: 1
+        }
+    );
+}
+
+#[tokio::test]
+async fn import_fuzzy_dedup_catches_near_duplicates_over_threshold() {
+    // With a moderate threshold the import should drop a heavily
+    // overlapping variant of an existing row.
+    let (server, _tmp) = test_server().await;
+    let _ = call_tool(
+        &server,
+        "memory.add",
+        json!({"tenant_id": "t", "text": "release freeze begins Thursday afternoon", "type": "doc", "project_id": "p1"}),
+    )
+    .await;
+
+    let near = make_item("release freeze starts Thursday afternoon", Some("p1"));
+    let far = make_item("pizza is on Friday", Some("p1"));
+    let doc = make_doc("nanomem", vec![near, far]);
+    let ps = server.store().as_persistent().unwrap();
+
+    let res = import_omf(
+        ps,
+        &tenant("t"),
+        &doc,
+        ImportOptions {
+            include_archived: true,
+            fuzzy_threshold: Some(0.6),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.imported, 1, "only the unrelated 'pizza' should land");
+    assert_eq!(res.duplicates, 1, "the near-duplicate should dedupe");
+}
+
+#[tokio::test]
+async fn import_rejects_unsupported_wire_version() {
+    let (server, _tmp) = test_server().await;
+    let mut doc = make_doc("memd", vec![make_item("x", Some("p1"))]);
+    doc.omf = "9.9".into();
+    let ps = server.store().as_persistent().unwrap();
+    let err = import_omf(ps, &tenant("t"), &doc, ImportOptions::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, memd::error::MemdError::ValidationError(_)));
 }
 
 #[tokio::test]
