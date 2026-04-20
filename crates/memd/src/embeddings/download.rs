@@ -360,6 +360,14 @@ fn download_file(url: &str, path: &PathBuf, name: &str) -> Result<()> {
     match std::fs::hard_link(&tmp_path, path) {
         Ok(()) => {
             let _ = std::fs::remove_file(&tmp_path);
+            // Durability fold (v0.8.0 handoff Candle follow-up): after
+            // a successful first-writer publish, fsync the parent dir
+            // so the new directory entry survives a post-return crash.
+            // The earlier file.sync_all() made the inode's data durable;
+            // without this, the dirent mapping `path -> inode` can still
+            // be lost on recovery. Best-effort: log-and-continue on
+            // platforms/filesystems that reject dir fsync.
+            fsync_parent_dir(path);
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             let _ = std::fs::remove_file(&tmp_path);
@@ -375,6 +383,42 @@ fn download_file(url: &str, path: &PathBuf, name: &str) -> Result<()> {
 
     tracing::info!("{} downloaded successfully", name);
     Ok(())
+}
+
+/// Best-effort fsync of the parent directory of ``path``.
+///
+/// Follows Linux durability semantics: `file.sync_all()` makes the
+/// inode's data durable, but a subsequent crash can still lose the
+/// directory entry that links the canonical name to that inode.
+/// Opening the parent directory and calling `sync_all()` on the
+/// directory handle forces the dirent through to stable storage.
+///
+/// Silent on filesystems that reject directory fsync (rare; mostly
+/// networked/synthetic filesystems). We already wrote and link-published
+/// the file successfully, so a failed dir-fsync is best-effort — log
+/// at debug and continue rather than fail the whole download.
+fn fsync_parent_dir(path: &std::path::Path) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    match std::fs::File::open(parent) {
+        Ok(dir) => {
+            if let Err(e) = dir.sync_all() {
+                tracing::debug!(
+                    "fsync on parent dir {:?} failed (best-effort): {}",
+                    parent,
+                    e
+                );
+            }
+        }
+        Err(e) => {
+            tracing::debug!(
+                "opening parent dir {:?} for fsync failed (best-effort): {}",
+                parent,
+                e
+            );
+        }
+    }
 }
 
 /// Get paths to the Candle BERT model files (config, tokenizer, weights).
@@ -561,6 +605,96 @@ mod tests {
         assert!(
             leftovers.is_empty(),
             "no temp/partial files should remain, found: {:?}",
+            leftovers
+        );
+
+        std::fs::remove_dir_all(&tmp_dir).ok();
+    }
+
+    #[test]
+    fn test_fsync_parent_dir_is_ok_on_real_dir() {
+        // Durability fold: `fsync_parent_dir` should quietly succeed
+        // on a normal tmpfs/ext4-style directory and never panic. We
+        // don't have a way to prove a real fsync reached disk in unit
+        // tests, but we can at least prove the code path runs without
+        // surfacing an error to the caller (it's best-effort by design).
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "memd-fsync-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let f = tmp_dir.join("marker.bin");
+        std::fs::write(&f, b"x").unwrap();
+        // Just exercising the code path; it should not panic or abort
+        // even if the underlying FS doesn't implement dir fsync.
+        fsync_parent_dir(&f);
+        // Also tolerate a path with no parent (e.g., root) without
+        // panicking: pass a path with no parent-less pathological shape.
+        // `Path::new("foo")`.parent() is Some("") on Unix, so this is
+        // already a safe no-op; we just call it to cover.
+        fsync_parent_dir(std::path::Path::new("foo"));
+
+        std::fs::remove_dir_all(&tmp_dir).ok();
+    }
+
+    #[test]
+    fn test_download_file_fsyncs_parent_on_publish() {
+        // End-to-end happy path: download completes, hard_link publishes,
+        // and fsync_parent_dir is called on the canonical target's parent.
+        // We can't assert the kernel-level fsync, but we can assert the
+        // post-publish invariants hold: file present, sized, no stray
+        // `.partial.*` siblings left behind.
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let body = b"candle-fsync-payload".to_vec();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body_for_server = body.clone();
+        let server_thread = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body_for_server.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(&body_for_server);
+            }
+        });
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "memd-download-fsync-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let target = tmp_dir.join("candle.bin");
+
+        let url = format!("http://{}/x", addr);
+        let result = download_file(&url, &target, "fsync test");
+        server_thread.join().ok();
+
+        assert!(result.is_ok(), "download_file should succeed: {:?}", result);
+        let observed = std::fs::read(&target).unwrap();
+        assert_eq!(observed, body, "published bytes must match");
+        let leftovers: Vec<_> = std::fs::read_dir(&tmp_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("partial"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no partial tmp files should remain, found: {:?}",
             leftovers
         );
 
