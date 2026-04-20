@@ -70,7 +70,7 @@ item with empty or whitespace-only `content` fails `validate_omf`.
 | `content` | string | yes | The memory text. |
 | `category` | string | no | Free-form. On import: used as a **fallback** `project_id` when `extensions.memd.project_id` is absent. |
 | `tags` | string[] | no | Applied verbatim to the imported chunk. |
-| `status` | string | no | Archival vocabulary. Values `"archived"` / `"expired"` cause the item to be skipped on import when `include_archived=false`. Anything else is treated as absent (the imported chunk lands as `status=Final`). |
+| `status` | string | no | Archival vocabulary. Values `"archived"` / `"expired"` cause the item to be skipped on import when `include_archived=false`. Any other value is informational and does not by itself force the imported chunk's status — lifecycle status is controlled via `extensions.memd.lifecycle.status` under the trust gate. memd's own export emits `"superseded"` / `"expired"` here for the corresponding chunk states; importers without the trust gate can use that as a hint. |
 | `created_at` | string | no | Date (`YYYY-MM-DD`) or RFC-3339. Informational; not used on import. |
 | `updated_at` | string | no | Same as `created_at`. |
 | `expires_at` | string | no | Date or RFC-3339. Informational; the ms-precision version lives in `extensions.memd.lifecycle.expires_at_ms` under the trust gate. |
@@ -92,15 +92,23 @@ memd writes (and trusts on import) the following fields under
 
 The `lifecycle` object carries:
 
-| Field | Type | Purpose |
-|-------|------|---------|
-| `status` | string | `final` / `superseded` / `expired` / `draft` / `error` / `deleted` |
-| `tier` | string | `working` / `long_term` / `history` |
-| `supersedes` | string or null | `chunk_id` of the row this supersedes |
-| `superseded_by` | string or null | `chunk_id` of the row that supersedes this |
-| `expires_at_ms` | integer or null | Unix ms; past values are lazily treated as expired |
-| `review_after_ms` | integer or null | Unix ms; informational |
-| `lifecycle_updated_at_ms` | integer | Unix ms of last overlay update |
+| Field | Type | Emitted | Honoured on trusted import |
+|-------|------|---------|----------------------------|
+| `status` | string | yes | yes — `final` / `superseded` / `expired` / `draft` / `error` / `deleted` |
+| `tier` | string | yes | yes — `working` / `long_term` / `history` |
+| `supersedes` | string or null | yes | **no** (informational; see note) |
+| `superseded_by` | string or null | yes | **no** (informational; see note) |
+| `expires_at_ms` | integer or null | yes | yes |
+| `review_after_ms` | integer or null | yes | yes |
+| `lifecycle_updated_at_ms` | integer | yes | yes |
+
+**Note on supersession edges.** `supersedes` and `superseded_by` carry
+the *source server's* `chunk_id` values. Because import mints a fresh
+`chunk_id` for each row, the edge would dangle on the target server.
+memd's import intentionally drops these two fields rather than
+preserving broken references. A future version that wants round-trip
+fidelity across servers would need ordered-import + ID translation, or
+a `source_chunk_id → target_chunk_id` remap pass after the main import.
 
 ## Trust gate
 
@@ -213,15 +221,19 @@ memd export-omf --tenant-id t [--project-id p] [--output PATH] \
 memd import-omf --tenant-id t [--input PATH | -] \
                 [--include-archived true|false] \
                 [--fuzzy-threshold F] \
-                [--dry-run]
+                [--dry-run true|false]
 ```
 
 - `--output` writes JSON to a file; omit for stdout.
 - `--input PATH`, `--input -`, or omission reads the document from the
   path or stdin.
-- `--dry-run` runs `preview_omf_import` instead of writing. This path
-  does **not** create the tenant directory on disk (materialisation is
-  deferred to the real-write branch).
+- Every boolean flag uses clap's explicit `true|false` shape
+  (`ArgAction::Set`), consistent with the existing `memd init` flags.
+  Omitting the flag falls back to the default shown in the command
+  signature.
+- `--dry-run true` runs `preview_omf_import` instead of writing. This
+  path does **not** create the tenant directory on disk
+  (materialisation is deferred to the real-write branch).
 
 ## Compatibility and versioning
 
@@ -231,7 +243,21 @@ memd import-omf --tenant-id t [--input PATH | -] \
   schema must bump `MEMD_EXT_VERSION` AND add a new trust branch for
   the bumped version — older writers continue to be accepted, but only
   at their own trusted version.
-- Untrusted producers (`source.app != "memd"` or missing `source`)
-  always import with default lifecycle, regardless of version. Their
-  `content`, `category`, `tags`, and `extensions.memd.project_id` (if
-  present) still apply.
+- Untrusted producers (`source.app != "memd"`, missing `source`, or
+  `extensions.memd.v` mismatched) always import with default
+  lifecycle, regardless of version. Fields that still flow in from
+  such producers:
+  - `content` — the memory text.
+  - `tags` — applied verbatim.
+  - `category` — used as fallback `project_id` when
+    `extensions.memd.project_id` is absent.
+  - `extensions.memd.project_id` — primary project resolution.
+  - `extensions.memd.chunk_type` — parsed via `ChunkType::FromStr`;
+    falls back to `doc` on unknown values.
+  - `extensions.memd.ingestion_mode` — parsed via
+    `IngestionMode::FromStr`; unknown values fall back to the import
+    default (`document`).
+  
+  What's gated on trust: **only** the `extensions.memd.lifecycle`
+  block. An untrusted producer can shape the imported row's project,
+  type, and mode, but not its tier, status, or expiry.
