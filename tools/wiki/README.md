@@ -83,9 +83,54 @@ Releases of `memd-wiki` and `memd` are tagged in lockstep. To override
 the gate (not recommended), construct `McpHttpClient(..., check_compat=False)`
 from Python — the CLI keeps the gate on.
 
+## Configuration
+
+`memd-wiki` reads the nearest-ancestor `.memd/config.json`, using the
+`wiki` subsection plus the top-level `tenant_id` / `project_id`. Missing
+fields fall through to hardcoded defaults. CLI flags win over everything.
+
+Example `.memd/config.json`:
+
+```json
+{
+  "tenant_id": "memd",
+  "project_id": "memd",
+  "wiki": {
+    "outdir": "docs/compiled_wiki",
+    "max_tasks": 25,
+    "library_k": 20,
+    "memd_url": "http://127.0.0.1:8787/mcp"
+  }
+}
+```
+
+Precedence (highest first):
+
+1. CLI flags (`--tenant-id`, `--project-id`, `--output-dir`,
+   `--max-tasks`, `--library-k`, `--memd-url`)
+2. `wiki.<field>` in the nearest `.memd/config.json`
+3. Top-level `tenant_id` / `project_id` in the same file
+4. Built-in defaults (`http://127.0.0.1:8787/mcp`, 25, 20,
+   `./compiled_wiki/` relative to CWD)
+
+Relative `wiki.outdir` resolves against the project root that owns
+the config file (the directory that contains `.memd/`), not the CWD.
+Absolute paths are used as-is. If a candidate `.memd/config.json`
+exists but cannot be parsed, `memd-wiki` exits with a precise error
+rather than silently falling through.
+
+`--config-start PATH` overrides the starting directory for the
+ancestor walk.
+
 ## Usage
 
-After install:
+After install, with a `.memd/config.json` in the project:
+
+```bash
+memd-wiki
+```
+
+Or override individual fields from the CLI:
 
 ```bash
 memd-wiki \
@@ -94,16 +139,16 @@ memd-wiki \
   --memd-url http://127.0.0.1:8787/mcp
 ```
 
-Or from a source checkout without install:
+From a source checkout without install:
 
 ```bash
 python -m compiled_wiki.cli \
   --tenant-id memd \
-  --project-id memd \
-  --memd-url http://127.0.0.1:8787/mcp
+  --project-id memd
 ```
 
-Generated wiki is written to `output/`.
+Generated wiki is written to the resolved output directory (CLI flag,
+config, or `./compiled_wiki/` under CWD).
 
 ## Tests
 
