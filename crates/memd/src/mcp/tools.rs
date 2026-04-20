@@ -277,6 +277,20 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                             },
                             "required": ["text", "type"]
                         }
+                    },
+                    "supersede_near_duplicates": {
+                        "description": "Track D: when set, applied per-chunk in the batch with the same semantics as memory.add.supersede_near_duplicates. Response gains a `superseded_ids: [[...], ...]` parallel array (one inner array per input chunk).",
+                        "oneOf": [
+                            { "type": "boolean" },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "mode": { "type": "string", "enum": ["exact", "fuzzy"] },
+                                    "threshold": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                                    "scope": { "type": "string", "enum": ["project", "tenant"] }
+                                }
+                            }
+                        ]
                     }
                 },
                 "required": ["chunks"]

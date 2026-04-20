@@ -758,6 +758,121 @@ async fn add_with_dedup_bool_true_uses_exact_mode_default() {
     );
 }
 
+// ---------- Track D4 ----------
+//
+// `memory.add_batch` accepts the same `supersede_near_duplicates`
+// knob and applies it per chunk. Response gains a parallel
+// `superseded_ids` array of arrays (per chunk).
+
+#[tokio::test]
+async fn add_batch_respects_supersede_near_duplicates_per_chunk() {
+    use memd::types::{ChunkId, ChunkStatus};
+    let (server, _tmp) = test_server().await;
+
+    // Seed: two heads in p1 with distinct canonicals.
+    let r1 = call_tool(
+        &server,
+        "memory.add_batch",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunks": [
+                { "text": "Release freeze begins Thursday.", "type": "doc", "project_id": "p1" },
+                { "text": "Migration approved by legal.",     "type": "doc", "project_id": "p1" },
+            ],
+        }),
+    )
+    .await;
+    let body1 = parse_result_text(&r1);
+    let ids1: Vec<String> = body1["chunk_ids"]
+        .as_array()
+        .expect("chunk_ids")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids1.len(), 2);
+    let id_freeze_old = ChunkId::parse(&ids1[0]).unwrap();
+    let _id_migration_old = ChunkId::parse(&ids1[1]).unwrap();
+
+    // Now add a batch where:
+    //   - chunk[0] paraphrases the freeze chunk (canonical match)
+    //   - chunk[1] is brand new (no candidate)
+    //   - chunk[2] paraphrases the migration chunk (canonical match)
+    let r2 = call_tool(
+        &server,
+        "memory.add_batch",
+        serde_json::json!({
+            "tenant_id": "t",
+            "supersede_near_duplicates": { "mode": "exact" },
+            "chunks": [
+                { "text": "release freeze begins thursday.", "type": "doc", "project_id": "p1" },
+                { "text": "Brand new note.",                  "type": "doc", "project_id": "p1" },
+                { "text": "migration approved by legal.",     "type": "doc", "project_id": "p1" },
+            ],
+        }),
+    )
+    .await;
+    let body2 = parse_result_text(&r2);
+    let new_ids: Vec<String> = body2["chunk_ids"]
+        .as_array()
+        .expect("chunk_ids")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    let supersedes: Vec<Vec<String>> = body2["superseded_ids"]
+        .as_array()
+        .expect("superseded_ids parallel array")
+        .iter()
+        .map(|inner| {
+            inner
+                .as_array()
+                .expect("inner array")
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        })
+        .collect();
+    assert_eq!(new_ids.len(), 3);
+    assert_eq!(supersedes.len(), 3);
+    // Chunk 0 paraphrase: must supersede the original freeze chunk.
+    assert_eq!(supersedes[0], vec![id_freeze_old.to_string()]);
+    // Chunk 1 brand new: no candidates.
+    assert!(supersedes[1].is_empty());
+    // Chunk 2 paraphrase: must supersede the original migration chunk.
+    assert_eq!(supersedes[2], vec![ids1[1].clone()]);
+
+    // Old freeze chunk now Superseded.
+    let ps = server.store().as_persistent().expect("persistent");
+    let resolved_old = ps
+        .get_with_lifecycle(&tenant("t"), &id_freeze_old)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved_old.status, ChunkStatus::Superseded);
+}
+
+#[tokio::test]
+async fn add_batch_without_dedup_keeps_legacy_response_shape() {
+    let (server, _tmp) = test_server().await;
+    let r = call_tool(
+        &server,
+        "memory.add_batch",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunks": [
+                { "text": "alpha", "type": "doc" },
+                { "text": "beta",  "type": "doc" },
+            ],
+        }),
+    )
+    .await;
+    let body = parse_result_text(&r);
+    assert!(body["chunk_ids"].as_array().is_some(), "chunk_ids present");
+    assert!(
+        body.get("superseded_ids").is_none(),
+        "no dedup → no superseded_ids field (legacy shape)"
+    );
+}
+
 // D2 round-2 LOW: backfill must handle many rows (not just one) and
 // must repopulate every NULL row in a single pass. Stays within a
 // single tenant because the chunks table's `UNIQUE(segment_id,
