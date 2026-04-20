@@ -758,6 +758,121 @@ async fn add_with_dedup_bool_true_uses_exact_mode_default() {
     );
 }
 
+// ---------- Track D5 ----------
+//
+// `memory.find_near_duplicates` is a read-only preview that returns
+// exact and (optionally) fuzzy candidates without mutating store
+// state. No supersession, no cache bumps.
+
+#[tokio::test]
+async fn find_near_duplicates_returns_exact_match_without_mutating() {
+    use memd::types::ChunkStatus;
+    let (server, _tmp) = test_server().await;
+    let id_a = add_chunk(&server, "t", "Release freeze begins Thursday.").await;
+    let _id_b = add_chunk(&server, "t", "Migration approved by legal.").await;
+
+    let r = call_tool(
+        &server,
+        "memory.find_near_duplicates",
+        serde_json::json!({
+            "tenant_id": "t",
+            "text": "release freeze begins thursday.",
+            "type": "doc",
+        }),
+    )
+    .await;
+    let body = parse_result_text(&r);
+    let exact: Vec<String> = body["exact_matches"]
+        .as_array()
+        .expect("exact_matches array")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(exact, vec![id_a.to_string()], "exact canonical hit");
+
+    // Fuzzy not requested → empty.
+    let fuzzy = body["fuzzy_matches"].as_array().expect("fuzzy_matches array");
+    assert!(fuzzy.is_empty(), "fuzzy_matches must be empty when no threshold");
+
+    // No mutation: original chunk still Final, no superseded_by.
+    let ps = server.store().as_persistent().expect("persistent");
+    let resolved = ps
+        .get_with_lifecycle(&tenant("t"), &id_a)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.status, ChunkStatus::Final);
+    assert!(resolved.lifecycle.superseded_by.is_none());
+}
+
+#[tokio::test]
+async fn find_near_duplicates_returns_fuzzy_with_similarity_score() {
+    let (server, _tmp) = test_server().await;
+    let id = add_chunk(&server, "t", "Release freeze begins Thursday.").await;
+
+    let r = call_tool(
+        &server,
+        "memory.find_near_duplicates",
+        serde_json::json!({
+            "tenant_id": "t",
+            "text": "Release freeze begins on Thursday.",
+            "type": "doc",
+            "fuzzy_threshold": 0.80,
+        }),
+    )
+    .await;
+    let body = parse_result_text(&r);
+    let fuzzy = body["fuzzy_matches"].as_array().expect("fuzzy_matches array");
+    assert_eq!(fuzzy.len(), 1, "single fuzzy match expected");
+    let entry = &fuzzy[0];
+    assert_eq!(
+        entry["chunk_id"].as_str().unwrap(),
+        id.to_string()
+    );
+    let sim = entry["similarity"].as_f64().expect("similarity number");
+    assert!(
+        (0.80..=1.0).contains(&sim),
+        "similarity must clear the requested threshold (got {sim})"
+    );
+}
+
+#[tokio::test]
+async fn find_near_duplicates_respects_project_scope() {
+    let (server, _tmp) = test_server().await;
+    add_chunk(&server, "t", "shared text").await;
+    // Different project — must not be exact-matched when scope=project
+    // is requested via project_id.
+    call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "other",
+            "text": "shared text",
+            "type": "doc",
+        }),
+    )
+    .await;
+
+    let r = call_tool(
+        &server,
+        "memory.find_near_duplicates",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "scope_a",  // distinct project
+            "text": "shared text",
+            "type": "doc",
+        }),
+    )
+    .await;
+    let body = parse_result_text(&r);
+    let exact = body["exact_matches"].as_array().expect("exact_matches");
+    assert!(
+        exact.is_empty(),
+        "scope=project (default) must not bridge across projects"
+    );
+}
+
 // ---------- Track D4 ----------
 //
 // `memory.add_batch` accepts the same `supersede_near_duplicates`

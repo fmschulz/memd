@@ -29,7 +29,8 @@ use super::handlers::{
     handle_find_references, handle_find_tool_calls, handle_memory_add, handle_memory_add_batch,
     handle_memory_compact, handle_memory_consolidate_episode, handle_memory_delete,
     handle_memory_feedback, handle_memory_get, handle_memory_metrics, handle_memory_search,
-    handle_memory_set_expiry, handle_memory_stats, handle_memory_supersede,
+    handle_memory_find_near_duplicates, handle_memory_set_expiry, handle_memory_stats,
+    handle_memory_supersede,
     handle_task_add_evidence, handle_task_finish,
     handle_task_get, handle_task_progress, handle_task_resume, handle_task_run_finish,
     handle_task_run_start, handle_task_search, handle_task_start, AddBatchParams, AddParams,
@@ -38,7 +39,8 @@ use super::handlers::{
     ContextGetFilesForSubsystemParams, ContextGetHotContextParams, ContextListSubsystemsParams,
     ContextSearchDocumentsParams, ContextSuggestAgentParams, DeleteParams, FeedbackParams,
     FindCallersParams, FindDefinitionParams, FindErrorsParams, FindImportsParams,
-    FindReferencesParams, FindToolCallsParams, GetParams, MetricsParams, ProjectBriefParams,
+    FindNearDuplicatesParams, FindReferencesParams, FindToolCallsParams, GetParams, MetricsParams,
+    ProjectBriefParams,
     SearchParams, SetExpiryParams, StatsParams, SupersedeParams, TaskAddEvidenceParams,
     TaskFinishParams,
     TaskGetParams, TaskProgressParams, TaskResumeParams, TaskRunFinishParams, TaskRunStartParams,
@@ -894,6 +896,16 @@ impl<S: Store> McpServer<S> {
                         })?;
                     handle_memory_set_expiry(&*self.store, self.tenant_manager.as_ref(), params)
                         .await
+                }
+                "memory.find_near_duplicates" => {
+                    let params: FindNearDuplicatesParams = serde_json::from_value(arguments)
+                        .map_err(|e| {
+                            McpError::InvalidParams(format!(
+                                "invalid find_near_duplicates params: {}",
+                                e
+                            ))
+                        })?;
+                    handle_memory_find_near_duplicates(&*self.store, params).await
                 }
                 "memory.consolidate_episode" => {
                     let params: ConsolidateEpisodeParams = serde_json::from_value(arguments)
