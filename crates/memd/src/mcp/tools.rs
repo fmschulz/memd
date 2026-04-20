@@ -1650,6 +1650,53 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                 "required": ["chunk_id"]
             }),
         ),
+        // LIFECYCLE-03: memory.find_near_duplicates (Track D5)
+        ToolDefinition::new(
+            "memory.find_near_duplicates",
+            "Read-only Track D preview. Returns existing live-head chunks that the same text would supersede via memory.add(supersede_near_duplicates=...). \
+             Always reports exact-canonical matches; when `fuzzy_threshold` is set, also returns trigram-Jaccard candidates with `similarity` scores. \
+             No writes, no cache bumps. Requires a persistent store.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier for data isolation"
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Probe text — canonicalised and matched against the dedup index"
+                    },
+                    "type": {
+                        "type": "string",
+                        "enum": ["code", "doc", "trace", "decision", "plan", "research", "message", "summary", "other"],
+                        "default": "doc"
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional project identifier — combined with `scope` to bound the candidate pool"
+                    },
+                    "fuzzy_threshold": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                        "description": "Optional padded char-trigram Jaccard threshold. When omitted, only exact-canonical matches are returned."
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["project", "tenant"],
+                        "default": "project"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 128,
+                        "description": "Fuzzy-mode candidate pool cap (most-recent rows considered per scope)."
+                    }
+                },
+                "required": ["text"]
+            }),
+        ),
         // MEMORY-09: memory.consolidate_episode
         ToolDefinition::new(
             "memory.consolidate_episode",
@@ -1910,6 +1957,7 @@ pub fn tool_names() -> Vec<&'static str> {
         "memory.compact",
         "memory.supersede",
         "memory.set_expiry",
+        "memory.find_near_duplicates",
         "memory.consolidate_episode",
         "context.list_subsystems",
         "context.get_files_for_subsystem",
@@ -1938,7 +1986,8 @@ mod tests {
         // (artifact.review / revision / decision / verification).
         // Track A (A7): + memory.supersede.
         // Track C (C6): + memory.set_expiry.
-        assert_eq!(tools.len(), 48);
+        // Track D (D5): + memory.find_near_duplicates.
+        assert_eq!(tools.len(), 49);
     }
 
     #[test]
@@ -2259,9 +2308,11 @@ mod tests {
         // Phase 2.3: 42 legacy + 4 focused artifact tools.
         // Track A (A7): + memory.supersede.
         // Track C (C6): + memory.set_expiry.
-        assert_eq!(names.len(), 48);
+        // Track D (D5): + memory.find_near_duplicates.
+        assert_eq!(names.len(), 49);
         assert!(names.contains(&"memory.supersede"));
         assert!(names.contains(&"memory.set_expiry"));
+        assert!(names.contains(&"memory.find_near_duplicates"));
         assert!(names.contains(&"artifact.find_related"));
         assert!(names.contains(&"artifact.review"));
         assert!(names.contains(&"artifact.revision"));
