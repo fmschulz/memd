@@ -29,18 +29,20 @@ use super::handlers::{
     handle_find_references, handle_find_tool_calls, handle_memory_add, handle_memory_add_batch,
     handle_memory_compact, handle_memory_consolidate_episode, handle_memory_delete,
     handle_memory_feedback, handle_memory_get, handle_memory_metrics, handle_memory_search,
-    handle_memory_export_markdown, handle_memory_find_near_duplicates,
-    handle_memory_set_expiry, handle_memory_stats, handle_memory_supersede,
-    handle_task_add_evidence, handle_task_finish,
+    handle_memory_export_markdown, handle_memory_export_omf,
+    handle_memory_find_near_duplicates, handle_memory_import_omf,
+    handle_memory_preview_omf_import, handle_memory_set_expiry, handle_memory_stats,
+    handle_memory_supersede, handle_task_add_evidence, handle_task_finish,
     handle_task_get, handle_task_progress, handle_task_resume, handle_task_run_finish,
     handle_task_run_start, handle_task_search, handle_task_start, AddBatchParams, AddParams,
     ArtifactCreateParams, ArtifactGetParams, ArtifactLibraryParams, ArtifactListThreadParams,
     ArtifactVerifyParams, CompactParams, ConsolidateEpisodeParams, ContextFindRelevantContextParams,
     ContextGetFilesForSubsystemParams, ContextGetHotContextParams, ContextListSubsystemsParams,
     ContextSearchDocumentsParams, ContextSuggestAgentParams, DeleteParams, ExportMarkdownParams,
-    FeedbackParams, FindCallersParams, FindDefinitionParams, FindErrorsParams, FindImportsParams,
-    FindNearDuplicatesParams, FindReferencesParams, FindToolCallsParams, GetParams, MetricsParams,
-    ProjectBriefParams,
+    ExportOmfParams, FeedbackParams, FindCallersParams, FindDefinitionParams, FindErrorsParams,
+    FindImportsParams, FindNearDuplicatesParams, FindReferencesParams, FindToolCallsParams,
+    GetParams, ImportOmfParams, MetricsParams,
+    PreviewOmfImportParams, ProjectBriefParams,
     SearchParams, SetExpiryParams, StatsParams, SupersedeParams, TaskAddEvidenceParams,
     TaskFinishParams,
     TaskGetParams, TaskProgressParams, TaskResumeParams, TaskRunFinishParams, TaskRunStartParams,
@@ -916,6 +918,50 @@ impl<S: Store> McpServer<S> {
                             ))
                         })?;
                     handle_memory_export_markdown(&*self.store, params).await
+                }
+                "memory.export_omf" => {
+                    let params: ExportOmfParams =
+                        serde_json::from_value(arguments).map_err(|e| {
+                            McpError::InvalidParams(format!("invalid export_omf params: {}", e))
+                        })?;
+                    handle_memory_export_omf(&*self.store, params).await
+                }
+                "memory.preview_omf_import" => {
+                    let params: PreviewOmfImportParams =
+                        serde_json::from_value(arguments).map_err(|e| {
+                            McpError::InvalidParams(format!(
+                                "invalid preview_omf_import params: {}",
+                                e
+                            ))
+                        })?;
+                    handle_memory_preview_omf_import(&*self.store, params).await
+                }
+                "memory.import_omf" => {
+                    let params: ImportOmfParams =
+                        serde_json::from_value(arguments).map_err(|e| {
+                            McpError::InvalidParams(format!("invalid import_omf params: {}", e))
+                        })?;
+                    let (response, events) = handle_memory_import_omf(
+                        &*self.store,
+                        self.tenant_manager.as_ref(),
+                        params,
+                    )
+                    .await?;
+                    // Run post-write structural indexing for each newly
+                    // imported chunk, mirroring memory.supersede and
+                    // memory.add_batch. The handler returns the events
+                    // so the dispatch arm stays the one place that
+                    // owns post-write side effects.
+                    for event in &events {
+                        self.maybe_index_structural_chunk(
+                            &event.tenant_id,
+                            event.project_id.as_deref(),
+                            &event.chunk_type,
+                            event.source_path.as_deref(),
+                            &event.text,
+                        );
+                    }
+                    Ok(response)
                 }
                 "memory.consolidate_episode" => {
                     let params: ConsolidateEpisodeParams = serde_json::from_value(arguments)
