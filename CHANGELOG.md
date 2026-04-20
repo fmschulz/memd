@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [Unreleased]
+
+Items from the post-nanomem handoff shipped direct to `main`.
+
+### Changed
+
+- **Schema migration (one-way): chunks UNIQUE is now tenant-scoped** (Item 2). The legacy `UNIQUE(segment_id, ordinal)` was a pre-existing bug: `PersistentStore::next_segment_id()` allocates segment IDs per-tenant, so tenant_a's (segment=1, ordinal=0) and tenant_b's first write would collide on the global UNIQUE and `INSERT OR REPLACE` would silently overwrite the first-written row's metadata. The constraint is now `UNIQUE(tenant_id, segment_id, ordinal)`. Legacy databases are migrated automatically on open via a rebuild-in-place in `migrate_chunks_unique_to_tenant_scoped`. `segment_id` is no longer globally meaningful; `MetadataStore::get_by_segment` takes a `tenant_id` parameter accordingly, and `idx_chunks_segment` is now `(tenant_id, segment_id)`.
+- **PostWriteEvent moved to its own module** (Item 6). Relocated from `mcp::handlers` to `mcp::post_write_hooks`, with `PostWriteEvent::from_imported_chunk` adapter. Public path `memd::mcp::PostWriteEvent` preserved; `memd::mcp::handlers::PostWriteEvent` retained via `pub use` re-export.
+
+### Added
+
+- **`memd export-markdown` auto-discovers `--data-dir` from `.memd/tenant_scope.json`** (Item 4). When invoked from inside an initialized project, picks up the daemon's data dir from the nearest-ancestor scope config written by `memd init` (without forcing `--data-dir` on every call). Discovery *augments* the `$HOME/.memd/data` fallback rather than replacing it, so the containment guard still refuses an outdir inside the home default even if discovery finds a different path. Also persists `data_dir` in `tenant_scope.json` for every scope mode (not just `global`), and absolutizes `--memd-data-dir` at init time.
+- **G3 symlink-escape guard on `memd export-markdown` writes** (Item 3). `reject_if_any_symlink_inside_outdir` refuses before any filesystem write if any existing component inside outdir is a symlink — closing a pre-existing-symlink-plant escape where an attacker could redirect the write to a path of their choosing. Outdir itself can be a symlink (users may legitimately point at a symlinked exports dir); only components BELOW outdir are refused.
+
+### Migration notes
+
+- **Downgrade is one-way.** A pre-Item-2 binary opening a post-migration database would see the new `UNIQUE(tenant_id, segment_id, ordinal)` constraint but its code paths still treat `segment_id` as globally unique — no silent corruption is expected, but any compaction / audit tooling from the older binary could misread tenant-scoped segments as cross-tenant rows. Roll forward, not back.
+
 ## [0.7.0] - 2026-04-18
 
 Track C release. Lands the temporal-fields + sweep + expiry-control surface on top of
