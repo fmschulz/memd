@@ -155,6 +155,27 @@ const TOKENIZER_FILENAME: &str = "tokenizer.json";
 const MIN_MODEL_SIZE: u64 = 20_000_000;
 const MIN_TOKENIZER_SIZE: u64 = 500_000;
 
+// Candle BERT (safetensors) files for sentence-transformers/all-MiniLM-L6-v2.
+// These URLs are fetched with plain ureq, which follows huggingface.co's
+// relative 307 Location headers correctly. Prior versions used hf-hub 0.3.2,
+// which mishandled those redirects and failed with RelativeUrlWithoutBase.
+// `resolve/main` tracks the repo's head ref — same mutable ref hf-hub 0.3.2
+// resolved to by default, so this preserves the prior trust posture rather
+// than introducing a stronger (commit-hash) pin.
+const CANDLE_BERT_CONFIG_URL: &str =
+    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/config.json";
+const CANDLE_BERT_CONFIG_FILENAME: &str = "sentence-transformers-all-MiniLM-L6-v2-config.json";
+const CANDLE_BERT_TOKENIZER_URL: &str =
+    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json";
+const CANDLE_BERT_TOKENIZER_FILENAME: &str =
+    "sentence-transformers-all-MiniLM-L6-v2-tokenizer.json";
+const CANDLE_BERT_WEIGHTS_URL: &str =
+    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors";
+const CANDLE_BERT_WEIGHTS_FILENAME: &str = "sentence-transformers-all-MiniLM-L6-v2.safetensors";
+const MIN_CANDLE_BERT_CONFIG_SIZE: u64 = 100; // config.json is ~600 bytes
+const MIN_CANDLE_BERT_TOKENIZER_SIZE: u64 = 100_000; // tokenizer.json is ~470KB at main today
+const MIN_CANDLE_BERT_WEIGHTS_SIZE: u64 = 80_000_000; // safetensors is ~90MB
+
 /// Get the cache directory for memd models
 pub fn get_cache_dir() -> Result<PathBuf> {
     let cache_dir = dirs::cache_dir()
@@ -238,38 +259,14 @@ fn verify_tokenizer_exists(path: &PathBuf) -> Result<()> {
 
 /// Download the embedding model
 pub fn download_model(cache_dir: &PathBuf) -> Result<()> {
-    std::fs::create_dir_all(cache_dir)?;
     let model_path = cache_dir.join(MODEL_FILENAME);
-
-    tracing::info!("Downloading embedding model to {:?}", model_path);
-
-    let response = ureq::get(MODEL_URL)
-        .call()
-        .map_err(|e| MemdError::StorageError(format!("failed to download model: {}", e)))?;
-
-    let mut file = std::fs::File::create(&model_path)?;
-    std::io::copy(&mut response.into_reader(), &mut file)?;
-
-    tracing::info!("Model downloaded successfully");
-    Ok(())
+    download_file(MODEL_URL, &model_path, "embedding model")
 }
 
 /// Download the tokenizer (legacy, uses default model)
 fn download_tokenizer(cache_dir: &PathBuf) -> Result<()> {
-    std::fs::create_dir_all(cache_dir)?;
     let tokenizer_path = cache_dir.join(TOKENIZER_FILENAME);
-
-    tracing::info!("Downloading tokenizer to {:?}", tokenizer_path);
-
-    let response = ureq::get(TOKENIZER_URL)
-        .call()
-        .map_err(|e| MemdError::StorageError(format!("failed to download tokenizer: {}", e)))?;
-
-    let mut file = std::fs::File::create(&tokenizer_path)?;
-    std::io::copy(&mut response.into_reader(), &mut file)?;
-
-    tracing::info!("Tokenizer downloaded successfully");
-    Ok(())
+    download_file(TOKENIZER_URL, &tokenizer_path, "tokenizer")
 }
 
 // =============================================================================
@@ -310,8 +307,26 @@ pub fn get_tokenizer_path_for(model: EmbeddingModel) -> Result<PathBuf> {
     Ok(tokenizer_path)
 }
 
-/// Generic file download helper
+/// Generic file download helper.
+///
+/// Streams into a per-invocation sibling temp file
+/// (`<path>.partial.<pid>.<thread>.<counter>`), fsyncs, then publishes
+/// to the canonical target via `hard_link` + `remove_file`. On Unix
+/// `hard_link` fails atomically with `AlreadyExists` if another caller
+/// already published — that branch keeps the winner's bytes and drops
+/// ours. `rename` would silently clobber the winner (Unix semantics),
+/// so we intentionally don't use it. The per-invocation counter in
+/// the temp suffix prevents same-process concurrent callers on the
+/// same target from sharing a temp file.
+///
+/// This keeps the cache atomic: an interrupted download, a crash
+/// mid-stream, or two racing processes can never leave a half-written
+/// file at the canonical cache path where `verify_file_size` would
+/// either wedge boot or (worse) let a truncated model through.
 fn download_file(url: &str, path: &PathBuf, name: &str) -> Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
     let cache_dir = path.parent().unwrap();
     std::fs::create_dir_all(cache_dir)?;
 
@@ -321,11 +336,88 @@ fn download_file(url: &str, path: &PathBuf, name: &str) -> Result<()> {
         .call()
         .map_err(|e| MemdError::StorageError(format!("failed to download {}: {}", name, e)))?;
 
-    let mut file = std::fs::File::create(path)?;
-    std::io::copy(&mut response.into_reader(), &mut file)?;
+    let tmp_path = path.with_extension(format!(
+        "partial.{}.{:?}.{}",
+        std::process::id(),
+        std::thread::current().id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = std::fs::File::create(&tmp_path)?;
+    let copy_result = std::io::copy(&mut response.into_reader(), &mut file)
+        .and_then(|_| file.sync_all());
+    if let Err(e) = copy_result {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(MemdError::StorageError(format!(
+            "failed to stream {} to {:?}: {}",
+            name, tmp_path, e
+        )));
+    }
+    drop(file);
+
+    // First-writer-wins publish: hard_link is atomic and fails with
+    // AlreadyExists if target already exists. Loser cleans up its tmp
+    // and keeps winner's bytes.
+    match std::fs::hard_link(&tmp_path, path) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(MemdError::StorageError(format!(
+                "failed to publish {} to {:?}: {}",
+                name, path, e
+            )));
+        }
+    }
 
     tracing::info!("{} downloaded successfully", name);
     Ok(())
+}
+
+/// Get paths to the Candle BERT model files (config, tokenizer, weights).
+///
+/// Downloads any missing files from huggingface.co into the memd cache using
+/// plain `ureq`, which handles HF's relative 307 redirects correctly. Targets
+/// the `sentence-transformers/all-MiniLM-L6-v2` repo used by the Candle BERT
+/// embedder. Returns the local paths in (config, tokenizer, weights) order.
+pub fn get_candle_bert_paths() -> Result<(PathBuf, PathBuf, PathBuf)> {
+    let cache_dir = get_cache_dir()?;
+    std::fs::create_dir_all(&cache_dir)?;
+
+    let config_path = cache_dir.join(CANDLE_BERT_CONFIG_FILENAME);
+    if !config_path.exists() {
+        download_file(CANDLE_BERT_CONFIG_URL, &config_path, "BERT config")?;
+    }
+    verify_file_size(&config_path, MIN_CANDLE_BERT_CONFIG_SIZE, "BERT config")?;
+
+    let tokenizer_path = cache_dir.join(CANDLE_BERT_TOKENIZER_FILENAME);
+    if !tokenizer_path.exists() {
+        download_file(
+            CANDLE_BERT_TOKENIZER_URL,
+            &tokenizer_path,
+            "BERT tokenizer",
+        )?;
+    }
+    verify_file_size(
+        &tokenizer_path,
+        MIN_CANDLE_BERT_TOKENIZER_SIZE,
+        "BERT tokenizer",
+    )?;
+
+    let weights_path = cache_dir.join(CANDLE_BERT_WEIGHTS_FILENAME);
+    if !weights_path.exists() {
+        download_file(CANDLE_BERT_WEIGHTS_URL, &weights_path, "BERT weights")?;
+    }
+    verify_file_size(
+        &weights_path,
+        MIN_CANDLE_BERT_WEIGHTS_SIZE,
+        "BERT weights",
+    )?;
+
+    Ok((config_path, tokenizer_path, weights_path))
 }
 
 /// Verify file exists and meets minimum size
@@ -398,5 +490,154 @@ mod tests {
         assert!(EmbeddingModel::Qwen3Embedding0_6B
             .model_url()
             .contains("Qwen3-Embedding"));
+    }
+
+    #[test]
+    fn test_candle_bert_constants() {
+        // Contract (repo + file + path, not revision): the Candle BERT embedder
+        // pulls config/tokenizer/weights from sentence-transformers/all-MiniLM-L6-v2
+        // at the `main` ref, same mutable ref hf-hub 0.3.2 resolved to by default.
+        // These asserts lock in the URL shape that plain ureq follows correctly,
+        // preventing a silent refactor from reintroducing the RelativeUrlWithoutBase
+        // regression. Revision pinning (commit hash) would be a stronger
+        // provenance guarantee and is deliberately out of scope here.
+        assert_eq!(
+            CANDLE_BERT_CONFIG_URL,
+            "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/config.json"
+        );
+        assert_eq!(
+            CANDLE_BERT_TOKENIZER_URL,
+            "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
+        );
+        assert_eq!(
+            CANDLE_BERT_WEIGHTS_URL,
+            "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors"
+        );
+        assert!(CANDLE_BERT_CONFIG_URL.starts_with("https://"));
+        assert!(CANDLE_BERT_TOKENIZER_URL.starts_with("https://"));
+        assert!(CANDLE_BERT_WEIGHTS_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn test_candle_bert_cache_filenames_are_distinct() {
+        // Repo-qualified filenames avoid collisions with the Xenova ONNX
+        // tokenizer cached under the same directory.
+        assert_ne!(CANDLE_BERT_CONFIG_FILENAME, CANDLE_BERT_TOKENIZER_FILENAME);
+        assert_ne!(CANDLE_BERT_TOKENIZER_FILENAME, TOKENIZER_FILENAME);
+        assert!(CANDLE_BERT_TOKENIZER_FILENAME.contains("sentence-transformers"));
+        assert!(CANDLE_BERT_WEIGHTS_FILENAME.ends_with(".safetensors"));
+    }
+
+    #[test]
+    fn test_download_file_fails_cleanly_on_request_error() {
+        // When the ureq .call() fails (connect-refused on a loopback port
+        // with no listener), download_file must return an error WITHOUT
+        // creating any file on disk — neither the canonical target nor a
+        // `.partial.*` sibling. This covers the early-failure branch
+        // (before any tmp file exists).
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "memd-download-req-err-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let target = tmp_dir.join("atomic-test.bin");
+
+        let result = download_file("http://127.0.0.1:1/never", &target, "test file");
+        assert!(result.is_err(), "expected download to error");
+        assert!(
+            !target.exists(),
+            "target should not exist after failed download: {:?}",
+            target
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&tmp_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name())
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no temp/partial files should remain, found: {:?}",
+            leftovers
+        );
+
+        std::fs::remove_dir_all(&tmp_dir).ok();
+    }
+
+    #[test]
+    fn test_download_file_is_first_writer_wins() {
+        // Simulate the race-loser branch: the canonical target already
+        // exists when we try to publish. `hard_link` must fail with
+        // AlreadyExists, our tmp must be cleaned up, and the pre-existing
+        // bytes must be preserved byte-for-byte.
+        //
+        // A tiny in-process HTTP server on a loopback port serves a real
+        // body so `download_file` reaches the publish branch (which is the
+        // only place that can observe the pre-existing target). We then
+        // assert the target's original bytes are intact and no `.partial.*`
+        // sibling is left behind.
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let body = b"fresh-download-payload".to_vec();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body_for_server = body.clone();
+        let server_thread = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body_for_server.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(&body_for_server);
+            }
+        });
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "memd-download-winner-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let target = tmp_dir.join("winner.bin");
+
+        // Pre-existing target: simulate the winning race sibling.
+        let sentinel = b"WINNER-BYTES".to_vec();
+        std::fs::write(&target, &sentinel).unwrap();
+
+        let url = format!("http://{}/x", addr);
+        let result = download_file(&url, &target, "race test");
+        server_thread.join().ok();
+
+        assert!(result.is_ok(), "download_file should succeed: {:?}", result);
+        // Target preserved byte-for-byte (winner wins).
+        let observed = std::fs::read(&target).unwrap();
+        assert_eq!(
+            observed, sentinel,
+            "pre-existing winner bytes must not be clobbered"
+        );
+        // Loser's .partial.* tmp file must be cleaned up.
+        let leftovers: Vec<_> = std::fs::read_dir(&tmp_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("partial"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "loser's partial tmp must be cleaned up, found: {:?}",
+            leftovers
+        );
+
+        std::fs::remove_dir_all(&tmp_dir).ok();
     }
 }
