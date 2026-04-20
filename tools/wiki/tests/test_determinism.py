@@ -146,6 +146,28 @@ def _make_mock_server() -> object:
 
     request_counter = itertools.count(1)
 
+    def _synth_task_resume(task_id: str) -> dict[str, Any]:
+        return {
+            "resume": {
+                "task": {
+                    "task_id": task_id,
+                    "goal": f"Force-emit task {task_id}",
+                    "status": "unknown",
+                    "updated_at_ms": 500,
+                    "started_at_ms": 50,
+                },
+                "latest_summary": f"Force-emit latest {task_id}",
+                "what_worked": [],
+                "what_failed": [],
+                "validation": [],
+                "followups": [],
+            },
+            "artifact": {"artifact_id": f"digest-{task_id}", "source_updated_at_ms": 500},
+            "trust_tier": "canonical_record",
+            "verification_hint": {"requires_verification": False, "reason": "canonical"},
+            "grounding_refs": [],
+        }
+
     def _handle(req, *, timeout: float = 0.0) -> _FakeResponse:
         _ = timeout
         body = req.data.decode("utf-8")
@@ -161,7 +183,12 @@ def _make_mock_server() -> object:
             tool = payload["params"]["name"]
             args = payload["params"]["arguments"]
             if tool == "task.resume":
-                canonical = per_task[args["task_id"]]
+                task_id = args["task_id"]
+                canonical = per_task.get(task_id) or _synth_task_resume(task_id)
+            elif tool == "artifact.list_thread":
+                # Synthesize a minimal empty-thread response for
+                # force-emit task_ids that aren't in the main fixture.
+                canonical = tool_responses["artifact.list_thread"]
             else:
                 canonical = tool_responses[tool]
             result = {
