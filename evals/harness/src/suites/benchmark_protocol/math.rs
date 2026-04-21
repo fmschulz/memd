@@ -279,6 +279,7 @@ mod tests {
             },
             quality_gate_passed: true,
             quality_gate_message: String::new(),
+            query_metrics: Vec::new(),
         }
     }
 
