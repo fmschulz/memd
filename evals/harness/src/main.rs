@@ -3,10 +3,67 @@
 //! Runs MCP conformance tests against memd.
 
 use clap::Parser;
+use serde::Deserialize;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use memd_evals::suites;
 use memd_evals::TestResult;
+
+#[derive(Debug, Deserialize)]
+struct DatasetManifest {
+    #[serde(default)]
+    dataset: Vec<DatasetManifestEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DatasetManifestEntry {
+    path: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    name: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    qrels_format: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    approx_bytes: Option<u64>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    license: Option<String>,
+}
+
+/// Read a TOML dataset manifest and return the resolved dataset paths.
+///
+/// Relative `path` entries resolve against the manifest file's own parent
+/// directory so `evals/bench/beir_manifest.toml` can ship with stable
+/// `datasets/retrieval/...` paths regardless of the operator's CWD.
+fn load_dataset_manifest(manifest_path: &Path) -> Result<Vec<PathBuf>, String> {
+    let content = fs::read_to_string(manifest_path)
+        .map_err(|err| format!("read manifest {}: {err}", manifest_path.display()))?;
+    let parsed: DatasetManifest = toml::from_str(&content)
+        .map_err(|err| format!("parse manifest {}: {err}", manifest_path.display()))?;
+    if parsed.dataset.is_empty() {
+        return Err(format!(
+            "manifest {} contains no [[dataset]] entries",
+            manifest_path.display()
+        ));
+    }
+    let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    Ok(parsed
+        .dataset
+        .into_iter()
+        .map(|entry| {
+            let candidate = PathBuf::from(&entry.path);
+            if candidate.is_absolute() {
+                candidate
+            } else {
+                manifest_dir.join(candidate)
+            }
+        })
+        .collect())
+}
 
 /// memd evaluation harness
 #[derive(Parser, Debug)]
@@ -46,6 +103,14 @@ struct Args {
     /// repeat it for multi-dataset benchmark runs (`--suite benchmark`).
     #[arg(long = "dataset-path")]
     dataset_path: Vec<String>,
+
+    /// Path to a TOML dataset manifest (see `evals/bench/beir_manifest.toml`).
+    ///
+    /// Each `[[dataset]]` entry contributes one dataset path. Relative paths
+    /// resolve against the manifest file's own directory. Manifest-provided
+    /// paths concatenate with any explicit `--dataset-path` values.
+    #[arg(long = "dataset-manifest")]
+    dataset_manifest: Option<String>,
 
     /// Bootstrap iterations used by the benchmark protocol suite.
     #[arg(long, default_value_t = 1000)]
@@ -131,19 +196,40 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
 
-    if !args.dataset_path.is_empty() && args.suite == "all" {
-        eprintln!("--dataset-path is only supported with a specific --suite, not --suite all");
+    // Merge explicit --dataset-path values with entries parsed from
+    // --dataset-manifest. Manifest entries append after explicit paths so
+    // CLI-provided overrides take precedence for the first-path env var used
+    // by single-dataset suites.
+    let mut dataset_paths: Vec<String> = args.dataset_path.clone();
+    if let Some(manifest_path) = args.dataset_manifest.as_deref() {
+        match load_dataset_manifest(Path::new(manifest_path)) {
+            Ok(paths) => {
+                dataset_paths.extend(paths.into_iter().map(|p| p.display().to_string()));
+            }
+            Err(err) => {
+                eprintln!("--dataset-manifest error: {err}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    if !dataset_paths.is_empty() && args.suite == "all" {
+        eprintln!(
+            "--dataset-path / --dataset-manifest is only supported with a specific --suite, not --suite all"
+        );
         return ExitCode::FAILURE;
     }
 
-    if args.dataset_path.len() > 1
+    if dataset_paths.len() > 1
         && !matches!(args.suite.as_str(), "benchmark" | "benchmark-protocol")
     {
-        eprintln!("Multiple --dataset-path values are only supported with --suite benchmark");
+        eprintln!(
+            "Multiple dataset paths (from --dataset-path / --dataset-manifest) are only supported with --suite benchmark"
+        );
         return ExitCode::FAILURE;
     }
 
-    if let Some(path) = args.dataset_path.first() {
+    if let Some(path) = dataset_paths.first() {
         std::env::set_var("MEMD_EVAL_DATASET_PATH", path);
     }
 
@@ -237,13 +323,14 @@ fn main() -> ExitCode {
             suites::compaction::run_compaction_tests(&memd_binary, embedding_model)
         }
         "benchmark" | "benchmark-protocol" => {
-            if args.dataset_path.is_empty() {
-                eprintln!("--dataset-path is required for --suite benchmark");
+            if dataset_paths.is_empty() {
+                eprintln!(
+                    "--dataset-path or --dataset-manifest is required for --suite benchmark"
+                );
                 return ExitCode::FAILURE;
             }
             let config = suites::benchmark_protocol::BenchmarkConfig {
-                dataset_paths: args
-                    .dataset_path
+                dataset_paths: dataset_paths
                     .iter()
                     .map(std::path::PathBuf::from)
                     .collect(),
@@ -338,5 +425,99 @@ fn main() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_dataset_manifest_resolves_relative_paths_against_manifest_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("beir_manifest.toml");
+        fs::write(
+            &manifest,
+            r#"
+[[dataset]]
+name = "fiqa"
+path = "datasets/retrieval/beir_fiqa.json"
+
+[[dataset]]
+name = "scidocs"
+path = "datasets/retrieval/beir_scidocs.json"
+"#,
+        )
+        .unwrap();
+
+        let paths = load_dataset_manifest(&manifest).unwrap();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(
+            paths[0],
+            dir.path().join("datasets/retrieval/beir_fiqa.json")
+        );
+        assert_eq!(
+            paths[1],
+            dir.path().join("datasets/retrieval/beir_scidocs.json")
+        );
+    }
+
+    #[test]
+    fn load_dataset_manifest_keeps_absolute_paths_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("m.toml");
+        let absolute = "/tmp/definitely/not/relative.json";
+        fs::write(
+            &manifest,
+            format!(
+                r#"
+[[dataset]]
+path = "{absolute}"
+"#
+            ),
+        )
+        .unwrap();
+        let paths = load_dataset_manifest(&manifest).unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], PathBuf::from(absolute));
+    }
+
+    #[test]
+    fn load_dataset_manifest_rejects_empty_dataset_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("empty.toml");
+        fs::write(&manifest, "# nothing here\n").unwrap();
+        let err = load_dataset_manifest(&manifest).unwrap_err();
+        assert!(err.contains("no [[dataset]] entries"), "{err}");
+    }
+
+    #[test]
+    fn load_dataset_manifest_surfaces_parse_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("bad.toml");
+        fs::write(&manifest, "this is not = valid toml = x\n").unwrap();
+        let err = load_dataset_manifest(&manifest).unwrap_err();
+        assert!(err.contains("parse manifest"));
+    }
+
+    #[test]
+    fn load_dataset_manifest_ignores_unknown_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("m.toml");
+        fs::write(
+            &manifest,
+            r#"
+[[dataset]]
+path = "datasets/retrieval/beir_fiqa.json"
+name = "fiqa"
+qrels_format = "binary"
+approx_bytes = 45_000_000
+license = "Apache-2.0"
+some_future_hint = "whatever"
+"#,
+        )
+        .unwrap();
+        let paths = load_dataset_manifest(&manifest).unwrap();
+        assert_eq!(paths.len(), 1);
     }
 }
