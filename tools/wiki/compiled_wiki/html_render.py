@@ -62,7 +62,9 @@ def _is_safe_url(url: str) -> bool:
     return m.group(1).lower() in _SAFE_URL_SCHEMES
 
 
-def make_link_rewriter(current_rel_path: Path) -> LinkRewriter:
+def make_link_rewriter(
+    current_rel_path: Path, base_path: str = ""
+) -> LinkRewriter:
     """Build a link rewriter that maps compiler-emitted ``.md`` paths to routes.
 
     The deterministic compiler and concept-page renderer emit relative
@@ -73,14 +75,23 @@ def make_link_rewriter(current_rel_path: Path) -> LinkRewriter:
     (a) resolve the relative path to outdir-root coordinates and (b)
     drop the ``.md`` suffix in favor of a trailing-slash URL.
 
+    ``base_path`` lets the serve layer mount a compiled tree under a
+    subpath (e.g. ``base_path="/treeviz"`` when a multi-project build
+    stores each project in its own subdirectory). All rewritten
+    outputs — including root-absolute references the author wrote
+    (``/log``, ``/manifest.json``) — are prefixed with ``base_path``
+    so links stay self-consistent under the mount.
+
     Rules:
-    - URLs with a scheme (``http:``, ``mailto:``, ...), fragment-only
-      URLs (``#frag``), and root-absolute URLs (``/``, ``/log``) pass
-      through unchanged.
+    - Fragment-only URLs (``#frag``) and scheme URLs (``http:``,
+      ``mailto:``, ...) pass through unchanged.
+    - Root-absolute URLs (``/log``, ``/manifest.json``) get
+      ``base_path`` prepended so they resolve under the current mount.
     - Relative URLs ending in ``.md`` are resolved against
       ``current_rel_path.parent`` via ``posixpath.normpath`` and
-      emitted as ``/<lane>/<leaf>/`` (``index.md`` alone maps to
-      ``/``). Query and fragment suffixes are preserved.
+      emitted as ``<base_path>/<lane>/<leaf>/`` (``index.md`` alone
+      maps to ``<base_path>/``). Query and fragment suffixes are
+      preserved.
     - Resolved paths that escape the outdir root (``../outside.md``)
       return the original URL unchanged — the browser will 404 it
       rather than us emit an ugly ``/../`` link.
@@ -88,17 +99,22 @@ def make_link_rewriter(current_rel_path: Path) -> LinkRewriter:
       ``image.png``) passes through unchanged so the reader can still
       see exactly what the author wrote.
 
-    ``current_rel_path`` is a POSIX-style path relative to outdir root
-    (e.g. ``Path("tasks/019dadab.md")`` or ``Path("index.md")``).
+    ``current_rel_path`` is a POSIX-style path relative to the mount
+    root (e.g. ``Path("tasks/019dadab.md")`` or ``Path("index.md")``).
+    ``base_path`` must be either the empty string or an absolute
+    trailing-slash-free prefix like ``/treeviz`` or ``/nelli-website``.
     """
     posix_current = str(current_rel_path).replace(os.sep, "/")
     current_dir = posixpath.dirname(posix_current)
+    base = base_path.rstrip("/") if base_path else ""
 
     def rewrite(url: str) -> str:
         if not url:
             return url
-        if url.startswith("#") or url.startswith("/"):
+        if url.startswith("#"):
             return url
+        if url.startswith("/"):
+            return f"{base}{url}" if base else url
         if _SCHEME_RE.match(url):
             return url
         body, sep_frag, tail = url.partition("#")
@@ -112,10 +128,12 @@ def make_link_rewriter(current_rel_path: Path) -> LinkRewriter:
         if normalized.startswith(".."):
             return url
         if normalized == "index.md":
-            return f"/{query}{fragment}"
+            return f"{base}/{query}{fragment}"
+        if normalized.endswith("/index.md"):
+            return f"{base}/{normalized[:-len('index.md')]}{query}{fragment}"
         if normalized.endswith(".md"):
-            return f"/{normalized[:-3]}/{query}{fragment}"
-        return f"/{normalized}{query}{fragment}"
+            return f"{base}/{normalized[:-3]}/{query}{fragment}"
+        return f"{base}/{normalized}{query}{fragment}"
 
     return rewrite
 

@@ -6,13 +6,20 @@ Phase summary:
 - P1 switched ``index.md`` to ``text/html`` via ``html_render``.
 - P2 formalized the route table with containment + symlink
   rejection.
-- **P3 (this phase)** plugs the per-page link rewriter into every
-  rendered response. Compiler-emitted ``.md`` links such as
-  ``../tasks/task-123.md`` now resolve to the route they were
-  filed under (``/tasks/task-123/``) so a reader can navigate the
-  compiled tree in a browser without every internal link 404'ing.
+- P3 plugged the per-page link rewriter into every rendered
+  response so internal ``.md`` links resolve to the routes
+  they were filed under.
+- **Multi-project (this change)** discovers top-level project
+  subdirectories at serve startup. Every URL whose first segment
+  matches a discovered project slug is routed into that
+  subdirectory as its own wiki mount; the emitted links are
+  prefixed with the project slug so navigation stays self-
+  consistent. URLs without a project prefix serve the top-level
+  landing (``index.md``) and may reach into the standard lanes at
+  the root, preserving the single-project behavior for callers
+  who compile only one project.
 
-Later phase layer on release (P4).
+Later phases layer on release.
 
 The route resolver is a pure function so the routing table can be
 exercised without binding a port.
@@ -25,7 +32,7 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import FrozenSet, Optional, Tuple
 
 from .containment import (
     OutdirContainmentError,
@@ -98,14 +105,46 @@ def _url_to_relative(url_path: str) -> Optional[Tuple[Path, str]]:
     return Path(*rel_parts), HTML_CONTENT_TYPE
 
 
-def resolve_route(outdir: Path, url_path: str) -> RouteResolution:
+def discover_project_slugs(outdir: Path) -> FrozenSet[str]:
+    """Return top-level subdirectories of ``outdir`` that look like mounted wikis.
+
+    A directory qualifies as a project mount if it contains either
+    ``index.md`` or ``manifest.json`` — i.e., looks like a compiled
+    wiki root. The top-level ``_ROUTED_PREFIXES`` (``concepts``,
+    ``entities``, etc.) are never treated as project mounts even if
+    they happen to contain an ``index.md`` the compiler emitted, so
+    single-project layouts continue to resolve through the standard
+    table.
+    """
+    if not outdir.is_dir():
+        return frozenset()
+    found = []
+    for entry in outdir.iterdir():
+        if not entry.is_dir() or entry.is_symlink():
+            continue
+        if entry.name in _ROUTED_PREFIXES:
+            continue
+        if not _is_valid_segment(entry.name):
+            continue
+        if (entry / "index.md").is_file() or (entry / "manifest.json").is_file():
+            found.append(entry.name)
+    return frozenset(found)
+
+
+def resolve_route(
+    outdir: Path,
+    url_path: str,
+    *,
+    project_slugs: FrozenSet[str] = frozenset(),
+) -> RouteResolution:
     """Map a URL path to a resolved file under ``outdir`` or a 404.
 
     The resolver is the single source of truth for the serve route
     table. Layered defenses before hitting disk:
 
     1. Per-segment character allowlist (``_is_valid_segment``).
-    2. Top-level prefix whitelist (``_ROUTED_PREFIXES``).
+    2. Top-level prefix whitelist (``_ROUTED_PREFIXES``) or a
+       discovered project-slug set passed in ``project_slugs``.
     3. ``reject_if_any_symlink_inside_outdir`` — raises if the
        resolved target is outside ``outdir`` (textual containment)
        or if any component below ``outdir`` is a pre-existing
@@ -114,9 +153,21 @@ def resolve_route(outdir: Path, url_path: str) -> RouteResolution:
     4. ``Path.is_file()`` — a valid route still 404s when the page
        hasn't been compiled yet.
 
+    When the first URL segment is a discovered project slug, the
+    resolver recurses into ``outdir/<slug>`` with the remainder of
+    the path. This lets a single serve instance host many compiled
+    project trees side-by-side.
+
     Every rejection funnels to a 404 ``text/plain`` response so the
     handler does not leak why the request was refused.
     """
+    trimmed = url_path.strip("/")
+    if trimmed:
+        first_seg = trimmed.split("/", 1)[0]
+        if first_seg in project_slugs and _is_valid_segment(first_seg):
+            remainder = trimmed[len(first_seg):].lstrip("/")
+            return resolve_route(outdir / first_seg, "/" + remainder)
+
     mapping = _url_to_relative(url_path)
     if mapping is None:
         return RouteResolution(
@@ -148,16 +199,22 @@ def make_handler(outdir: Path, *, quiet: bool = False) -> type:
     Returning a class (rather than an instance) matches the
     ``http.server`` contract: ``ThreadingHTTPServer`` instantiates one
     handler per request.
+
+    Project slugs are discovered once at factory time. Adding or
+    removing a project subdirectory on disk requires a service
+    restart to take effect.
     """
     outdir_abs = normalize_absolute(outdir)
+    project_slugs = discover_project_slugs(outdir_abs)
 
     class WikiRequestHandler(BaseHTTPRequestHandler):
-        server_version = "memd-wiki-serve/0.11.0"
+        server_version = "memd-wiki-serve/0.12.0"
 
         def do_GET(self) -> None:  # noqa: N802 — http.server API.
-            route = resolve_route(outdir, self.path.split("?", 1)[0])
+            url_path = self.path.split("?", 1)[0]
+            route = resolve_route(outdir, url_path, project_slugs=project_slugs)
             if route.status is HTTPStatus.OK and route.file_path is not None:
-                self._respond_file(route.file_path, route.content_type)
+                self._respond_file(route.file_path, route.content_type, url_path)
                 return
             self._respond_bytes(
                 route.status, b"not found\n", PLAIN_CONTENT_TYPE
@@ -177,17 +234,22 @@ def make_handler(outdir: Path, *, quiet: bool = False) -> type:
             self.end_headers()
             self.wfile.write(body)
 
-        def _respond_file(self, path: Path, content_type: str) -> None:
+        def _respond_file(
+            self, path: Path, content_type: str, url_path: str
+        ) -> None:
             if content_type.startswith("text/html"):
                 markdown = path.read_text(encoding="utf-8")
                 try:
-                    relative = path.relative_to(outdir_abs)
+                    relative_to_outdir = path.relative_to(outdir_abs)
                 except ValueError:
                     # Defense-in-depth: resolve_route already enforces
                     # containment, but fall back to an identity rewriter
                     # instead of crashing if invariants ever drift.
-                    relative = Path(path.name)
-                rewriter = make_link_rewriter(relative)
+                    relative_to_outdir = Path(path.name)
+                base_path, relative_to_mount = _split_project_prefix(
+                    relative_to_outdir, project_slugs
+                )
+                rewriter = make_link_rewriter(relative_to_mount, base_path=base_path)
                 body = render_page(
                     markdown, title=path.name, link_rewriter=rewriter
                 ).encode("utf-8")
@@ -196,3 +258,21 @@ def make_handler(outdir: Path, *, quiet: bool = False) -> type:
             self._respond_bytes(HTTPStatus.OK, body, content_type)
 
     return WikiRequestHandler
+
+
+def _split_project_prefix(
+    relative_to_outdir: Path, project_slugs: FrozenSet[str]
+) -> Tuple[str, Path]:
+    """Split a relative-to-outdir path into ``(base_path, relative_to_mount)``.
+
+    When the first path component is a known project slug, the slug
+    becomes the mount's base path (``/treeviz``) and the remaining
+    components form the page's path within the mount. Otherwise the
+    page is served at the root mount (empty base path).
+    """
+    parts = relative_to_outdir.parts
+    if parts and parts[0] in project_slugs:
+        base_path = "/" + parts[0]
+        remainder = Path(*parts[1:]) if len(parts) > 1 else Path("index.md")
+        return base_path, remainder
+    return "", relative_to_outdir
