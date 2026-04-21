@@ -1,0 +1,38 @@
+# memd BEIR retrieval-gate dataset manifest (v0.12)
+#
+# Relative `path` values resolve against THIS manifest's directory. Use
+# absolute paths if you want CWD-independent lookup.
+#
+# Each entry describes a single dataset file that the `--suite benchmark`
+# runner will evaluate. The regression gate (`--suite benchmark-regression
+# --metric ndcg_at_10`) pairs queries per-dataset by `dataset_path`, so the
+# path strings here become the stable cross-version alignment keys.
+#
+# qrels_format hints (not used by the current reader — documentation only):
+#   "binary"   — queries[].relevant is Vec<String>; grades default to 1.
+#   "graded"   — queries[].relevance_grades: HashMap<doc_id, u8> is authoritative.
+#
+# Sizes are approximate after JSON conversion; license info is provided so
+# downstream CI jobs can choose to skip datasets whose terms they cannot
+# accept.
+
+[[dataset]]
+name = "fiqa"
+path = "datasets/retrieval/beir_fiqa.json"
+qrels_format = "binary"
+approx_bytes = 45_000_000
+license = "Apache-2.0"
+
+[[dataset]]
+name = "scidocs"
+path = "datasets/retrieval/beir_scidocs.json"
+qrels_format = "binary"
+approx_bytes = 80_000_000
+license = "CC-BY-4.0"
+
+[[dataset]]
+name = "trec-covid"
+path = "datasets/retrieval/beir_trec-covid.json"
+qrels_format = "binary"
+approx_bytes = 140_000_000
+license = "Public Domain (TREC-COVID 2020 abstract corpus)"
