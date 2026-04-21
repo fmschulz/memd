@@ -1,0 +1,122 @@
+name: Retrieval Gate
+
+on:
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'evals/**'
+      - '.github/workflows/retrieval-gate.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'evals/**'
+      - '.github/workflows/retrieval-gate.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+# Cancel any still-running run for the same ref when a new commit arrives —
+# only the tip commit's gate verdict matters.
+concurrency:
+  group: retrieval-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Same caps used to generate evals/bench/baselines/beir_v1.json. Must
+  # match the baseline parameters exactly or the paired-query test will
+  # operate on a shrunken or shifted sample and the gate verdict becomes
+  # untrustworthy. See evals/BENCHMARK_PROTOCOL.md for the regeneration
+  # ritual if these need to change.
+  BEIR_MAX_QUERIES: '30'
+  BEIR_MAX_DOCUMENTS: '500'
+  BEIR_SYSTEM_VARIANT: 'hybrid-feature'
+  BEIR_SEED: '42'
+  BEIR_BOOTSTRAP_ITERATIONS: '1000'
+  BEIR_METRIC: 'ndcg_at_10'
+  BEIR_SIGNIFICANCE_ALPHA: '0.05'
+  BEIR_MIN_EFFECT_SIZE: '0.05'
+
+jobs:
+  retrieval-gate:
+    name: BEIR nDCG@10 gate (fiqa + scidocs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-retrieval-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-retrieval-
+            ${{ runner.os }}-cargo-
+
+      - name: Cache BEIR datasets
+        id: beir-cache
+        uses: actions/cache@v4
+        with:
+          path: evals/bench/datasets/retrieval
+          key: beir-datasets-${{ hashFiles('evals/bench/scripts/fetch_offline_benchmark_datasets.sh') }}
+
+      - name: Fetch BEIR datasets
+        if: steps.beir-cache.outputs.cache-hit != 'true'
+        run: bash ./evals/bench/scripts/fetch_offline_benchmark_datasets.sh
+
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/memd/models
+          key: memd-embed-all-minilm-v1
+
+      - name: Build memd + memd-evals (release)
+        run: cargo build --release -p memd -p memd-evals
+
+      - name: Run benchmark (fiqa + scidocs)
+        run: |
+          ./target/release/memd-evals \
+            --memd-path ./target/release/memd \
+            --skip-build \
+            --suite benchmark \
+            --dataset-path evals/bench/datasets/retrieval/beir_fiqa.json \
+            --dataset-path evals/bench/datasets/retrieval/beir_scidocs.json \
+            --system-variant "$BEIR_SYSTEM_VARIANT" \
+            --seed "$BEIR_SEED" \
+            --bootstrap-iterations "$BEIR_BOOTSTRAP_ITERATIONS" \
+            --max-queries "$BEIR_MAX_QUERIES" \
+            --max-documents "$BEIR_MAX_DOCUMENTS" \
+            --report-json /tmp/candidate.json
+
+      - name: Regression gate (nDCG@10)
+        run: |
+          ./target/release/memd-evals \
+            --memd-path ./target/release/memd \
+            --skip-build \
+            --suite benchmark-regression \
+            --baseline-report evals/bench/baselines/beir_v1.json \
+            --candidate-report /tmp/candidate.json \
+            --metric "$BEIR_METRIC" \
+            --significance-alpha "$BEIR_SIGNIFICANCE_ALPHA" \
+            --min-effect-size "$BEIR_MIN_EFFECT_SIZE" \
+            --regression-report-json /tmp/regression.json
+
+      - name: Upload candidate + regression reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrieval-gate-reports
+          path: |
+            /tmp/candidate.json
+            /tmp/regression.json
+          if-no-files-found: warn
+          retention-days: 14
