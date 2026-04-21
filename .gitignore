@@ -26,6 +26,13 @@ Thumbs.db
 test_chunk
 test_chunk.rs
 
+# Per-repo agent / codex workspaces
+/.codexloop/
+/MEMORY.md
+
+# User-local task tracking (per global CLAUDE.md convention)
+/tasks/
+
 # Python environment (uv/pixi)
 .venv/
 __pycache__/
@@ -60,6 +67,9 @@ TESTING.md
 
 # Evaluation results (benchmarks change frequently)
 /evals/results/
+/evals/bench/results/
+/evals/bench/memd-xproject-pilot/runs/
+/evals/bench/memd-xproject-pilot/final_answers/
 /evals/datasets/beir/
 /evals/datasets/codesearchnet/
 /evals/bench/datasets/retrieval/beir_fiqa.json
