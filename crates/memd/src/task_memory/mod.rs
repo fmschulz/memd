@@ -65,6 +65,15 @@ pub enum ArtifactKind {
     Decision,
     Digest,
     TaskFinish,
+    /// LLM-authored concept / entity page. Carries a `content` markdown
+    /// body and non-empty `grounding_refs` (enforced at the MCP
+    /// boundary). Trust semantics match other canonical records: a
+    /// fresh `WikiPage` sits at `TrustTier::CanonicalRecord` forever;
+    /// presence of distinct-writer `Verification` children whose
+    /// `reply_to_artifact_id` targets the page signals "verified"
+    /// state in the rendered wiki, but never promotes the page's own
+    /// `promotion_state`.
+    WikiPage,
 }
 
 impl ArtifactKind {
@@ -81,6 +90,7 @@ impl ArtifactKind {
             Self::Decision => "decision",
             Self::Digest => "digest",
             Self::TaskFinish => "task_finish",
+            Self::WikiPage => "wiki_page",
         }
     }
 }
@@ -101,8 +111,9 @@ impl FromStr for ArtifactKind {
             "decision" => Ok(Self::Decision),
             "digest" => Ok(Self::Digest),
             "task_finish" => Ok(Self::TaskFinish),
+            "wiki_page" => Ok(Self::WikiPage),
             _ => Err(format!(
-                "invalid artifact_kind '{}', must be one of: task_start, task_progress, run_start, run_finish, evidence, review, revision, verification, decision, digest, task_finish",
+                "invalid artifact_kind '{}', must be one of: task_start, task_progress, run_start, run_finish, evidence, review, revision, verification, decision, digest, task_finish, wiki_page",
                 value
             )),
         }
@@ -291,6 +302,12 @@ pub struct TaskArtifact {
     pub method_summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub summary: Option<String>,
+    /// Optional full-markdown body. Only populated for
+    /// `ArtifactKind::WikiPage` — the MCP validator rejects non-empty
+    /// `content` on every other kind. Nullable so existing artifact
+    /// rows round-trip unchanged.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub evidence_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -398,6 +415,7 @@ impl TaskArtifact {
             scientific_question: None,
             method_summary: None,
             summary: None,
+            content: None,
             evidence_kind: None,
             supports_claim: None,
             blockers: Vec::new(),
@@ -492,6 +510,19 @@ impl TaskArtifact {
     pub fn new_decision(tenant_id: TenantId, task_id: impl Into<String>) -> Self {
         let mut artifact = Self::new(ArtifactKind::Decision, tenant_id, task_id);
         artifact.status = Some("recorded".to_string());
+        artifact
+    }
+
+    /// Canonical constructor for an LLM-authored concept / entity page.
+    ///
+    /// The caller is still responsible for populating `content`,
+    /// `summary`, `artifact_role`, `related_artifact_ids` (used as
+    /// grounding refs at the MCP boundary) before the page is handed to
+    /// `artifact.create`. The handler validates those fields before
+    /// storing the row — see `crates/memd/src/mcp/handlers.rs`.
+    pub fn new_wiki_page(tenant_id: TenantId, task_id: impl Into<String>) -> Self {
+        let mut artifact = Self::new(ArtifactKind::WikiPage, tenant_id, task_id);
+        artifact.status = Some("authored".to_string());
         artifact
     }
 
@@ -728,7 +759,8 @@ pub fn derive_artifact_promotion_state(artifact: &TaskArtifact) -> PromotionStat
         | ArtifactKind::Revision
         | ArtifactKind::Verification
         | ArtifactKind::Decision
-        | ArtifactKind::TaskFinish => PromotionState::Canonical,
+        | ArtifactKind::TaskFinish
+        | ArtifactKind::WikiPage => PromotionState::Canonical,
     }
 }
 
@@ -773,7 +805,8 @@ fn build_projection_chunk(
             ArtifactKind::Review
             | ArtifactKind::Revision
             | ArtifactKind::Verification
-            | ArtifactKind::Decision => "artifact.create".to_string(),
+            | ArtifactKind::Decision
+            | ArtifactKind::WikiPage => "artifact.create".to_string(),
             ArtifactKind::Digest => "memory.compact".to_string(),
         })
     });
@@ -1146,7 +1179,102 @@ mod tests {
             ArtifactKind::from_str("digest").unwrap(),
             ArtifactKind::Digest
         );
+        assert_eq!(
+            ArtifactKind::from_str("wiki_page").unwrap(),
+            ArtifactKind::WikiPage
+        );
         assert!(ArtifactKind::from_str("unknown").is_err());
+    }
+
+    /// v2 Phase 0: `wiki_page` artifact kind round-trips through its
+    /// snake_case name and through JSON with a populated `content`
+    /// field. Both directions matter: the MCP wire format is the JSON
+    /// name; the storage layer round-trips through JSON.
+    #[test]
+    fn wiki_page_artifact_kind_roundtrips_and_carries_content() {
+        assert_eq!(ArtifactKind::WikiPage.as_str(), "wiki_page");
+        let err = ArtifactKind::from_str("not_a_kind").unwrap_err();
+        assert!(
+            err.contains("wiki_page"),
+            "FromStr error must list the new wiki_page kind; got: {err}"
+        );
+
+        let tenant = TenantId::new("wiki_author").unwrap();
+        let mut page = TaskArtifact::new_wiki_page(tenant, "task-wiki-1");
+        page.project_id = ProjectId::new(Some("memd".to_string()));
+        page.artifact_role = Some("concept".to_string());
+        page.summary = Some("Explains the verification boundary.".to_string());
+        page.content = Some(
+            "# Verification boundary\n\nClaims require distinct-writer countersignatures.".to_string(),
+        );
+        page.related_artifact_ids = vec!["0199...".to_string()];
+
+        let json = serde_json::to_string(&page).expect("wiki_page should serialize");
+        assert!(json.contains("\"artifact_kind\":\"wiki_page\""));
+        assert!(json.contains("\"content\":"));
+
+        let parsed: TaskArtifact = serde_json::from_str(&json).expect("wiki_page should round-trip");
+        assert_eq!(parsed.artifact_kind, ArtifactKind::WikiPage);
+        assert_eq!(parsed.content, page.content);
+        assert_eq!(parsed.artifact_role, Some("concept".to_string()));
+    }
+
+    /// v2 Phase 0 (trust model, §4.2 of the plan): a freshly-authored
+    /// `wiki_page` sits at `TrustTier::CanonicalRecord`, and stays
+    /// there even if a distinct-writer `Verification` child replies to
+    /// it — the promotion path targets the verification artifact
+    /// being written, not the parent it cites. The WikiPage's trust
+    /// tier is a property of the page itself, not of its children.
+    #[test]
+    fn wiki_page_stays_canonical_record_even_with_verification_children() {
+        let tenant = TenantId::new("wiki_trust").unwrap();
+
+        let page = TaskArtifact::new_wiki_page(tenant.clone(), "task-wiki-2");
+        assert_eq!(
+            derive_artifact_promotion_state(&page),
+            PromotionState::Canonical,
+            "fresh wiki_page derives to Canonical, not Verified or Summarized"
+        );
+        assert_eq!(
+            derive_artifact_trust_tier(&page),
+            TrustTier::CanonicalRecord,
+            "fresh wiki_page starts at CanonicalRecord trust tier"
+        );
+
+        // Simulate the state after a distinct-writer Verification
+        // child has been recorded against this page. The child would
+        // be promoted via promote_if_countersigned (covered separately
+        // in mcp::handlers tests); the PAGE itself never changes
+        // promotion_state. Assert directly that an externally-
+        // unmodified WikiPage remains at CanonicalRecord.
+        assert_eq!(
+            page.promotion_state,
+            PromotionState::Raw,
+            "wiki_page promotion_state starts at Raw pre-storage"
+        );
+        let mut stored = page.clone();
+        stored.promotion_state = derive_artifact_promotion_state(&stored);
+        assert_eq!(
+            derive_artifact_trust_tier(&stored),
+            TrustTier::CanonicalRecord,
+            "post-storage wiki_page stays at CanonicalRecord trust tier"
+        );
+
+        // Even if some caller maliciously attempts to self-label the
+        // page with verification-adjacent fields, the trust tier must
+        // not upgrade — only server-computed PromotionState::Verified
+        // does that, and the server only sets Verified on the child,
+        // never on the wiki_page via this path.
+        let mut self_labelled = page.clone();
+        self_labelled.verification_status = Some("verified".to_string());
+        self_labelled.approval_state = Some("approved".to_string());
+        self_labelled.validation = vec!["self-asserted".to_string()];
+        self_labelled.promotion_state = derive_artifact_promotion_state(&self_labelled);
+        assert_eq!(
+            derive_artifact_trust_tier(&self_labelled),
+            TrustTier::CanonicalRecord,
+            "self-labelled wiki_page cannot reach VerifiedRecord — §4.2 laundering block"
+        );
     }
 
     #[test]
