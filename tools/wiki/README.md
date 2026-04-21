@@ -3,10 +3,13 @@
 Deterministic compiler that builds a Karpathy-style compiled markdown wiki from
 live `memd` project state, read through the MCP HTTP API.
 
-> **Status:** v0.10.0 ships LLM-authored concept / entity pages
-> alongside the v1 compiler-owned surface. The opt-in v2 lanes are
-> empty by default — a fresh install with no `wiki_page` artifacts
-> behaves identically to v0.9.0.
+> **Status:** v0.11.0 adds a read-only HTTP runtime
+> (`memd-wiki serve`) on top of the v0.10.0 compiler output.
+> Artifact-id URLs (`/concepts/<id>/`, `/tasks/<id>/`, ...) are
+> stable; slugs, in-memory search, and watch-rebuild stay deferred
+> to v3.1+. The build + lint + migrate surfaces are unchanged, so
+> upgrading from v0.10.0 is a version bump plus the new `serve`
+> subcommand.
 
 ## Scope
 
@@ -55,7 +58,50 @@ The compiler is trust-aware:
   `CanonicalRecord` forever; "Verified by:" footers come exclusively
   from distinct-writer Verification *children* of the page
 
-A browsable runtime (`memd-wiki serve`) is explicitly deferred to v3.
+## Serving the compiled wiki
+
+```bash
+memd-wiki serve [--output-dir PATH] [--host 127.0.0.1] [--port 8099]
+```
+
+Read-only stdlib HTTP server over a compiled tree. Binds localhost
+by default; pass `--host 0` or `--port 0` for ephemeral addresses
+(useful in tests and CI). SIGINT / SIGTERM shut the server down
+cleanly. `memd-wiki serve` never rebuilds the tree — run
+`memd-wiki build` first whenever memd state changes.
+
+URL table (stable — artifact-id routes, no slug table yet):
+
+| Route                              | Source file                      |
+|---|---|
+| `/`                                | `index.md` (rendered to HTML)    |
+| `/log`                             | `log.md`                         |
+| `/manifest.json`                   | raw JSON, `application/json`     |
+| `/concepts/<artifact_id>/`         | `concepts/<id>.md`               |
+| `/entities/<artifact_id>/`         | `entities/<id>.md`               |
+| `/tasks/<task_id>/`                | `tasks/<id>.md`                  |
+| `/projects/<project_id>/`          | `projects/<id>.md`               |
+| `/libraries/<name>/`               | `libraries/<name>.md`            |
+| `/notes/a/b/c`                     | `notes/a/b/c.md` (human-owned)   |
+
+Everything served as HTML is rendered from the compiled markdown
+with a small inline `<style>` block (zero external asset requests)
+and every internal `.md` link is rewritten to the route shape above
+so a reader can navigate the tree in a browser.
+
+Safety: per-segment character allowlist (`[A-Za-z0-9._-]+`),
+`.`/`..` rejected explicitly, symlink components below `--output-dir`
+rejected via the same `containment.reject_if_any_symlink_inside_outdir`
+rule the Rust export-markdown CLI enforces. Every rejection 404s
+with `text/plain` so the server does not leak why a request was
+refused. Link `href` attributes are filtered against a scheme
+allowlist (`http`, `https`, `mailto`, `ftp`, `ftps`, relative);
+`javascript:` and `data:` in LLM-authored concept bodies are
+rendered as literal markdown text.
+
+v3.1+ deferrals: slugs + `concept_slugs` manifest field; `--build`,
+`--open`, `--quiet` flags; file watching + live rebuild; in-memory
+search (`/search?q=`).
 
 ## Authoring concept / entity pages
 

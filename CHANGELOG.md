@@ -6,6 +6,80 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-04-21
+
+### Added
+
+- **memd-wiki serve v3.0: read-only HTTP runtime over the compiled
+  tree.** The four-phase sub-plan deferred from v0.10.0 shipped as
+  four discrete commits (`fdb67fc`, `6711f87`, `4ec36d7`, `8087f3a`)
+  with a mid-P1 security fold (`ffc825e`). `memd-wiki serve` binds
+  localhost by default and exposes the compiler's full page set plus
+  the human-owned `notes/` lane at stable artifact-id URLs. Zero new
+  third-party dependencies — the server is stdlib
+  `http.server.ThreadingHTTPServer` + a hand-rolled Markdown → HTML
+  renderer.
+  - **P0 `memd-wiki serve` skeleton** (`fdb67fc`). Registered the
+    `serve` subparser next to `build` / `lint` / `migrate`, plus a
+    pure `resolve_route(outdir, url_path)` + `make_handler(outdir)`
+    factory. Signal-safe shutdown on SIGINT + SIGTERM.
+  - **P1 hand-rolled Markdown → HTML renderer** (`6711f87`, folded
+    in `ffc825e`). `tools/wiki/compiled_wiki/html_render.py` covers
+    the exact dialect the deterministic compiler emits (ATX
+    headings, `-` lists with 2-space continuation lines, inline
+    code, link, italic/bold, YAML frontmatter) plus the minimal
+    superset LLM-authored concept bodies need (fenced code, hr).
+    Pure string-in / string-out so golden-byte tests don't bind a
+    socket. Every link `href` runs through a URL-scheme allowlist
+    — `http`, `https`, `mailto`, `ftp`, `ftps`, and scheme-less
+    relative URLs are permitted; `javascript:` / `data:` / etc.
+    render as HTML-escaped literal markdown so the filtered URL
+    stays visible instead of silently dropped. The scheme guard
+    runs AFTER the link rewriter so a malicious rewriter cannot
+    smuggle an unsafe URL through. The served document is wrapped
+    in a minimal self-contained `<html>` shell with an inline
+    `<style>` block (zero external asset requests).
+  - **P2 expanded route table + containment guard** (`4ec36d7`).
+    Formal routes for `/`, `/log`, `/manifest.json` (raw
+    `application/json`), `/concepts/<id>/`, `/entities/<id>/`,
+    `/tasks/<id>/`, `/projects/<id>/`, `/libraries/<name>/`, and
+    `/notes/a/b/c/`. Layered defenses before hitting disk: per-
+    segment char allowlist `[A-Za-z0-9._-]+`, top-level prefix
+    whitelist, reuse of
+    `containment.reject_if_any_symlink_inside_outdir` (fail-closed
+    parity with the Rust export-markdown CLI), and `Path.is_file()`
+    — all rejections funnel to a 404 `text/plain` so the server
+    does not leak why a request was refused.
+  - **P3 per-page link rewriter** (`8087f3a`). Compiler-emitted
+    relative `.md` links (`projects/memd.md`,
+    `../tasks/019dadab.md`, `../libraries/failures.md`) are
+    resolved against the current page's outdir-relative path and
+    rewritten to the P2 route shape. Query + fragment suffixes are
+    preserved. Paths that normalize to an outdir escape
+    (`../outside.md` from `index.md`) pass through unchanged so
+    the browser 404s cleanly. Round-trip integration test crawls
+    BFS from `/`, scrapes every `<a href>` via
+    `html.parser.HTMLParser`, and asserts zero dead internal links
+    on a seeded linked tree.
+
+### Changed
+
+- Both `Cargo.toml` and `tools/wiki/pyproject.toml` move to 0.11.0
+  in lockstep. The MCP tool contract and manifest schema are
+  unchanged — a v0.11.0 `memd-wiki` works against a v0.11.0 memd
+  server identically to how v0.10.0 against v0.10.0 worked, plus
+  the new `serve` subcommand.
+
+### Notes
+
+- Test counts: Rust suite unchanged at 910 / 4 ignored; Python
+  `tools/wiki` grew from 174 to 249 (+75 = 23 html_render unit +
+  9 URL-scheme / edge-case folds + 23 P2 route-resolver + 15 P3
+  rewriter + 5 integration/round-trip) with zero regressions.
+- v3.1+ deferrals documented in `tools/wiki/README.md`: slugs +
+  `concept_slugs` manifest field, `--build`/`--open`/`--quiet`
+  flags, watch + live rebuild, in-memory search.
+
 ## [0.10.0] - 2026-04-20
 
 ### Added
