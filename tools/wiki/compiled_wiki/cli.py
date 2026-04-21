@@ -17,6 +17,7 @@ from .compiler import (
 from .config_loader import ConfigLoadError, DiscoveredConfig, load_config
 from .containment import OutdirContainmentError, resolve_forbidden_data_dirs
 from .lint import LintReport, lint_output_dir
+from .serve import _add_serve_subparser, _run_serve
 
 DEFAULT_MEMD_URL = "http://127.0.0.1:8787/mcp"
 DEFAULT_MAX_TASKS = 25
@@ -75,6 +76,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     _add_build_subparser(subparsers)
     _add_lint_subparser(subparsers)
     _add_migrate_subparser(subparsers)
+    _add_serve_subparser(subparsers)
 
     args = parser.parse_args(argv)
     # Backwards-compat: if no subcommand and no subcommand-specific
@@ -494,6 +496,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_lint(args, discovered)
     if args.command == "migrate":
         return _run_migrate(args, discovered)
+    if args.command == "serve":
+        return _run_serve(args, discovered)
     return _run_build(args, discovered)
 
 
