@@ -359,6 +359,99 @@ def render_library_page(
     return "\n".join(lines)
 
 
+def render_concept_page(
+    tenant_id: str,
+    project_id: str,
+    snapshot_at_ms: int,
+    record: dict[str, Any],
+) -> str:
+    """Render an LLM-authored wiki_page artifact (plan §5 phase 2).
+
+    The rendered page has four sections:
+    1. YAML frontmatter — artifact_id, role, trust_tier, snapshot.
+    2. ``# {summary}`` heading + the summary as the page subtitle.
+    3. The raw markdown ``content`` body (LLM-authored).
+    4. ``## Grounded By`` footer — links back to every cited artifact.
+
+    Concept pages link grounding refs back to ``../tasks/<id>.md``
+    using the same convention as project / library pages so internal
+    backlinks stay consistent across the wiki.
+    """
+    page = record["page"]
+    summary = one_line(page.get("summary"))
+    role = record["artifact_role"]
+    artifact_id = record["artifact_id"]
+
+    frontmatter = [
+        "---",
+        f"artifact_id: {artifact_id}",
+        f"artifact_kind: wiki_page",
+        f"artifact_role: {role}",
+        f"trust_tier: {record['trust_tier']}",
+        f"source_snapshot_at_ms: {snapshot_at_ms}",
+        f"source_updated_at_ms: {record['source_updated_at_ms']}",
+        f"tenant_id: {tenant_id}",
+        f"project_id: {project_id}",
+        "---",
+        "",
+    ]
+
+    title_text = summary or f"Concept page {artifact_id}"
+    body_lines = [
+        f"# {title_text}",
+        "",
+    ]
+    if summary and summary != title_text:
+        body_lines.extend([summary, ""])
+    body_lines.append(f"- Lane: `{record['lane']}`")
+    body_lines.append(f"- Role: `{role}`")
+    body_lines.append(f"- Trust tier: `{record['trust_tier']}`")
+    body_lines.append(f"- Source snapshot at: `{iso_timestamp(snapshot_at_ms)}`")
+    body_lines.append(
+        f"- Source updated at: `{iso_timestamp(record['source_updated_at_ms'])}`"
+    )
+    body_lines.append("")
+
+    content = page.get("content")
+    if isinstance(content, str) and content.strip():
+        body_lines.append("## Body")
+        body_lines.append("")
+        body_lines.append(content.rstrip())
+        body_lines.append("")
+
+    grounding_lines = render_concept_grounding(record["grounding_refs"])
+    body_lines.extend(grounding_lines)
+
+    return "\n".join(frontmatter + body_lines)
+
+
+def render_concept_grounding(
+    refs: list[dict[str, Any]],
+) -> list[str]:
+    """Render the Grounded By footer for a concept page.
+
+    Each ref points back at the canonical task page via
+    ``../tasks/<id>.md``; unresolved refs render with an
+    `(unresolved)` marker so the Phase 3 lint can pin the data
+    integrity issue, and the human reader is not silently misled.
+    """
+    if not refs:
+        return ["## Grounded By", "", "- (no grounding refs)", ""]
+    lines = ["## Grounded By", ""]
+    for ref in refs:
+        task_id = ref.get("task_id", "unknown-task")
+        artifact_id = ref.get("artifact_id", "unknown-artifact")
+        artifact_kind = ref.get("artifact_kind", "artifact")
+        role = ref.get("artifact_role")
+        suffix = f", role={role}" if role else ""
+        marker = "" if ref.get("resolved", True) else " *(unresolved)*"
+        lines.append(
+            f"- [{task_id}](../tasks/{task_id}.md) | artifact `{artifact_id}` | {artifact_kind}{suffix}{marker}"
+        )
+    lines.append("")
+    return lines
+
+
 def render_log_page(
     tenant_id: str,
     project_id: str,

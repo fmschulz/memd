@@ -761,7 +761,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                             "task_id": {"type": "string"},
                             "artifact_kind": {
                                 "type": "string",
-                                "enum": ["task_start", "task_progress", "run_start", "run_finish", "evidence", "review", "revision", "verification", "decision", "digest", "task_finish"]
+                                "enum": ["task_start", "task_progress", "run_start", "run_finish", "evidence", "review", "revision", "verification", "decision", "digest", "task_finish", "wiki_page"]
                             },
                             "status": {"type": "string"},
                             "challenge_id": {"type": "string"},
@@ -931,7 +931,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                             "task_id": {"type": "string"},
                             "artifact_kind": {
                                 "type": "string",
-                                "enum": ["task_start", "task_progress", "run_start", "run_finish", "evidence", "review", "revision", "verification", "decision", "digest", "task_finish"]
+                                "enum": ["task_start", "task_progress", "run_start", "run_finish", "evidence", "review", "revision", "verification", "decision", "digest", "task_finish", "wiki_page"]
                             },
                             "status": {"type": "string"},
                             "challenge_id": {"type": "string"},
