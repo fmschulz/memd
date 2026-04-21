@@ -494,6 +494,8 @@ def build_concept_page_record(
             "resolved": True,
         })
 
+    verifications = _fetch_verification_children(client, config, artifact_id)
+
     return {
         "page": page,
         "path": path,
@@ -507,7 +509,61 @@ def build_concept_page_record(
             or 0
         ),
         "grounding_refs": grounding_refs,
+        "verifications": verifications,
     }
+
+
+def _fetch_verification_children(
+    client: McpHttpClient,
+    config: BuildConfig,
+    wiki_page_artifact_id: str | None,
+) -> list[dict[str, Any]]:
+    """Return distinct-writer Verification artifacts that target this page.
+
+    Plan §4.2 trust model: a wiki_page itself stays at
+    ``CanonicalRecord``; UI-facing "verified" state is derived from
+    presence of children whose ``reply_to_artifact_id`` points at the
+    page AND whose ``promotion_state`` is ``verified`` (the server-side
+    countersignature signal). The renderer surfaces these as
+    ``Verified by: <agent_id> on <date>`` lines in the page footer; the
+    Phase 3 lint validates the contract.
+    """
+    if not wiki_page_artifact_id:
+        return []
+    try:
+        payload = client.call_tool(
+            "artifact.search",
+            {
+                "tenant_id": config.tenant_id,
+                "k": 50,
+                "filters": {
+                    "project_id": config.project_id,
+                    "artifact_kind": "verification",
+                    "reply_to_artifact_id": wiki_page_artifact_id,
+                },
+            },
+        )
+    except Exception:  # noqa: BLE001 — verification fetch is best-effort
+        return []
+    verifications: list[dict[str, Any]] = []
+    for hit in payload.get("hits") or []:
+        if not isinstance(hit, dict):
+            continue
+        artifact = hit.get("artifact")
+        if not isinstance(artifact, dict):
+            continue
+        if artifact.get("promotion_state") != "verified":
+            continue
+        verifications.append({
+            "artifact_id": artifact.get("artifact_id", "unknown"),
+            "agent_id": artifact.get("agent_id") or "unknown-agent",
+            "timestamp_created": int(artifact.get("timestamp_created") or 0),
+        })
+    # Stable ordering: earliest verification first, then artifact_id.
+    verifications.sort(
+        key=lambda v: (v["timestamp_created"], v["artifact_id"])
+    )
+    return verifications
 
 
 def _grounding_trust_tier(artifact: dict[str, Any]) -> str:

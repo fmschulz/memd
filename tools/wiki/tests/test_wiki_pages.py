@@ -141,6 +141,63 @@ class RenderConceptPageTests(unittest.TestCase):
         text = render_concept_page("memd", "memd", 0, record)
         self.assertIn("*(unresolved)*", text)
 
+    def test_verified_by_section_emits_when_verifications_present(self) -> None:
+        record = {
+            "page": {
+                "artifact_id": "0199-page",
+                "summary": "X",
+                "artifact_role": "concept",
+                "content": "# X",
+            },
+            "path": "concepts/0199-page.md",
+            "lane": "concepts",
+            "artifact_id": "0199-page",
+            "artifact_role": "concept",
+            "trust_tier": "canonical_record",
+            "source_updated_at_ms": 1000,
+            "grounding_refs": [
+                {
+                    "artifact_id": "g1",
+                    "task_id": "t1",
+                    "artifact_kind": "task_finish",
+                    "resolved": True,
+                }
+            ],
+            "verifications": [
+                {
+                    "artifact_id": "v1",
+                    "agent_id": "reviewer-beta",
+                    "timestamp_created": 2_000_000_000_000,
+                }
+            ],
+        }
+        text = render_concept_page("memd", "memd", 1000, record)
+        self.assertIn("## Verified By", text)
+        self.assertIn("Verified by: reviewer-beta", text)
+        self.assertIn("artifact `v1`", text)
+
+    def test_no_verified_by_section_when_empty(self) -> None:
+        record = {
+            "page": {"artifact_id": "p", "summary": "X", "artifact_role": "concept"},
+            "path": "concepts/p.md",
+            "lane": "concepts",
+            "artifact_id": "p",
+            "artifact_role": "concept",
+            "trust_tier": "canonical_record",
+            "source_updated_at_ms": 0,
+            "grounding_refs": [
+                {
+                    "artifact_id": "g",
+                    "task_id": "t",
+                    "artifact_kind": "task_finish",
+                    "resolved": True,
+                }
+            ],
+            "verifications": [],
+        }
+        text = render_concept_page("memd", "memd", 0, record)
+        self.assertNotIn("## Verified By", text)
+
 
 def _seed_wiki_page(artifact_id: str = "0199-wiki", role: str = "concept") -> dict[str, Any]:
     return {
