@@ -422,7 +422,34 @@ def render_concept_page(
     grounding_lines = render_concept_grounding(record["grounding_refs"])
     body_lines.extend(grounding_lines)
 
+    verified_by_lines = render_verified_by(record.get("verifications") or [])
+    body_lines.extend(verified_by_lines)
+
     return "\n".join(frontmatter + body_lines)
+
+
+def render_verified_by(verifications: list[dict[str, Any]]) -> list[str]:
+    """Plan §4.2 footer: distinct-writer verification children of the page.
+
+    The server-side countersignature path
+    (``promote_if_countersigned``) is the only source of these
+    entries — a page that wants to display "verified" status MUST
+    receive at least one such child via ``artifact.create`` of an
+    ``artifact_kind = verification`` reply.
+    """
+    if not verifications:
+        return []
+    lines = ["## Verified By", ""]
+    for entry in verifications:
+        agent = entry.get("agent_id", "unknown-agent")
+        ts_ms = entry.get("timestamp_created", 0)
+        date = iso_timestamp(ts_ms) if ts_ms else "unknown date"
+        artifact_id = entry.get("artifact_id", "unknown")
+        lines.append(
+            f"- Verified by: {agent} on {date} (artifact `{artifact_id}`)"
+        )
+    lines.append("")
+    return lines
 
 
 def render_concept_grounding(
