@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -12,12 +12,12 @@ use crate::TestResult;
 
 use super::longmemeval;
 use super::math::{
-    calculate_precision, calculate_recall, calculate_reciprocal_rank, evaluate_quality_gate,
-    summarize, summarize_cross_corpus,
+    calculate_ndcg, calculate_precision, calculate_recall, calculate_reciprocal_rank,
+    evaluate_quality_gate, summarize, summarize_cross_corpus,
 };
 use super::types::{
     BenchmarkConfig, BenchmarkReport, CrossCorpusReport, Dataset, DatasetBenchmarkResult,
-    PhaseTiming, Query, QueryMetrics, Thresholds,
+    PhaseTiming, Query, QueryMetrics, Thresholds, NDCG_K_VALUES,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -135,7 +135,7 @@ pub fn run_benchmark_protocol(
                 &config,
             );
             println!(
-                "Normalized cross-corpus: Recall@10 {:.3} [{:.3}, {:.3}] | MRR {:.3} [{:.3}, {:.3}] | P@10 {:.3} [{:.3}, {:.3}]",
+                "Normalized cross-corpus: Recall@10 {:.3} [{:.3}, {:.3}] | MRR {:.3} [{:.3}, {:.3}] | P@10 {:.3} [{:.3}, {:.3}] | nDCG@10 {}",
                 report.normalized_summary.recall.mean,
                 report.normalized_summary.recall.ci_lower,
                 report.normalized_summary.recall.ci_upper,
@@ -145,6 +145,7 @@ pub fn run_benchmark_protocol(
                 report.normalized_summary.precision.mean,
                 report.normalized_summary.precision.ci_lower,
                 report.normalized_summary.precision.ci_upper,
+                format_ndcg_at(&report.normalized_summary.ndcg_at_k, 10),
             );
             let gate_name = "P6_quality_gate[normalized_cross_corpus]";
             if report.quality_gate_passed {
@@ -315,7 +316,7 @@ fn run_single_dataset(
 
     let summary = summarize(&query_metrics, config.bootstrap_iterations, config.seed);
     println!(
-        "Summary: Recall@10 {:.3} [{:.3}, {:.3}] | MRR {:.3} [{:.3}, {:.3}] | P@10 {:.3} [{:.3}, {:.3}]",
+        "Summary: Recall@10 {:.3} [{:.3}, {:.3}] | MRR {:.3} [{:.3}, {:.3}] | P@10 {:.3} [{:.3}, {:.3}] | nDCG@10 {}",
         summary.recall.mean,
         summary.recall.ci_lower,
         summary.recall.ci_upper,
@@ -325,6 +326,7 @@ fn run_single_dataset(
         summary.precision.mean,
         summary.precision.ci_lower,
         summary.precision.ci_upper,
+        format_ndcg_at(&summary.ndcg_at_k, 10),
     );
     let phase_timing = build_phase_timing(load_convert_ms, cap_filter_ms, index_ms, query_ms);
     println!(
@@ -638,6 +640,7 @@ fn evaluate_queries(
     client: &mut McpClient,
     queries: &[Query],
 ) -> Result<Vec<QueryMetrics>, String> {
+    let retrieval_k = max_ndcg_cutoff();
     let mut metrics = Vec::with_capacity(queries.len());
     for query in queries {
         let query_start = Instant::now();
@@ -647,21 +650,63 @@ fn evaluate_queries(
                 serde_json::json!({
                     "tenant_id": "eval_benchmark_protocol",
                     "query": query.query,
-                    "k": 10
+                    "k": retrieval_k,
                 }),
             )
             .map_err(|err| format!("memory.search for query {} failed: {err}", query.id))?;
         let retrieved_ids = extract_retrieved_ids(&response);
+
+        // recall/MRR/precision keep their historical @10 semantics — they were
+        // computed against a search `k=10` before nDCG required a deeper
+        // retrieval. Slicing here pins those metrics to the top-10 window so
+        // pre-existing baselines stay numerically comparable.
+        let top10_cap = retrieved_ids.len().min(10);
+        let retrieved_top10 = &retrieved_ids[..top10_cap];
         let relevant_set: HashSet<_> = query.relevant.iter().cloned().collect();
+        let grades = build_query_grades(query);
+        let mut ndcg_at_k = BTreeMap::new();
+        for &k in NDCG_K_VALUES {
+            ndcg_at_k.insert(k, calculate_ndcg(&retrieved_ids, &grades, k));
+        }
         metrics.push(QueryMetrics {
             query_id: query.id.clone(),
-            recall_at_10: calculate_recall(&retrieved_ids, &relevant_set),
-            mrr: calculate_reciprocal_rank(&retrieved_ids, &relevant_set),
-            precision_at_10: calculate_precision(&retrieved_ids, &relevant_set),
+            recall_at_10: calculate_recall(retrieved_top10, &relevant_set),
+            mrr: calculate_reciprocal_rank(retrieved_top10, &relevant_set),
+            precision_at_10: calculate_precision(retrieved_top10, &relevant_set),
             latency_ms: query_start.elapsed().as_secs_f64() * 1000.0,
+            ndcg_at_k,
         });
     }
     Ok(metrics)
+}
+
+/// Merge binary `relevant` + graded `relevance_grades` into the HashMap that
+/// `calculate_ndcg` expects. Boolean entries default to grade 1; explicit
+/// grades in `relevance_grades` take precedence (i.e. graded qrels win when
+/// both are present, including the case where a graded 0 wants to mark an
+/// entry in `relevant` as explicitly irrelevant).
+fn build_query_grades(query: &Query) -> HashMap<String, u8> {
+    let mut grades: HashMap<String, u8> = HashMap::with_capacity(
+        query.relevant.len() + query.relevance_grades.len(),
+    );
+    for doc_id in &query.relevant {
+        grades.insert(doc_id.clone(), 1);
+    }
+    for (doc_id, grade) in &query.relevance_grades {
+        grades.insert(doc_id.clone(), *grade);
+    }
+    grades
+}
+
+fn max_ndcg_cutoff() -> usize {
+    NDCG_K_VALUES.iter().copied().max().unwrap_or(10)
+}
+
+fn format_ndcg_at(ndcg: &BTreeMap<usize, f64>, k: usize) -> String {
+    match ndcg.get(&k) {
+        Some(value) => format!("{value:.3}"),
+        None => "n/a".to_string(),
+    }
 }
 
 fn extract_retrieved_ids(response: &Value) -> Vec<String> {
@@ -758,24 +803,79 @@ mod tests {
                     id: "q1".to_string(),
                     query: "q1".to_string(),
                     relevant: vec!["d1".to_string()],
+                    relevance_grades: HashMap::new(),
                 },
                 Query {
                     id: "q2".to_string(),
                     query: "q2".to_string(),
                     relevant: vec!["d3".to_string()],
+                    relevance_grades: HashMap::new(),
                 },
                 Query {
                     id: "q3".to_string(),
                     query: "q3".to_string(),
                     relevant: vec!["d2".to_string(), "d3".to_string()],
+                    relevance_grades: HashMap::new(),
                 },
                 Query {
                     id: "q4".to_string(),
                     query: "q4".to_string(),
                     relevant: vec!["missing".to_string()],
+                    relevance_grades: HashMap::new(),
                 },
             ],
         }
+    }
+
+    #[test]
+    fn build_query_grades_treats_binary_relevant_as_grade_one() {
+        let query = Query {
+            id: "q".to_string(),
+            query: "q".to_string(),
+            relevant: vec!["a".to_string(), "b".to_string()],
+            relevance_grades: HashMap::new(),
+        };
+        let grades = build_query_grades(&query);
+        assert_eq!(grades.get("a"), Some(&1));
+        assert_eq!(grades.get("b"), Some(&1));
+        assert_eq!(grades.get("c"), None);
+    }
+
+    #[test]
+    fn build_query_grades_lets_graded_override_binary() {
+        let mut explicit = HashMap::new();
+        explicit.insert("a".to_string(), 3u8);
+        // Graded 0 explicitly demotes an entry that binary-relevant listed.
+        explicit.insert("b".to_string(), 0u8);
+        let query = Query {
+            id: "q".to_string(),
+            query: "q".to_string(),
+            relevant: vec!["a".to_string(), "b".to_string()],
+            relevance_grades: explicit,
+        };
+        let grades = build_query_grades(&query);
+        assert_eq!(grades.get("a"), Some(&3));
+        assert_eq!(grades.get("b"), Some(&0));
+    }
+
+    #[test]
+    fn build_query_grades_supports_graded_only_qrels() {
+        let mut explicit = HashMap::new();
+        explicit.insert("a".to_string(), 2u8);
+        let query = Query {
+            id: "q".to_string(),
+            query: "q".to_string(),
+            relevant: Vec::new(),
+            relevance_grades: explicit,
+        };
+        let grades = build_query_grades(&query);
+        assert_eq!(grades.get("a"), Some(&2));
+    }
+
+    #[test]
+    fn max_ndcg_cutoff_is_table_max() {
+        let expected = NDCG_K_VALUES.iter().copied().max().unwrap();
+        assert_eq!(max_ndcg_cutoff(), expected);
     }
 
     #[test]

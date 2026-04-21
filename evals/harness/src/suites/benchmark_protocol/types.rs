@@ -1,6 +1,11 @@
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+/// Cutoffs at which the benchmark protocol computes nDCG. Must stay sorted
+/// ascending; the maximum controls how many hits the retriever must return.
+pub(super) const NDCG_K_VALUES: &[usize] = &[1, 5, 10, 100];
 
 #[derive(Debug, Clone)]
 pub struct BenchmarkConfig {
@@ -34,6 +39,11 @@ pub(super) struct Query {
     pub(super) id: String,
     pub(super) query: String,
     pub(super) relevant: Vec<String>,
+    /// Graded qrels: doc_id → relevance grade (0 = irrelevant, 1+ = relevant).
+    /// When absent, `relevant` entries are synthesized as grade 1 at read time
+    /// so existing boolean-relevance datasets are treated as binary qrels.
+    #[serde(default)]
+    pub(super) relevance_grades: HashMap<String, u8>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +61,11 @@ pub(super) struct QueryMetrics {
     pub(super) mrr: f64,
     pub(super) precision_at_10: f64,
     pub(super) latency_ms: f64,
+    /// Per-query nDCG at each cutoff in [`NDCG_K_VALUES`]. Keyed by cutoff
+    /// so the regression gate can align metrics across baseline/candidate
+    /// reports even if the set of cutoffs changes across versions.
+    #[serde(default)]
+    pub(super) ndcg_at_k: BTreeMap<usize, f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +83,10 @@ pub(super) struct BenchmarkSummary {
     pub(super) mrr: MetricWithCi,
     pub(super) precision: MetricWithCi,
     pub(super) latency_ms: MetricWithCi,
+    /// Mean nDCG at each cutoff. BTreeMap for deterministic JSON output.
+    /// Old baselines without this field deserialize to an empty map.
+    #[serde(default)]
+    pub(super) ndcg_at_k: BTreeMap<usize, f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
