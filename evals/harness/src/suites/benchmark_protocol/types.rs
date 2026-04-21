@@ -124,7 +124,7 @@ pub(super) struct BenchmarkReport {
     pub(super) query_metrics: Vec<QueryMetrics>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct DatasetBenchmarkResult {
     pub(super) dataset_path: String,
     pub(super) dataset_description: String,
@@ -134,9 +134,15 @@ pub(super) struct DatasetBenchmarkResult {
     pub(super) summary: BenchmarkSummary,
     pub(super) quality_gate_passed: bool,
     pub(super) quality_gate_message: String,
+    /// Per-query metrics from the originating `BenchmarkReport`. Carried on
+    /// the cross-corpus view so the regression gate can do paired-query
+    /// tests across datasets. Legacy `CrossCorpusReport`s without the field
+    /// deserialize to an empty vector and the gate skips them cleanly.
+    #[serde(default)]
+    pub(super) query_metrics: Vec<QueryMetrics>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(super) struct CrossCorpusReport {
     pub(super) generated_unix_seconds: u64,
     pub(super) embedding_model: String,
@@ -157,7 +163,7 @@ fn default_system_variant() -> String {
     "hybrid-feature".to_string()
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Thresholds {
     pub(super) recall: Option<f64>,
     pub(super) mrr: Option<f64>,
