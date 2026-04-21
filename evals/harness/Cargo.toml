@@ -8,6 +8,7 @@ description = "Evaluation harness for memd MCP conformance tests"
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 thiserror = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
