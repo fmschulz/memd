@@ -26,7 +26,10 @@ golden-byte tests) never need to bind a socket.
 from __future__ import annotations
 
 import html
+import os
+import posixpath
 import re
+from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Tuple
 
 LinkRewriter = Callable[[str], str]
@@ -57,6 +60,64 @@ def _is_safe_url(url: str) -> bool:
     if m is None:
         return True
     return m.group(1).lower() in _SAFE_URL_SCHEMES
+
+
+def make_link_rewriter(current_rel_path: Path) -> LinkRewriter:
+    """Build a link rewriter that maps compiler-emitted ``.md`` paths to routes.
+
+    The deterministic compiler and concept-page renderer emit relative
+    markdown links such as ``projects/memd.md`` (from ``index.md``) and
+    ``../tasks/task-123.md`` (from ``projects/memd.md``). The P2 route
+    table exposes those pages at ``/projects/memd/`` and
+    ``/tasks/task-123/`` respectively, so every rendered link needs to
+    (a) resolve the relative path to outdir-root coordinates and (b)
+    drop the ``.md`` suffix in favor of a trailing-slash URL.
+
+    Rules:
+    - URLs with a scheme (``http:``, ``mailto:``, ...), fragment-only
+      URLs (``#frag``), and root-absolute URLs (``/``, ``/log``) pass
+      through unchanged.
+    - Relative URLs ending in ``.md`` are resolved against
+      ``current_rel_path.parent`` via ``posixpath.normpath`` and
+      emitted as ``/<lane>/<leaf>/`` (``index.md`` alone maps to
+      ``/``). Query and fragment suffixes are preserved.
+    - Resolved paths that escape the outdir root (``../outside.md``)
+      return the original URL unchanged — the browser will 404 it
+      rather than us emit an ugly ``/../`` link.
+    - Any other relative URL (``manifest.json``, LLM-supplied
+      ``image.png``) passes through unchanged so the reader can still
+      see exactly what the author wrote.
+
+    ``current_rel_path`` is a POSIX-style path relative to outdir root
+    (e.g. ``Path("tasks/019dadab.md")`` or ``Path("index.md")``).
+    """
+    posix_current = str(current_rel_path).replace(os.sep, "/")
+    current_dir = posixpath.dirname(posix_current)
+
+    def rewrite(url: str) -> str:
+        if not url:
+            return url
+        if url.startswith("#") or url.startswith("/"):
+            return url
+        if _SCHEME_RE.match(url):
+            return url
+        body, sep_frag, tail = url.partition("#")
+        fragment = f"#{tail}" if sep_frag else ""
+        body, sep_q, query_tail = body.partition("?")
+        query = f"?{query_tail}" if sep_q else ""
+        if not body:
+            return url
+        combined = posixpath.join(current_dir, body) if current_dir else body
+        normalized = posixpath.normpath(combined)
+        if normalized.startswith(".."):
+            return url
+        if normalized == "index.md":
+            return f"/{query}{fragment}"
+        if normalized.endswith(".md"):
+            return f"/{normalized[:-3]}/{query}{fragment}"
+        return f"/{normalized}{query}{fragment}"
+
+    return rewrite
 
 _PAGE_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
