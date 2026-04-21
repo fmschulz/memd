@@ -23,15 +23,24 @@ concurrency:
   group: retrieval-gate-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege: this job only reads the repo, reads/writes the Actions
+# cache (handled by the action itself, not the token), and uploads
+# artifacts. No pushes / no issue writes / no releases — drop everything
+# else from the default GITHUB_TOKEN.
+permissions:
+  contents: read
+  actions: read
+
 env:
-  # Same caps used to generate evals/bench/baselines/beir_v1.json. Must
-  # match the baseline parameters exactly or the paired-query test will
-  # operate on a shrunken or shifted sample and the gate verdict becomes
+  # Pinned parameter set used to generate evals/bench/baselines/beir_v1.json.
+  # Must match the baseline parameters exactly or the paired-query test
+  # will operate on a shifted sample and the gate verdict becomes
   # untrustworthy. See evals/BENCHMARK_PROTOCOL.md for the regeneration
-  # ritual if these need to change.
+  # ritual if any of these need to change.
+  BEIR_EMBEDDING_MODEL: 'all-minilm'
+  BEIR_SYSTEM_VARIANT: 'hybrid-feature'
   BEIR_MAX_QUERIES: '30'
   BEIR_MAX_DOCUMENTS: '500'
-  BEIR_SYSTEM_VARIANT: 'hybrid-feature'
   BEIR_SEED: '42'
   BEIR_BOOTSTRAP_ITERATIONS: '1000'
   BEIR_METRIC: 'ndcg_at_10'
@@ -42,13 +51,22 @@ jobs:
   retrieval-gate:
     name: BEIR nDCG@10 gate (fiqa + scidocs)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 60 min covers the cold-cache path: toolchain install + cargo registry
+    # warm-up + dataset/model downloads + release build + two benchmark
+    # passes. Warm-cache runs finish in ~10-15 min.
+    timeout-minutes: 60
     steps:
+      # NOTE on action versions: upstream actions are pinned to v4 major-
+      # tag refs, not commit SHAs. Commit-SHA pins are defense-in-depth
+      # against tag retargeting; swap in verified SHAs when the repo
+      # adopts a supply-chain audit policy (see repo-wide TODO).
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -63,21 +81,28 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Cache BEIR datasets
+        # Cache key picks up the fetch script (base commit URL lives there)
+        # and the baseline JSON, which moves lockstep with the mirrored
+        # datasets' content snapshot. A stale cache from a prior mirror
+        # bump is invalidated when either file changes.
         id: beir-cache
         uses: actions/cache@v4
         with:
           path: evals/bench/datasets/retrieval
-          key: beir-datasets-${{ hashFiles('evals/bench/scripts/fetch_offline_benchmark_datasets.sh') }}
+          key: beir-datasets-${{ hashFiles('evals/bench/scripts/fetch_offline_benchmark_datasets.sh', 'evals/bench/baselines/beir_v1.json') }}
 
       - name: Fetch BEIR datasets
         if: steps.beir-cache.outputs.cache-hit != 'true'
         run: bash ./evals/bench/scripts/fetch_offline_benchmark_datasets.sh
 
       - name: Cache embedding model
+        # Cache key includes the embedding-model env var so a model swap
+        # (e.g. BEIR_EMBEDDING_MODEL=qwen3) gets a fresh cache entry
+        # instead of silently reusing stale weights.
         uses: actions/cache@v4
         with:
           path: ~/.cache/memd/models
-          key: memd-embed-all-minilm-v1
+          key: memd-embed-${{ env.BEIR_EMBEDDING_MODEL }}-v1
 
       - name: Build memd + memd-evals (release)
         run: cargo build --release -p memd -p memd-evals
@@ -90,6 +115,7 @@ jobs:
             --suite benchmark \
             --dataset-path evals/bench/datasets/retrieval/beir_fiqa.json \
             --dataset-path evals/bench/datasets/retrieval/beir_scidocs.json \
+            --embedding-model "$BEIR_EMBEDDING_MODEL" \
             --system-variant "$BEIR_SYSTEM_VARIANT" \
             --seed "$BEIR_SEED" \
             --bootstrap-iterations "$BEIR_BOOTSTRAP_ITERATIONS" \
