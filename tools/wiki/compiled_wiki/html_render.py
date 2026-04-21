@@ -38,6 +38,26 @@ _LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 _EMPH_RE = re.compile(r"\*([^\s*][^*]*?)\*")
 
+# XSS guard: allow only benign schemes plus scheme-less (relative) URLs.
+# ``javascript:``/``data:``/``vbscript:``/``file:`` are rejected and the
+# link is rendered as literal markdown (``[label](url)`` escaped) so a
+# reader still sees what was filtered instead of a silently dropped link.
+_SAFE_URL_SCHEMES = frozenset({"http", "https", "mailto", "ftp", "ftps"})
+_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*):")
+
+
+def _is_safe_url(url: str) -> bool:
+    """Return True if ``url`` uses a safe scheme or is scheme-less.
+
+    Relative URLs (``foo.md``, ``/abs/path``, ``../sibling/``, ``#frag``)
+    have no scheme and are always considered safe. A URL with a scheme
+    must be in ``_SAFE_URL_SCHEMES``.
+    """
+    m = _SCHEME_RE.match(url)
+    if m is None:
+        return True
+    return m.group(1).lower() in _SAFE_URL_SCHEMES
+
 _PAGE_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -279,12 +299,18 @@ def render_inline(
             if m is not None:
                 label = m.group(1)
                 url = m.group(2)
-                if link_rewriter is not None:
-                    url = link_rewriter(url)
-                inner = render_inline(label, link_rewriter=link_rewriter)
-                out.append(
-                    f'<a href="{html.escape(url, quote=True)}">{inner}</a>'
-                )
+                rewritten = link_rewriter(url) if link_rewriter is not None else url
+                if _is_safe_url(rewritten):
+                    inner = render_inline(label, link_rewriter=link_rewriter)
+                    out.append(
+                        f'<a href="{html.escape(rewritten, quote=True)}">{inner}</a>'
+                    )
+                else:
+                    # Preserve the raw markdown text of the rejected link so
+                    # a reader can audit what was filtered (unlike a silent
+                    # drop). The inner content is HTML-escaped so the URL
+                    # cannot break out of the text context.
+                    out.append(html.escape(m.group(0)))
                 i = m.end()
                 continue
         if ch == "*" and text.startswith("**", i):
