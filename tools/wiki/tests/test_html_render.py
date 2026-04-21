@@ -69,6 +69,49 @@ class InlineTests(unittest.TestCase):
             '<a href="x">see <code>ref</code></a>',
         )
 
+    def test_link_rejects_javascript_scheme(self) -> None:
+        # LLM-authored concept bodies can attempt XSS via ``javascript:``.
+        # The renderer falls back to rendering the raw markdown source as
+        # HTML-escaped plain text, so the URL stays visible and inert.
+        self.assertEqual(
+            render_inline("[click](javascript:alert(1))"),
+            "[click](javascript:alert(1))",
+        )
+
+    def test_link_rejects_data_scheme(self) -> None:
+        self.assertEqual(
+            render_inline("[x](data:text/html,<script>alert(1)</script>)"),
+            "[x](data:text/html,&lt;script&gt;alert(1)&lt;/script&gt;)",
+        )
+
+    def test_link_rejects_scheme_case_insensitive(self) -> None:
+        self.assertEqual(
+            render_inline("[x](JaVaScRiPt:alert(1))"),
+            "[x](JaVaScRiPt:alert(1))",
+        )
+
+    def test_link_rejected_when_rewriter_produces_unsafe_url(self) -> None:
+        # XSS via a malicious rewriter still fails closed — the safety
+        # check runs AFTER the rewriter, not before.
+        bad_rewriter = lambda _u: "javascript:alert(1)"
+        self.assertEqual(
+            render_inline("[x](safe.md)", link_rewriter=bad_rewriter),
+            "[x](safe.md)",
+        )
+
+    def test_link_allows_https_and_relative(self) -> None:
+        self.assertEqual(
+            render_inline("[a](https://example.com) and [b](../rel.md)"),
+            '<a href="https://example.com">a</a> and '
+            '<a href="../rel.md">b</a>',
+        )
+
+    def test_link_allows_fragment_and_mailto(self) -> None:
+        self.assertEqual(
+            render_inline("[a](#anchor) [b](mailto:x@y.com)"),
+            '<a href="#anchor">a</a> <a href="mailto:x@y.com">b</a>',
+        )
+
 
 class BlockTests(unittest.TestCase):
     def test_heading_levels(self) -> None:
@@ -131,6 +174,24 @@ class BlockTests(unittest.TestCase):
             markdown_to_html(md),
             '<ul>\n<li><a href="tasks/task-1.md">tasks/task-1.md</a> - '
             "Goal name</li>\n</ul>",
+        )
+
+    def test_hash_without_space_is_not_a_heading(self) -> None:
+        # `#foo` is not a valid ATX heading (must be `# foo`).
+        self.assertEqual(
+            markdown_to_html("#foo"),
+            "<p>#foo</p>",
+        )
+
+    def test_empty_input_produces_empty_html(self) -> None:
+        self.assertEqual(markdown_to_html(""), "")
+
+    def test_blockquote_silently_falls_back_to_paragraph(self) -> None:
+        # `>` prefix is not in the supported dialect; pins the MVP
+        # fallback so a future v3.1 upgrade is caught by tests.
+        self.assertEqual(
+            markdown_to_html("> quoted"),
+            "<p>&gt; quoted</p>",
         )
 
     def test_trust_block_subheading_and_backticked_terms(self) -> None:
