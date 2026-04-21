@@ -6,8 +6,93 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-04-20
+
 ### Added
 
+- **memd-wiki v2: LLM-authored concept / entity pages (plan
+  `docs/plans/active/2026-04-20-memd-wiki-v2-llm-authored-pages.md`).**
+  Adds a first-class lane for LLM-authored knowledge pages alongside
+  the deterministic compiler-owned surface from v1. Six phases
+  shipped as discrete commits, each with its own test gate; the
+  rollout is opt-in (default `concept_pages = []`) so a fresh
+  install runs identically to v0.9.0.
+  - **`ArtifactKind::WikiPage` + `TaskArtifact::content`** Phase 0:
+    new variant on `ArtifactKind` with `as_str = "wiki_page"`,
+    `FromStr` mapping (error-message updated to enumerate the new
+    kind), and a nullable `content: Option<String>` field on
+    `TaskArtifact` carrying the markdown body. The trust model is
+    explicit: a fresh `WikiPage` sits at `TrustTier::CanonicalRecord`
+    and stays there forever — the existing
+    `promote_if_countersigned` path early-returns on non-Review/
+    Revision/Verification/Decision kinds, so the WikiPage's own
+    `promotion_state` never reaches `Verified`. Verification of the
+    page's claims is signaled by *children*: distinct-writer
+    `Verification` artifacts whose `reply_to_artifact_id` targets
+    the page promote themselves (via the existing path) and the
+    renderer surfaces them as a `Verified by:` footer. MCP-boundary
+    validator rejects non-empty `content` on every other kind.
+  - **`artifact.create` accepts `wiki_page`** Phase 1: enriched
+    boundary validator requires non-empty `related_artifact_ids`
+    (grounding refs), `summary ≤ 500 bytes`, `artifact_role ∈
+    {"concept", "entity"}`, and `content ≤ 256KB`. Constants live
+    on `pub(crate)` so follow-on work references the canonical
+    limits.
+  - **Python compiler reads `wiki_page` artifacts** Phase 2:
+    `tools/wiki/compiled_wiki/compiler.py` now calls `artifact.search`
+    with `artifact_kind=wiki_page` filter, resolves each grounding
+    ref via `artifact.get`, fetches Verification children via a
+    second `artifact.search` call (filter on `reply_to_artifact_id`
+    + `promotion_state=verified`), and renders one markdown page
+    per WikiPage under `concepts/<artifact_id>.md` (role=concept) or
+    `entities/<artifact_id>.md` (role=entity). Stable sort key
+    `(artifact_role, entity_name or summary[:50], artifact_id)`
+    keeps output byte-identical under arbitrary backend
+    permutation. The render emits YAML frontmatter, a summary
+    heading + metadata bullets, the raw markdown body from
+    `content`, a `## Grounded By` footer with backlinks, and (when
+    Verification children exist) a `## Verified By` footer. v1
+    surfaces (index, log, projects, tasks, libraries) are
+    unchanged.
+  - **Manifest schema v2** Phase 2: bumps
+    `MANIFEST_SCHEMA_VERSION` from 1 to 2, adds
+    `llm_authored_prefixes = ["concepts/", "entities/"]`,
+    `human_owned_prefixes = ["notes/"]` (declared for v3 but the
+    compiler never writes there), and a `concept_pages` list with
+    one entry per WikiPage (artifact_id, path, trust_tier, role,
+    grounding_refs, source_updated_at_ms). Empty-by-default so a
+    fresh install with no WikiPage artifacts produces a clean v2
+    manifest.
+  - **Four new lint checks** Phase 3, scoped to
+    `manifest.concept_pages`:
+    - `concept-missing-grounding` (ERROR, paranoid): WikiPage with
+      empty `grounding_refs` (validator already rejects this; the
+      check defends against rows from a prior-version server).
+    - `concept-stale` (WARN, oracle-gated): page snapshot lags the
+      newest grounded artifact by more than `concept_staleness_ms`
+      (default 30 days). Skipped silently when no oracle is
+      provided.
+    - `concept-contradicts-canonical` (ERROR, syntactic scaffold):
+      page cites ONLY `task_finish` artifacts with
+      `status=rejected`; v3 layers an LLM-backed semantic diff
+      onto the same hook.
+    - `concept-trust-tier-ungrounded` (ERROR): page self-labels
+      `verified: true` (frontmatter or body) without a matching
+      `Verified by:` footer line. Closes the trust-laundering
+      vector codex caught during plan review.
+  - **Manifest forward-compat + `memd-wiki migrate`** Phase 4: new
+    `WikiManifestTooNewError` raised by `check_manifest_version`
+    when `manifest.schema_version > MAX_KNOWN_MANIFEST_SCHEMA_VERSION`.
+    `lint_output_dir` re-raises it so a future-manifest reader gets
+    a clear "upgrade memd-wiki" diagnostic instead of a silent
+    partial lint. New `memd-wiki migrate` subcommand upgrades v1
+    manifests to v2 in place (preserves existing fields, adds
+    empty new lanes via `setdefault`); `--dry-run` prints the
+    upgraded manifest without writing.
+  - **MCP contract pin** Phase 2: `mcp_contract.py` adds
+    `artifact.search` (with filter args) and `artifact.get` to
+    `REQUIRED_MCP_TOOLS` so a memd-side rename or schema change
+    breaks the contract test rather than the wiki silently.
 - **Advisory single-writer lockfile for HF model downloads (Candle
   follow-up from v0.8.0 handoff).** `download_file` in
   `crates/memd/src/embeddings/download.rs` now acquires a sibling
@@ -26,6 +111,27 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   acquisition, contention, stale reclaim, TOCTOU re-check on
   lock-disappearance, and an end-to-end two-caller cooperation path
   against a single-connection HTTP server.
+
+### Changed
+
+- **MCP `artifact_kind` enum extended.** The `artifact.create`,
+  `task.search`, and `artifact.search` JSON schemas now accept
+  `"wiki_page"` in addition to the v1 set. JSON consumers with
+  closed-enum validators must update.
+
+### Migration
+
+- Existing v0.9.0 wikis: run `memd-wiki migrate --output-dir
+  <wiki_dir>` once to upgrade the manifest from `schema_version=1`
+  to `schema_version=2`. The next `memd-wiki build` will overwrite
+  the manifest with the canonical v2 shape regardless, so the
+  explicit migrate is only needed if you want to read the manifest
+  with v0.10.0 lint before recompiling.
+- Existing v0.9.0 servers: refresh
+  `memd-skill/bin/linux-x64/memd` and `~/.local/bin/memd` from the
+  v0.10.0 release build, then restart the daemon. The MCP wire
+  format is additive; pre-v0.10.0 clients keep working but cannot
+  author `wiki_page` artifacts.
 
 ## [0.9.0] - 2026-04-20
 
