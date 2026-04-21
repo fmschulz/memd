@@ -409,8 +409,15 @@ def fetch_wiki_pages(
             },
         },
     )
-    hits = payload.get("hits") or []
-    return [hit.get("artifact") for hit in hits if isinstance(hit, dict) and hit.get("artifact")]
+    # `artifact.search` returns `{"results": [ArtifactSearchHit, ...]}`
+    # per `ArtifactSearchResult` in `crates/memd/src/mcp/handlers.rs`.
+    # Each hit carries the resolved canonical artifact under `.artifact`.
+    results = payload.get("results") or []
+    return [
+        hit.get("artifact")
+        for hit in results
+        if isinstance(hit, dict) and hit.get("artifact")
+    ]
 
 
 def sort_wiki_pages(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -546,7 +553,8 @@ def _fetch_verification_children(
     except Exception:  # noqa: BLE001 — verification fetch is best-effort
         return []
     verifications: list[dict[str, Any]] = []
-    for hit in payload.get("hits") or []:
+    # Same `{"results": [...]}` shape as the wiki_page query above.
+    for hit in payload.get("results") or []:
         if not isinstance(hit, dict):
             continue
         artifact = hit.get("artifact")

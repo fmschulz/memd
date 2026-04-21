@@ -121,7 +121,7 @@ def _make_mock_server() -> object:
         # for the project. Default fixture has none — concept-page
         # rendering is exercised by ConceptRenderTests below.
         "artifact.search": {
-            "hits": [],
+            "results": [],
         },
         # v2 phase 2: artifact.get is used to resolve grounding refs
         # for any wiki_page that's authored. Default returns no

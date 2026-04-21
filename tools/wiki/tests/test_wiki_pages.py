@@ -284,7 +284,7 @@ def _make_mock_server(
         },
         "artifact.list_thread": {"artifacts": []},
         "artifact.search": {
-            "hits": [{"artifact": page} for page in wiki_pages],
+            "results": [{"artifact": page} for page in wiki_pages],
         },
     }
 
