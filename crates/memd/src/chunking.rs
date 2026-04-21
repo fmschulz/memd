@@ -106,12 +106,35 @@ pub fn chunk_text(text: &str, config: &ChunkingConfig) -> Vec<Chunk> {
                 current_length = 0;
             }
 
-            // Split the oversized sentence into character-based chunks
+            // Split the oversized sentence into byte-based chunks, but
+            // never inside a multi-byte UTF-8 character: walking back
+            // from the target cut until it lands on a char boundary
+            // keeps `sentence.text[sent_offset..chunk_end]` panic-free
+            // when the body contains characters like `§`, `→`, emoji,
+            // or any non-ASCII text that happens to straddle a
+            // chunk_size-aligned offset. `is_char_boundary(0)` and
+            // `is_char_boundary(text.len())` are both always true so
+            // the tail chunk is always emittable.
             let mut sent_offset = 0;
             while sent_offset < sentence.text.len() {
                 let remaining = sentence.text.len() - sent_offset;
-                let chunk_len = remaining.min(config.chunk_size);
-                let chunk_end = sent_offset + chunk_len;
+                let target_len = remaining.min(config.chunk_size);
+                let mut chunk_end = sent_offset + target_len;
+                while chunk_end > sent_offset && !sentence.text.is_char_boundary(chunk_end) {
+                    chunk_end -= 1;
+                }
+                // `chunk_end == sent_offset` can only happen if the
+                // remaining payload starts with a single character
+                // wider than chunk_size — absurd for real text but
+                // guard against it by taking that whole character.
+                if chunk_end == sent_offset {
+                    chunk_end = sent_offset
+                        + sentence.text[sent_offset..]
+                            .chars()
+                            .next()
+                            .map(char::len_utf8)
+                            .unwrap_or(1);
+                }
 
                 let chunk_text = sentence.text[sent_offset..chunk_end].to_string();
                 chunks.push(Chunk {
@@ -122,7 +145,7 @@ pub fn chunk_text(text: &str, config: &ChunkingConfig) -> Vec<Chunk> {
                 });
                 chunk_index += 1;
 
-                sent_offset += chunk_len;
+                sent_offset = chunk_end;
                 // No overlap for forced splits - they're already at max size
             }
 
@@ -462,6 +485,84 @@ mod tests {
             last.text.len(),
             window,
         );
+    }
+
+    /// Regression: the oversized-sentence forced-split path used to
+    /// slice `sentence.text[sent_offset..chunk_end]` with `chunk_end`
+    /// computed as a byte offset without honoring UTF-8 character
+    /// boundaries. When an input sentence contained a multi-byte
+    /// character (e.g., `§`, `→`, emoji) straddling the chunk-size
+    /// boundary, the slice panicked with "byte index N is not a char
+    /// boundary". This surfaced end-to-end on the live memd daemon
+    /// when `context.brief_project` tried to chunk a task_finish
+    /// `what_failed` list that mentioned `§` — the daemon logged a
+    /// tokio-worker panic at chunking.rs:116 and dropped the client's
+    /// connection. The fix walks `chunk_end` back until it lands on a
+    /// valid char boundary; the tail-case where the remainder starts
+    /// with a single character wider than `chunk_size` is handled by
+    /// taking that whole character.
+    #[test]
+    fn test_forced_split_does_not_panic_on_multi_byte_char_boundary() {
+        // Build a single "sentence" (no terminator) that:
+        //   - has no sentence boundary so it hits the oversized-
+        //     split branch;
+        //   - is longer than chunk_size;
+        //   - contains a multi-byte UTF-8 character (`§` = 2 bytes)
+        //     straddling the byte offset chunk_size would cut at.
+        let chunk_size = 30;
+        // Pad so that byte offset 30 falls inside `§` (2 bytes).
+        //   "A" * 29 = 29 bytes, then '§' occupies bytes 29..31 → byte 30 is mid-char.
+        let mut text = "A".repeat(29);
+        text.push('§');
+        text.push_str(&"B".repeat(29));
+        // Force the oversized-split branch.
+        assert!(text.len() > chunk_size);
+        let config = ChunkingConfig {
+            chunk_size,
+            overlap: 0,
+            min_chunk_size: 5,
+        };
+        // Must not panic.
+        let chunks = chunk_text(&text, &config);
+        assert!(!chunks.is_empty());
+        // Every chunk must be valid UTF-8 and its start/end must be
+        // char boundaries into the original text.
+        for chunk in &chunks {
+            assert!(
+                text.is_char_boundary(chunk.start_char),
+                "chunk {} start {} must be a char boundary",
+                chunk.chunk_index,
+                chunk.start_char
+            );
+            assert!(
+                text.is_char_boundary(chunk.end_char),
+                "chunk {} end {} must be a char boundary",
+                chunk.chunk_index,
+                chunk.end_char
+            );
+        }
+        // Recombined text must be the same byte-for-byte.
+        let rejoin: String = chunks.iter().map(|c| c.text.as_str()).collect();
+        assert!(rejoin.contains("§"), "rejoin lost the multi-byte char");
+    }
+
+    /// Paranoid extra: many different multi-byte characters at the
+    /// boundary. Emoji, CJK, arrows — none should panic.
+    #[test]
+    fn test_forced_split_handles_emoji_and_cjk() {
+        let chunk_size = 20;
+        for bad_char in ["§", "→", "漢", "🚀"] {
+            let mut text = "A".repeat(chunk_size - 1);
+            text.push_str(bad_char);
+            text.push_str(&"B".repeat(chunk_size));
+            let config = ChunkingConfig {
+                chunk_size,
+                overlap: 0,
+                min_chunk_size: 5,
+            };
+            // Must not panic for any of these.
+            let _ = chunk_text(&text, &config);
+        }
     }
 
     #[test]
