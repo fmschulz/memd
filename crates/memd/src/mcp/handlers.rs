@@ -2540,6 +2540,83 @@ fn validate_confidence(confidence: f32) -> Result<(), McpError> {
     Ok(())
 }
 
+/// Max number of bytes accepted in a `wiki_page` artifact's `content`
+/// field. Concept / entity pages typically run 5-20KB; 256KB is ~10×
+/// headroom. The cap is enforced at the MCP boundary so the storage
+/// layer never has to defend against giant blobs.
+pub(crate) const WIKI_PAGE_MAX_CONTENT_BYTES: usize = 256 * 1024;
+
+/// Max number of bytes accepted in a `wiki_page` `summary` field.
+/// Renders as the subtitle under the page title.
+pub(crate) const WIKI_PAGE_MAX_SUMMARY_BYTES: usize = 500;
+
+/// Phase 1 of memd-wiki v2: enforce the WikiPage-specific shape at the
+/// MCP boundary. The four rules (plan §5 phase 1):
+///
+/// 1. `related_artifact_ids` is non-empty — concept pages MUST cite
+///    something. The Python compiler treats each entry as a grounding
+///    reference and renders a "Grounded by" link back to the canonical
+///    artifact.
+/// 2. `summary` length ≤ `WIKI_PAGE_MAX_SUMMARY_BYTES`. The summary is
+///    the page subtitle; long text belongs in `content`.
+/// 3. `artifact_role` ∈ {"concept", "entity"}. Keeps the lane typed so
+///    the compiler can emit `concepts/<slug>.md` vs `entities/<slug>.md`
+///    deterministically.
+/// 4. `content` length ≤ `WIKI_PAGE_MAX_CONTENT_BYTES`.
+fn validate_wiki_page_params(params: &ArtifactCreateParams) -> Result<(), McpError> {
+    if params.related_artifact_ids.is_empty() {
+        return Err(McpError::InvalidParams(
+            "artifact.create: `wiki_page` requires a non-empty `related_artifact_ids` \
+             (grounding refs to canonical artifacts the page cites)"
+                .to_string(),
+        ));
+    }
+    for (idx, artifact_id) in params.related_artifact_ids.iter().enumerate() {
+        if artifact_id.trim().is_empty() {
+            return Err(McpError::InvalidParams(format!(
+                "artifact.create: `wiki_page.related_artifact_ids[{idx}]` must not be empty"
+            )));
+        }
+    }
+
+    if let Some(summary) = params.summary.as_ref() {
+        if summary.len() > WIKI_PAGE_MAX_SUMMARY_BYTES {
+            return Err(McpError::InvalidParams(format!(
+                "artifact.create: `wiki_page.summary` is {} bytes; maximum is {}",
+                summary.len(),
+                WIKI_PAGE_MAX_SUMMARY_BYTES
+            )));
+        }
+    }
+
+    match params.artifact_role.as_deref() {
+        Some(role) if role == "concept" || role == "entity" => {}
+        Some(role) => {
+            return Err(McpError::InvalidParams(format!(
+                "artifact.create: `wiki_page.artifact_role` must be \"concept\" or \"entity\"; got {role:?}"
+            )));
+        }
+        None => {
+            return Err(McpError::InvalidParams(
+                "artifact.create: `wiki_page` requires `artifact_role` = \"concept\" or \"entity\""
+                    .to_string(),
+            ));
+        }
+    }
+
+    if let Some(content) = params.content.as_ref() {
+        if content.len() > WIKI_PAGE_MAX_CONTENT_BYTES {
+            return Err(McpError::InvalidParams(format!(
+                "artifact.create: `wiki_page.content` is {} bytes; maximum is {}",
+                content.len(),
+                WIKI_PAGE_MAX_CONTENT_BYTES
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 fn dataset_params_to_refs(params: Vec<TaskDatasetRefParams>) -> Result<Vec<DatasetRef>, McpError> {
     let mut refs = Vec::with_capacity(params.len());
     for dataset in params {
@@ -5716,6 +5793,14 @@ pub async fn handle_artifact_create<S: Store>(
                 artifact_kind.as_str()
             )));
         }
+    }
+
+    // Phase 1 WikiPage-specific validation. These checks live at the
+    // MCP boundary so the stored row always honors the contract — the
+    // Python compiler (Phase 2) and lint (Phase 3) can trust it
+    // without re-validating.
+    if artifact_kind == ArtifactKind::WikiPage {
+        validate_wiki_page_params(&params)?;
     }
 
     let inherited_project_id = parent_artifact
@@ -11418,6 +11503,189 @@ mod tests {
             }
             other => panic!("expected InvalidParams, got: {other:?}"),
         }
+    }
+
+    /// Phase 1 of memd-wiki v2: when `artifact_kind = wiki_page`, the
+    /// MCP validator enforces (a) non-empty `related_artifact_ids`,
+    /// (b) `summary` ≤ 500 bytes, (c) `artifact_role` ∈ {concept,
+    /// entity}, (d) `content` ≤ 256KB. Each rule gets one negative
+    /// case; the positive case is covered by
+    /// `wiki_page_verification_child_promotes_child_not_parent`.
+    #[tokio::test]
+    async fn artifact_create_validates_wiki_page_shape() {
+        let store = make_store();
+
+        fn wiki_params_with(
+            related_artifact_ids: Vec<String>,
+            summary: &str,
+            artifact_role: Option<&str>,
+            content: Option<String>,
+        ) -> ArtifactCreateParams {
+            let mut params = artifact_params_minimal(
+                "tenant_wiki_validate",
+                "wiki_page",
+                "task-wiki-validate",
+                Some("author-a"),
+                None,
+                summary,
+                None,
+                None,
+                None,
+            );
+            params.artifact_role = artifact_role.map(|s| s.to_string());
+            params.related_artifact_ids = related_artifact_ids;
+            params.content = content;
+            params
+        }
+
+        // (a) related_artifact_ids empty → reject.
+        let err = handle_artifact_create(
+            &store,
+            None,
+            wiki_params_with(vec![], "ok", Some("concept"), Some("body".to_string())),
+        )
+        .await
+        .expect_err("wiki_page must require grounding");
+        match err {
+            McpError::InvalidParams(msg) => assert!(
+                msg.contains("related_artifact_ids"),
+                "error should name the failing field; got: {msg}"
+            ),
+            other => panic!("expected InvalidParams, got: {other:?}"),
+        }
+
+        // (a') related_artifact_ids contains an empty string → reject.
+        let err = handle_artifact_create(
+            &store,
+            None,
+            wiki_params_with(
+                vec!["   ".to_string()],
+                "ok",
+                Some("concept"),
+                Some("body".to_string()),
+            ),
+        )
+        .await
+        .expect_err("wiki_page grounding entries must not be blank");
+        match err {
+            McpError::InvalidParams(msg) => assert!(
+                msg.contains("related_artifact_ids[0]"),
+                "error should name the offending index; got: {msg}"
+            ),
+            other => panic!("expected InvalidParams, got: {other:?}"),
+        }
+
+        // (b) summary > 500 bytes → reject.
+        let huge_summary = "s".repeat(super::WIKI_PAGE_MAX_SUMMARY_BYTES + 1);
+        let err = handle_artifact_create(
+            &store,
+            None,
+            wiki_params_with(
+                vec!["019".to_string()],
+                &huge_summary,
+                Some("concept"),
+                Some("body".to_string()),
+            ),
+        )
+        .await
+        .expect_err("wiki_page summary size must be capped");
+        match err {
+            McpError::InvalidParams(msg) => assert!(
+                msg.contains("summary") && msg.contains("500"),
+                "error should mention summary + cap; got: {msg}"
+            ),
+            other => panic!("expected InvalidParams, got: {other:?}"),
+        }
+
+        // (c) unknown artifact_role → reject.
+        let err = handle_artifact_create(
+            &store,
+            None,
+            wiki_params_with(
+                vec!["019".to_string()],
+                "ok",
+                Some("not-a-role"),
+                Some("body".to_string()),
+            ),
+        )
+        .await
+        .expect_err("wiki_page role allowlist");
+        match err {
+            McpError::InvalidParams(msg) => assert!(
+                msg.contains("concept") && msg.contains("entity"),
+                "error should list allowed roles; got: {msg}"
+            ),
+            other => panic!("expected InvalidParams, got: {other:?}"),
+        }
+
+        // (c') missing artifact_role → reject.
+        let err = handle_artifact_create(
+            &store,
+            None,
+            wiki_params_with(
+                vec!["019".to_string()],
+                "ok",
+                None,
+                Some("body".to_string()),
+            ),
+        )
+        .await
+        .expect_err("wiki_page role is required");
+        match err {
+            McpError::InvalidParams(msg) => assert!(
+                msg.contains("artifact_role"),
+                "error should name artifact_role; got: {msg}"
+            ),
+            other => panic!("expected InvalidParams, got: {other:?}"),
+        }
+
+        // (d) content > MAX_CONTENT_BYTES → reject.
+        let huge_content = "x".repeat(super::WIKI_PAGE_MAX_CONTENT_BYTES + 1);
+        let err = handle_artifact_create(
+            &store,
+            None,
+            wiki_params_with(
+                vec!["019".to_string()],
+                "ok",
+                Some("concept"),
+                Some(huge_content),
+            ),
+        )
+        .await
+        .expect_err("wiki_page content size must be capped");
+        match err {
+            McpError::InvalidParams(msg) => assert!(
+                msg.contains("content") && msg.contains("262144"),
+                "error should mention content + 256KB cap (in bytes); got: {msg}"
+            ),
+            other => panic!("expected InvalidParams, got: {other:?}"),
+        }
+
+        // Positive case: a well-formed WikiPage is accepted.
+        let good = handle_artifact_create(
+            &store,
+            None,
+            wiki_params_with(
+                vec!["01999999-0000-0000-0000-000000000000".to_string()],
+                "OK summary",
+                Some("entity"),
+                Some("# body".to_string()),
+            ),
+        )
+        .await
+        .expect("well-formed wiki_page must be accepted");
+        let payload: TaskArtifactResult = parse_tool_payload(&good);
+        let stored = store
+            .get_task_artifact(
+                &TenantId::new("tenant_wiki_validate").unwrap(),
+                &payload.artifact_id,
+            )
+            .await
+            .unwrap()
+            .expect("artifact persisted");
+        assert_eq!(stored.artifact_kind, ArtifactKind::WikiPage);
+        assert_eq!(stored.artifact_role.as_deref(), Some("entity"));
+        assert_eq!(stored.content.as_deref(), Some("# body"));
     }
 
     /// Phase 0 (codex-folded §4.2 of the plan): a distinct-writer
