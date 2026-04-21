@@ -28,6 +28,7 @@ test_chunk.rs
 
 # Per-repo agent / codex workspaces
 /.codexloop/
+/.worktrees/
 /MEMORY.md
 
 # User-local task tracking (per global CLAUDE.md convention)
