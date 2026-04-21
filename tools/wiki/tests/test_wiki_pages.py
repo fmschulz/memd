@@ -299,7 +299,7 @@ def _make_mock_server(
         if method == "initialize":
             result = {
                 "protocolVersion": PROTOCOL_VERSION,
-                "serverInfo": {"name": "memd", "version": "0.11.0"},
+                "serverInfo": {"name": "memd", "version": "0.12.0"},
             }
         elif method == "tools/call":
             tool = payload["params"]["name"]
