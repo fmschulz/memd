@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -30,6 +30,58 @@ pub(super) fn calculate_precision(retrieved: &[String], relevant: &HashSet<Strin
         return 0.0;
     }
     relevant.intersection(&retrieved_set).count() as f64 / retrieved_set.len() as f64
+}
+
+/// Standard BEIR nDCG@k using `2^rel - 1` gain with `log2(rank + 1)` discount.
+///
+/// * `retrieved` — ordered doc IDs, index 0 = rank 1.
+/// * `grades` — qrels: doc ID → graded relevance (0 = irrelevant, 1+ = relevant).
+///   Missing doc IDs are treated as grade 0.
+/// * `k` — cutoff rank (only the first `k` retrieved positions contribute to DCG;
+///   only the top-`k` grades contribute to iDCG).
+///
+/// Returns `0.0` when `iDCG@k == 0` (no relevant documents known for this
+/// query or `k == 0`). Callers decide whether such queries are dropped from
+/// the dataset average.
+// Wired into QueryMetrics in P2 of docs/plans/active/2026-04-21-beir-retrieval-gate.md.
+#[allow(dead_code)]
+pub(super) fn calculate_ndcg(
+    retrieved: &[String],
+    grades: &HashMap<String, u8>,
+    k: usize,
+) -> f64 {
+    if k == 0 {
+        return 0.0;
+    }
+
+    let dcg: f64 = retrieved
+        .iter()
+        .take(k)
+        .enumerate()
+        .map(|(index, doc_id)| {
+            let grade = grades.get(doc_id).copied().unwrap_or(0) as f64;
+            if grade == 0.0 {
+                0.0
+            } else {
+                (2f64.powf(grade) - 1.0) / ((index + 2) as f64).log2()
+            }
+        })
+        .sum();
+
+    let mut ideal: Vec<u8> = grades.values().copied().filter(|g| *g > 0).collect();
+    ideal.sort_by(|a, b| b.cmp(a));
+    let idcg: f64 = ideal
+        .iter()
+        .take(k)
+        .enumerate()
+        .map(|(index, grade)| (2f64.powf(*grade as f64) - 1.0) / ((index + 2) as f64).log2())
+        .sum();
+
+    if idcg <= 0.0 {
+        0.0
+    } else {
+        dcg / idcg
+    }
 }
 
 pub(super) fn summarize(
@@ -233,5 +285,120 @@ mod tests {
         assert!((a.recall.ci_upper - b.recall.ci_upper).abs() < 1e-9);
         assert!((a.mrr.ci_lower - b.mrr.ci_lower).abs() < 1e-9);
         assert!((a.precision.ci_upper - b.precision.ci_upper).abs() < 1e-9);
+    }
+
+    mod ndcg {
+        use super::super::*;
+        use std::collections::HashMap;
+
+        fn grades(entries: &[(&str, u8)]) -> HashMap<String, u8> {
+            entries
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), *v))
+                .collect()
+        }
+
+        #[test]
+        fn binary_perfect_ranking_is_one() {
+            let retrieved = vec!["a".to_string()];
+            let g = grades(&[("a", 1)]);
+            assert!((calculate_ndcg(&retrieved, &g, 10) - 1.0).abs() < 1e-12);
+        }
+
+        #[test]
+        fn graded_perfect_ranking_is_one() {
+            let retrieved = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+            let g = grades(&[("a", 3), ("b", 2), ("c", 1)]);
+            assert!((calculate_ndcg(&retrieved, &g, 3) - 1.0).abs() < 1e-12);
+        }
+
+        #[test]
+        fn graded_reverse_ranking_matches_textbook_value() {
+            // Classic textbook case: perfect ideal ranking is [3, 2, 1];
+            // we hand the model the reverse [1, 2, 3].
+            // DCG@3  = 1/log2(2) + 3/log2(3) + 7/log2(4)
+            //        = 1 + 1.8927892607143721 + 3.5
+            //        = 6.3927892607143721
+            // iDCG@3 = 7/log2(2) + 3/log2(3) + 1/log2(4)
+            //        = 7 + 1.8927892607143721 + 0.5
+            //        = 9.392789260714372
+            // nDCG@3 = 0.6806060567602009
+            let retrieved = vec!["c".to_string(), "b".to_string(), "a".to_string()];
+            let g = grades(&[("a", 3), ("b", 2), ("c", 1)]);
+            let got = calculate_ndcg(&retrieved, &g, 3);
+            assert!((got - 0.680_606_056_760_200_9).abs() < 1e-12, "got {got}");
+        }
+
+        #[test]
+        fn retrieved_outside_qrels_is_zero() {
+            let retrieved = vec!["x".to_string(), "y".to_string()];
+            let g = grades(&[("a", 1)]);
+            assert_eq!(calculate_ndcg(&retrieved, &g, 10), 0.0);
+        }
+
+        #[test]
+        fn empty_grades_is_zero() {
+            let retrieved = vec!["a".to_string()];
+            let g: HashMap<String, u8> = HashMap::new();
+            assert_eq!(calculate_ndcg(&retrieved, &g, 10), 0.0);
+        }
+
+        #[test]
+        fn zero_k_is_zero() {
+            let retrieved = vec!["a".to_string()];
+            let g = grades(&[("a", 1)]);
+            assert_eq!(calculate_ndcg(&retrieved, &g, 0), 0.0);
+        }
+
+        #[test]
+        fn idcg_caps_at_known_relevant_docs() {
+            // Only 1 retrieved, 2 relevant:
+            //   DCG@5  = 1/log2(2) = 1
+            //   iDCG@5 = 1/log2(2) + 1/log2(3) = 1 + 0.6309297535714574
+            //          = 1.6309297535714574
+            //   nDCG@5 = 0.6131471927654585
+            let retrieved = vec!["a".to_string()];
+            let g = grades(&[("a", 1), ("b", 1)]);
+            let got = calculate_ndcg(&retrieved, &g, 5);
+            assert!((got - 0.613_147_192_765_458_5).abs() < 1e-12, "got {got}");
+        }
+
+        #[test]
+        fn cutoff_excludes_positions_beyond_k() {
+            // Perfect ranking but ask only @1 — the highest-grade doc alone
+            // against an ideal of the single highest grade still equals 1.0.
+            let retrieved = vec!["a".to_string(), "b".to_string()];
+            let g = grades(&[("a", 3), ("b", 2)]);
+            assert!((calculate_ndcg(&retrieved, &g, 1) - 1.0).abs() < 1e-12);
+        }
+
+        #[test]
+        fn mixed_ranking_with_gap_matches_manual_calculation() {
+            // retrieved = [a, b, c, d]; grades = a=3, b=2, c=3, d=0
+            // DCG@4  = 7/log2(2) + 3/log2(3) + 7/log2(4) + 0
+            //        = 7 + 1.8927892607143721 + 3.5
+            //        = 12.392789260714372
+            // iDCG@4 (grades sorted desc [3,3,2]) = 7/log2(2) + 7/log2(3) + 3/log2(4)
+            //        = 7 + 4.416508274709534 + 1.5
+            //        = 12.916508274709534
+            // nDCG@4 = 0.9594535145926796
+            let retrieved = vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "d".to_string(),
+            ];
+            let g = grades(&[("a", 3), ("b", 2), ("c", 3), ("d", 0)]);
+            let got = calculate_ndcg(&retrieved, &g, 4);
+            assert!((got - 0.959_453_514_592_679_6).abs() < 1e-12, "got {got}");
+        }
+
+        #[test]
+        fn k_larger_than_retrieved_still_normalizes_correctly() {
+            let retrieved = vec!["a".to_string()];
+            let g = grades(&[("a", 1)]);
+            // k=100 but only one retrieved → DCG=1, iDCG=1 (only one relevant) → 1.0
+            assert!((calculate_ndcg(&retrieved, &g, 100) - 1.0).abs() < 1e-12);
+        }
     }
 }
