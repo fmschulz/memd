@@ -6,6 +6,119 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-04-21
+
+### Added
+
+- **BEIR retrieval-gate infrastructure.** The `memd-evals` harness now
+  computes BEIR-standard nDCG@{1, 5, 10, 100}, supports graded qrels,
+  reads `CrossCorpusReport` / `BenchmarkReport` interchangeably in the
+  regression gate, accepts a TOML dataset manifest, and ships with a
+  committed baseline + GitHub Actions workflow so accidental retrieval
+  regressions fail PR checks instead of silently landing.
+  - **P1 nDCG math** (`59df881`). New
+    `calculate_ndcg(retrieved, grades, k)` in
+    `evals/harness/src/suites/benchmark_protocol/math.rs` using the
+    standard `2^rel - 1` gain with `log2(rank + 1)` discount.
+    Ten unit tests against hand-computed textbook vectors with 1e-12
+    tolerance: binary / graded perfect-ranking = 1.0, reverse-ranking
+    against the [3,2,1] ideal = 0.6806060567602009, retrieved outside
+    qrels = 0.0, empty grades = 0.0, k=0 = 0.0, iDCG caps at known
+    relevant docs (1 retrieved / 2 relevant → 0.6131…), cutoff
+    excludes positions beyond k, mixed ranking with a zero slot =
+    0.9594535145926796, k > retrieved.len() with complete qrels = 1.0.
+  - **P2 graded qrels + per-query nDCG in reports** (`a062d8f`).
+    Additive `queries[].relevance_grades: HashMap<String, u8>` on
+    dataset JSON. `build_query_grades()` synthesizes grade=1 for
+    every entry in `relevant[]`, and explicit grades override that
+    (including grade=0 to demote a binary-relevant entry).
+    `QueryMetrics` / `BenchmarkSummary` gain
+    `ndcg_at_k: BTreeMap<usize, f64>` fields — BTreeMap for
+    byte-stable JSON, `#[serde(default)]` so pre-0.12 baselines
+    read clean. The benchmark runner asks the retriever for top-100
+    (the max cutoff in `NDCG_K_VALUES = &[1, 5, 10, 100]`);
+    recall/MRR/P@10 are explicitly sliced to top-10 so old baselines
+    remain numerically comparable. Stdout summary lines gain an
+    `nDCG@10 {x.xxx | n/a}` suffix.
+  - **P3 CrossCorpusReport-aware regression gate + `--metric`**
+    (`410d7f4`, folded as `117d117`).
+    `load_report_either` tries `CrossCorpusReport` first and falls
+    back to `BenchmarkReport`. Cross-corpus alignment pairs queries
+    per-dataset (match by `dataset_path`, then by `query_id` within
+    that dataset) so `q1` collisions across datasets can't produce
+    false positives in the paired test. New `--metric` flag (default
+    `ndcg_at_10`; accepts `all`, `recall_at_10`, `mrr`,
+    `precision_at_10`, or `ndcg_at_<k>` for any positive k). Metrics
+    absent from both sides skip with an actionable "regenerate
+    baseline" reason instead of failing on missing data.
+    `DatasetBenchmarkResult` gains `#[serde(default)] query_metrics`
+    so cross-corpus reports carry the per-query detail the paired
+    gate needs.
+  - **P4 `--dataset-manifest` + trec-covid soft fetch + README
+    reconcile** (`303c834`). New `evals/bench/beir_manifest.toml`
+    lists fiqa / scidocs / trec-covid with path + name +
+    qrels_format hint + approx_bytes + license. Relative paths
+    resolve against the manifest's own directory. `memd-evals`
+    gains a `--dataset-manifest` flag that concatenates manifest
+    entries after explicit `--dataset-path` flags. The offline
+    dataset fetcher gains `try_fetch_one` for `beir_trec-covid.json`
+    — warns on 404 instead of failing the whole script (the base
+    commit mirror doesn't carry trec-covid today; manual drop-in is
+    still supported). `evals/bench/datasets/retrieval/README.md`
+    reconciled: new tier table names all five BEIR files the
+    harness ever touches, including the two manual-only entries
+    (`beir_scifact_fixed.json`, `beir_nfcorpus.json`) that
+    `scifact.rs` and `nfcorpus.rs` silently expect.
+  - **P5 committed baseline + regeneration ritual** (`1fc3a92`).
+    `evals/bench/baselines/beir_v1.json` — a `CrossCorpusReport`
+    generated at this commit against fiqa (17 queries after
+    relevance filtering) + scidocs (30 queries) with
+    `--embedding-model all-minilm --system-variant hybrid-feature
+    --max-queries 30 --max-documents 500 --seed 42
+    --bootstrap-iterations 1000`. Headline: normalized nDCG@10 =
+    0.4347 (fiqa 0.4969, scidocs 0.3725); normalized nDCG@100 =
+    0.5221. `evals/BENCHMARK_PROTOCOL.md` gains the full nDCG
+    section, a pinned-parameter table that lockstep-mirrors the CI
+    env vars, and a two-PR regeneration ritual (PR 1 lands the
+    substantive change; the gate fails; PR 2 lands the refreshed
+    baseline with a written justification).
+  - **P6 CI workflow** (`87a37be`, folded as `c1ac5b8` after Codex
+    review). `.github/workflows/retrieval-gate.yml` runs on
+    pull_request + push-to-main against `crates/` / `evals/` /
+    `Cargo.{toml,lock}`. Single job: cache cargo + BEIR datasets +
+    embedding model, build release memd + memd-evals, run
+    `--suite benchmark` with the pinned-parameter set,
+    run `--suite benchmark-regression --metric ndcg_at_10` against
+    the committed baseline, upload candidate + regression reports
+    as an always-retain artifact. Concurrency group cancels
+    superseded runs for the same ref. `timeout-minutes: 60`
+    accommodates the cold-cache path. Least-privilege
+    `permissions: { contents: read, actions: read }`. All pinned
+    parameters live as top-level env vars
+    (`BEIR_EMBEDDING_MODEL`, `BEIR_SYSTEM_VARIANT`,
+    `BEIR_MAX_QUERIES`, `BEIR_MAX_DOCUMENTS`, `BEIR_SEED`,
+    `BEIR_BOOTSTRAP_ITERATIONS`, `BEIR_METRIC`,
+    `BEIR_SIGNIFICANCE_ALPHA`, `BEIR_MIN_EFFECT_SIZE`) so a bump
+    is a single edit.
+
+### Changed
+
+- `memd-evals`: retrieval depth for the benchmark protocol is now 100
+  (max of `NDCG_K_VALUES`), up from 10. Historical recall/MRR/P@10
+  are explicitly sliced to the top-10 window inside `evaluate_queries`
+  so pre-0.12 baselines remain numerically comparable.
+
+### Deferred to v0.12.x+
+
+- Heavy-BEIR lane (`nq`, `hotpotqa`, `arguana`, `webis-touche2020`)
+  gated on a `--include-heavy` branch in the fetcher with a
+  `--accept-licenses` gate.
+- Commit-SHA pinning for the GitHub Actions in
+  `.github/workflows/retrieval-gate.yml` (a repo-wide supply-chain
+  audit pass, not a retrieval-gate concern specifically).
+- `beir_trec-covid.json` mirror hosting (deferred until a future
+  commit bump that includes it in the pinned base-URL commit).
+
 ## [0.11.0] - 2026-04-21
 
 ### Added
