@@ -297,7 +297,7 @@ fn build_paired_queries(
             baseline.shape(),
             candidate.shape(),
             baseline.shape(),
-            baseline.shape(),
+            candidate.shape(),
         )),
     }
 }
@@ -650,5 +650,9 @@ mod tests {
             .find(|r| r.name == "P6_regression_align_reports" && !r.passed)
             .expect("expected align_reports failure for mixed shapes");
         assert!(failure.message.contains("shapes differ"));
+        // Remediation hint must name BOTH shapes so the operator knows the
+        // two normalization paths (not just one).
+        assert!(failure.message.contains("BenchmarkReport"));
+        assert!(failure.message.contains("CrossCorpusReport"));
     }
 }
