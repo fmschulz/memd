@@ -36,6 +36,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
+from .compat import WikiManifestTooNewError, check_manifest_version
+
 _TASK_LINK_RE = re.compile(r"\(\.\./tasks/(?P<task_id>[^)\s]+)\.md\)")
 _TOP_LEVEL_TASK_LINK_RE = re.compile(r"\(tasks/(?P<task_id>[^)\s]+)\.md\)")
 _ISO_FMT = "%Y-%m-%d %H:%M:%SZ"
@@ -116,6 +118,14 @@ def lint_output_dir(
     Returns findings in a stable order so CI diffs are meaningful:
     sort key is (check_name, path, message).
     """
+    # Plan §4.4 forward-compat gate: if the manifest declares a
+    # schema_version higher than this build can read, raise loudly so
+    # the operator upgrades memd-wiki rather than getting a silent
+    # partial lint. Unknown / missing schema_version is tolerated
+    # (lint behaves as before — manifest-drift / -invalid catch
+    # structural problems).
+    _enforce_manifest_version(outdir)
+
     findings: list[LintFinding] = []
     findings.extend(_check_library_grounding_refs(outdir))
     findings.extend(
@@ -400,6 +410,26 @@ def _read(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except OSError:
         return ""
+
+
+def _enforce_manifest_version(outdir: Path) -> None:
+    """Raise ``WikiManifestTooNewError`` when the manifest is too new.
+
+    The lint never silently degrades when the on-disk manifest comes
+    from a future memd-wiki revision — operators get a clear "upgrade"
+    diagnostic instead. Missing/malformed manifest stays a structural
+    finding handled by ``_check_manifest_drift``.
+    """
+    manifest_path = outdir / "manifest.json"
+    if not manifest_path.is_file():
+        return
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    # `check_manifest_version` raises WikiManifestTooNewError on
+    # schema_version > MAX_KNOWN; pass-through is the desired behavior.
+    check_manifest_version(manifest)
 
 
 # --- Phase 3 (v2): concept-* checks --------------------------------------
