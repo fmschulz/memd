@@ -14,6 +14,7 @@ from .mcp_client import McpHttpClient
 from .render import (
     artifact_heading,
     artifact_summary,
+    render_concept_page,
     render_index,
     render_library_page,
     render_log_page,
@@ -101,6 +102,14 @@ def build_wiki(config: BuildConfig) -> BuildResult:
         ),
     }
 
+    # v2 phase 2: fetch every wiki_page artifact for this project so the
+    # compiler can render LLM-authored concept / entity pages alongside
+    # the deterministic compiler-owned surface. Empty result is
+    # expected on installs that haven't authored any concept pages yet —
+    # the compiler still emits an (empty) `concepts/` and `entities/`
+    # lane in the manifest so v2 readers see the new lanes.
+    wiki_pages = fetch_wiki_pages(client, config)
+
     primary_task_ids = list(
         project_payload["brief"].get("source_task_ids", [])
     )[: config.max_tasks]
@@ -187,6 +196,21 @@ def build_wiki(config: BuildConfig) -> BuildResult:
     (config.output_dir / "tasks").mkdir(parents=True, exist_ok=True)
     (config.output_dir / "libraries").mkdir(parents=True, exist_ok=True)
 
+    # v2 phase 2: stable sort + grounding-resolution for wiki_page
+    # artifacts. The order is deterministic regardless of backend
+    # ranking (plan §5 phase 2): primary key is the role lane
+    # (concept first, then entity), then a human-readable sort key
+    # (entity name when present, otherwise the page summary truncated
+    # to 50 chars), then the artifact_id as a stable tie-breaker.
+    sorted_wiki_pages = sort_wiki_pages(wiki_pages)
+    wiki_page_records = [
+        build_concept_page_record(client, config, page)
+        for page in sorted_wiki_pages
+    ]
+    if wiki_page_records:
+        (config.output_dir / "concepts").mkdir(parents=True, exist_ok=True)
+        (config.output_dir / "entities").mkdir(parents=True, exist_ok=True)
+
     files = {
         config.output_dir / "index.md": render_index(
             config.tenant_id, config.project_id, snapshot_at_ms, tasks
@@ -215,9 +239,21 @@ def build_wiki(config: BuildConfig) -> BuildResult:
             "highlights", config.project_id, snapshot_at_ms, libraries["highlights"]
         ),
         config.output_dir / "manifest.json": render_manifest(
-            config, snapshot_at_ms, tasks, log_entries, project_payload
+            config,
+            snapshot_at_ms,
+            tasks,
+            log_entries,
+            project_payload,
+            wiki_page_records,
         ),
     }
+    for record in wiki_page_records:
+        files[config.output_dir / record["path"]] = render_concept_page(
+            config.tenant_id,
+            config.project_id,
+            snapshot_at_ms,
+            record,
+        )
 
     # Sort force-emit tasks and their thread artifacts for determinism.
     force_emit_tasks.sort(key=lambda item: item["task_id"])
@@ -317,12 +353,12 @@ def build_log_entries(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return entries
 
 
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 2
 
 # Plan §6.1: prefixes of `output/` that the memd-wiki compiler owns.
 # v1 lints only within these; anything outside (e.g. a future
 # human-authored `concepts/` tree) is the caller's concern and the
-# compiler will not manage it. Pinned now so v2 can add LLM-authored
+# compiler will not manage it. Pinned so v2 can add LLM-authored
 # prefixes without changing the manifest format.
 COMPILER_OWNED_PREFIXES: tuple[str, ...] = (
     "index.md",
@@ -333,6 +369,161 @@ COMPILER_OWNED_PREFIXES: tuple[str, ...] = (
     "libraries/",
 )
 
+# Plan §4.5: the LLM-authoring lane. Concept and entity pages live
+# here; the compiler renders them from `wiki_page` artifacts but does
+# not manage their content (that comes from `artifact.create` calls
+# made out-of-band). Phase 3 adds `concept-*` lint checks scoped to
+# this prefix tuple.
+LLM_AUTHORED_PREFIXES: tuple[str, ...] = (
+    "concepts/",
+    "entities/",
+)
+
+# Plan §4.5: human-authored lane. The compiler never writes here and
+# the lint tolerates dangling references INTO this lane. v2 ships the
+# manifest declaration so v3 can add `notes/` enforcement without a
+# manifest version bump.
+HUMAN_OWNED_PREFIXES: tuple[str, ...] = (
+    "notes/",
+)
+
+
+def fetch_wiki_pages(
+    client: McpHttpClient, config: BuildConfig
+) -> list[dict[str, Any]]:
+    """Return every `wiki_page` artifact for the configured project.
+
+    Wraps `artifact.search` with `artifact_kind=wiki_page` and
+    requests up to 100 hits in one call (the documented MCP cap). v2
+    treats concept pages as a small set per project; if it grows past
+    100 we will need to paginate or change the surface.
+    """
+    payload = client.call_tool(
+        "artifact.search",
+        {
+            "tenant_id": config.tenant_id,
+            "k": 100,
+            "filters": {
+                "project_id": config.project_id,
+                "artifact_kind": "wiki_page",
+            },
+        },
+    )
+    hits = payload.get("hits") or []
+    return [hit.get("artifact") for hit in hits if isinstance(hit, dict) and hit.get("artifact")]
+
+
+def sort_wiki_pages(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return wiki pages in deterministic order (plan §5 phase 2).
+
+    Sort key: ``(artifact_role, entity_name or summary[:50], artifact_id)``.
+    artifact_role goes first so the concept lane renders before the
+    entity lane in any consumer that walks the manifest. The
+    middle key is the human-readable disambiguator. The artifact_id
+    tail breaks ties when two pages share both role and name.
+    """
+    def key(page: dict[str, Any]) -> tuple[str, str, str]:
+        role = page.get("artifact_role") or ""
+        entity_refs = page.get("entity_refs") or []
+        name = ""
+        if entity_refs and isinstance(entity_refs[0], dict):
+            name = entity_refs[0].get("name", "") or ""
+        if not name:
+            name = (page.get("summary") or "")[:50]
+        return (role, name, page.get("artifact_id") or "")
+
+    return sorted(pages, key=key)
+
+
+def build_concept_page_record(
+    client: McpHttpClient,
+    config: BuildConfig,
+    page: dict[str, Any],
+) -> dict[str, Any]:
+    """Materialize a renderable concept-page record from a wiki_page artifact.
+
+    Resolves each `related_artifact_ids` entry into a full grounding
+    artifact via `artifact.get` so the renderer can cite the
+    artifact_kind, role, and trust tier of every grounded record. Any
+    id that fails to resolve is preserved as a stub so the page still
+    renders something — the Phase 3 `concept-missing-grounding` lint
+    catches the underlying data integrity issue.
+    """
+    artifact_id = page.get("artifact_id")
+    role = page.get("artifact_role") or "concept"
+    lane = "concepts" if role == "concept" else "entities"
+    path = f"{lane}/{artifact_id}.md"
+
+    grounding_refs: list[dict[str, Any]] = []
+    for related_id in page.get("related_artifact_ids") or []:
+        if not isinstance(related_id, str) or not related_id.strip():
+            continue
+        try:
+            ref_payload = client.call_tool(
+                "artifact.get",
+                {
+                    "tenant_id": config.tenant_id,
+                    "artifact_id": related_id,
+                },
+            )
+        except Exception:  # noqa: BLE001 — preserve dangling refs as stubs
+            grounding_refs.append({
+                "artifact_id": related_id,
+                "task_id": "unknown-task",
+                "artifact_kind": "unknown",
+                "trust_tier": "unknown",
+                "resolved": False,
+            })
+            continue
+        ref_artifact = ref_payload.get("artifact") if isinstance(ref_payload, dict) else None
+        if not isinstance(ref_artifact, dict):
+            grounding_refs.append({
+                "artifact_id": related_id,
+                "task_id": "unknown-task",
+                "artifact_kind": "unknown",
+                "trust_tier": "unknown",
+                "resolved": False,
+            })
+            continue
+        grounding_refs.append({
+            "artifact_id": ref_artifact.get("artifact_id", related_id),
+            "task_id": ref_artifact.get("task_id", "unknown-task"),
+            "artifact_kind": ref_artifact.get("artifact_kind", "unknown"),
+            "artifact_role": ref_artifact.get("artifact_role"),
+            "trust_tier": _grounding_trust_tier(ref_artifact),
+            "resolved": True,
+        })
+
+    return {
+        "page": page,
+        "path": path,
+        "lane": lane,
+        "artifact_id": artifact_id,
+        "artifact_role": role,
+        "trust_tier": _grounding_trust_tier(page),
+        "source_updated_at_ms": int(
+            page.get("source_updated_at_ms")
+            or page.get("timestamp_created")
+            or 0
+        ),
+        "grounding_refs": grounding_refs,
+    }
+
+
+def _grounding_trust_tier(artifact: dict[str, Any]) -> str:
+    """Mirror Rust's `derive_artifact_trust_tier` for a Python dict.
+
+    Used for rendering only. The authoritative computation lives in
+    the Rust server; this surface keeps Phase 2 free of an extra MCP
+    call per artifact when all we need is the displayed tier.
+    """
+    promotion = artifact.get("promotion_state")
+    if promotion == "verified":
+        return "verified_record"
+    if artifact.get("artifact_kind") == "digest":
+        return "compiled_digest_hint"
+    return "canonical_record"
+
 
 def render_manifest(
     config: BuildConfig,
@@ -340,10 +531,32 @@ def render_manifest(
     tasks: list[dict[str, Any]],
     log_entries: list[dict[str, Any]],
     project_payload: dict[str, Any],
+    wiki_page_records: list[dict[str, Any]] | None = None,
 ) -> str:
+    wiki_page_records = wiki_page_records or []
+    concept_pages = [
+        {
+            "artifact_id": record["artifact_id"],
+            "path": record["path"],
+            "trust_tier": record["trust_tier"],
+            "artifact_role": record["artifact_role"],
+            "grounding_refs": [
+                {
+                    "artifact_id": ref["artifact_id"],
+                    "task_id": ref["task_id"],
+                    "artifact_kind": ref["artifact_kind"],
+                }
+                for ref in record["grounding_refs"]
+            ],
+            "source_updated_at_ms": record["source_updated_at_ms"],
+        }
+        for record in wiki_page_records
+    ]
     manifest = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "compiler_owned_prefixes": list(COMPILER_OWNED_PREFIXES),
+        "llm_authored_prefixes": list(LLM_AUTHORED_PREFIXES),
+        "human_owned_prefixes": list(HUMAN_OWNED_PREFIXES),
         "source_snapshot_at_ms": snapshot_at_ms,
         "memd_url": config.memd_url,
         "tenant_id": config.tenant_id,
@@ -353,6 +566,7 @@ def render_manifest(
         "project_digest_artifact_id": project_payload["artifact"].get("artifact_id"),
         "project_trust_tier": project_payload.get("trust_tier"),
         "task_ids": [task["task_id"] for task in tasks],
+        "concept_pages": concept_pages,
     }
     return json.dumps(manifest, indent=2, sort_keys=True) + "\n"
 
