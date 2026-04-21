@@ -1,8 +1,8 @@
-"""Integration smoke tests for ``memd-wiki serve`` (P0).
+"""Integration smoke tests for ``memd-wiki serve``.
 
 Binds an ephemeral localhost port, talks to it via ``http.client``,
 asserts a few baseline invariants: the root returns the compiled
-``index.md`` as ``text/plain``, unknown paths 404.
+``index.md`` rendered as ``text/html``, unknown paths 404.
 
 Zero third-party deps: stdlib ``unittest`` + ``http.client`` only, to
 stay inside the wiki tool's zero-dependency constraint.
@@ -36,6 +36,11 @@ class ResolveRouteTests(unittest.TestCase):
         route = resolve_route(self.outdir, "/")
         self.assertEqual(route.status, 200)
         self.assertEqual(route.file_path, self.outdir / "index.md")
+        self.assertTrue(route.content_type.startswith("text/html"))
+
+    def test_unknown_path_content_type_is_text_plain(self) -> None:
+        route = resolve_route(self.outdir, "/nope")
+        self.assertEqual(route.status, 404)
         self.assertTrue(route.content_type.startswith("text/plain"))
 
     def test_empty_path_resolves_to_index(self) -> None:
@@ -88,21 +93,29 @@ class ServeIntegrationTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_root_returns_index_md_body(self) -> None:
+    def test_root_returns_index_md_body_as_html(self) -> None:
         status, ctype, body = self._get("/")
         self.assertEqual(status, 200)
-        self.assertTrue(ctype.startswith("text/plain"))
-        self.assertIn(b"Fixture Wiki", body)
+        self.assertTrue(ctype.startswith("text/html"))
+        self.assertIn(b"<!DOCTYPE html>", body)
+        self.assertIn(b"<h1>Fixture Wiki</h1>", body)
+        # Paragraph content from the markdown body survives rendering.
+        self.assertIn(b"Hello from P0", body)
+        # Inline <style> block is present so the served page is
+        # readable without external assets.
+        self.assertIn(b"<style>", body)
 
-    def test_unknown_path_returns_404(self) -> None:
-        status, _ctype, body = self._get("/does-not-exist")
+    def test_unknown_path_returns_404_as_text_plain(self) -> None:
+        status, ctype, body = self._get("/does-not-exist")
         self.assertEqual(status, 404)
+        self.assertTrue(ctype.startswith("text/plain"))
         self.assertIn(b"not found", body)
 
     def test_query_string_is_stripped_before_routing(self) -> None:
-        status, _ctype, body = self._get("/?cachebust=1")
+        status, ctype, body = self._get("/?cachebust=1")
         self.assertEqual(status, 200)
-        self.assertIn(b"Fixture Wiki", body)
+        self.assertTrue(ctype.startswith("text/html"))
+        self.assertIn(b"<h1>Fixture Wiki</h1>", body)
 
 
 if __name__ == "__main__":
