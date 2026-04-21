@@ -117,6 +117,18 @@ def _make_mock_server() -> object:
                 }
             ],
         },
+        # v2 phase 2: the compiler now pulls every wiki_page artifact
+        # for the project. Default fixture has none — concept-page
+        # rendering is exercised by ConceptRenderTests below.
+        "artifact.search": {
+            "hits": [],
+        },
+        # v2 phase 2: artifact.get is used to resolve grounding refs
+        # for any wiki_page that's authored. Default returns no
+        # artifact; a concept fixture overrides this.
+        "artifact.get": {
+            "artifact": None,
+        },
     }
     # Provide per-task overrides for task-002 so the two-task fixture
     # yields distinct canonical payloads.
@@ -401,11 +413,24 @@ class ManifestSchemaTests(unittest.TestCase):
                 build_wiki(config)
             manifest = json.loads((outdir / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["schema_version"], MANIFEST_SCHEMA_VERSION)
-        self.assertEqual(manifest["schema_version"], 1)
+        # v2 schema_version. Phase 4 forward-compat lets a v1 reader
+        # error cleanly when it sees this value.
+        self.assertEqual(manifest["schema_version"], 2)
         self.assertEqual(
             tuple(manifest["compiler_owned_prefixes"]),
             COMPILER_OWNED_PREFIXES,
         )
+        # v2 lanes are always emitted (empty when no wiki_page
+        # artifacts exist) so v2 readers see a stable shape.
+        self.assertEqual(
+            manifest["llm_authored_prefixes"],
+            ["concepts/", "entities/"],
+        )
+        self.assertEqual(
+            manifest["human_owned_prefixes"],
+            ["notes/"],
+        )
+        self.assertEqual(manifest["concept_pages"], [])
 
     def test_compiler_owned_prefixes_includes_all_page_roots(self) -> None:
         # Regression guard: the tuple must cover every page kind the

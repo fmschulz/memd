@@ -67,4 +67,17 @@ REQUIRED_MCP_TOOLS: tuple[ToolExpectation, ...] = (
         args_we_pass=("tenant_id", "thread_id"),
         required_by_us=(),
     ),
+    # v2 phase 2: the compiler pulls every wiki_page artifact for the
+    # configured project and resolves each one's grounding refs back
+    # to the cited canonical artifact via artifact.get.
+    ToolExpectation(
+        name="artifact.search",
+        args_we_pass=("tenant_id", "k", "filters"),
+        required_by_us=(),
+    ),
+    ToolExpectation(
+        name="artifact.get",
+        args_we_pass=("tenant_id", "artifact_id"),
+        required_by_us=("artifact_id",),
+    ),
 )
