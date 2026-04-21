@@ -794,7 +794,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "tenant_id": {"type": "string"},
                     "artifact_kind": {
                         "type": "string",
-                        "enum": ["task_start", "task_progress", "run_start", "run_finish", "evidence", "review", "revision", "verification", "decision", "digest", "task_finish"]
+                        "enum": ["task_start", "task_progress", "run_start", "run_finish", "evidence", "review", "revision", "verification", "decision", "digest", "task_finish", "wiki_page"]
                     },
                     "task_id": {"type": "string"},
                     "project_id": {"type": "string"},
@@ -813,6 +813,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "scientific_question": {"type": "string"},
                     "method_summary": {"type": "string"},
                     "summary": {"type": "string"},
+                    "content": {"type": "string"},
                     "evidence_kind": {"type": "string"},
                     "supports_claim": {"type": "boolean"},
                     "blockers": {"type": "array", "items": {"type": "string"}},
