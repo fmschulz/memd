@@ -76,6 +76,7 @@ fn convert_entries(
             id: entry.question_id.clone(),
             query: build_query_text(&entry),
             relevant,
+            relevance_grades: std::collections::HashMap::new(),
         });
     }
 
