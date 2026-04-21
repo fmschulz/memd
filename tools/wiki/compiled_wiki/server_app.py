@@ -4,17 +4,15 @@ Phase summary:
 
 - P0 served the compiled tree's ``index.md`` as ``text/plain``.
 - P1 switched ``index.md`` to ``text/html`` via ``html_render``.
-- **P2 (this phase)** formalizes the route table. The compiler's
-  full page set (``index``, ``log``, per-project, per-task,
-  per-library, and LLM-authored concept/entity pages) is now
-  reachable. Path-traversal and symlink escapes are rejected via
-  the existing containment helpers in ``containment.py`` — the
-  serve handler reuses the same fail-closed rules the
-  export-markdown CLI already enforces. ``manifest.json`` is
-  served raw with ``application/json``; every other supported
-  route renders the underlying ``.md`` file as HTML.
+- P2 formalized the route table with containment + symlink
+  rejection.
+- **P3 (this phase)** plugs the per-page link rewriter into every
+  rendered response. Compiler-emitted ``.md`` links such as
+  ``../tasks/task-123.md`` now resolve to the route they were
+  filed under (``/tasks/task-123/``) so a reader can navigate the
+  compiled tree in a browser without every internal link 404'ing.
 
-Later phases layer on link rewriting (P3) and release (P4).
+Later phase layer on release (P4).
 
 The route resolver is a pure function so the routing table can be
 exercised without binding a port.
@@ -34,7 +32,7 @@ from .containment import (
     normalize_absolute,
     reject_if_any_symlink_inside_outdir,
 )
-from .html_render import render_page
+from .html_render import make_link_rewriter, render_page
 
 HTML_CONTENT_TYPE = "text/html; charset=utf-8"
 PLAIN_CONTENT_TYPE = "text/plain; charset=utf-8"
@@ -151,6 +149,7 @@ def make_handler(outdir: Path, *, quiet: bool = False) -> type:
     ``http.server`` contract: ``ThreadingHTTPServer`` instantiates one
     handler per request.
     """
+    outdir_abs = normalize_absolute(outdir)
 
     class WikiRequestHandler(BaseHTTPRequestHandler):
         server_version = "memd-wiki-serve/0.11.0"
@@ -181,7 +180,17 @@ def make_handler(outdir: Path, *, quiet: bool = False) -> type:
         def _respond_file(self, path: Path, content_type: str) -> None:
             if content_type.startswith("text/html"):
                 markdown = path.read_text(encoding="utf-8")
-                body = render_page(markdown, title=path.name).encode("utf-8")
+                try:
+                    relative = path.relative_to(outdir_abs)
+                except ValueError:
+                    # Defense-in-depth: resolve_route already enforces
+                    # containment, but fall back to an identity rewriter
+                    # instead of crashing if invariants ever drift.
+                    relative = Path(path.name)
+                rewriter = make_link_rewriter(relative)
+                body = render_page(
+                    markdown, title=path.name, link_rewriter=rewriter
+                ).encode("utf-8")
             else:
                 body = path.read_bytes()
             self._respond_bytes(HTTPStatus.OK, body, content_type)

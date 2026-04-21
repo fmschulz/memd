@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from html.parser import HTMLParser
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -31,7 +32,7 @@ from compiled_wiki.server_app import (  # noqa: E402
 
 
 def _seed_full_tree(root: Path) -> None:
-    """Write the minimal file tree the P2 route table expects."""
+    """Write the minimal file tree the route table expects."""
     (root / "index.md").write_text("# Fixture Wiki\n\nHello from P2.\n", encoding="utf-8")
     (root / "log.md").write_text("# Log\n\n- entry 1\n", encoding="utf-8")
     (root / "manifest.json").write_text(
@@ -321,6 +322,193 @@ class ServeIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(ctype.startswith("text/html"))
         self.assertIn(b"<h1>Fixture Wiki</h1>", body)
+
+
+class _AnchorCollector(HTMLParser):
+    """Collect every ``<a href="...">`` value from served HTML.
+
+    Used by the round-trip test to assert the link rewriter produces
+    routes that actually resolve.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.hrefs: list[str] = []
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        if tag != "a":
+            return
+        for key, value in attrs:
+            if key == "href" and value is not None:
+                self.hrefs.append(value)
+
+
+def _seed_linked_tree(root: Path) -> None:
+    """Seed a tree whose pages link to each other via compiler-style
+    relative ``.md`` paths.
+
+    Every internal link uses the exact markup that the deterministic
+    renderer in ``compiled_wiki.render`` emits:
+
+    - ``index.md`` links down to ``projects/memd.md``, ``log.md``,
+      ``libraries/failures.md``, and each task page.
+    - ``projects/memd.md`` links up-and-over to ``../tasks/...`` and
+      ``../libraries/...``.
+    - ``tasks/task-a.md`` links up-and-over to ``../projects/memd.md``
+      and to a sibling task ``../tasks/task-b.md``.
+    - ``libraries/failures.md`` links up-and-over to a task page.
+    - ``concepts/abc.md`` links up-and-over to a task page
+      (mirrors ``render_concept_grounding``).
+    - ``log.md`` links down to task and project pages.
+    """
+    (root / "index.md").write_text(
+        "# Index\n\n"
+        "- [projects/memd.md](projects/memd.md)\n"
+        "- [log.md](log.md)\n"
+        "- [libraries/failures.md](libraries/failures.md)\n"
+        "- [tasks/task-a.md](tasks/task-a.md)\n"
+        "- [tasks/task-b.md](tasks/task-b.md)\n",
+        encoding="utf-8",
+    )
+    (root / "log.md").write_text(
+        "# Log\n\n"
+        "- [tasks/task-a.md](tasks/task-a.md)\n"
+        "- [projects/memd.md](projects/memd.md)\n",
+        encoding="utf-8",
+    )
+    (root / "projects").mkdir()
+    (root / "projects" / "memd.md").write_text(
+        "# Project memd\n\n"
+        "- [../tasks/task-a.md](../tasks/task-a.md)\n"
+        "- [../libraries/failures.md](../libraries/failures.md)\n"
+        "- [../log.md](../log.md)\n",
+        encoding="utf-8",
+    )
+    (root / "tasks").mkdir()
+    (root / "tasks" / "task-a.md").write_text(
+        "# Task A\n\n"
+        "- [../projects/memd.md](../projects/memd.md)\n"
+        "- [../tasks/task-b.md](../tasks/task-b.md)\n",
+        encoding="utf-8",
+    )
+    (root / "tasks" / "task-b.md").write_text(
+        "# Task B\n\n"
+        "- [../tasks/task-a.md](../tasks/task-a.md)\n",
+        encoding="utf-8",
+    )
+    (root / "libraries").mkdir()
+    (root / "libraries" / "failures.md").write_text(
+        "# Failures\n\n"
+        "- [../tasks/task-a.md](../tasks/task-a.md)\n",
+        encoding="utf-8",
+    )
+    (root / "concepts").mkdir()
+    (root / "concepts" / "abc.md").write_text(
+        "---\nartifact_id: abc\n---\n\n"
+        "# Concept abc\n\n"
+        "- [task-a](../tasks/task-a.md)\n"
+        "- [https://example.com](https://example.com)\n",
+        encoding="utf-8",
+    )
+    (root / "manifest.json").write_text(
+        '{"schema_version": 2}\n', encoding="utf-8"
+    )
+
+
+class LinkRewriterIntegrationTests(unittest.TestCase):
+    """End-to-end round-trip: every internal anchor on every served
+    page resolves to HTTP 200.
+
+    Bootstraps a linked compiled tree, crawls every reachable page
+    starting from ``/``, scrapes each ``<a href>`` value, and asserts
+    the corresponding route returns 200. External URLs
+    (``https://example.com``) and the ``manifest.json`` raw route are
+    skipped from the page crawl but still hit for status.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.outdir = Path(self._tmp.name)
+        _seed_linked_tree(self.outdir)
+        handler_cls = make_handler(self.outdir, quiet=True)
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+        self.host, self.port = self.server.server_address[:2]
+        self.thread = threading.Thread(
+            target=self.server.serve_forever, daemon=True
+        )
+        self.thread.start()
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2.0)
+
+    def _get(self, path: str) -> tuple[int, str, bytes]:
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=2.0)
+        try:
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            body = resp.read()
+            return resp.status, resp.getheader("Content-Type", ""), body
+        finally:
+            conn.close()
+
+    def _extract_hrefs(self, body: bytes) -> list[str]:
+        parser = _AnchorCollector()
+        parser.feed(body.decode("utf-8"))
+        return parser.hrefs
+
+    def test_every_internal_anchor_resolves_200(self) -> None:
+        # BFS from '/' following internal (root-absolute) links.
+        queue = ["/"]
+        visited: set[str] = set()
+        dead: list[tuple[str, str, int]] = []
+        while queue:
+            page = queue.pop(0)
+            if page in visited:
+                continue
+            visited.add(page)
+            status, ctype, body = self._get(page)
+            self.assertEqual(status, 200, f"page={page!r}")
+            if not ctype.startswith("text/html"):
+                continue
+            for href in self._extract_hrefs(body):
+                # Strip query + fragment for crawling.
+                target, _, _ = href.partition("#")
+                target, _, _ = target.partition("?")
+                if not target:
+                    continue
+                if not target.startswith("/"):
+                    # External URL (http://...) or scheme-less relative.
+                    continue
+                st, _, _ = self._get(target)
+                if st != 200:
+                    dead.append((page, href, st))
+                else:
+                    queue.append(target)
+        self.assertEqual(
+            dead, [], f"dead internal links: {dead}"
+        )
+        # Sanity: the BFS actually visited more than the entry page.
+        self.assertGreater(len(visited), 4, f"crawl too shallow: {visited}")
+
+    def test_concept_page_rewrites_grounding_link(self) -> None:
+        status, _ctype, body = self._get("/concepts/abc/")
+        self.assertEqual(status, 200)
+        hrefs = self._extract_hrefs(body)
+        self.assertIn("/tasks/task-a/", hrefs)
+        # External URL must survive the rewriter untouched.
+        self.assertIn("https://example.com", hrefs)
+
+    def test_task_page_rewrites_sibling_link(self) -> None:
+        status, _ctype, body = self._get("/tasks/task-a/")
+        self.assertEqual(status, 200)
+        hrefs = self._extract_hrefs(body)
+        self.assertIn("/projects/memd/", hrefs)
+        self.assertIn("/tasks/task-b/", hrefs)
 
 
 if __name__ == "__main__":

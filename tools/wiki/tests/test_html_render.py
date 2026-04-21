@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from compiled_wiki.html_render import (  # noqa: E402
+    make_link_rewriter,
     markdown_to_html,
     render_inline,
     render_page,
@@ -231,6 +232,106 @@ class PageTemplateTests(unittest.TestCase):
             link_rewriter=lambda u: "/rewritten/" + u,
         )
         self.assertIn('href="/rewritten/foo.md"', html_out)
+
+
+class LinkRewriterTests(unittest.TestCase):
+    """Unit tests for ``make_link_rewriter`` (P3 rewriter behavior).
+
+    Covers every link shape the deterministic compiler emits in
+    ``compiled_wiki.render`` — ``render_index``, ``render_project_page``,
+    ``render_task_page``, ``render_library_page``, ``render_log_page``,
+    and the concept/entity page renderers — so a regression in the
+    rewriter is caught before end-to-end HTTP round-trip.
+    """
+
+    def test_from_index_rewrites_lane_targets(self) -> None:
+        rewrite = make_link_rewriter(Path("index.md"))
+        self.assertEqual(rewrite("projects/memd.md"), "/projects/memd/")
+        self.assertEqual(rewrite("tasks/019dadab.md"), "/tasks/019dadab/")
+        self.assertEqual(
+            rewrite("libraries/failures.md"), "/libraries/failures/"
+        )
+        self.assertEqual(rewrite("log.md"), "/log/")
+
+    def test_from_index_rewrites_self_to_root(self) -> None:
+        rewrite = make_link_rewriter(Path("index.md"))
+        self.assertEqual(rewrite("index.md"), "/")
+
+    def test_from_project_page_traverses_up(self) -> None:
+        rewrite = make_link_rewriter(Path("projects/memd.md"))
+        self.assertEqual(rewrite("../tasks/019dadab.md"), "/tasks/019dadab/")
+        self.assertEqual(
+            rewrite("../libraries/failures.md"), "/libraries/failures/"
+        )
+        self.assertEqual(rewrite("../log.md"), "/log/")
+
+    def test_from_task_page_to_project_and_sibling(self) -> None:
+        rewrite = make_link_rewriter(Path("tasks/019dadab.md"))
+        self.assertEqual(rewrite("../projects/memd.md"), "/projects/memd/")
+        self.assertEqual(
+            rewrite("../tasks/other.md"), "/tasks/other/"
+        )
+
+    def test_from_concept_page_grounding_links(self) -> None:
+        rewrite = make_link_rewriter(Path("concepts/abc-123.md"))
+        # render_concept_grounding emits ``[task-id](../tasks/task-id.md)``.
+        self.assertEqual(
+            rewrite("../tasks/task-999.md"), "/tasks/task-999/"
+        )
+
+    def test_from_log_page_rewrites(self) -> None:
+        rewrite = make_link_rewriter(Path("log.md"))
+        self.assertEqual(rewrite("tasks/019dadab.md"), "/tasks/019dadab/")
+        self.assertEqual(rewrite("projects/memd.md"), "/projects/memd/")
+
+    def test_external_and_anchor_links_pass_through(self) -> None:
+        rewrite = make_link_rewriter(Path("index.md"))
+        for url in (
+            "https://example.com/path",
+            "http://127.0.0.1:8080/",
+            "mailto:a@b.com",
+            "#section-2",
+            "/already-root/",
+        ):
+            self.assertEqual(rewrite(url), url, f"url={url}")
+
+    def test_non_md_relative_link_pass_through(self) -> None:
+        rewrite = make_link_rewriter(Path("index.md"))
+        # Compiler does not emit these, but LLM-authored bodies might.
+        self.assertEqual(rewrite("image.png"), "/image.png")
+        self.assertEqual(rewrite("manifest.json"), "/manifest.json")
+
+    def test_query_and_fragment_preserved(self) -> None:
+        rewrite = make_link_rewriter(Path("index.md"))
+        self.assertEqual(
+            rewrite("tasks/019dadab.md#section-2"),
+            "/tasks/019dadab/#section-2",
+        )
+        self.assertEqual(
+            rewrite("tasks/019dadab.md?cachebust=1"),
+            "/tasks/019dadab/?cachebust=1",
+        )
+
+    def test_escape_above_outdir_root_is_left_untouched(self) -> None:
+        # From ``index.md``, ``../outside.md`` would normalize to ``..``
+        # which can't be mapped to a route. Leave it unchanged so the
+        # browser 404s rather than us emitting ``/../outside/``.
+        rewrite = make_link_rewriter(Path("index.md"))
+        self.assertEqual(rewrite("../outside.md"), "../outside.md")
+
+    def test_empty_url_is_left_untouched(self) -> None:
+        rewrite = make_link_rewriter(Path("index.md"))
+        self.assertEqual(rewrite(""), "")
+
+    def test_rewriter_integrates_with_render_page(self) -> None:
+        # Pin the end-to-end contract: feeding the rewriter into
+        # ``render_page`` produces an ``<a href="/tasks/abc/">`` anchor
+        # for a compiler-style ``[x](tasks/abc.md)`` link.
+        rewrite = make_link_rewriter(Path("index.md"))
+        html_out = render_page(
+            "- [see](tasks/abc.md)", title="t", link_rewriter=rewrite
+        )
+        self.assertIn('href="/tasks/abc/"', html_out)
 
 
 if __name__ == "__main__":
