@@ -119,6 +119,13 @@ struct Args {
     /// Optional regression gate report path.
     #[arg(long)]
     regression_report_json: Option<String>,
+
+    /// Metric(s) to gate on for `--suite benchmark-regression`. Accepts
+    /// `all` (recall_at_10, mrr, precision_at_10, ndcg_at_10), a named
+    /// field (`recall_at_10`, `mrr`, `precision_at_10`), or `ndcg_at_<k>`
+    /// (e.g. `ndcg_at_10`, `ndcg_at_100`). Default: `ndcg_at_10`.
+    #[arg(long, default_value = "ndcg_at_10")]
+    metric: String,
 }
 
 fn main() -> ExitCode {
@@ -277,6 +284,7 @@ fn main() -> ExitCode {
                     .regression_report_json
                     .as_deref()
                     .map(std::path::PathBuf::from),
+                metric: args.metric,
             };
             suites::benchmark_protocol::run_regression_gate(config)
         }

@@ -393,6 +393,7 @@ fn build_cross_corpus_report(
             summary: report.summary.clone(),
             quality_gate_passed: report.quality_gate_passed,
             quality_gate_message: report.quality_gate_message.clone(),
+            query_metrics: report.query_metrics.clone(),
         })
         .collect();
 
