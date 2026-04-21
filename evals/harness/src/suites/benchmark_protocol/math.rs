@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -43,8 +43,6 @@ pub(super) fn calculate_precision(retrieved: &[String], relevant: &HashSet<Strin
 /// Returns `0.0` when `iDCG@k == 0` (no relevant documents known for this
 /// query or `k == 0`). Callers decide whether such queries are dropped from
 /// the dataset average.
-// Wired into QueryMetrics in P2 of docs/plans/active/2026-04-21-beir-retrieval-gate.md.
-#[allow(dead_code)]
 pub(super) fn calculate_ndcg(
     retrieved: &[String],
     grades: &HashMap<String, u8>,
@@ -98,6 +96,7 @@ pub(super) fn summarize(
         mrr: bootstrap_ci(&mrrs, iterations, seed + 1),
         precision: bootstrap_ci(&precisions, iterations, seed + 2),
         latency_ms: bootstrap_ci(&latencies, iterations, seed + 3),
+        ndcg_at_k: aggregate_ndcg_from_queries(metrics),
     }
 }
 
@@ -115,7 +114,51 @@ pub(super) fn summarize_cross_corpus(
         mrr: bootstrap_ci(&mrrs, iterations, seed + 1),
         precision: bootstrap_ci(&precisions, iterations, seed + 2),
         latency_ms: bootstrap_ci(&latencies, iterations, seed + 3),
+        ndcg_at_k: aggregate_ndcg_cross_corpus(datasets),
     }
+}
+
+/// Macro-average nDCG@k across queries in a single dataset. Queries without
+/// a value at cutoff `k` (e.g. older schemas that didn't compute nDCG) are
+/// skipped; the aggregate per cutoff reflects only queries that reported it.
+fn aggregate_ndcg_from_queries(metrics: &[QueryMetrics]) -> BTreeMap<usize, f64> {
+    let k_values: BTreeSet<usize> = metrics
+        .iter()
+        .flat_map(|m| m.ndcg_at_k.keys().copied())
+        .collect();
+    let mut result = BTreeMap::new();
+    for k in k_values {
+        let values: Vec<f64> = metrics
+            .iter()
+            .filter_map(|m| m.ndcg_at_k.get(&k).copied())
+            .collect();
+        if !values.is_empty() {
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            result.insert(k, mean);
+        }
+    }
+    result
+}
+
+/// Macro-average nDCG@k across per-dataset summaries. Per-dataset summaries
+/// that lack a cutoff `k` drop out of that cutoff's cross-corpus mean.
+fn aggregate_ndcg_cross_corpus(datasets: &[DatasetBenchmarkResult]) -> BTreeMap<usize, f64> {
+    let k_values: BTreeSet<usize> = datasets
+        .iter()
+        .flat_map(|d| d.summary.ndcg_at_k.keys().copied())
+        .collect();
+    let mut result = BTreeMap::new();
+    for k in k_values {
+        let values: Vec<f64> = datasets
+            .iter()
+            .filter_map(|d| d.summary.ndcg_at_k.get(&k).copied())
+            .collect();
+        if !values.is_empty() {
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            result.insert(k, mean);
+        }
+    }
+    result
 }
 
 fn bootstrap_ci(values: &[f64], iterations: usize, seed: u64) -> MetricWithCi {
@@ -232,6 +275,7 @@ mod tests {
                 mrr: metric(mrr),
                 precision: metric(precision),
                 latency_ms: metric(latency_ms),
+                ndcg_at_k: BTreeMap::new(),
             },
             quality_gate_passed: true,
             quality_gate_message: String::new(),
@@ -269,6 +313,67 @@ mod tests {
         assert!((summary.precision.mean - 0.5).abs() < 1e-9);
         assert!((summary.latency_ms.mean - 150.0).abs() < 1e-9);
         assert_eq!(summary.recall.n, 2);
+    }
+
+    fn query_metric_with_ndcg(query_id: &str, entries: &[(usize, f64)]) -> QueryMetrics {
+        let mut ndcg = BTreeMap::new();
+        for (k, v) in entries {
+            ndcg.insert(*k, *v);
+        }
+        QueryMetrics {
+            query_id: query_id.to_string(),
+            recall_at_10: 0.0,
+            mrr: 0.0,
+            precision_at_10: 0.0,
+            latency_ms: 0.0,
+            ndcg_at_k: ndcg,
+        }
+    }
+
+    #[test]
+    fn summarize_aggregates_ndcg_per_cutoff() {
+        let metrics = vec![
+            query_metric_with_ndcg("q1", &[(1, 1.0), (10, 0.8)]),
+            query_metric_with_ndcg("q2", &[(1, 0.0), (10, 0.4)]),
+        ];
+        let summary = summarize(&metrics, 100, 42);
+        assert!((summary.ndcg_at_k[&1] - 0.5).abs() < 1e-12);
+        assert!((summary.ndcg_at_k[&10] - 0.6).abs() < 1e-12);
+    }
+
+    #[test]
+    fn summarize_ndcg_skips_cutoffs_absent_from_all_queries() {
+        // One query reports @10 and @100, another reports only @10. Aggregate
+        // keeps whichever cutoffs appear in at least one query; the @100 mean
+        // uses only the query that reported it.
+        let metrics = vec![
+            query_metric_with_ndcg("q1", &[(10, 0.5), (100, 0.9)]),
+            query_metric_with_ndcg("q2", &[(10, 0.3)]),
+        ];
+        let summary = summarize(&metrics, 100, 42);
+        assert!((summary.ndcg_at_k[&10] - 0.4).abs() < 1e-12);
+        assert!((summary.ndcg_at_k[&100] - 0.9).abs() < 1e-12);
+        assert_eq!(summary.ndcg_at_k.len(), 2);
+    }
+
+    #[test]
+    fn summarize_empty_metrics_leaves_ndcg_map_empty() {
+        let summary = summarize(&[], 100, 42);
+        assert!(summary.ndcg_at_k.is_empty());
+    }
+
+    #[test]
+    fn cross_corpus_summary_aggregates_ndcg_across_datasets() {
+        let mut ds_a = dataset_result("a", 0.0, 0.0, 0.0, 0.0);
+        ds_a.summary.ndcg_at_k.insert(10, 0.4);
+        ds_a.summary.ndcg_at_k.insert(100, 0.7);
+        let mut ds_b = dataset_result("b", 0.0, 0.0, 0.0, 0.0);
+        ds_b.summary.ndcg_at_k.insert(10, 0.6);
+        let summary = summarize_cross_corpus(&[ds_a, ds_b], 100, 42);
+        assert!((summary.ndcg_at_k[&10] - 0.5).abs() < 1e-12);
+        // Only one dataset reported @100 → its value is passed through as the
+        // macro average of the one dataset that reported it.
+        assert!((summary.ndcg_at_k[&100] - 0.7).abs() < 1e-12);
     }
 
     #[test]

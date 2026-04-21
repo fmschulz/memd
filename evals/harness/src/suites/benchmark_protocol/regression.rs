@@ -279,6 +279,7 @@ fn now_unix_seconds() -> u64 {
 mod tests {
     use super::super::types::{BenchmarkSummary, MetricWithCi, PhaseTiming, Thresholds};
     use super::*;
+    use std::collections::BTreeMap;
 
     fn dummy_report(dataset_path: &str, system_variant: &str) -> BenchmarkReport {
         let metric = MetricWithCi {
@@ -309,6 +310,7 @@ mod tests {
                 mrr: metric.clone(),
                 precision: metric.clone(),
                 latency_ms: metric,
+                ndcg_at_k: BTreeMap::new(),
             },
             phase_timing: PhaseTiming::default(),
             quality_gate_passed: true,
