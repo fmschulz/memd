@@ -26,6 +26,7 @@ from compiled_wiki.server_app import (  # noqa: E402
     HTML_CONTENT_TYPE,
     JSON_CONTENT_TYPE,
     PLAIN_CONTENT_TYPE,
+    discover_project_slugs,
     make_handler,
     resolve_route,
 )
@@ -509,6 +510,167 @@ class LinkRewriterIntegrationTests(unittest.TestCase):
         hrefs = self._extract_hrefs(body)
         self.assertIn("/projects/memd/", hrefs)
         self.assertIn("/tasks/task-b/", hrefs)
+
+
+def _seed_multi_project_tree(root: Path) -> None:
+    """Write a two-project tree plus a top-level landing index.
+
+    Emulates the shape a curated build pipeline produces: one
+    landing ``index.md`` at the root, then per-project subtrees
+    each containing their own ``index.md`` and standard lanes.
+    """
+    (root / "index.md").write_text(
+        "# Projects\n\n- [treeviz](treeviz/index.md)\n- [memd](memd/index.md)\n",
+        encoding="utf-8",
+    )
+    for project in ("treeviz", "memd"):
+        project_root = root / project
+        project_root.mkdir()
+        (project_root / "index.md").write_text(
+            f"# {project}\n\n- [Project Page](projects/{project}.md)\n"
+            f"- [Failures](libraries/failures.md)\n",
+            encoding="utf-8",
+        )
+        (project_root / "manifest.json").write_text(
+            '{"schema_version": 2}\n', encoding="utf-8"
+        )
+        (project_root / "projects").mkdir()
+        (project_root / "projects" / f"{project}.md").write_text(
+            f"# {project} project page\n", encoding="utf-8"
+        )
+        (project_root / "libraries").mkdir()
+        (project_root / "libraries" / "failures.md").write_text(
+            "# Failures\n", encoding="utf-8"
+        )
+
+
+class DiscoverProjectSlugsTests(unittest.TestCase):
+    """Filesystem discovery of mounted project subdirectories."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.outdir = Path(self._tmp.name)
+
+    def test_discovers_projects_with_index_md(self) -> None:
+        _seed_multi_project_tree(self.outdir)
+        slugs = discover_project_slugs(self.outdir)
+        self.assertEqual(slugs, frozenset({"treeviz", "memd"}))
+
+    def test_ignores_standard_lanes(self) -> None:
+        _seed_full_tree(self.outdir)
+        slugs = discover_project_slugs(self.outdir)
+        # Single-project compiler output — no mounts.
+        self.assertEqual(slugs, frozenset())
+
+    def test_ignores_dirs_without_index_or_manifest(self) -> None:
+        _seed_multi_project_tree(self.outdir)
+        (self.outdir / "scratch").mkdir()
+        (self.outdir / "scratch" / "notes.txt").write_text("x", encoding="utf-8")
+        slugs = discover_project_slugs(self.outdir)
+        self.assertNotIn("scratch", slugs)
+
+    def test_missing_outdir_returns_empty(self) -> None:
+        slugs = discover_project_slugs(self.outdir / "does-not-exist")
+        self.assertEqual(slugs, frozenset())
+
+
+class MultiProjectRouteTests(unittest.TestCase):
+    """Routing dispatches project-prefixed URLs into the right subtree."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.outdir = Path(self._tmp.name)
+        _seed_multi_project_tree(self.outdir)
+        self.slugs = discover_project_slugs(self.outdir)
+
+    def test_landing_index_serves_root_index(self) -> None:
+        route = resolve_route(self.outdir, "/", project_slugs=self.slugs)
+        self.assertEqual(route.status, 200)
+        self.assertEqual(route.file_path, self.outdir / "index.md")
+
+    def test_project_root_resolves_to_project_index(self) -> None:
+        route = resolve_route(self.outdir, "/treeviz/", project_slugs=self.slugs)
+        self.assertEqual(route.status, 200)
+        self.assertEqual(route.file_path, self.outdir / "treeviz" / "index.md")
+
+    def test_project_inner_page_routes_into_subtree(self) -> None:
+        route = resolve_route(
+            self.outdir, "/memd/projects/memd", project_slugs=self.slugs
+        )
+        self.assertEqual(route.status, 200)
+        self.assertEqual(
+            route.file_path, self.outdir / "memd" / "projects" / "memd.md"
+        )
+
+    def test_unknown_project_slug_is_404(self) -> None:
+        route = resolve_route(
+            self.outdir, "/ghost/index", project_slugs=self.slugs
+        )
+        self.assertEqual(route.status, 404)
+
+    def test_project_manifest_returns_json(self) -> None:
+        route = resolve_route(
+            self.outdir, "/treeviz/manifest.json", project_slugs=self.slugs
+        )
+        self.assertEqual(route.status, 200)
+        self.assertEqual(route.content_type, JSON_CONTENT_TYPE)
+        self.assertEqual(
+            route.file_path, self.outdir / "treeviz" / "manifest.json"
+        )
+
+
+class MultiProjectIntegrationTests(unittest.TestCase):
+    """End-to-end HTTP with a multi-project layout, checking link rewrites."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.outdir = Path(self._tmp.name)
+        _seed_multi_project_tree(self.outdir)
+        handler_cls = make_handler(self.outdir, quiet=True)
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+        self.host, self.port = self.server.server_address[:2]
+        self.thread = threading.Thread(
+            target=self.server.serve_forever, daemon=True
+        )
+        self.thread.start()
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2.0)
+
+    def _get(self, path: str) -> tuple[int, bytes]:
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=2.0)
+        try:
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            return resp.status, resp.read()
+        finally:
+            conn.close()
+
+    def test_landing_lists_projects_with_prefixed_links(self) -> None:
+        status, body = self._get("/")
+        self.assertEqual(status, 200)
+        # Relative ``treeviz/index.md`` from the landing should rewrite to
+        # ``/treeviz/`` (no base prefix since the landing is at root).
+        text = body.decode("utf-8")
+        self.assertIn('href="/treeviz/"', text)
+        self.assertIn('href="/memd/"', text)
+
+    def test_project_page_links_stay_under_project_prefix(self) -> None:
+        status, body = self._get("/treeviz/")
+        self.assertEqual(status, 200)
+        text = body.decode("utf-8")
+        # Links in treeviz/index.md refer to ``projects/treeviz.md`` and
+        # ``libraries/failures.md``, which must emit under /treeviz/.
+        self.assertIn('href="/treeviz/projects/treeviz/"', text)
+        self.assertIn('href="/treeviz/libraries/failures/"', text)
+        # Must NOT leak to unprefixed routes.
+        self.assertNotIn('href="/projects/treeviz/"', text)
+        self.assertNotIn('href="/libraries/failures/"', text)
 
 
 if __name__ == "__main__":
