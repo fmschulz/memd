@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
-from .compiler import BuildConfig, build_wiki
+from .compat import WikiManifestTooNewError
+from .compiler import (
+    BuildConfig,
+    COMPILER_OWNED_PREFIXES,
+    HUMAN_OWNED_PREFIXES,
+    LLM_AUTHORED_PREFIXES,
+    MANIFEST_SCHEMA_VERSION,
+    build_wiki,
+)
 from .config_loader import ConfigLoadError, DiscoveredConfig, load_config
 from .containment import OutdirContainmentError, resolve_forbidden_data_dirs
 from .lint import LintReport, lint_output_dir
@@ -65,6 +74,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command")
     _add_build_subparser(subparsers)
     _add_lint_subparser(subparsers)
+    _add_migrate_subparser(subparsers)
 
     args = parser.parse_args(argv)
     # Backwards-compat: if no subcommand and no subcommand-specific
@@ -126,6 +136,29 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> None:
             "Explicit memd data directory. When set, the containment "
             "guard refuses only this path (overrides "
             "$HOME/.memd/data + tenant_scope discovery)."
+        ),
+    )
+
+
+def _add_migrate_subparser(subparsers: argparse._SubParsersAction) -> None:
+    migrate = subparsers.add_parser(
+        "migrate",
+        help="Upgrade an older manifest in place to the current schema_version.",
+        description=(
+            "Read manifest.json, upgrade to the current schema_version "
+            "with empty new lanes if needed, write back. Round-trippable: "
+            "running migrate against an already-current manifest is a "
+            "no-op. Use this when bumping memd-wiki across a manifest "
+            "schema bump (currently 1 → 2)."
+        ),
+    )
+    _add_shared_config_args(migrate)
+    migrate.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Print the migrated manifest to stdout without overwriting "
+            "manifest.json."
         ),
     )
 
@@ -253,6 +286,98 @@ def _run_build(args: argparse.Namespace, discovered: DiscoveredConfig) -> int:
     return 0
 
 
+def _run_migrate(
+    args: argparse.Namespace, discovered: DiscoveredConfig
+) -> int:
+    """Upgrade manifest.json in place to the current schema_version.
+
+    v1 → v2 migration:
+    - Sets ``schema_version`` to 2.
+    - Adds ``llm_authored_prefixes`` and ``human_owned_prefixes``
+      with the v2 default values.
+    - Adds an empty ``concept_pages`` list (no WikiPage artifacts
+      have been authored against this old wiki yet).
+    - Preserves every other field as-is so a v2 ``build_wiki`` can
+      either consume the migrated manifest or overwrite it cleanly
+      on the next compile.
+    """
+    outdir = _resolve_output_dir(args.output_dir, discovered)
+    if not outdir.is_dir():
+        print(
+            f"memd-wiki: error: migrate target {outdir} is not a directory",
+            file=sys.stderr,
+        )
+        return 2
+    manifest_path = outdir / "manifest.json"
+    if not manifest_path.is_file():
+        print(
+            f"memd-wiki: error: no manifest.json found at {manifest_path}",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        print(
+            f"memd-wiki: error: could not parse manifest.json: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+    if not isinstance(manifest, dict):
+        print(
+            "memd-wiki: error: manifest.json top-level is not an object",
+            file=sys.stderr,
+        )
+        return 2
+
+    raw_version = manifest.get("schema_version")
+    try:
+        version = int(raw_version) if raw_version is not None else 1
+    except (TypeError, ValueError):
+        print(
+            f"memd-wiki: error: manifest schema_version {raw_version!r} "
+            "is not parseable",
+            file=sys.stderr,
+        )
+        return 2
+    if version > MANIFEST_SCHEMA_VERSION:
+        print(
+            f"memd-wiki: error: manifest schema_version {version} is "
+            f"newer than this build's max ({MANIFEST_SCHEMA_VERSION}); "
+            "upgrade memd-wiki",
+            file=sys.stderr,
+        )
+        return 2
+    if version == MANIFEST_SCHEMA_VERSION:
+        print(
+            f"memd-wiki: manifest already at schema_version "
+            f"{MANIFEST_SCHEMA_VERSION}; nothing to do",
+            file=sys.stderr,
+        )
+        return 0
+
+    upgraded = dict(manifest)
+    upgraded["schema_version"] = MANIFEST_SCHEMA_VERSION
+    # Always overwrite the prefix lists so a partially-handed-around
+    # manifest converges to the canonical v2 shape.
+    upgraded["compiler_owned_prefixes"] = list(COMPILER_OWNED_PREFIXES)
+    upgraded.setdefault("llm_authored_prefixes", list(LLM_AUTHORED_PREFIXES))
+    upgraded.setdefault("human_owned_prefixes", list(HUMAN_OWNED_PREFIXES))
+    upgraded.setdefault("concept_pages", [])
+
+    serialized = json.dumps(upgraded, indent=2, sort_keys=True) + "\n"
+    if args.dry_run:
+        sys.stdout.write(serialized)
+        return 0
+    manifest_path.write_text(serialized, encoding="utf-8")
+    print(
+        f"memd-wiki: migrated manifest from schema_version {version} to "
+        f"{MANIFEST_SCHEMA_VERSION}",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def _run_lint(args: argparse.Namespace, discovered: DiscoveredConfig) -> int:
     outdir = _resolve_output_dir(args.output_dir, discovered)
     if not outdir.is_dir():
@@ -264,9 +389,13 @@ def _run_lint(args: argparse.Namespace, discovered: DiscoveredConfig) -> int:
     lookup_latest_ms = None
     if args.check_staleness:
         lookup_latest_ms = _build_staleness_lookup(args, discovered)
-    report: LintReport = lint_output_dir(
-        outdir, lookup_latest_ms=lookup_latest_ms
-    )
+    try:
+        report: LintReport = lint_output_dir(
+            outdir, lookup_latest_ms=lookup_latest_ms
+        )
+    except WikiManifestTooNewError as exc:
+        print(f"memd-wiki: error: {exc}", file=sys.stderr)
+        return 2
     for finding in report.findings:
         print(finding.render())
     summary = (
@@ -363,6 +492,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "lint":
         return _run_lint(args, discovered)
+    if args.command == "migrate":
+        return _run_migrate(args, discovered)
     return _run_build(args, discovered)
 
 
