@@ -1,6 +1,6 @@
-"""memd-wiki lint: 5 health checks over a compiled output tree.
+"""memd-wiki lint: health checks over a compiled output tree.
 
-Plan §5 check inventory:
+Plan §5 check inventory (v1 + v2 phase 3):
 
 | Check | Severity | Signal |
 |---|---|---|
@@ -9,6 +9,10 @@ Plan §5 check inventory:
 | Emitted link target missing from output | ERROR |
 | Page renders from ``compiled_digest_hint`` with ``requires_verification=true`` and no canonical sibling | WARN |
 | ``manifest.json`` references a page not on disk, or vice versa (scoped to ``compiler_owned_prefixes``) | ERROR |
+| WikiPage in manifest with ``grounding_refs=[]`` (paranoid check) | ERROR |
+| WikiPage source older than newest grounding ref by > ``concept_staleness_ms`` | WARN |
+| WikiPage cites ONLY ``task_finish`` artifacts with ``status=rejected`` | ERROR |
+| WikiPage self-labels ``verified: true`` without a distinct-writer Verification child | ERROR |
 
 Exit codes:
     0 — clean
@@ -86,17 +90,28 @@ class LintReport:
         return 0
 
 
+# v2 phase 3: default staleness window for concept pages. A concept
+# whose `source_updated_at_ms` lags its newest grounding ref by more
+# than this is flagged WARN. 30 days is generous; can be lowered via
+# the optional `concept_staleness_ms` parameter on `lint_output_dir`.
+DEFAULT_CONCEPT_STALENESS_MS = 30 * 24 * 60 * 60 * 1000
+
+
 def lint_output_dir(
     outdir: Path,
     *,
     lookup_latest_ms: Callable[[str], int | None] | None = None,
+    concept_staleness_ms: int = DEFAULT_CONCEPT_STALENESS_MS,
 ) -> LintReport:
-    """Run the full 5-check lint over a compiled output tree.
+    """Run the full lint suite (v1 5 checks + v2 4 concept checks).
 
     ``lookup_latest_ms`` is an optional memd-backed oracle: given a
     task_id, return the latest canonical updated timestamp in ms, or
     None when the oracle has no opinion. When omitted, the
     task-snapshot-stale check is skipped entirely (default, offline).
+
+    ``concept_staleness_ms`` controls the WARN threshold for the
+    concept-stale check (v2 phase 3); defaults to 30 days.
 
     Returns findings in a stable order so CI diffs are meaningful:
     sort key is (check_name, path, message).
@@ -109,6 +124,13 @@ def lint_output_dir(
     findings.extend(_check_dead_backlinks(outdir))
     findings.extend(_check_trust_tier_surfacing(outdir))
     findings.extend(_check_manifest_drift(outdir))
+    findings.extend(
+        _check_concept_pages(
+            outdir,
+            lookup_latest_ms=lookup_latest_ms,
+            concept_staleness_ms=concept_staleness_ms,
+        )
+    )
     # Stable output ordering.
     findings.sort(key=lambda f: (f.check, f.path or "", f.message))
     return LintReport(findings=tuple(findings))
@@ -378,3 +400,143 @@ def _read(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except OSError:
         return ""
+
+
+# --- Phase 3 (v2): concept-* checks --------------------------------------
+
+
+def _check_concept_pages(
+    outdir: Path,
+    *,
+    lookup_latest_ms: Callable[[str], int | None] | None,
+    concept_staleness_ms: int,
+) -> Iterable[LintFinding]:
+    """Run the four v2 phase 3 checks against the manifest.concept_pages list.
+
+    Each check yields zero or more findings. The manifest is the source of
+    truth for "what concept pages exist" — files-on-disk that are NOT
+    listed in manifest.concept_pages are caught by manifest-drift only
+    if they fall under compiler_owned_prefixes (concept lanes do not).
+    """
+    manifest_path = outdir / "manifest.json"
+    if not manifest_path.is_file():
+        return  # manifest-missing already fires upstream
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return  # manifest-invalid already fires upstream
+    if not isinstance(manifest, dict):
+        return
+    concept_pages = manifest.get("concept_pages") or []
+    if not isinstance(concept_pages, list):
+        return
+
+    for entry in concept_pages:
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("path") or "concepts/<unknown>.md"
+        artifact_id = entry.get("artifact_id") or "unknown"
+
+        # Check 6: paranoid grounding-empty defense (Phase 1 validator
+        # already rejects this at write time, but a prior-version
+        # server may have stored one).
+        grounding = entry.get("grounding_refs") or []
+        if not isinstance(grounding, list) or not grounding:
+            yield LintFinding(
+                severity="error",
+                check="concept-missing-grounding",
+                path=path,
+                message=(
+                    f"wiki_page {artifact_id} has no grounding_refs; "
+                    "every concept / entity page must cite at least one "
+                    "canonical record"
+                ),
+            )
+
+        # Check 7: staleness — only runs when the lookup oracle is
+        # supplied. Compares the wiki_page's own
+        # source_updated_at_ms to the newest cited artifact's
+        # latest-known timestamp via lookup_latest_ms(task_id).
+        if lookup_latest_ms is not None and grounding:
+            page_updated = int(entry.get("source_updated_at_ms") or 0)
+            newest_grounding = 0
+            for ref in grounding:
+                if not isinstance(ref, dict):
+                    continue
+                task_id = ref.get("task_id")
+                if not isinstance(task_id, str) or not task_id:
+                    continue
+                latest = lookup_latest_ms(task_id)
+                if isinstance(latest, int) and latest > newest_grounding:
+                    newest_grounding = latest
+            if (
+                page_updated > 0
+                and newest_grounding > 0
+                and (newest_grounding - page_updated) > concept_staleness_ms
+            ):
+                yield LintFinding(
+                    severity="warn",
+                    check="concept-stale",
+                    path=path,
+                    message=(
+                        f"wiki_page {artifact_id}: page snapshot "
+                        f"({page_updated} ms) lags newest grounding ref "
+                        f"({newest_grounding} ms) by more than the "
+                        f"staleness window ({concept_staleness_ms} ms)"
+                    ),
+                )
+
+        # Check 8: contradiction scaffold — flag pages that cite ONLY
+        # rejected task_finish artifacts. This is intentionally weak;
+        # v3 layers an LLM-backed semantic diff onto the same hook.
+        all_rejected = (
+            len(grounding) > 0
+            and all(
+                isinstance(ref, dict)
+                and ref.get("artifact_kind") == "task_finish"
+                and (ref.get("status") or "").lower() == "rejected"
+                for ref in grounding
+            )
+        )
+        if all_rejected:
+            yield LintFinding(
+                severity="error",
+                check="concept-contradicts-canonical",
+                path=path,
+                message=(
+                    f"wiki_page {artifact_id} cites only rejected task_finish "
+                    "artifacts; the page asserts something the canonical "
+                    "record explicitly rejected"
+                ),
+            )
+
+        # Check 9: trust-tier-ungrounded. The page may self-label
+        # `verified: true` in its YAML frontmatter or markdown
+        # content. That label is only legitimate if a distinct-writer
+        # Verification child has been recorded against it
+        # (countersignature signal). The lint surfaces this by
+        # reading the rendered concept-page file directly and
+        # asserting that any `verified: true` block has a matching
+        # "Verified by:" footer line — which `render_concept_page`
+        # only emits when the manifest entry carries verification
+        # children.
+        page_file = outdir / path
+        if page_file.is_file():
+            text = _read(page_file)
+            self_labels = (
+                "verified: true" in text.lower()
+                or "verified=true" in text.lower()
+            )
+            has_verification_footer = "verified by:" in text.lower()
+            if self_labels and not has_verification_footer:
+                yield LintFinding(
+                    severity="error",
+                    check="concept-trust-tier-ungrounded",
+                    path=path,
+                    message=(
+                        f"wiki_page {artifact_id} self-labels `verified: true` "
+                        "but has no distinct-writer Verification child; "
+                        "trust labels must come from countersignature, not "
+                        "the page's own markdown"
+                    ),
+                )
