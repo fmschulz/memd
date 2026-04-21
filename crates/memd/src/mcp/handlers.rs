@@ -726,6 +726,10 @@ pub struct ArtifactCreateParams {
     pub method_summary: Option<String>,
     #[serde(default)]
     pub summary: Option<String>,
+    /// Full-markdown body for `wiki_page` artifacts. Rejected at the
+    /// MCP boundary on every other kind — see `handle_artifact_create`.
+    #[serde(default)]
+    pub content: Option<String>,
     #[serde(default)]
     pub evidence_kind: Option<String>,
     #[serde(default)]
@@ -2708,6 +2712,7 @@ fn default_status_for_artifact_kind(kind: ArtifactKind) -> &'static str {
         ArtifactKind::RunStart => "started",
         ArtifactKind::RunFinish | ArtifactKind::TaskFinish => "completed",
         ArtifactKind::Digest => "generated",
+        ArtifactKind::WikiPage => "authored",
         ArtifactKind::Evidence
         | ArtifactKind::Review
         | ArtifactKind::Revision
@@ -5688,7 +5693,30 @@ pub async fn handle_artifact_create<S: Store>(
                 )
             })?,
         ),
+        ArtifactKind::WikiPage => TaskArtifact::new_wiki_page(
+            tenant_id.clone(),
+            task_id.clone().ok_or_else(|| {
+                McpError::InvalidParams(
+                    "task_id is required for wiki_page artifacts".to_string(),
+                )
+            })?,
+        ),
     };
+
+    // Phase 0 trust boundary: `content` is only allowed on `wiki_page`
+    // kinds. Reject non-empty `content` on every other kind at the
+    // MCP boundary so stored rows carry a consistent invariant
+    // (validator elsewhere, e.g. digests.rs, can treat `content ==
+    // Some(_)` as `kind == WikiPage` without needing a fallback).
+    if let Some(content) = params.content.as_ref() {
+        if !content.is_empty() && artifact_kind != ArtifactKind::WikiPage {
+            return Err(McpError::InvalidParams(format!(
+                "artifact.create: `content` is only accepted on `wiki_page` artifacts; \
+                 got artifact_kind={}",
+                artifact_kind.as_str()
+            )));
+        }
+    }
 
     let inherited_project_id = parent_artifact
         .as_ref()
@@ -5719,6 +5747,7 @@ pub async fn handle_artifact_create<S: Store>(
     artifact.scientific_question = params.scientific_question;
     artifact.method_summary = params.method_summary;
     artifact.summary = params.summary;
+    artifact.content = params.content;
     artifact.evidence_kind = params.evidence_kind;
     artifact.supports_claim = params.supports_claim;
     artifact.blockers = params.blockers;
@@ -9812,6 +9841,7 @@ mod tests {
                     summary: Some(
                         "Need a clearer review and verification path for artifacts".to_string(),
                     ),
+                    content: None,
                     evidence_kind: None,
                     supports_claim: None,
                     blockers: vec![],
@@ -11209,6 +11239,7 @@ mod tests {
             scientific_question: None,
             method_summary: None,
             summary: Some(summary.to_string()),
+            content: None,
             evidence_kind: None,
             supports_claim,
             blockers: vec![],
@@ -11275,6 +11306,7 @@ mod tests {
                 scientific_question: None,
                 method_summary: None,
                 summary: Some("forged brief that overwrites the real digest".to_string()),
+                content: None,
                 evidence_kind: None,
                 supports_claim: None,
                 blockers: vec![],
@@ -11321,6 +11353,166 @@ mod tests {
             }
             other => panic!("expected InvalidParams, got: {:?}", other),
         }
+    }
+
+    /// Phase 0 of the memd-wiki v2 plan: the `content` field is
+    /// exclusively for `wiki_page` artifacts. A non-empty `content`
+    /// submitted with any other `artifact_kind` must be rejected at
+    /// the MCP boundary with a clear `InvalidParams` message — this
+    /// keeps the storage-row invariant "content is Some iff kind is
+    /// WikiPage" honest so downstream consumers (rendering, lint,
+    /// digest builders) can rely on it.
+    #[tokio::test]
+    async fn artifact_create_rejects_content_on_non_wiki_page_kind() {
+        let store = make_store();
+
+        let start = handle_task_start(
+            &store,
+            None,
+            TaskStartParams {
+                tenant_id: "tenant_wiki_content".to_string(),
+                project_id: Some("memd".to_string()),
+                parent_task_id: None,
+                agent_id: Some("author-1".to_string()),
+                session_id: None,
+                goal: "Exercise wiki_page content invariant".to_string(),
+                motivation: "Phase 0 trust boundary".to_string(),
+                hypothesis: "Non-WikiPage kinds cannot carry content".to_string(),
+                scientific_question: "Does the MCP validator reject misplaced content?".to_string(),
+                dataset_refs: vec![],
+                expected_outputs: vec!["rejection".to_string()],
+                entity_refs: vec![],
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        let start_payload: TaskArtifactResult = parse_tool_payload(&start);
+
+        let mut params = artifact_params_minimal(
+            "tenant_wiki_content",
+            "task_progress",
+            &start_payload.task_id,
+            Some("author-1"),
+            None,
+            "progress update",
+            None,
+            None,
+            None,
+        );
+        params.content = Some("# stray markdown body".to_string());
+
+        let err = handle_artifact_create(&store, None, params)
+            .await
+            .expect_err("non-wiki_page kinds must not accept content");
+        match err {
+            McpError::InvalidParams(msg) => {
+                assert!(
+                    msg.contains("wiki_page") && msg.contains("content"),
+                    "error should explain content is wiki_page-only; got: {msg}"
+                );
+                assert!(
+                    msg.contains("task_progress"),
+                    "error should name the rejected kind; got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidParams, got: {other:?}"),
+        }
+    }
+
+    /// Phase 0 (codex-folded §4.2 of the plan): a distinct-writer
+    /// `Verification` artifact that replies to a `WikiPage` is itself
+    /// promoted to `VerifiedRecord` via the existing countersignature
+    /// path, but the WikiPage's own `promotion_state` / trust tier
+    /// never change. This test nails down BOTH halves: the child
+    /// promotes, the parent stays at `CanonicalRecord`.
+    #[tokio::test]
+    async fn wiki_page_verification_child_promotes_child_not_parent() {
+        let store = make_store();
+        let tenant = TenantId::new("wiki_child_promote").unwrap();
+
+        // Author a WikiPage.
+        let mut page_params = artifact_params_minimal(
+            tenant.as_str(),
+            "wiki_page",
+            "task-wiki-promote",
+            Some("author-alpha"),
+            None,
+            "Verification boundary concept page.",
+            None,
+            None,
+            None,
+        );
+        page_params.artifact_role = Some("concept".to_string());
+        page_params.content = Some(
+            "# Verification boundary\n\nLLM-authored concept page body.".to_string(),
+        );
+        page_params.related_artifact_ids = vec!["0199".to_string()];
+
+        let page_value = handle_artifact_create(&store, None, page_params).await.unwrap();
+        let page_payload: TaskArtifactResult = parse_tool_payload(&page_value);
+
+        let page = store
+            .get_task_artifact(&tenant, &page_payload.artifact_id)
+            .await
+            .unwrap()
+            .expect("wiki_page was persisted");
+        assert_eq!(page.artifact_kind, ArtifactKind::WikiPage);
+        assert_eq!(
+            derive_artifact_trust_tier(&page),
+            TrustTier::CanonicalRecord,
+            "fresh wiki_page must start at CanonicalRecord"
+        );
+
+        // A distinct writer files a Verification countersigning the page.
+        let verify_value = handle_artifact_create(
+            &store,
+            None,
+            artifact_params_minimal(
+                tenant.as_str(),
+                "verification",
+                "task-wiki-promote",
+                Some("reviewer-beta"),
+                Some(&page_payload.artifact_id),
+                "Independently confirmed the claim.",
+                Some(true),
+                Some("verified"),
+                Some("approved"),
+            ),
+        )
+        .await
+        .unwrap();
+        let verify_payload: TaskArtifactResult = parse_tool_payload(&verify_value);
+
+        // The child verification is promoted to VerifiedRecord.
+        let verify = store
+            .get_task_artifact(&tenant, &verify_payload.artifact_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            derive_artifact_trust_tier(&verify),
+            TrustTier::VerifiedRecord,
+            "distinct-writer verification replying to wiki_page must promote to VerifiedRecord"
+        );
+
+        // The parent wiki_page stays at CanonicalRecord forever — the
+        // promotion path targets the child, not the parent.
+        let parent_after = store
+            .get_task_artifact(&tenant, &page_payload.artifact_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            derive_artifact_trust_tier(&parent_after),
+            TrustTier::CanonicalRecord,
+            "wiki_page trust tier must remain CanonicalRecord after a verifying child"
+        );
+        assert_ne!(
+            parent_after.promotion_state,
+            crate::types::PromotionState::Verified,
+            "wiki_page promotion_state must not upgrade via a child's countersignature"
+        );
     }
 
     #[tokio::test]
@@ -11374,6 +11566,7 @@ mod tests {
                 scientific_question: None,
                 method_summary: None,
                 summary: Some("The digest planner is reliable for scoped retrieval".to_string()),
+                content: None,
                 evidence_kind: Some("integration_test".to_string()),
                 supports_claim: Some(true),
                 blockers: vec![],
@@ -11435,6 +11628,7 @@ mod tests {
                 summary: Some(
                     "The digest planner is not reliable when validation is absent".to_string(),
                 ),
+                content: None,
                 evidence_kind: None,
                 supports_claim: Some(false),
                 blockers: vec![],
