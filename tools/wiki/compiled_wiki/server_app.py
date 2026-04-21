@@ -3,14 +3,18 @@
 Phase summary:
 
 - P0 served the compiled tree's ``index.md`` as ``text/plain``.
-- **P1 (this phase)** renders ``index.md`` to ``text/html`` using
-  the hand-rolled markdown renderer in ``html_render.py`` and wraps
-  it in a minimal self-contained document with an inline ``<style>``
-  block. Route table still resolves only ``/``; expanded routes land
-  in P2.
+- P1 switched ``index.md`` to ``text/html`` via ``html_render``.
+- **P2 (this phase)** formalizes the route table. The compiler's
+  full page set (``index``, ``log``, per-project, per-task,
+  per-library, and LLM-authored concept/entity pages) is now
+  reachable. Path-traversal and symlink escapes are rejected via
+  the existing containment helpers in ``containment.py`` — the
+  serve handler reuses the same fail-closed rules the
+  export-markdown CLI already enforces. ``manifest.json`` is
+  served raw with ``application/json``; every other supported
+  route renders the underlying ``.md`` file as HTML.
 
-Later phases layer on route expansion + containment (P2) and link
-rewriting (P3).
+Later phases layer on link rewriting (P3) and release (P4).
 
 The route resolver is a pure function so the routing table can be
 exercised without binding a port.
@@ -18,16 +22,35 @@ exercised without binding a port.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
+from .containment import (
+    OutdirContainmentError,
+    normalize_absolute,
+    reject_if_any_symlink_inside_outdir,
+)
 from .html_render import render_page
 
 HTML_CONTENT_TYPE = "text/html; charset=utf-8"
 PLAIN_CONTENT_TYPE = "text/plain; charset=utf-8"
+JSON_CONTENT_TYPE = "application/json; charset=utf-8"
+
+# URL path segments must match this character class. ``.`` and ``..``
+# are also rejected explicitly in ``_is_valid_segment`` so percent-encoded
+# or single-character traversal attempts cannot smuggle through.
+_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+# Top-level URL prefixes that name a lane under the compiled wiki.
+# ``notes/`` is the human-owned lane (``human_owned_prefixes`` in the
+# manifest); the other five are compiler- or LLM-authored.
+_ROUTED_PREFIXES = frozenset(
+    {"concepts", "entities", "tasks", "projects", "libraries", "notes"}
+)
 
 
 @dataclass(frozen=True)
@@ -39,25 +62,85 @@ class RouteResolution:
     file_path: Optional[Path] = None
 
 
-def resolve_route(outdir: Path, url_path: str) -> RouteResolution:
-    """Map a URL path to a file under ``outdir`` or a 404.
+def _is_valid_segment(segment: str) -> bool:
+    if segment in ("", ".", ".."):
+        return False
+    return bool(_SEGMENT_RE.match(segment))
 
-    P1 still recognizes only the root path, which serves the tree's
-    ``index.md`` rendered as HTML. Every other path is 404. Expanded
-    routing (concept/entity/task/project/library pages, ``/log``,
-    ``/manifest.json``) lands in P2.
+
+def _url_to_relative(url_path: str) -> Optional[Tuple[Path, str]]:
+    """Translate a request URL path to a ``(relative_path, content_type)`` pair.
+
+    Returns ``None`` for anything outside the route whitelist. Does NOT
+    touch the filesystem — the caller runs the containment guard and
+    the ``is_file`` check. Character-level validation runs here so
+    percent-encoded or traversal-shaped inputs never reach the FS.
     """
-    if url_path in ("", "/"):
-        index = outdir / "index.md"
-        if index.is_file():
-            return RouteResolution(
-                status=HTTPStatus.OK,
-                content_type=HTML_CONTENT_TYPE,
-                file_path=index,
-            )
+    trimmed = url_path.strip("/")
+    if trimmed == "":
+        return Path("index.md"), HTML_CONTENT_TYPE
+    if trimmed == "log":
+        return Path("log.md"), HTML_CONTENT_TYPE
+    if trimmed == "manifest.json":
+        return Path("manifest.json"), JSON_CONTENT_TYPE
+
+    segments = trimmed.split("/")
+    if not all(_is_valid_segment(s) for s in segments):
+        return None
+
+    top = segments[0]
+    if top not in _ROUTED_PREFIXES:
+        return None
+
+    # Every routed prefix resolves to ``<outdir>/<...>/<leaf>.md``. The
+    # ``.md`` suffix is appended once at the very end so the leaf name
+    # passed in the URL stays filesystem-extension-free (matching the
+    # trailing-slash URL convention at :file:`docs/plans`).
+    rel_parts = list(segments[:-1]) + [segments[-1] + ".md"]
+    return Path(*rel_parts), HTML_CONTENT_TYPE
+
+
+def resolve_route(outdir: Path, url_path: str) -> RouteResolution:
+    """Map a URL path to a resolved file under ``outdir`` or a 404.
+
+    The resolver is the single source of truth for the serve route
+    table. Layered defenses before hitting disk:
+
+    1. Per-segment character allowlist (``_is_valid_segment``).
+    2. Top-level prefix whitelist (``_ROUTED_PREFIXES``).
+    3. ``reject_if_any_symlink_inside_outdir`` — raises if the
+       resolved target is outside ``outdir`` (textual containment)
+       or if any component below ``outdir`` is a pre-existing
+       symlink (fail-closed parity with the Rust export-markdown
+       reference at ``crates/memd/src/cli.rs``).
+    4. ``Path.is_file()`` — a valid route still 404s when the page
+       hasn't been compiled yet.
+
+    Every rejection funnels to a 404 ``text/plain`` response so the
+    handler does not leak why the request was refused.
+    """
+    mapping = _url_to_relative(url_path)
+    if mapping is None:
+        return RouteResolution(
+            status=HTTPStatus.NOT_FOUND, content_type=PLAIN_CONTENT_TYPE
+        )
+    relative, content_type = mapping
+
+    outdir_abs = normalize_absolute(outdir)
+    target = outdir_abs / relative
+    try:
+        reject_if_any_symlink_inside_outdir(target, outdir_abs)
+    except OutdirContainmentError:
+        return RouteResolution(
+            status=HTTPStatus.NOT_FOUND, content_type=PLAIN_CONTENT_TYPE
+        )
+
+    if not target.is_file():
+        return RouteResolution(
+            status=HTTPStatus.NOT_FOUND, content_type=PLAIN_CONTENT_TYPE
+        )
     return RouteResolution(
-        status=HTTPStatus.NOT_FOUND,
-        content_type=PLAIN_CONTENT_TYPE,
+        status=HTTPStatus.OK, content_type=content_type, file_path=target
     )
 
 
