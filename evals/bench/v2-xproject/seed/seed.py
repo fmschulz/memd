@@ -17,7 +17,7 @@ import urllib.request
 BENCH = pathlib.Path(__file__).resolve().parent.parent
 # Gold facts live OUTSIDE the repo tree so agents under any bench
 # fixture cwd cannot grep-cheat their way to the answers. Benchmark
-# runners need read access to ~/.local/share/memd-bench-v2/.
+# runners need read access to this private artifact path.
 GOLD_FACTS_PATH = pathlib.Path.home() / ".local/share/memd-private-artifacts-z7k/gold_facts.json"
 FACTS = json.load(open(GOLD_FACTS_PATH))
 DAEMON = "http://127.0.0.1:8787/mcp"

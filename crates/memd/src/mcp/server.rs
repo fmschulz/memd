@@ -2003,7 +2003,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_initialize() {
-        let mut server = test_server();
+        let server = test_server();
         let result = server.handle_initialize(None).await.unwrap();
 
         assert_eq!(result["protocolVersion"], DEFAULT_PROTOCOL_VERSION);
@@ -2013,7 +2013,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_initialize_negotiates_supported_protocol_version() {
-        let mut server = test_server();
+        let server = test_server();
         let result = server
             .handle_initialize(Some(json!({
                 "protocolVersion": "2025-11-25",
@@ -2035,7 +2035,7 @@ mod tests {
     /// tool must promote trust just like the mega-schema path.
     #[tokio::test]
     async fn artifact_verification_tool_produces_verified_record_when_distinct_writer() {
-        let mut server = test_server();
+        let server = test_server();
         let _ = server.handle_initialize(Some(json!({}))).await.unwrap();
 
         // Author starts a task as "alice".
@@ -2257,7 +2257,7 @@ mod tests {
     /// `artifact_kind` just like `artifact.verification` does.
     #[tokio::test]
     async fn focused_artifact_wrappers_dispatch_per_kind_and_preserve_fields() {
-        let mut server = test_server();
+        let server = test_server();
         let _ = server.handle_initialize(Some(json!({}))).await.unwrap();
 
         // Seed a parent task so the wrappers have something to reply to.
@@ -2534,7 +2534,7 @@ mod tests {
     /// that the kind is tool-driven.
     #[tokio::test]
     async fn artifact_verification_rejects_overriding_artifact_kind() {
-        let mut server = test_server();
+        let server = test_server();
         let _ = server.handle_initialize(Some(json!({}))).await.unwrap();
 
         let err = server
@@ -2562,7 +2562,7 @@ mod tests {
 
     #[tokio::test]
     async fn notifications_initialized_alias_is_accepted() {
-        let mut server = test_server();
+        let server = test_server();
         let response = server
             .handle_jsonrpc(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
             .await;
@@ -2576,7 +2576,7 @@ mod tests {
 
     #[tokio::test]
     async fn ping_request_returns_empty_object_with_echoed_id() {
-        let mut server = test_server();
+        let server = test_server();
         let response = server
             .handle_jsonrpc(r#"{"jsonrpc":"2.0","id":42,"method":"ping"}"#)
             .await
@@ -2594,7 +2594,7 @@ mod tests {
 
     #[tokio::test]
     async fn parse_error_still_returns_response_with_null_id() {
-        let mut server = test_server();
+        let server = test_server();
         let response = server
             .handle_jsonrpc("not valid json at all")
             .await
@@ -2607,7 +2607,7 @@ mod tests {
 
     #[tokio::test]
     async fn notification_with_invalid_method_suppresses_error_response() {
-        let mut server = test_server();
+        let server = test_server();
         // Parses successfully (notification), but the method is unknown;
         // handle_request produces an error, which handle_jsonrpc must
         // swallow so we do not emit a response on the wire.
@@ -2760,7 +2760,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_unknown_method() {
-        let mut server = test_server();
+        let server = test_server();
         let request = Request {
             jsonrpc: "2.0".to_string(),
             id: Some(RequestId::Number(1)),

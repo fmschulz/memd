@@ -79,7 +79,7 @@ Trust boundary:
 
 ## Tool Surface
 
-`memd` exposes 41 MCP tools.
+`memd` exposes 53 MCP tools.
 
 ### Generic Memory
 
@@ -92,6 +92,13 @@ Trust boundary:
 - `memory.stats`
 - `memory.metrics`
 - `memory.compact`
+- `memory.supersede`
+- `memory.set_expiry`
+- `memory.find_near_duplicates`
+- `memory.export_markdown`
+- `memory.export_omf`
+- `memory.preview_omf_import`
+- `memory.import_omf`
 - `memory.consolidate_episode`
 
 ### Task Knowledge Artifacts
@@ -109,9 +116,14 @@ Trust boundary:
 ### Canonical Artifacts
 
 - `artifact.create`
+- `artifact.review`
+- `artifact.revision`
+- `artifact.decision`
+- `artifact.verification`
 - `artifact.get`
 - `artifact.search`
 - `artifact.find_related` (formerly `artifact.verify` — the alias still works but is deprecated)
+- `artifact.verify` (deprecated alias for `artifact.find_related`)
 - `artifact.find_failures`
 - `artifact.find_decisions`
 - `artifact.find_evidence`
