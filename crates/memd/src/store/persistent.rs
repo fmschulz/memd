@@ -4229,7 +4229,7 @@ mod tests {
         use crate::store::hybrid::{HybridConfig, HybridSearcher};
         use crate::task_memory::{build_task_projections, TaskArtifact};
 
-        let (mut store, _dir) = make_test_store_hybrid_tiered();
+        let (store, _dir) = make_test_store_hybrid_tiered();
         let hybrid = store.hybrid_searcher.as_ref().unwrap().clone();
         let tenant = make_tenant();
 

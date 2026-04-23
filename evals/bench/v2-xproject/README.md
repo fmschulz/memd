@@ -10,8 +10,11 @@ measurement captured documentation quality, not memory quality.
 
 ## v2 design
 
-Every question in v2 has an answer that is **inside memd and not in any
-reachable file** on the test machine. Three mechanisms enforce this:
+Every question in v2 has an answer that is **inside memd and not in the
+fixture cwd**. This is sufficient for a containerized or otherwise
+filesystem-isolated run; without OS-level isolation, `FINDINGS.md`
+documents known contamination paths through the shared user filesystem.
+Three mechanisms reduce accidental leakage:
 
 1. **Seeded gold facts.** `seed/seed.py` writes specific text into
    dedicated bench tenants (`bench_v2_alpha`, `bench_v2_beta`,
@@ -27,16 +30,16 @@ reachable file** on the test machine. Three mechanisms enforce this:
    `evals/bench/v2-xproject/` — if a fact leaks into the filesystem,
    the question is removed from the run before scoring.
 
-## Question categories (4)
+## Question categories (3 active, 1 planned)
 
 | Category | What memd is being tested on | N |
 |---|---|---|
 | `ephemeral` | Canonical decisions stored as memd chunks that never made it into any file | 8 |
-| `cross_project` | From cwd of project A, answer requires searching project B's tenant | 6 |
-| `quantitative` | Aggregate over historical `task_run_*` artifacts (count, max, latest) | 4 |
-| `trust` | Only verified/ grounded artifacts should be cited (`verification_status=verified`, `artifact.verify`) | 3 |
+| `cross_project` | From cwd of project A, answer requires searching project B's tenant | 3 |
+| `quantitative` | Aggregate over historical `task_run_*` artifacts (count, max, latest) | 2 |
+| `trust` | Only verified/grounded artifacts should be cited (`verification_status=verified`, `artifact.find_related`/`artifact.verification`) | 0 |
 
-Total: **21 questions × 2 agents × 2 conditions = 84 runs.**
+Total checked in now: **13 questions × 2 agents × 2 conditions = 52 runs.**
 
 ## Directory layout
 
@@ -45,12 +48,8 @@ evals/bench/v2-xproject/
 ├── README.md                     — this file
 ├── FINDINGS.md                   — written after the run
 ├── questions/
-│   ├── ephemeral.json            — 8 questions keyed to seeded chunk IDs
-│   ├── cross_project.json        — 6 questions spanning tenants
-│   ├── quantitative.json         — 4 questions over task-run aggregates
-│   └── trust.json                — 3 questions exercising artifact.verify
+│   └── prompts.json              — 13 prompts across ephemeral, cross_project, and quantitative categories
 ├── seed/
-│   ├── gold_facts.json           — ground truth (fact_id → tenant, chunk payload, gold_phrase)
 │   ├── seed.py                   — populates memd with the gold facts
 │   └── canary.sh                 — fs leak check; fails closed if gold_phrase leaks
 ├── fixtures/
@@ -62,8 +61,8 @@ evals/bench/v2-xproject/
 │   ├── run.sh                    — one cell: <agent> <condition> <cwd> <question_id>
 │   └── run_all.sh                — sweeps every cell
 ├── judge/
-│   ├── gold_match.py             — objective: does the response contain the gold_phrase?
-│   └── judge_pairs.py            — blind LLM pairwise (backup signal)
+│   ├── extract_final.py          — strips Codex transcript to final answer
+│   └── gold_match.py             — objective: does the response contain the gold_phrase?
 └── results/
     ├── runs/                     — raw agent stdout
     ├── final/                    — codex transcripts stripped to final-answer
@@ -71,6 +70,8 @@ evals/bench/v2-xproject/
     ├── gold_scores.json          — objective scores
     └── summary.md                — aggregate report
 ```
+
+No blind pairwise judge script is currently checked in.
 
 ## Scoring
 
@@ -81,17 +82,19 @@ evals/bench/v2-xproject/
 - Hallucination rate: count of response-claimed identifiers (via regex
   patterns) that are NOT in memd and NOT in any file on disk.
 
-**Secondary metric — blind LLM pairwise judge** on grounding,
-correctness, specificity, actionability, as in v1.
+**Secondary metrics** are secondary-fact recall and honest `not found`
+rate as computed by `judge/gold_match.py`. A blind LLM pairwise judge
+is not currently checked in.
 
 **Statistical test — McNemar's test on paired gold-hit binary outcomes**
 per (question, agent). Significance threshold: p < 0.05.
 
 ## Expected outcome
 
-If memd is doing what it claims, `with-memd` gold-phrase recall should
-be ≥ 0.8 while `without-memd` should be ≤ 0.1 (because the gold facts
-literally are not in any file). A tight, publishable result.
+Under OS-level isolation, `with-memd` gold-phrase recall should be ≥ 0.8
+while `without-memd` should be ≤ 0.1 because the gold facts are not in
+the mounted fixture. The checked-in non-isolated partial results are not
+a publishable memd-vs-no-memd headline; see `FINDINGS.md`.
 
 ## Reproducibility
 
@@ -99,8 +102,7 @@ literally are not in any file). A tight, publishable result.
    chunk_id).
 2. `bash seed/canary.sh` — verifies no gold_phrase leaks into the
    filesystem outside this bench dir.
-3. `bash harness/run_all.sh` — sweeps 84 runs (~90 min wall clock).
+3. `bash harness/run_all.sh` — sweeps 52 runs (~60 min wall clock).
 4. `python3 judge/gold_match.py` — objective gold-fact scoring.
-5. `python3 judge/judge_pairs.py` — LLM pairwise (optional, ~30 min).
-6. `python3 judge/summary.py` — writes `results/summary.md` and
-   `FINDINGS.md`.
+5. `python3 judge/gold_match.py` — also rewrites
+   `results/summary.md`.

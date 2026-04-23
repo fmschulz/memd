@@ -312,13 +312,6 @@ pub struct BatchChunkParams {
     pub mode: Option<String>,
 }
 
-impl BatchChunkParams {
-    /// True when the chunk carries any Track C temporal overlay field.
-    fn has_lifecycle_overlay(&self) -> bool {
-        self.expires_at_ms.is_some() || self.review_after_ms.is_some()
-    }
-}
-
 /// Parameters for memory.add_batch
 #[derive(Debug, Deserialize)]
 pub struct AddBatchParams {
@@ -1792,11 +1785,11 @@ fn apply_search_filters(
 /// `k` candidates from the ranker so that even when the top hits are
 /// hidden we can still return a full page of visible results.
 ///
-/// Cross-tenant correctness: `memory.search` can return hits across
-/// tenants when `project_id` is set. The visibility lookup must use the
-/// hit row's own `chunk.tenant_id`, not an outer tenant parameter, or a
-/// project-scoped search across tenants would point at the wrong overlay
-/// rows.
+/// Cross-tenant correctness: when the operator explicitly enables the
+/// legacy project fallback, `memory.search` can return hits across
+/// tenants. The visibility lookup must use the hit row's own
+/// `chunk.tenant_id`, not an outer tenant parameter, or a project-scoped
+/// search across tenants would point at the wrong overlay rows.
 ///
 /// Cost: one `get_with_lifecycle` per kept candidate. With the default
 /// `oversample_factor=3` and `k=20`, this is up to 60 metadata reads per
@@ -2893,12 +2886,7 @@ async fn scoped_tenants_for_project<S: Store>(
         if !seen.insert(tenant.to_string()) {
             continue;
         }
-        let has_project = !store
-            .list_tasks(&tenant, Some(project_id), 1)
-            .await
-            .map_err(|e| McpError::ToolError(e.to_string()))?
-            .is_empty();
-        if has_project {
+        if tenant_has_project(store, &tenant, project_id).await? {
             warn!(
                 primary_tenant = %primary_tenant,
                 extra_tenant = %tenant,
@@ -2909,6 +2897,43 @@ async fn scoped_tenants_for_project<S: Store>(
         }
     }
     Ok(scoped)
+}
+
+async fn tenant_has_project<S: Store>(
+    store: &S,
+    tenant: &TenantId,
+    project_id: &str,
+) -> Result<bool, McpError> {
+    if !store
+        .list_tasks(tenant, Some(project_id), 1)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?
+        .is_empty()
+    {
+        return Ok(true);
+    }
+
+    // Legacy fallback is opt-in and diagnostic-oriented. Include raw chunks
+    // so memory.search, task/artifact search, and context search agree about
+    // which tenants have material for a project.
+    const PAGE_SIZE: usize = 200;
+    let mut offset = 0;
+    loop {
+        let chunks = store
+            .list_chunks(tenant, PAGE_SIZE, offset)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        if chunks.is_empty() {
+            return Ok(false);
+        }
+        if chunks
+            .iter()
+            .any(|chunk| chunk.project_id.as_option() == Some(project_id))
+        {
+            return Ok(true);
+        }
+        offset = offset.saturating_add(PAGE_SIZE);
+    }
 }
 
 fn merge_scored_chunk_lists(
@@ -4003,20 +4028,7 @@ pub async fn handle_memory_search<S: Store>(
     let pre_visibility_cap = params.k.saturating_mul(oversample_factor);
     let fetch_k = adaptive_fetch_k(params.k, &params.query, has_filters)
         .max(pre_visibility_cap);
-    let digest_tenants = scoped_tenants_for_project(store, &tenant_id, project_id_filter).await?;
-    let search_tenants = if project_id_filter.is_some() {
-        let all = store
-            .list_tenants()
-            .await
-            .map_err(|e| McpError::ToolError(e.to_string()))?;
-        if all.is_empty() {
-            vec![tenant_id.clone()]
-        } else {
-            all
-        }
-    } else {
-        vec![tenant_id.clone()]
-    };
+    let scoped_tenants = scoped_tenants_for_project(store, &tenant_id, project_id_filter).await?;
 
     info!(
         tenant_id = %tenant_id,
@@ -4030,11 +4042,11 @@ pub async fn handle_memory_search<S: Store>(
     // Use search_with_tier_info if debug_tiers is requested
     if debug_tiers {
         let (scored_chunks, timing) =
-            search_with_tier_info_for_tenants(store, &search_tenants, &params.query, fetch_k)
+            search_with_tier_info_for_tenants(store, &scoped_tenants, &params.query, fetch_k)
                 .await?;
         let preferred = summary_preferred_results(
             store,
-            &digest_tenants,
+            &scoped_tenants,
             &params.query,
             project_id_filter,
             mode,
@@ -4054,7 +4066,7 @@ pub async fn handle_memory_search<S: Store>(
             if let Some(repaired_query) = normalize_query_for_repair(&params.query) {
                 let (repair_scored, repair_timing) = search_with_tier_info_for_tenants(
                     store,
-                    &search_tenants,
+                    &scoped_tenants,
                     &repaired_query,
                     fetch_k,
                 )
@@ -4142,10 +4154,10 @@ pub async fn handle_memory_search<S: Store>(
 
     // Standard path without tier info
     let scored_chunks =
-        search_with_scores_for_tenants(store, &search_tenants, &params.query, fetch_k).await?;
+        search_with_scores_for_tenants(store, &scoped_tenants, &params.query, fetch_k).await?;
     let preferred = summary_preferred_results(
         store,
-        &digest_tenants,
+        &scoped_tenants,
         &params.query,
         project_id_filter,
         mode,
@@ -4163,7 +4175,7 @@ pub async fn handle_memory_search<S: Store>(
     if scored_chunks.is_empty() && !params.query.is_empty() {
         if let Some(repaired_query) = normalize_query_for_repair(&params.query) {
             let repair_scored =
-                search_with_scores_for_tenants(store, &search_tenants, &repaired_query, fetch_k)
+                search_with_scores_for_tenants(store, &scoped_tenants, &repaired_query, fetch_k)
                     .await?;
             let repaired_filtered = apply_search_filters(
                 repair_scored,
@@ -9864,6 +9876,59 @@ mod tests {
             .contains("strict reproduction blocker"));
 
         set_cross_tenant_project_fallback(false);
+    }
+
+    #[tokio::test]
+    async fn memory_search_project_scope_respects_isolation_default_for_raw_chunks() {
+        let _flag_guard = with_fallback_flag();
+        set_cross_tenant_project_fallback(false);
+
+        let store = make_store();
+
+        handle_memory_add(
+            &store,
+            None,
+            AddParams {
+                tenant_id: "tenant_a".to_string(),
+                text: "tenant a private alpha".to_string(),
+                chunk_type: "doc".to_string(),
+                project_id: Some("shared".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        handle_memory_add(
+            &store,
+            None,
+            AddParams {
+                tenant_id: "tenant_b".to_string(),
+                text: "tenant b private beta".to_string(),
+                chunk_type: "doc".to_string(),
+                project_id: Some("shared".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = handle_memory_search(
+            &store,
+            SearchParams {
+                tenant_id: "tenant_a".to_string(),
+                query: "private".to_string(),
+                project_id: Some("shared".to_string()),
+                k: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let payload: SearchResult = parse_tool_payload(&result);
+        assert_eq!(payload.results.len(), 1);
+        assert_eq!(payload.results[0].text, "tenant a private alpha");
     }
 
     #[tokio::test]

@@ -244,7 +244,7 @@ mod tests {
 
         // Open and mark middle chunk as deleted
         let seg_dir = base_dir.join("seg_000002");
-        let mut reader = SegmentReader::open(seg_dir.clone()).unwrap();
+        let reader = SegmentReader::open(seg_dir.clone()).unwrap();
 
         assert_eq!(reader.active_count(), 3);
         reader.mark_deleted(1).unwrap();

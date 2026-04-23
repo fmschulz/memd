@@ -340,7 +340,7 @@ Common environment variables:
 | `MEMD_CROSS_ENCODER_DISABLE` | unset | When `1`, skip ONNX cross-encoder init |
 | `ORT_DYLIB_PATH` | unset | Override ONNX Runtime shared library location |
 
-Config file: `~/.memd/config.toml`. Notable keys:
+Config file: `~/.config/memd/config.toml`. Notable keys:
 
 ```toml
 [server]
