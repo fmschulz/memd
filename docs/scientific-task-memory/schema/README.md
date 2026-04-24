@@ -211,6 +211,21 @@ These filters are resolved first, then the candidate set is reranked for retriev
 
 `memory.compact` can explicitly refresh project brief and failure/decision/evidence/highlight library digests through `project_id`, `digest_modes`, and `force_digest_rebuild`.
 
+## Conversation Event Tags
+
+Raw conversational chunks can use ordinary tags for event binding without a
+schema migration:
+
+- `event:<event_id>` groups factual and relational entries from one observed event.
+- `entry:factual`, `entry:relational`, and `entry:synthesis` distinguish raw facts, relations, and derived summaries.
+- `speaker:<id>` and `turn:<n>` are optional caller-owned labels.
+
+`memory.search` keeps default ranking behavior unchanged. When callers pass
+`expand_event_siblings: true`, each ranked hit that has an `event:<id>` tag can
+include an `expanded_siblings` array containing bounded same-tenant/same-project
+chunks with the same event tag. These siblings are context for the hit, not
+additional ranked hits.
+
 ## Durability
 
 Task artifacts are WAL-backed. The relevant implementation is in:
