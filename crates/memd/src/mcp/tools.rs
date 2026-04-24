@@ -117,6 +117,11 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "minimum": 1,
                         "maximum": 10,
                         "description": "Multiplier applied to k when pulling candidates from the ranker before visibility filtering. Larger values give more headroom to refill to k when many top hits are hidden; smaller values are cheaper but may under-fill. Ignored when all three include_* flags are true."
+                    },
+                    "expand_event_siblings": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "When true, attach bounded same-tenant/same-project chunks sharing an event:<id> tag under each result's expanded_siblings field. Ranked results are unchanged."
                     }
                 },
                 "required": ["query"]

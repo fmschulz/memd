@@ -151,6 +151,10 @@ pub struct SearchParams {
     /// row (i.e. all three include_* are true).
     #[serde(default)]
     pub oversample_factor: Option<usize>,
+    /// When true, attach same-event sibling chunks to each ranked hit under
+    /// `expanded_siblings`. The ranked hit list itself is unchanged.
+    #[serde(default)]
+    pub expand_event_siblings: bool,
 }
 
 fn default_k() -> usize {
@@ -176,6 +180,7 @@ impl Default for SearchParams {
             include_expired: None,
             include_history: None,
             oversample_factor: None,
+            expand_event_siblings: false,
         }
     }
 }
@@ -1171,6 +1176,10 @@ pub struct ChunkResult {
     /// Canonical artifact linked to this projection chunk when available.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub artifact: Option<TaskArtifact>,
+    /// Opt-in same-event context returned by `memory.search` when
+    /// `expand_event_siblings=true`.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub expanded_siblings: Vec<ChunkResult>,
 }
 
 /// Source information in results
@@ -1875,6 +1884,16 @@ fn extract_episode_id(tags: &[String]) -> Option<String> {
         .find_map(|tag| tag.strip_prefix("episode:").map(|value| value.to_string()))
 }
 
+const EVENT_TAG_PREFIX: &str = "event:";
+const EVENT_SIBLING_EXPANSION_LIMIT: usize = 20;
+
+fn event_tags(tags: &[String]) -> Vec<String> {
+    tags.iter()
+        .filter(|tag| tag.starts_with(EVENT_TAG_PREFIX) && tag.len() > EVENT_TAG_PREFIX.len())
+        .cloned()
+        .collect()
+}
+
 fn make_episode_tag(episode_id: &str) -> String {
     format!("episode:{}", episode_id)
 }
@@ -2250,7 +2269,132 @@ fn chunk_to_result(
         verification_hint,
         source_tier,
         artifact,
+        expanded_siblings: Vec::new(),
     }
+}
+
+async fn collect_event_siblings<S: Store>(
+    store: &S,
+    base_chunk: &MemoryChunk,
+    policy: &VisibilityPolicy,
+    limit: usize,
+) -> Result<Vec<MemoryChunk>, McpError> {
+    let base_event_tags = event_tags(&base_chunk.tags);
+    if base_event_tags.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let base_event_tags: HashSet<String> = base_event_tags.into_iter().collect();
+    let mut seen = HashSet::from([base_chunk.chunk_id.to_string()]);
+    let mut siblings = Vec::new();
+    let now_ms = current_time_ms();
+    let page_size = 200;
+    let mut offset = 0;
+
+    while siblings.len() < limit {
+        let page = store
+            .list_chunks(&base_chunk.tenant_id, page_size, offset)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        if page.is_empty() {
+            break;
+        }
+
+        for candidate in page {
+            if siblings.len() >= limit {
+                break;
+            }
+            if !seen.insert(candidate.chunk_id.to_string()) {
+                continue;
+            }
+            if candidate.project_id.as_option() != base_chunk.project_id.as_option() {
+                continue;
+            }
+            if !candidate
+                .tags
+                .iter()
+                .any(|tag| base_event_tags.contains(tag))
+            {
+                continue;
+            }
+
+            match store
+                .get_with_lifecycle(&candidate.tenant_id, &candidate.chunk_id)
+                .await
+            {
+                Ok(Some(resolved)) => {
+                    if policy.is_visible_at(resolved.status, &resolved.lifecycle, now_ms) {
+                        siblings.push(resolved.chunk);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(
+                        chunk_id = %candidate.chunk_id,
+                        tenant_id = %candidate.tenant_id,
+                        error = %e,
+                        "event sibling expansion: get_with_lifecycle failed, dropping sibling"
+                    );
+                }
+            }
+        }
+
+        offset = offset.saturating_add(page_size);
+    }
+
+    Ok(siblings)
+}
+
+async fn build_chunk_results<S: Store>(
+    store: &S,
+    scored_chunks: &[(MemoryChunk, f32)],
+    source_tier: Option<String>,
+    artifacts: &HashMap<String, TaskArtifact>,
+    expand_event_siblings: bool,
+    visibility_policy: &VisibilityPolicy,
+) -> Result<Vec<ChunkResult>, McpError> {
+    let mut results = Vec::with_capacity(scored_chunks.len());
+
+    for (chunk, score) in scored_chunks {
+        let mut result = chunk_to_result(
+            chunk,
+            *score,
+            source_tier.clone(),
+            artifacts.get(&chunk.chunk_id.to_string()).cloned(),
+        );
+
+        if expand_event_siblings {
+            let sibling_ranked: Vec<(MemoryChunk, f32)> = collect_event_siblings(
+                store,
+                chunk,
+                visibility_policy,
+                EVENT_SIBLING_EXPANSION_LIMIT,
+            )
+            .await?
+            .into_iter()
+            .map(|sibling| (sibling, 0.0))
+            .collect();
+            let sibling_artifacts =
+                resolve_artifacts_for_ranked_chunks(store, &sibling_ranked).await?;
+            result.expanded_siblings = sibling_ranked
+                .iter()
+                .map(|(sibling, sibling_score)| {
+                    chunk_to_result(
+                        sibling,
+                        *sibling_score,
+                        None,
+                        sibling_artifacts
+                            .get(&sibling.chunk_id.to_string())
+                            .cloned(),
+                    )
+                })
+                .collect();
+        }
+
+        results.push(result);
+    }
+
+    Ok(results)
 }
 
 async fn collect_all_chunks<S: Store>(
@@ -4133,17 +4277,15 @@ pub async fn handle_memory_search<S: Store>(
         let default_tier = tier_info.as_ref().map(|t| t.source_tier.clone());
 
         let artifacts = resolve_artifacts_for_ranked_chunks(store, &scored_chunks).await?;
-        let results: Vec<ChunkResult> = scored_chunks
-            .iter()
-            .map(|(chunk, score)| {
-                chunk_to_result(
-                    chunk,
-                    *score,
-                    default_tier.clone(),
-                    artifacts.get(&chunk.chunk_id.to_string()).cloned(),
-                )
-            })
-            .collect();
+        let results = build_chunk_results(
+            store,
+            &scored_chunks,
+            default_tier,
+            &artifacts,
+            params.expand_event_siblings,
+            &visibility_policy,
+        )
+        .await?;
 
         return format_mcp_response(&SearchResult {
             results,
@@ -4206,17 +4348,15 @@ pub async fn handle_memory_search<S: Store>(
     debug!(results_count = scored_chunks.len(), "search completed");
 
     let artifacts = resolve_artifacts_for_ranked_chunks(store, &scored_chunks).await?;
-    let results: Vec<ChunkResult> = scored_chunks
-        .iter()
-        .map(|(chunk, score)| {
-            chunk_to_result(
-                chunk,
-                *score,
-                None,
-                artifacts.get(&chunk.chunk_id.to_string()).cloned(),
-            )
-        })
-        .collect();
+    let results = build_chunk_results(
+        store,
+        &scored_chunks,
+        None,
+        &artifacts,
+        params.expand_event_siblings,
+        &visibility_policy,
+    )
+    .await?;
 
     format_mcp_response(&SearchResult {
         results,
@@ -8138,6 +8278,7 @@ mod tests {
             include_expired: None,
             include_history: None,
             oversample_factor: None,
+            expand_event_siblings: false,
         };
 
         let result = handle_memory_search(&store, params).await.unwrap();
@@ -8163,6 +8304,7 @@ mod tests {
             include_expired: None,
             include_history: None,
             oversample_factor: None,
+            expand_event_siblings: false,
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -8185,6 +8327,7 @@ mod tests {
             include_expired: None,
             include_history: None,
             oversample_factor: None,
+            expand_event_siblings: false,
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -8295,6 +8438,7 @@ mod tests {
             include_expired: None,
             include_history: None,
             oversample_factor: None,
+            expand_event_siblings: false,
         };
 
         let search_result = handle_memory_search(&store, search_params).await.unwrap();
@@ -8364,6 +8508,7 @@ mod tests {
                 include_expired: None,
                 include_history: None,
                 oversample_factor: None,
+                expand_event_siblings: false,
             },
         )
         .await
@@ -8424,6 +8569,7 @@ mod tests {
                 include_expired: None,
                 include_history: None,
                 oversample_factor: None,
+                expand_event_siblings: false,
             },
         )
         .await
@@ -8479,6 +8625,7 @@ mod tests {
                 include_expired: None,
                 include_history: None,
                 oversample_factor: None,
+                expand_event_siblings: false,
             },
         )
         .await
@@ -8554,6 +8701,7 @@ mod tests {
                 include_expired: None,
                 include_history: None,
                 oversample_factor: None,
+                expand_event_siblings: false,
             },
         )
         .await
@@ -8619,6 +8767,7 @@ mod tests {
                 include_expired: None,
                 include_history: None,
                 oversample_factor: None,
+                expand_event_siblings: false,
             },
         )
         .await
@@ -8682,6 +8831,7 @@ mod tests {
                 include_expired: None,
                 include_history: None,
                 oversample_factor: None,
+                expand_event_siblings: false,
             },
         )
         .await
@@ -8943,6 +9093,7 @@ mod tests {
             include_expired: None,
             include_history: None,
             oversample_factor: None,
+            expand_event_siblings: false,
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -9026,6 +9177,7 @@ mod tests {
             include_expired: None,
             include_history: None,
             oversample_factor: None,
+            expand_event_siblings: false,
         };
 
         let result = handle_memory_search(&store, search_params).await.unwrap();
@@ -9069,6 +9221,7 @@ mod tests {
             include_expired: None,
             include_history: None,
             oversample_factor: None,
+            expand_event_siblings: false,
         };
 
         let result = handle_memory_search(&store, search_params).await.unwrap();
@@ -9864,6 +10017,7 @@ mod tests {
                 include_expired: None,
                 include_history: None,
                 oversample_factor: None,
+                expand_event_siblings: false,
             },
         )
         .await
@@ -10245,6 +10399,7 @@ mod tests {
                 include_expired: None,
                 include_history: None,
                 oversample_factor: None,
+                expand_event_siblings: false,
             },
         )
         .await
@@ -10324,6 +10479,7 @@ mod tests {
                 include_expired: None,
                 include_history: None,
                 oversample_factor: None,
+                expand_event_siblings: false,
             },
         )
         .await
