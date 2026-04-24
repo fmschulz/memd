@@ -200,10 +200,17 @@ See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough.
 - `memory.add` — single chunk (code, doc, note; code chunks with a real
   `source.path` are parsed into the structural index)
 - `memory.add_batch` — many chunks in one call
-- `memory.search` — hybrid retrieval with optional `mode` and `project_id`
+- `memory.search` — hybrid retrieval with optional `mode`, `project_id`, and
+  event sibling expansion
 - `memory.get`, `memory.delete`, `memory.stats`, `memory.metrics`
 - `memory.compact` — explicit digest refresh; supports `digest_modes` and
   `force_digest_rebuild`
+
+Conversation-style chunks can carry caller-supplied `event:<id>` tags along
+with `entry:factual` or `entry:relational`. Passing
+`expand_event_siblings: true` to `memory.search` keeps the ranked result list
+unchanged and attaches bounded same-tenant/same-project chunks that share the
+matched event tag under each result's `expanded_siblings` field.
 
 ### `task.*` — structured work
 
