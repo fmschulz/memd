@@ -66,6 +66,30 @@ pub struct ServerConfig {
     /// auth if you need multi-user isolation.
     #[serde(default)]
     pub allow_cross_tenant_project_fallback: bool,
+    /// Explicit project aliases for intentional cross-tenant retrieval.
+    ///
+    /// Each rule says: when the requested `(tenant_id, project_id)` matches,
+    /// also search the listed alias scopes. Unlike the legacy fallback, this
+    /// does not widen to every tenant that happens to share the project name.
+    #[serde(default)]
+    pub project_aliases: Vec<ProjectAliasConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectAliasConfig {
+    pub tenant_id: String,
+    pub project_id: String,
+    #[serde(default)]
+    pub aliases: Vec<ProjectAliasScopeConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectAliasScopeConfig {
+    pub tenant_id: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 fn default_transport() -> String {
@@ -98,6 +122,7 @@ impl Default for ServerConfig {
             bind: default_bind(),
             path: default_path(),
             allow_cross_tenant_project_fallback: false,
+            project_aliases: Vec::new(),
         }
     }
 }
@@ -156,6 +181,39 @@ impl Config {
             return Err(MemdError::ConfigError(
                 "server.path must start with '/'".to_string(),
             ));
+        }
+
+        for rule in &self.server.project_aliases {
+            if rule.tenant_id.trim().is_empty() || rule.project_id.trim().is_empty() {
+                return Err(MemdError::ConfigError(
+                    "server.project_aliases entries require tenant_id and project_id".to_string(),
+                ));
+            }
+            for alias in &rule.aliases {
+                if alias.tenant_id.trim().is_empty() {
+                    return Err(MemdError::ConfigError(
+                        "server.project_aliases aliases require tenant_id".to_string(),
+                    ));
+                }
+                if alias
+                    .project_id
+                    .as_deref()
+                    .is_some_and(|project_id| project_id.trim().is_empty())
+                {
+                    return Err(MemdError::ConfigError(
+                        "server.project_aliases aliases cannot use an empty project_id".to_string(),
+                    ));
+                }
+                if alias
+                    .project_id
+                    .as_deref()
+                    .is_some_and(|project_id| project_id != rule.project_id)
+                {
+                    return Err(MemdError::ConfigError(
+                        "server.project_aliases aliases currently require project_id to match the parent rule; omit alias project_id for the same project".to_string(),
+                    ));
+                }
+            }
         }
 
         Ok(())
@@ -343,6 +401,53 @@ mod tests {
 
         let config = load_from_str(toml).unwrap();
         assert_eq!(config.server.transport, "http");
+    }
+
+    #[test]
+    fn project_aliases_load_from_toml() {
+        let toml = r#"
+            [server]
+
+            [[server.project_aliases]]
+            tenant_id = "memd"
+            project_id = "memd"
+
+            [[server.project_aliases.aliases]]
+            tenant_id = "default"
+            reason = "historical writes"
+        "#;
+
+        let config = load_from_str(toml).unwrap();
+        assert_eq!(config.server.project_aliases.len(), 1);
+        assert_eq!(config.server.project_aliases[0].aliases.len(), 1);
+        assert_eq!(
+            config.server.project_aliases[0].aliases[0]
+                .reason
+                .as_deref(),
+            Some("historical writes")
+        );
+    }
+
+    #[test]
+    fn project_aliases_reject_project_renames() {
+        let toml = r#"
+            [server]
+
+            [[server.project_aliases]]
+            tenant_id = "memd"
+            project_id = "memd"
+
+            [[server.project_aliases.aliases]]
+            tenant_id = "default"
+            project_id = "old_memd"
+        "#;
+
+        let result = load_from_str(toml);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("aliases currently require project_id to match the parent rule"));
     }
 
     #[test]

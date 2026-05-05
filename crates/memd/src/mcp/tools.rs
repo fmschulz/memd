@@ -122,6 +122,24 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "type": "boolean",
                         "default": false,
                         "description": "When true, attach bounded same-tenant/same-project chunks sharing an event:<id> tag under each result's expanded_siblings field. Ranked results are unchanged."
+                    },
+                    "compact": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "When true, return a smaller response shape while preserving identifiers, scores, trust metadata, grounding references, and verification hints."
+                    },
+                    "token_budget": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Approximate token budget for result payloads. Setting this also enables compact response packing."
+                    },
+                    "include_text": {
+                        "type": "boolean",
+                        "description": "Override whether chunk text is included. Compact mode defaults to snippets; false omits text."
+                    },
+                    "include_artifact": {
+                        "type": "boolean",
+                        "description": "Override whether linked canonical artifacts are included. Compact mode defaults to false."
                     }
                 },
                 "required": ["query"]
@@ -760,6 +778,26 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "enum": ["generic", "brief_project", "resume_task", "find_failures", "find_decisions", "find_evidence", "find_highlights"],
                         "default": "generic"
                     },
+                    "compact": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "When true, return compact artifact hits with identifiers, summaries, trust metadata, and grounding references; full artifact JSON is omitted unless include_artifact=true."
+                    },
+                    "token_budget": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Approximate token budget for result payloads. Setting this also enables compact response packing."
+                    },
+                    "include_artifact": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "Whether to include the full canonical artifact JSON. Compact mode defaults to false."
+                    },
+                    "include_matched_text": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "Whether to include projection matched_text. Compact mode defaults to false."
+                    },
                     "filters": {
                         "type": "object",
                         "properties": {
@@ -929,6 +967,26 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "type": "string",
                         "enum": ["generic", "brief_project", "resume_task", "find_failures", "find_decisions", "find_evidence", "find_highlights"],
                         "default": "generic"
+                    },
+                    "compact": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "When true, return compact artifact hits with identifiers, summaries, trust metadata, and grounding references; full artifact JSON is omitted unless include_artifact=true."
+                    },
+                    "token_budget": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Approximate token budget for result payloads. Setting this also enables compact response packing."
+                    },
+                    "include_artifact": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "Whether to include the full canonical artifact JSON. Compact mode defaults to false."
+                    },
+                    "include_matched_text": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "Whether to include projection matched_text. Compact mode defaults to false."
                     },
                     "filters": {
                         "type": "object",
@@ -1317,13 +1375,48 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
         // MCP-07: memory.stats
         ToolDefinition::new(
             "memory.stats",
-            "Get memory statistics for a tenant",
+            "Get memory statistics for a tenant. Returns uncapped active/deleted/all chunk-type counts.",
             json!({
                 "type": "object",
                 "properties": {
                     "tenant_id": {
                         "type": "string",
                         "description": "Tenant identifier for data isolation"
+                    }
+                },
+                "required": []
+            }),
+        ),
+        ToolDefinition::new(
+            "memory.health",
+            "Get read-only memory health for a tenant/project: duplicate ratio, index coverage, payload percentiles, latency tail, and warnings.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier for data isolation"
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional project identifier to scope the health report"
+                    },
+                    "include_examples": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Include duplicate text examples"
+                    },
+                    "duplicate_limit": {
+                        "type": "integer",
+                        "default": 10,
+                        "minimum": 0,
+                        "maximum": 100,
+                        "description": "Maximum duplicate examples when include_examples=true"
+                    },
+                    "include_recent": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "Include recent latency-tail metrics"
                     }
                 },
                 "required": []
@@ -2069,6 +2162,7 @@ pub fn tool_names() -> Vec<&'static str> {
         "memory.delete",
         "memory.feedback",
         "memory.stats",
+        "memory.health",
         "memory.metrics",
         "memory.compact",
         "memory.supersede",
@@ -2109,7 +2203,7 @@ mod tests {
         // Track D (D5): + memory.find_near_duplicates.
         // Track G (G2): + memory.export_markdown.
         // Track F (F5): + memory.export_omf + memory.preview_omf_import + memory.import_omf.
-        assert_eq!(tools.len(), 53);
+        assert_eq!(tools.len(), 54);
     }
 
     #[test]
@@ -2433,7 +2527,7 @@ mod tests {
         // Track D (D5): + memory.find_near_duplicates.
         // Track G (G2): + memory.export_markdown.
         // Track F (F5): + memory.export_omf + memory.preview_omf_import + memory.import_omf.
-        assert_eq!(names.len(), 53);
+        assert_eq!(names.len(), 54);
         assert!(names.contains(&"memory.supersede"));
         assert!(names.contains(&"memory.set_expiry"));
         assert!(names.contains(&"memory.find_near_duplicates"));
@@ -2450,6 +2544,7 @@ mod tests {
         assert!(names.contains(&"memory.metrics"));
         assert!(names.contains(&"memory.feedback"));
         assert!(names.contains(&"memory.compact"));
+        assert!(names.contains(&"memory.health"));
         assert!(names.contains(&"memory.consolidate_episode"));
         assert!(names.contains(&"task.start"));
         assert!(names.contains(&"task.progress"));

@@ -209,7 +209,11 @@ These filters are resolved first, then the candidate set is reranked for retriev
 
 `memory.search`, `task.search`, and `artifact.search` also accept `mode` with `generic`, `brief_project`, `resume_task`, `find_failures`, `find_decisions`, `find_evidence`, and `find_highlights` to bias candidate planning toward the corresponding digests and canonical summaries.
 
+`memory.search` and `artifact.search` support compact response shaping with `compact: true` or `token_budget`. Compact output uses the response packer after ranking and visibility filtering, preserves identifiers and trust/grounding metadata, and can omit large `text`, `matched_text`, and full `artifact` fields so callers can fetch only selected records.
+
 `memory.compact` can explicitly refresh project brief and failure/decision/evidence/highlight library digests through `project_id`, `digest_modes`, and `force_digest_rebuild`.
+
+`memory.stats` uses aggregate counts and reports `active_chunks`, `deleted_chunks`, `total_chunks`, and active/deleted/all chunk-type maps. `memory.health` adds a read-only tenant/project report for duplicate canonical text, index coverage, payload-size percentiles, recent latency tails, and explicit alias scope information.
 
 ## Conversation Event Tags
 
@@ -248,9 +252,10 @@ Agents should follow this contract:
 5. Use `task.add_evidence` when a concrete result matters.
 6. Use `task.finish` to record worked/failed/validation/uncertainty/followups.
 7. Use `artifact.create` when the important event is critique, revision, verification, or thread-level coordination rather than a task lifecycle step.
-8. Use `artifact.search` / `artifact.list_thread` when the artifact itself is the unit of exchange.
+8. Use compact `memory.search` / `artifact.search` first for broad retrieval, then `memory.get` or `artifact.get` for selected full records.
+9. Use `artifact.search` / `artifact.list_thread` when the artifact itself is the unit of exchange.
 
-This is how `memd` enforces consistent reporting across agents in the same tenant. For one trusted machine or trust domain, agents should prefer a stable shared `tenant_id` and use `project_id`, `thread_id`, and `task_id` for narrower scopes. The current MCP handlers also include a compatibility fallback for project-scoped retrieval across other local tenants on the same daemon when they already contain the same `project_id`, which helps recover older fragmented history.
+This is how `memd` enforces consistent reporting across agents in the same tenant. For one trusted machine or trust domain, agents should prefer a stable shared `tenant_id` and use `project_id`, `thread_id`, and `task_id` for narrower scopes. Cross-tenant project recovery is explicit: configure same-project `server.project_aliases` for known historical scopes and inspect `scope_expansion` plus per-hit `origin` metadata in search responses.
 
 ## Documentation Status
 
