@@ -9,7 +9,7 @@ Shared knowledge artifacts over MCP for coding agents and AI scientists.
 
 Use the same shared local `memd` daemon URL for Codex CLI and Claude Code when you want one machine to host a shared knowledge base across sessions.
 
-For one trusted machine or trust domain, prefer one stable shared `tenant_id` for collaborating agents and use `project_id` for project scoping. The current MCP retrieval path can also widen project-scoped lookup across other local tenants on the same daemon that already contain that project, but that is a compatibility fallback for older fragmented history rather than the preferred steady state.
+For one trusted machine or trust domain, prefer one stable shared `tenant_id` for collaborating agents and use `project_id` for project scoping. If older same-project history exists under another local tenant, configure explicit `server.project_aliases` and inspect `scope_expansion` / per-hit `origin` metadata rather than relying on broad fallback.
 
 ## When to Use
 
@@ -79,7 +79,7 @@ Trust boundary:
 
 ## Tool Surface
 
-`memd` exposes 53 MCP tools.
+`memd` exposes 54 MCP tools.
 
 ### Generic Memory
 
@@ -90,6 +90,7 @@ Trust boundary:
 - `memory.delete`
 - `memory.feedback`
 - `memory.stats`
+- `memory.health`
 - `memory.metrics`
 - `memory.compact`
 - `memory.supersede`
@@ -346,7 +347,7 @@ If multiple agents write to the same tenant, later agents can search and recover
 
 That is the point of the artifact schema: consistency across agents and scientists.
 
-If older history was accidentally written under another local tenant on the same daemon, project-scoped retrieval can now recover that same-project history as a compatibility fallback. Future writes should still converge on one shared tenant.
+If older history was accidentally written under another local tenant on the same daemon, project-scoped retrieval can recover it only through configured same-project aliases. Future writes should still converge on one shared tenant.
 
 ## Retrieval Patterns
 
@@ -359,6 +360,13 @@ parameter that biases results:
 - `brief_project` — favour project briefs and onboarding summaries
 - `resume_task` — favour task-resume digests
 - `find_failures` / `find_decisions` / `find_evidence` / `find_highlights` — bias toward that library digest
+
+Default to compact retrieval for broad searches:
+
+- start with `compact=true` and a conservative `token_budget` such as 2000-4000
+- keep `include_artifact=false` and use `include_text=false` when IDs are enough
+- fetch full selected chunks with `memory.get` only after the compact pass
+- record notable duplicate, payload, or latency findings with `memory.health` in task artifacts
 
 Examples:
 
@@ -374,6 +382,10 @@ them when your downstream code needs that shape:
 
 - `task.search` — task-centric filtering (by tool name, dataset, status, confidence)
 - `artifact.search` — artifact-native filtering (by role, kind, reply-to, challenge)
+
+For `artifact.search`, use `compact=true`, `include_artifact=false`, and
+`include_matched_text=false` for discovery. Then call `artifact.get` for the
+small set of artifact IDs you actually need to inspect.
 
 If you just want "find the thing that matches my query", stick with
 `memory.search`.

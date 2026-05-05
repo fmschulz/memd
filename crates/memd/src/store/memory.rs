@@ -561,21 +561,31 @@ impl Store for MemoryStore {
         let stats = store
             .get(&tenant_str)
             .map(|tenant_chunks| {
-                let mut chunk_types: HashMap<String, usize> = HashMap::new();
+                let mut chunk_types_active: HashMap<String, usize> = HashMap::new();
+                let mut chunk_types_deleted: HashMap<String, usize> = HashMap::new();
+                let mut chunk_types_all: HashMap<String, usize> = HashMap::new();
                 let mut deleted_count = 0;
 
                 for chunk in tenant_chunks.values() {
+                    let key = chunk.chunk_type.to_string();
+                    *chunk_types_all.entry(key.clone()).or_insert(0) += 1;
                     if chunk.status == ChunkStatus::Deleted {
                         deleted_count += 1;
+                        *chunk_types_deleted.entry(key).or_insert(0) += 1;
+                    } else {
+                        *chunk_types_active.entry(key).or_insert(0) += 1;
                     }
-
-                    *chunk_types.entry(chunk.chunk_type.to_string()).or_insert(0) += 1;
                 }
+                let active_count = tenant_chunks.len().saturating_sub(deleted_count);
 
                 StoreStats {
                     total_chunks: tenant_chunks.len(),
+                    active_chunks: active_count,
                     deleted_chunks: deleted_count,
-                    chunk_types,
+                    chunk_types: chunk_types_active.clone(),
+                    chunk_types_active,
+                    chunk_types_deleted,
+                    chunk_types_all,
                 }
             })
             .unwrap_or_default();
@@ -935,9 +945,13 @@ mod tests {
 
         let stats = store.stats(&tenant).await.unwrap();
         assert_eq!(stats.total_chunks, 3);
+        assert_eq!(stats.active_chunks, 2);
         assert_eq!(stats.deleted_chunks, 1);
         assert_eq!(stats.chunk_types.get("doc"), Some(&2));
-        assert_eq!(stats.chunk_types.get("code"), Some(&1));
+        assert_eq!(stats.chunk_types.get("code"), None);
+        assert_eq!(stats.chunk_types_active.get("doc"), Some(&2));
+        assert_eq!(stats.chunk_types_deleted.get("code"), Some(&1));
+        assert_eq!(stats.chunk_types_all.get("code"), Some(&1));
     }
 
     #[tokio::test]

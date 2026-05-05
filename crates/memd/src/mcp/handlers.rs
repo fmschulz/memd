@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -18,6 +19,7 @@ use tracing::{debug, info, warn};
 /// fallback is a migration shim only. `McpServer::new` sets this from
 /// `ServerConfig.allow_cross_tenant_project_fallback`.
 static ALLOW_CROSS_TENANT_PROJECT_FALLBACK: AtomicBool = AtomicBool::new(false);
+static PROJECT_ALIASES: OnceLock<std::sync::RwLock<Vec<ProjectAliasConfig>>> = OnceLock::new();
 
 /// Enable or disable the cross-tenant project fallback. Called from
 /// `McpServer::new` / `McpServer::with_metrics` to honour the server
@@ -26,8 +28,46 @@ pub(crate) fn set_cross_tenant_project_fallback(enabled: bool) {
     ALLOW_CROSS_TENANT_PROJECT_FALLBACK.store(enabled, Ordering::Relaxed);
 }
 
+#[allow(dead_code)]
+pub(crate) fn set_project_aliases(aliases: Vec<ProjectAliasConfig>) {
+    let lock = PROJECT_ALIASES.get_or_init(|| std::sync::RwLock::new(Vec::new()));
+    if let Ok(mut guard) = lock.write() {
+        *guard = aliases;
+    }
+}
+
 fn cross_tenant_project_fallback_enabled() -> bool {
     ALLOW_CROSS_TENANT_PROJECT_FALLBACK.load(Ordering::Relaxed)
+}
+
+fn configured_project_aliases(primary_tenant: &TenantId, project_id: &str) -> Vec<OriginScope> {
+    let Some(lock) = PROJECT_ALIASES.get() else {
+        return Vec::new();
+    };
+    let Ok(aliases) = lock.read() else {
+        return Vec::new();
+    };
+    aliases
+        .iter()
+        .filter(|rule| rule.tenant_id == primary_tenant.as_str() && rule.project_id == project_id)
+        .flat_map(|rule| {
+            rule.aliases.iter().filter_map(move |alias| {
+                let alias_project = alias.project_id.as_deref().unwrap_or(project_id);
+                if alias_project != project_id {
+                    return None;
+                }
+                Some(OriginScope {
+                    requested_tenant_id: primary_tenant.to_string(),
+                    origin_tenant_id: alias.tenant_id.clone(),
+                    origin_project_id: Some(alias_project.to_string()),
+                    alias_reason: alias
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "configured_project_alias".to_string()),
+                })
+            })
+        })
+        .collect()
 }
 
 /// Resolve an `agent_id` for an artifact write from an explicit param.
@@ -65,9 +105,14 @@ use super::error::McpError;
 // (re-exported at `memd::mcp::PostWriteEvent`), but dropping the
 // nested path would be a silent semver shrink.
 pub use super::post_write_hooks::PostWriteEvent;
+use crate::config::ProjectAliasConfig;
 use crate::metrics::{IndexStats, MetricsCollector};
+use crate::retrieval::{ContextPacker, PackerConfig, PackerInput};
 use crate::store::metadata::MetadataStore;
-use crate::store::{FeedbackEntry, RelevanceLabel, Store, StoreStats, TenantManager};
+use crate::store::{
+    DuplicateHealth, FeedbackEntry, HealthCounts, IndexCoverageHealth, PayloadHealth,
+    RelevanceLabel, Store, StoreHealthSnapshot, StoreStats, TenantManager,
+};
 use crate::task_memory::{
     build_library_digest_artifact, build_project_brief_digest_artifact, build_project_brief_view,
     build_task_projections, build_task_projections_minimal, build_task_resume_digest_artifact,
@@ -155,6 +200,19 @@ pub struct SearchParams {
     /// `expanded_siblings`. The ranked hit list itself is unchanged.
     #[serde(default)]
     pub expand_event_siblings: bool,
+    /// Opt into a smaller response shape. Full mode remains the default.
+    #[serde(default)]
+    pub compact: bool,
+    /// Approximate token budget for result payloads. Setting this also
+    /// enables compact response packing.
+    #[serde(default)]
+    pub token_budget: Option<usize>,
+    /// Override whether chunk text is included.
+    #[serde(default)]
+    pub include_text: Option<bool>,
+    /// Override whether linked canonical artifacts are included.
+    #[serde(default)]
+    pub include_artifact: Option<bool>,
 }
 
 fn default_k() -> usize {
@@ -181,6 +239,10 @@ impl Default for SearchParams {
             include_history: None,
             oversample_factor: None,
             expand_event_siblings: false,
+            compact: false,
+            token_budget: None,
+            include_text: None,
+            include_artifact: None,
         }
     }
 }
@@ -646,6 +708,14 @@ pub struct TaskSearchParams {
     pub filters: Option<TaskSearchFiltersParams>,
     #[serde(default)]
     pub mode: Option<QueryMode>,
+    #[serde(default)]
+    pub compact: bool,
+    #[serde(default)]
+    pub token_budget: Option<usize>,
+    #[serde(default)]
+    pub include_artifact: Option<bool>,
+    #[serde(default)]
+    pub include_matched_text: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -874,6 +944,25 @@ pub struct DeleteParams {
 pub struct StatsParams {
     #[serde(default)]
     pub tenant_id: String,
+}
+
+fn default_duplicate_limit() -> usize {
+    10
+}
+
+/// Parameters for memory.health
+#[derive(Debug, Deserialize)]
+pub struct HealthParams {
+    #[serde(default)]
+    pub tenant_id: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub include_examples: bool,
+    #[serde(default = "default_duplicate_limit")]
+    pub duplicate_limit: usize,
+    #[serde(default = "default_true")]
+    pub include_recent: bool,
 }
 
 /// Parameters for memory.metrics
@@ -1112,6 +1201,10 @@ pub struct FindErrorsParams {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SearchResult {
     pub results: Vec<ChunkResult>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub budget_info: Option<BudgetInfo>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub scope_expansion: Option<ScopeExpansion>,
     /// Tier debug info (only present when debug_tiers=true)
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub tier_info: Option<TierDebugInfo>,
@@ -1147,10 +1240,44 @@ pub struct RepairInfo {
     pub repaired_query: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BudgetInfo {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub requested_budget: Option<usize>,
+    pub estimated_output_tokens: usize,
+    pub truncated: bool,
+    #[serde(default)]
+    pub omitted_fields: Vec<String>,
+    pub dropped_result_count: usize,
+    pub duplicate_drop_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OriginScope {
+    pub requested_tenant_id: String,
+    pub origin_tenant_id: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub origin_project_id: Option<String>,
+    #[serde(default)]
+    pub alias_reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeExpansion {
+    pub requested_tenant_id: String,
+    pub requested_project_id: String,
+    #[serde(default)]
+    pub aliases: Vec<OriginScope>,
+}
+
 /// Single chunk in search results
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChunkResult {
     pub chunk_id: String,
+    pub tenant_id: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub project_id: Option<String>,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
     pub text: String,
     pub score: f32, // Stub: 1.0 for all results
     pub chunk_type: String,
@@ -1176,6 +1303,8 @@ pub struct ChunkResult {
     /// Canonical artifact linked to this projection chunk when available.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub artifact: Option<TaskArtifact>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub origin: Option<OriginScope>,
     /// Opt-in same-event context returned by `memory.search` when
     /// `expand_event_siblings=true`.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -1296,7 +1425,19 @@ pub struct ArtifactGetResult {
 /// One artifact returned from artifact.search.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ArtifactSearchHit {
-    pub artifact: TaskArtifact,
+    pub artifact_id: String,
+    pub task_id: String,
+    pub artifact_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub artifact_role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub project_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub thread_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub artifact: Option<TaskArtifact>,
     pub score: f32,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub matched_chunk_id: Option<String>,
@@ -1308,12 +1449,18 @@ pub struct ArtifactSearchHit {
     pub grounding_refs: Vec<GroundingRef>,
     #[serde(default)]
     pub verification_hint: VerificationHint,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub origin: Option<OriginScope>,
 }
 
 /// Result of artifact.search.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ArtifactSearchResult {
     pub results: Vec<ArtifactSearchHit>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub budget_info: Option<BudgetInfo>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub scope_expansion: Option<ScopeExpansion>,
 }
 
 /// Result of artifact.list_thread.
@@ -1500,12 +1647,57 @@ pub struct ContextGetHotContextResult {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StatsResult {
     pub total_chunks: usize,
+    #[serde(default)]
+    pub active_chunks: usize,
     pub deleted_chunks: usize,
+    /// Backward-compatible active chunk-type counts.
     pub chunk_types: HashMap<String, usize>,
+    #[serde(default)]
+    pub chunk_types_active: HashMap<String, usize>,
+    #[serde(default)]
+    pub chunk_types_deleted: HashMap<String, usize>,
+    #[serde(default)]
+    pub chunk_types_all: HashMap<String, usize>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub disk_stats: Option<DiskStatsResult>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub compaction: Option<CompactionStatsResult>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HealthScopeResult {
+    pub tenant_id: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub aliases: Vec<OriginScope>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChunkTypeHealthResult {
+    pub active: HashMap<String, usize>,
+    pub all: HashMap<String, usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct LatencyHealthResult {
+    pub recent_search_count: usize,
+    pub p50_total_ms: u64,
+    pub p95_total_ms: u64,
+    pub p99_total_ms: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MemoryHealthResult {
+    pub scope: HealthScopeResult,
+    pub counts: HealthCounts,
+    pub chunk_types: ChunkTypeHealthResult,
+    pub duplicates: DuplicateHealth,
+    pub index_coverage: IndexCoverageHealth,
+    pub payload: PayloadHealth,
+    pub latency: LatencyHealthResult,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// Disk statistics in stats result
@@ -2098,15 +2290,30 @@ fn build_artifact_search_hit(
         &artifact,
         matched_chunk.map(build_citation),
     )];
+    let summary = artifact.event_summary();
     ArtifactSearchHit {
-        artifact,
+        artifact_id: artifact.artifact_id.clone(),
+        task_id: artifact.task_id.clone(),
+        artifact_kind: artifact.artifact_kind.as_str().to_string(),
+        artifact_role: artifact.artifact_role.clone(),
+        project_id: artifact.project_id.as_option().map(str::to_string),
+        thread_id: artifact.thread_id.clone(),
+        summary,
+        artifact: Some(artifact),
         score,
         matched_chunk_id: matched_chunk.map(|chunk| chunk.chunk_id.to_string()),
         matched_text: matched_chunk.map(|chunk| chunk.text.clone()),
         trust_tier,
         grounding_refs,
         verification_hint: verification_hint_for_trust_tier(trust_tier),
+        origin: None,
     }
+}
+
+fn artifact_hit_record(hit: &ArtifactSearchHit) -> &TaskArtifact {
+    hit.artifact
+        .as_ref()
+        .expect("internal artifact search hit must carry full artifact before response shaping")
 }
 
 async fn artifact_lookup_tenants<S: Store>(
@@ -2255,6 +2462,8 @@ fn chunk_to_result(
         result_metadata(artifact.as_ref(), citation.clone());
     ChunkResult {
         chunk_id: chunk.chunk_id.to_string(),
+        tenant_id: chunk.tenant_id.to_string(),
+        project_id: chunk.project_id.as_option().map(str::to_string),
         text: chunk.text.clone(),
         score,
         chunk_type: chunk.chunk_type.to_string(),
@@ -2269,6 +2478,7 @@ fn chunk_to_result(
         verification_hint,
         source_tier,
         artifact,
+        origin: None,
         expanded_siblings: Vec::new(),
     }
 }
@@ -2395,6 +2605,327 @@ async fn build_chunk_results<S: Store>(
     }
 
     Ok(results)
+}
+
+fn estimate_tokens_for_json<T: Serialize>(value: &T) -> usize {
+    serde_json::to_string(value)
+        .map(|json| estimate_tokens(&json))
+        .unwrap_or(0)
+}
+
+fn estimate_tokens(text: &str) -> usize {
+    text.len().saturating_add(3) / 4
+}
+
+fn compact_snippet(text: &str) -> String {
+    const MAX_CHARS: usize = 600;
+    if text.len() <= MAX_CHARS {
+        return text.to_string();
+    }
+
+    let mut end = 0;
+    for (idx, _) in text.char_indices() {
+        if idx > MAX_CHARS {
+            break;
+        }
+        end = idx;
+    }
+    text[..end].trim_end().to_string()
+}
+
+fn pack_chunk_results(
+    results: Vec<ChunkResult>,
+    requested_budget: Option<usize>,
+) -> (Vec<ChunkResult>, usize, usize, bool) {
+    let Some(max_tokens) = requested_budget else {
+        return (results, 0, 0, false);
+    };
+    if results.is_empty() {
+        return (results, 0, 0, false);
+    }
+
+    let packer = ContextPacker::new(PackerConfig {
+        max_tokens,
+        ..Default::default()
+    });
+    let inputs = results
+        .iter()
+        .filter_map(|result| {
+            let chunk_id = ChunkId::parse(&result.chunk_id).ok()?;
+            Some(PackerInput {
+                chunk_id,
+                text: result.text.clone(),
+                chunk_type: result
+                    .chunk_type
+                    .parse::<ChunkType>()
+                    .unwrap_or(ChunkType::Other),
+                score: result.score,
+                hash: result
+                    .citation
+                    .as_ref()
+                    .map(|citation| citation.content_hash.clone())
+                    .unwrap_or_else(|| result.chunk_id.clone()),
+                embedding: None,
+                source_uri: result.source.uri.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let packed = packer.pack(inputs);
+    let selected = packed
+        .chunks
+        .iter()
+        .map(|chunk| chunk.chunk_id.to_string())
+        .collect::<HashSet<_>>();
+    let original_len = results.len();
+    let kept = results
+        .into_iter()
+        .filter(|result| selected.contains(&result.chunk_id))
+        .collect::<Vec<_>>();
+    let dropped = original_len.saturating_sub(kept.len());
+    let truncated = dropped > 0 || packed.total_tokens >= max_tokens;
+    (kept, dropped, packed.duplicates_removed, truncated)
+}
+
+fn shape_memory_results(
+    results: Vec<ChunkResult>,
+    params: &SearchParams,
+) -> (Vec<ChunkResult>, Option<BudgetInfo>) {
+    let compact_requested = params.compact || params.token_budget.is_some();
+    if !compact_requested {
+        return (results, None);
+    }
+
+    let requested_budget = params.token_budget.or(Some(4000));
+    let (mut packed, dropped_result_count, duplicate_drop_count, truncated_by_pack) =
+        pack_chunk_results(results, requested_budget);
+    let include_text = params.include_text.unwrap_or(true);
+    let include_artifact = params.include_artifact.unwrap_or(false);
+    let mut omitted_fields = Vec::new();
+
+    for result in &mut packed {
+        if include_text {
+            result.text = compact_snippet(&result.text);
+        } else {
+            result.text.clear();
+        }
+        if !include_artifact {
+            result.artifact = None;
+        }
+        if !result.expanded_siblings.is_empty() {
+            result.expanded_siblings.clear();
+            omitted_fields.push("expanded_siblings".to_string());
+        }
+    }
+
+    if !include_text {
+        omitted_fields.push("text".to_string());
+    }
+    if !include_artifact {
+        omitted_fields.push("artifact".to_string());
+    }
+    omitted_fields.sort();
+    omitted_fields.dedup();
+
+    let estimated_output_tokens = estimate_tokens_for_json(&packed);
+    let truncated = truncated_by_pack
+        || requested_budget
+            .map(|budget| estimated_output_tokens > budget)
+            .unwrap_or(false);
+    (
+        packed,
+        Some(BudgetInfo {
+            requested_budget,
+            estimated_output_tokens,
+            truncated,
+            omitted_fields,
+            dropped_result_count,
+            duplicate_drop_count,
+        }),
+    )
+}
+
+fn pack_artifact_hits(
+    results: Vec<ArtifactSearchHit>,
+    requested_budget: Option<usize>,
+) -> (Vec<ArtifactSearchHit>, usize, usize, bool) {
+    let Some(max_tokens) = requested_budget else {
+        return (results, 0, 0, false);
+    };
+    if results.is_empty() {
+        return (results, 0, 0, false);
+    }
+
+    let mut index_by_chunk_id = HashMap::new();
+    let mut inputs = Vec::with_capacity(results.len());
+    for (idx, hit) in results.iter().enumerate() {
+        let chunk_id = hit
+            .matched_chunk_id
+            .as_deref()
+            .and_then(|id| ChunkId::parse(id).ok())
+            .unwrap_or_else(ChunkId::new);
+        index_by_chunk_id.insert(chunk_id.to_string(), idx);
+        let text = hit
+            .matched_text
+            .clone()
+            .or_else(|| hit.summary.clone())
+            .unwrap_or_else(|| hit.artifact_id.clone());
+        inputs.push(PackerInput {
+            chunk_id,
+            text: text.clone(),
+            chunk_type: ChunkType::Summary,
+            score: hit.score,
+            hash: format!("{}:{}", hit.artifact_id, text),
+            embedding: None,
+            source_uri: None,
+        });
+    }
+
+    let packer = ContextPacker::new(PackerConfig {
+        max_tokens,
+        ..Default::default()
+    });
+    let packed = packer.pack(inputs);
+    let selected_indexes = packed
+        .chunks
+        .iter()
+        .filter_map(|chunk| index_by_chunk_id.get(&chunk.chunk_id.to_string()).copied())
+        .collect::<HashSet<_>>();
+    let original_len = results.len();
+    let kept = results
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, hit)| selected_indexes.contains(&idx).then_some(hit))
+        .collect::<Vec<_>>();
+    let dropped = original_len.saturating_sub(kept.len());
+    let truncated = dropped > 0 || packed.total_tokens >= max_tokens;
+    (kept, dropped, packed.duplicates_removed, truncated)
+}
+
+fn shape_artifact_results(
+    results: Vec<ArtifactSearchHit>,
+    params: &TaskSearchParams,
+) -> (Vec<ArtifactSearchHit>, Option<BudgetInfo>) {
+    let compact_requested = params.compact || params.token_budget.is_some();
+    if !compact_requested {
+        return (results, None);
+    }
+
+    let requested_budget = params.token_budget.or(Some(4000));
+    let (mut packed, dropped_result_count, duplicate_drop_count, truncated_by_pack) =
+        pack_artifact_hits(results, requested_budget);
+    let include_artifact = params.include_artifact.unwrap_or(false);
+    let include_matched_text = params.include_matched_text.unwrap_or(false);
+    let mut omitted_fields = Vec::new();
+
+    for hit in &mut packed {
+        if !include_artifact {
+            hit.artifact = None;
+        }
+        if include_matched_text {
+            if let Some(text) = hit.matched_text.as_mut() {
+                *text = compact_snippet(text);
+            }
+        } else {
+            hit.matched_text = None;
+        }
+    }
+
+    if !include_artifact {
+        omitted_fields.push("artifact".to_string());
+    }
+    if !include_matched_text {
+        omitted_fields.push("matched_text".to_string());
+    }
+
+    let estimated_output_tokens = estimate_tokens_for_json(&packed);
+    let truncated = truncated_by_pack
+        || requested_budget
+            .map(|budget| estimated_output_tokens > budget)
+            .unwrap_or(false);
+    (
+        packed,
+        Some(BudgetInfo {
+            requested_budget,
+            estimated_output_tokens,
+            truncated,
+            omitted_fields,
+            dropped_result_count,
+            duplicate_drop_count,
+        }),
+    )
+}
+
+fn scope_expansion_for(tenant_id: &TenantId, project_id: Option<&str>) -> Option<ScopeExpansion> {
+    let project_id = project_id?;
+    let aliases = configured_project_aliases(tenant_id, project_id);
+    (!aliases.is_empty()).then(|| ScopeExpansion {
+        requested_tenant_id: tenant_id.to_string(),
+        requested_project_id: project_id.to_string(),
+        aliases,
+    })
+}
+
+fn origin_for_result(
+    requested_tenant_id: &TenantId,
+    expansion: Option<&ScopeExpansion>,
+    origin_tenant_id: &TenantId,
+    origin_project_id: Option<String>,
+) -> Option<OriginScope> {
+    if origin_tenant_id == requested_tenant_id {
+        return None;
+    }
+    expansion
+        .and_then(|expansion| {
+            expansion
+                .aliases
+                .iter()
+                .find(|alias| alias.origin_tenant_id == origin_tenant_id.as_str())
+                .cloned()
+        })
+        .or_else(|| {
+            Some(OriginScope {
+                requested_tenant_id: requested_tenant_id.to_string(),
+                origin_tenant_id: origin_tenant_id.to_string(),
+                origin_project_id,
+                alias_reason: "legacy_cross_tenant_project_fallback".to_string(),
+            })
+        })
+}
+
+fn annotate_chunk_origins(
+    results: &mut [ChunkResult],
+    requested_tenant_id: &TenantId,
+    expansion: Option<&ScopeExpansion>,
+) {
+    for result in results {
+        let Ok(origin_tenant) = TenantId::new(&result.tenant_id) else {
+            continue;
+        };
+        result.origin = origin_for_result(
+            requested_tenant_id,
+            expansion,
+            &origin_tenant,
+            result.project_id.clone(),
+        );
+    }
+}
+
+fn annotate_artifact_origins(
+    results: &mut [ArtifactSearchHit],
+    requested_tenant_id: &TenantId,
+    expansion: Option<&ScopeExpansion>,
+) {
+    for hit in results {
+        let Some(artifact) = hit.artifact.as_ref() else {
+            continue;
+        };
+        hit.origin = origin_for_result(
+            requested_tenant_id,
+            expansion,
+            &artifact.tenant_id,
+            artifact.project_id.as_option().map(str::to_string),
+        );
+    }
 }
 
 async fn collect_all_chunks<S: Store>(
@@ -2541,7 +3072,9 @@ fn build_episode_summary_text(episode_id: &str, chunks: &[MemoryChunk]) -> Strin
 /// Parse the `mode` request param into an `IngestionMode`. Empty / None
 /// returns the default (`Document`). Unknown values fail-closed with a
 /// clear MCP error so callers learn about the typo immediately.
-pub(crate) fn parse_ingestion_mode(s: Option<&str>) -> Result<crate::types::IngestionMode, McpError> {
+pub(crate) fn parse_ingestion_mode(
+    s: Option<&str>,
+) -> Result<crate::types::IngestionMode, McpError> {
     use crate::types::IngestionMode;
     let trimmed = s.map(|x| x.trim()).filter(|x| !x.is_empty());
     match trimmed {
@@ -3013,8 +3546,24 @@ async fn scoped_tenants_for_project<S: Store>(
         return Ok(vec![primary_tenant.clone()]);
     };
 
+    let aliases = configured_project_aliases(primary_tenant, project_id);
+    if !aliases.is_empty() {
+        let mut scoped = vec![primary_tenant.clone()];
+        let mut seen = HashSet::from([primary_tenant.to_string()]);
+        for alias in aliases {
+            let alias_tenant = TenantId::new(&alias.origin_tenant_id)
+                .map_err(|e| McpError::InvalidParams(e.to_string()))?;
+            if seen.insert(alias_tenant.to_string())
+                && tenant_has_project(store, &alias_tenant, project_id).await?
+            {
+                scoped.push(alias_tenant);
+            }
+        }
+        return Ok(scoped);
+    }
+
     // Default behavior: tenant isolation. Only widen when the operator
-    // has explicitly opted into the cross-tenant fallback via
+    // has explicitly opted into the legacy all-tenant fallback via
     // `server.allow_cross_tenant_project_fallback = true`.
     if !cross_tenant_project_fallback_enabled() {
         return Ok(vec![primary_tenant.clone()]);
@@ -4164,14 +4713,14 @@ pub async fn handle_memory_search<S: Store>(
     let debug_tiers = params.debug_tiers.unwrap_or(false);
     let mode = params.mode.unwrap_or_default();
     let project_id_filter = params.project_id.as_deref();
+    let scope_expansion = scope_expansion_for(&tenant_id, project_id_filter);
     let has_filters = has_active_search_filters(project_id_filter, &parsed_filters);
     let (visibility_policy, oversample_factor) = resolve_visibility_and_oversample(&params);
     // Pre-visibility trim headroom: `apply_search_filters` takes a cap so
     // we pass `k * oversample_factor` here; `apply_visibility_filter`
     // further trims to `params.k` after hiding non-visible rows.
     let pre_visibility_cap = params.k.saturating_mul(oversample_factor);
-    let fetch_k = adaptive_fetch_k(params.k, &params.query, has_filters)
-        .max(pre_visibility_cap);
+    let fetch_k = adaptive_fetch_k(params.k, &params.query, has_filters).max(pre_visibility_cap);
     let scoped_tenants = scoped_tenants_for_project(store, &tenant_id, project_id_filter).await?;
 
     info!(
@@ -4277,7 +4826,7 @@ pub async fn handle_memory_search<S: Store>(
         let default_tier = tier_info.as_ref().map(|t| t.source_tier.clone());
 
         let artifacts = resolve_artifacts_for_ranked_chunks(store, &scored_chunks).await?;
-        let results = build_chunk_results(
+        let mut results = build_chunk_results(
             store,
             &scored_chunks,
             default_tier,
@@ -4286,9 +4835,13 @@ pub async fn handle_memory_search<S: Store>(
             &visibility_policy,
         )
         .await?;
+        annotate_chunk_origins(&mut results, &tenant_id, scope_expansion.as_ref());
 
+        let (results, budget_info) = shape_memory_results(results, &params);
         return format_mcp_response(&SearchResult {
             results,
+            budget_info,
+            scope_expansion,
             tier_info,
             repair_info,
         });
@@ -4348,7 +4901,7 @@ pub async fn handle_memory_search<S: Store>(
     debug!(results_count = scored_chunks.len(), "search completed");
 
     let artifacts = resolve_artifacts_for_ranked_chunks(store, &scored_chunks).await?;
-    let results = build_chunk_results(
+    let mut results = build_chunk_results(
         store,
         &scored_chunks,
         None,
@@ -4357,9 +4910,13 @@ pub async fn handle_memory_search<S: Store>(
         &visibility_policy,
     )
     .await?;
+    annotate_chunk_origins(&mut results, &tenant_id, scope_expansion.as_ref());
 
+    let (results, budget_info) = shape_memory_results(results, &params);
     format_mcp_response(&SearchResult {
         results,
+        budget_info,
+        scope_expansion,
         tier_info: None,
         repair_info,
     })
@@ -4423,8 +4980,9 @@ pub async fn handle_memory_add<S: Store>(
     let review_after_ms = effective_review_after_ms;
     let has_lifecycle = params.expires_at_ms.is_some() || review_after_ms.is_some();
     let resolved_dedup = match params.supersede_near_duplicates.as_ref() {
-        Some(spec) => crate::mcp::dedup::resolve_spec(spec)
-            .map_err(|e| McpError::ToolError(e.to_string()))?,
+        Some(spec) => {
+            crate::mcp::dedup::resolve_spec(spec).map_err(|e| McpError::ToolError(e.to_string()))?
+        }
         None => None,
     };
 
@@ -4774,8 +5332,9 @@ pub async fn handle_memory_add_batch<S: Store>(
 
     // Resolve the optional Track D dedup spec once for the whole batch.
     let resolved_dedup = match params.supersede_near_duplicates.as_ref() {
-        Some(spec) => crate::mcp::dedup::resolve_spec(spec)
-            .map_err(|e| McpError::ToolError(e.to_string()))?,
+        Some(spec) => {
+            crate::mcp::dedup::resolve_spec(spec).map_err(|e| McpError::ToolError(e.to_string()))?
+        }
         None => None,
     };
 
@@ -4821,12 +5380,9 @@ pub async fn handle_memory_add_batch<S: Store>(
             // Track E: per-chunk mode + conversation default review window.
             let ingestion_mode = parse_ingestion_mode(chunk_params.mode.as_deref())?;
             chunk = chunk.with_ingestion_mode(ingestion_mode);
-            let review_after_ms = apply_conversation_review_default(
-                ingestion_mode,
-                chunk_params.review_after_ms,
-            );
-            let has_lifecycle =
-                chunk_params.expires_at_ms.is_some() || review_after_ms.is_some();
+            let review_after_ms =
+                apply_conversation_review_default(ingestion_mode, chunk_params.review_after_ms);
+            let has_lifecycle = chunk_params.expires_at_ms.is_some() || review_after_ms.is_some();
             let delta = LifecycleDelta {
                 expires_at_ms: chunk_params.expires_at_ms.map(Some),
                 review_after_ms: review_after_ms.map(Some),
@@ -4888,10 +5444,7 @@ pub async fn handle_memory_add_batch<S: Store>(
             superseded_ids.push(linked);
         }
 
-        info!(
-            count = chunk_ids.len(),
-            "batch add (with dedup) completed"
-        );
+        info!(count = chunk_ids.len(), "batch add (with dedup) completed");
         return format_mcp_response(&serde_json::json!({
             "chunk_ids": chunk_ids,
             "superseded_ids": superseded_ids,
@@ -4927,10 +5480,8 @@ pub async fn handle_memory_add_batch<S: Store>(
         }
         let ingestion_mode = parse_ingestion_mode(chunk_params.mode.as_deref())?;
         chunk = chunk.with_ingestion_mode(ingestion_mode);
-        let review_after_ms = apply_conversation_review_default(
-            ingestion_mode,
-            chunk_params.review_after_ms,
-        );
+        let review_after_ms =
+            apply_conversation_review_default(ingestion_mode, chunk_params.review_after_ms);
         let delta = LifecycleDelta {
             expires_at_ms: chunk_params.expires_at_ms.map(Some),
             review_after_ms: review_after_ms.map(Some),
@@ -5089,9 +5640,7 @@ pub async fn handle_memory_find_near_duplicates<S: Store>(
     params: FindNearDuplicatesParams,
 ) -> Result<Value, McpError> {
     let ps = store.as_persistent().ok_or_else(|| {
-        McpError::ToolError(
-            "memory.find_near_duplicates requires a persistent store".into(),
-        )
+        McpError::ToolError("memory.find_near_duplicates requires a persistent store".into())
     })?;
     let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     let chunk_type = parse_chunk_type(&params.chunk_type)?;
@@ -5208,9 +5757,9 @@ pub async fn handle_memory_export_omf<S: Store>(
     store: &S,
     params: ExportOmfParams,
 ) -> Result<Value, McpError> {
-    let ps = store
-        .as_persistent()
-        .ok_or_else(|| McpError::ToolError("memory.export_omf requires a persistent store".into()))?;
+    let ps = store.as_persistent().ok_or_else(|| {
+        McpError::ToolError("memory.export_omf requires a persistent store".into())
+    })?;
     let tenant_id = resolve_tenant_id(&params.tenant_id)?;
 
     let opts = crate::omf::export::ExportOptions {
@@ -5297,9 +5846,9 @@ pub async fn handle_memory_import_omf<S: Store>(
     tenant_manager: Option<&TenantManager>,
     params: ImportOmfParams,
 ) -> Result<(Value, Vec<PostWriteEvent>), McpError> {
-    let ps = store
-        .as_persistent()
-        .ok_or_else(|| McpError::ToolError("memory.import_omf requires a persistent store".into()))?;
+    let ps = store.as_persistent().ok_or_else(|| {
+        McpError::ToolError("memory.import_omf requires a persistent store".into())
+    })?;
     let tenant_id = resolve_tenant_id(&params.tenant_id)?;
 
     if let Some(tm) = tenant_manager {
@@ -5925,9 +6474,7 @@ pub async fn handle_artifact_create<S: Store>(
         ArtifactKind::WikiPage => TaskArtifact::new_wiki_page(
             tenant_id.clone(),
             task_id.clone().ok_or_else(|| {
-                McpError::InvalidParams(
-                    "task_id is required for wiki_page artifacts".to_string(),
-                )
+                McpError::InvalidParams("task_id is required for wiki_page artifacts".to_string())
             })?,
         ),
     };
@@ -6149,6 +6696,7 @@ pub async fn handle_task_search<S: Store>(
     validate_search_k(params.k)?;
     let filters = parse_task_search_filters(params.filters.as_ref())?;
     let mode = params.mode.unwrap_or_default();
+    let scope_expansion = scope_expansion_for(&tenant_id, filters.project_id.as_deref());
     let has_filters = has_active_task_filters(&filters);
     let candidate_limit = if has_filters {
         params.k.saturating_mul(20).clamp(50, 1000)
@@ -6194,7 +6742,7 @@ pub async fn handle_task_search<S: Store>(
     }
     let ranked = merge_scored_chunk_lists(ranked_lists, params.k);
     let artifacts = resolve_artifacts_for_ranked_chunks(store, &ranked).await?;
-    let results = ranked
+    let mut results = ranked
         .iter()
         .map(|(chunk, score)| {
             chunk_to_result(
@@ -6205,9 +6753,12 @@ pub async fn handle_task_search<S: Store>(
             )
         })
         .collect::<Vec<_>>();
+    annotate_chunk_origins(&mut results, &tenant_id, scope_expansion.as_ref());
 
     format_mcp_response(&SearchResult {
         results,
+        budget_info: None,
+        scope_expansion,
         tier_info: None,
         repair_info: None,
     })
@@ -6294,11 +6845,18 @@ pub async fn handle_artifact_search<S: Store>(
     validate_search_k(params.k)?;
     let filters = parse_task_search_filters(params.filters.as_ref())?;
     let mode = params.mode.unwrap_or_default();
-    let results =
+    let scope_expansion = scope_expansion_for(&tenant_id, filters.project_id.as_deref());
+    let mut results =
         search_artifacts_internal(store, &tenant_id, &params.query, params.k, &filters, mode)
             .await?;
+    annotate_artifact_origins(&mut results, &tenant_id, scope_expansion.as_ref());
 
-    format_mcp_response(&ArtifactSearchResult { results })
+    let (results, budget_info) = shape_artifact_results(results, &params);
+    format_mcp_response(&ArtifactSearchResult {
+        results,
+        budget_info,
+        scope_expansion,
+    })
 }
 
 /// Handle artifact.list_thread tool call.
@@ -6615,7 +7173,7 @@ pub async fn handle_artifact_verify<S: Store>(
     let mut canonical_hits = Vec::new();
     let mut digest_hits = Vec::new();
     for hit in candidate_hits {
-        if derive_artifact_trust_tier(&hit.artifact) == TrustTier::CompiledDigestHint {
+        if derive_artifact_trust_tier(artifact_hit_record(&hit)) == TrustTier::CompiledDigestHint {
             digest_hits.push(hit);
         } else {
             canonical_hits.push(hit);
@@ -6626,7 +7184,12 @@ pub async fn handle_artifact_verify<S: Store>(
     if canonical_hits.is_empty() && !digest_hits.is_empty() {
         let expanded_ids = digest_hits
             .iter()
-            .flat_map(|hit| hit.artifact.related_artifact_ids.iter().cloned())
+            .flat_map(|hit| {
+                artifact_hit_record(hit)
+                    .related_artifact_ids
+                    .iter()
+                    .cloned()
+            })
             .collect::<Vec<_>>();
         let expanded_refs = resolve_grounding_refs_by_artifact_ids(
             store,
@@ -6660,15 +7223,15 @@ pub async fn handle_artifact_verify<S: Store>(
 
     let supporting_hits = canonical_hits
         .iter()
-        .filter(|hit| artifact_supports_claim(&hit.artifact, &params.claim, hit.score))
+        .filter(|hit| artifact_supports_claim(artifact_hit_record(hit), &params.claim, hit.score))
         .collect::<Vec<_>>();
     let support_task_ids = supporting_hits
         .iter()
-        .map(|hit| hit.artifact.task_id.clone())
+        .map(|hit| artifact_hit_record(hit).task_id.clone())
         .collect::<HashSet<_>>();
     let support_thread_ids = supporting_hits
         .iter()
-        .map(|hit| hit.artifact.thread_key().to_string())
+        .map(|hit| artifact_hit_record(hit).thread_key().to_string())
         .collect::<HashSet<_>>();
 
     let conflicting_hits = if supporting_hits.is_empty() {
@@ -6676,10 +7239,10 @@ pub async fn handle_artifact_verify<S: Store>(
     } else {
         canonical_hits
             .iter()
-            .filter(|hit| artifact_has_negative_marker(&hit.artifact))
+            .filter(|hit| artifact_has_negative_marker(artifact_hit_record(hit)))
             .filter(|hit| {
                 artifact_matches_conflict_scope(
-                    &hit.artifact,
+                    artifact_hit_record(hit),
                     params.project_id.as_deref(),
                     params.task_id.as_deref(),
                     params.thread_id.as_deref(),
@@ -6728,10 +7291,9 @@ pub async fn handle_artifact_verify<S: Store>(
     {
         GroundingStatus::Conflicted
     } else if !supporting_artifacts.is_empty() {
-        if supporting_hits
-            .iter()
-            .any(|hit| derive_artifact_trust_tier(&hit.artifact) == TrustTier::VerifiedRecord)
-        {
+        if supporting_hits.iter().any(|hit| {
+            derive_artifact_trust_tier(artifact_hit_record(hit)) == TrustTier::VerifiedRecord
+        }) {
             GroundingStatus::VerifiedRecord
         } else {
             GroundingStatus::CanonicallyGrounded
@@ -7203,10 +7765,148 @@ pub async fn handle_memory_stats<S: Store>(
 
     format_mcp_response(&StatsResult {
         total_chunks: store_stats.total_chunks,
+        active_chunks: store_stats.active_chunks,
         deleted_chunks: store_stats.deleted_chunks,
         chunk_types: store_stats.chunk_types,
+        chunk_types_active: store_stats.chunk_types_active,
+        chunk_types_deleted: store_stats.chunk_types_deleted,
+        chunk_types_all: store_stats.chunk_types_all,
         disk_stats,
         compaction,
+    })
+}
+
+fn percentile_u64(sorted: &[u64], p: usize) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let idx = (p * (sorted.len() - 1) / 100).min(sorted.len() - 1);
+    sorted[idx]
+}
+
+fn build_latency_health(metrics: &MetricsCollector, include_recent: bool) -> LatencyHealthResult {
+    if !include_recent {
+        return LatencyHealthResult::default();
+    }
+    let mut totals = metrics
+        .get_recent_queries(1000)
+        .into_iter()
+        .map(|query| query.total_ms)
+        .collect::<Vec<_>>();
+    totals.sort_unstable();
+    LatencyHealthResult {
+        recent_search_count: totals.len(),
+        p50_total_ms: percentile_u64(&totals, 50),
+        p95_total_ms: percentile_u64(&totals, 95),
+        p99_total_ms: percentile_u64(&totals, 99),
+    }
+}
+
+fn warnings_for_health(
+    snapshot: &StoreHealthSnapshot,
+    latency: &LatencyHealthResult,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if snapshot.counts.total_chunks == 0 {
+        warnings.push("no chunks found for requested scope".to_string());
+    }
+    if snapshot.duplicates.duplicate_row_ratio > 0.20 {
+        warnings.push(format!(
+            "high duplicate row ratio ({:.1}%)",
+            snapshot.duplicates.duplicate_row_ratio * 100.0
+        ));
+    }
+    if snapshot.index_coverage.indexed_percentage > 0.0
+        && snapshot.index_coverage.indexed_percentage < 95.0
+    {
+        warnings.push(format!(
+            "low index coverage ({:.1}%)",
+            snapshot.index_coverage.indexed_percentage
+        ));
+    }
+    if snapshot.payload.p95_canonical_text_bytes > 8_000 {
+        warnings.push(format!(
+            "high p95 canonical text payload ({} bytes)",
+            snapshot.payload.p95_canonical_text_bytes
+        ));
+    }
+    if latency.p95_total_ms > 5_000 {
+        warnings.push(format!(
+            "high recent p95 search latency ({} ms)",
+            latency.p95_total_ms
+        ));
+    }
+    warnings
+}
+
+async fn fallback_health_snapshot<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+) -> Result<StoreHealthSnapshot, McpError> {
+    let stats = store
+        .stats(tenant_id)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    Ok(StoreHealthSnapshot {
+        counts: HealthCounts {
+            active_chunks: stats.active_chunks,
+            deleted_chunks: stats.deleted_chunks,
+            total_chunks: stats.total_chunks,
+            ..Default::default()
+        },
+        chunk_types_active: stats.chunk_types_active,
+        chunk_types_all: stats.chunk_types_all,
+        ..Default::default()
+    })
+}
+
+/// Handle memory.health tool call
+pub async fn handle_memory_health<S: Store>(
+    store: &S,
+    metrics: &MetricsCollector,
+    params: HealthParams,
+) -> Result<Value, McpError> {
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
+    if let Some(project_id) = params.project_id.as_deref() {
+        validate_identifier("project_id", project_id)?;
+    }
+    let duplicate_limit = if params.include_examples {
+        params.duplicate_limit.min(100)
+    } else {
+        0
+    };
+    let snapshot = match store
+        .health_snapshot(&tenant_id, params.project_id.as_deref(), duplicate_limit)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?
+    {
+        Some(snapshot) => snapshot,
+        None => fallback_health_snapshot(store, &tenant_id).await?,
+    };
+    let latency = build_latency_health(metrics, params.include_recent);
+    let warnings = warnings_for_health(&snapshot, &latency);
+    let aliases = params
+        .project_id
+        .as_deref()
+        .map(|project_id| configured_project_aliases(&tenant_id, project_id))
+        .unwrap_or_default();
+
+    format_mcp_response(&MemoryHealthResult {
+        scope: HealthScopeResult {
+            tenant_id: tenant_id.to_string(),
+            project_id: params.project_id,
+            aliases,
+        },
+        counts: snapshot.counts,
+        chunk_types: ChunkTypeHealthResult {
+            active: snapshot.chunk_types_active,
+            all: snapshot.chunk_types_all,
+        },
+        duplicates: snapshot.duplicates,
+        index_coverage: snapshot.index_coverage,
+        payload: snapshot.payload,
+        latency,
+        warnings,
     })
 }
 
@@ -8235,10 +8935,15 @@ pub fn handle_find_errors(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ProjectAliasScopeConfig;
+    use crate::metrics::{MetricsCollector, QueryMetrics};
+    use crate::store::persistent::{PersistentStore, PersistentStoreConfig};
     use crate::store::{MemoryStore, Store};
+    use crate::types::lifecycle::MemoryTier;
     use proptest::prelude::*;
     use serde::de::DeserializeOwned;
     use std::sync::{Mutex, MutexGuard};
+    use tempfile::TempDir;
 
     /// Serialize tests that flip the process-global
     /// `ALLOW_CROSS_TENANT_PROJECT_FALLBACK` atomic. Without this, parallel
@@ -8254,6 +8959,50 @@ mod tests {
 
     fn make_store() -> MemoryStore {
         MemoryStore::new()
+    }
+
+    fn make_persistent_store() -> (PersistentStore, TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PersistentStore::open(PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            segment_max_chunks: 100,
+            wal_checkpoint_interval: 10,
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            ..Default::default()
+        })
+        .unwrap();
+        (store, dir)
+    }
+
+    fn project_brief_digest_fixture(
+        tenant: &TenantId,
+        project_id: &str,
+        summary: &str,
+        source_updated_at_ms: i64,
+    ) -> TaskArtifact {
+        let (artifact_id, task_id, digest_key) =
+            crate::task_memory::stable_digest_identity(DIGEST_ROLE_PROJECT_BRIEF, project_id);
+        let mut artifact = TaskArtifact::new_digest(
+            tenant.clone(),
+            task_id,
+            digest_key,
+            DIGEST_ROLE_PROJECT_BRIEF,
+        );
+        artifact.artifact_id = artifact_id;
+        artifact.project_id = ProjectId::new(Some(project_id.to_string()));
+        artifact.summary = Some(summary.to_string());
+        artifact.source_updated_at_ms = Some(source_updated_at_ms);
+        artifact
+    }
+
+    struct ProjectAliasResetGuard;
+
+    impl Drop for ProjectAliasResetGuard {
+        fn drop(&mut self) {
+            set_project_aliases(Vec::new());
+            set_cross_tenant_project_fallback(false);
+        }
     }
 
     fn parse_tool_payload<T: DeserializeOwned>(result: &Value) -> T {
@@ -8279,6 +9028,10 @@ mod tests {
             include_history: None,
             oversample_factor: None,
             expand_event_siblings: false,
+            compact: false,
+            token_budget: None,
+            include_text: None,
+            include_artifact: None,
         };
 
         let result = handle_memory_search(&store, params).await.unwrap();
@@ -8305,6 +9058,10 @@ mod tests {
             include_history: None,
             oversample_factor: None,
             expand_event_siblings: false,
+            compact: false,
+            token_budget: None,
+            include_text: None,
+            include_artifact: None,
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -8328,6 +9085,10 @@ mod tests {
             include_history: None,
             oversample_factor: None,
             expand_event_siblings: false,
+            compact: false,
+            token_budget: None,
+            include_text: None,
+            include_artifact: None,
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -8413,11 +9174,11 @@ mod tests {
             episode_id: None,
             source: None,
             tags: vec![],
-        expires_at_ms: None,
-        review_after_ms: None,
-        
-        mode: None,
-        supersede_near_duplicates: None,
+            expires_at_ms: None,
+            review_after_ms: None,
+
+            mode: None,
+            supersede_near_duplicates: None,
         };
 
         let add_result = handle_memory_add(&store, None, add_params).await.unwrap();
@@ -8439,6 +9200,10 @@ mod tests {
             include_history: None,
             oversample_factor: None,
             expand_event_siblings: false,
+            compact: false,
+            token_budget: None,
+            include_text: None,
+            include_artifact: None,
         };
 
         let search_result = handle_memory_search(&store, search_params).await.unwrap();
@@ -8463,11 +9228,11 @@ mod tests {
                 episode_id: None,
                 source: None,
                 tags: vec![],
-            expires_at_ms: None,
-            review_after_ms: None,
-            
-            mode: None,
-            supersede_near_duplicates: None,
+                expires_at_ms: None,
+                review_after_ms: None,
+
+                mode: None,
+                supersede_near_duplicates: None,
             },
         )
         .await
@@ -8484,11 +9249,11 @@ mod tests {
                 episode_id: None,
                 source: None,
                 tags: vec![],
-            expires_at_ms: None,
-            review_after_ms: None,
-            
-            mode: None,
-            supersede_near_duplicates: None,
+                expires_at_ms: None,
+                review_after_ms: None,
+
+                mode: None,
+                supersede_near_duplicates: None,
             },
         )
         .await
@@ -8509,6 +9274,10 @@ mod tests {
                 include_history: None,
                 oversample_factor: None,
                 expand_event_siblings: false,
+                compact: false,
+                token_budget: None,
+                include_text: None,
+                include_artifact: None,
             },
         )
         .await
@@ -8540,11 +9309,11 @@ mod tests {
                     episode_id: None,
                     source: None,
                     tags: vec![],
-                expires_at_ms: None,
-                review_after_ms: None,
-                
-                mode: None,
-                supersede_near_duplicates: None,
+                    expires_at_ms: None,
+                    review_after_ms: None,
+
+                    mode: None,
+                    supersede_near_duplicates: None,
                 },
             )
             .await
@@ -8570,6 +9339,10 @@ mod tests {
                 include_history: None,
                 oversample_factor: None,
                 expand_event_siblings: false,
+                compact: false,
+                token_budget: None,
+                include_text: None,
+                include_artifact: None,
             },
         )
         .await
@@ -8626,6 +9399,10 @@ mod tests {
                 include_history: None,
                 oversample_factor: None,
                 expand_event_siblings: false,
+                compact: false,
+                token_budget: None,
+                include_text: None,
+                include_artifact: None,
             },
         )
         .await
@@ -8652,11 +9429,11 @@ mod tests {
                 episode_id: Some("ep1".to_string()),
                 source: None,
                 tags: vec![],
-            expires_at_ms: None,
-            review_after_ms: None,
-            
-            mode: None,
-            supersede_near_duplicates: None,
+                expires_at_ms: None,
+                review_after_ms: None,
+
+                mode: None,
+                supersede_near_duplicates: None,
             },
         )
         .await
@@ -8673,11 +9450,11 @@ mod tests {
                 episode_id: Some("ep2".to_string()),
                 source: None,
                 tags: vec![],
-            expires_at_ms: None,
-            review_after_ms: None,
-            
-            mode: None,
-            supersede_near_duplicates: None,
+                expires_at_ms: None,
+                review_after_ms: None,
+
+                mode: None,
+                supersede_near_duplicates: None,
             },
         )
         .await
@@ -8702,6 +9479,10 @@ mod tests {
                 include_history: None,
                 oversample_factor: None,
                 expand_event_siblings: false,
+                compact: false,
+                token_budget: None,
+                include_text: None,
+                include_artifact: None,
             },
         )
         .await
@@ -8745,9 +9526,9 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
-            
-            mode: None,
-            supersede_near_duplicates: None,
+
+                mode: None,
+                supersede_near_duplicates: None,
             },
         )
         .await
@@ -8768,6 +9549,10 @@ mod tests {
                 include_history: None,
                 oversample_factor: None,
                 expand_event_siblings: false,
+                compact: false,
+                token_budget: None,
+                include_text: None,
+                include_artifact: None,
             },
         )
         .await
@@ -8807,11 +9592,11 @@ mod tests {
                 episode_id: None,
                 source: None,
                 tags: vec![],
-            expires_at_ms: None,
-            review_after_ms: None,
-            
-            mode: None,
-            supersede_near_duplicates: None,
+                expires_at_ms: None,
+                review_after_ms: None,
+
+                mode: None,
+                supersede_near_duplicates: None,
             },
         )
         .await
@@ -8832,6 +9617,10 @@ mod tests {
                 include_history: None,
                 oversample_factor: None,
                 expand_event_siblings: false,
+                compact: false,
+                token_budget: None,
+                include_text: None,
+                include_artifact: None,
             },
         )
         .await
@@ -8872,9 +9661,9 @@ mod tests {
             tags: vec!["rust".to_string(), "function".to_string()],
             expires_at_ms: None,
             review_after_ms: None,
-        
-        mode: None,
-        supersede_near_duplicates: None,
+
+            mode: None,
+            supersede_near_duplicates: None,
         };
 
         let result = handle_memory_add(&store, None, add_params).await.unwrap();
@@ -8917,10 +9706,10 @@ mod tests {
                     episode_id: None,
                     source: None,
                     tags: vec![],
-                expires_at_ms: None,
-                review_after_ms: None,
-                
-                mode: None,
+                    expires_at_ms: None,
+                    review_after_ms: None,
+
+                    mode: None,
                 },
                 BatchChunkParams {
                     text: "chunk 2".to_string(),
@@ -8929,10 +9718,10 @@ mod tests {
                     episode_id: None,
                     source: None,
                     tags: vec![],
-                expires_at_ms: None,
-                review_after_ms: None,
+                    expires_at_ms: None,
+                    review_after_ms: None,
 
-                mode: None,
+                    mode: None,
                 },
             ],
         };
@@ -8956,11 +9745,11 @@ mod tests {
             episode_id: None,
             source: None,
             tags: vec![],
-        expires_at_ms: None,
-        review_after_ms: None,
-        
-        mode: None,
-        supersede_near_duplicates: None,
+            expires_at_ms: None,
+            review_after_ms: None,
+
+            mode: None,
+            supersede_near_duplicates: None,
         };
 
         let add_result = handle_memory_add(&store, None, add_params).await.unwrap();
@@ -9012,11 +9801,11 @@ mod tests {
                 episode_id: None,
                 source: None,
                 tags: vec![],
-            expires_at_ms: None,
-            review_after_ms: None,
-            
-            mode: None,
-            supersede_near_duplicates: None,
+                expires_at_ms: None,
+                review_after_ms: None,
+
+                mode: None,
+                supersede_near_duplicates: None,
             },
         )
         .await
@@ -9057,9 +9846,9 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
-            
-            mode: None,
-            supersede_near_duplicates: None,
+
+                mode: None,
+                supersede_near_duplicates: None,
             };
             handle_memory_add(&store, None, add_params).await.unwrap();
         }
@@ -9075,6 +9864,128 @@ mod tests {
         assert_eq!(stats.total_chunks, 3);
         assert_eq!(stats.deleted_chunks, 0);
         assert_eq!(stats.chunk_types.get("doc"), Some(&3));
+    }
+
+    #[tokio::test]
+    async fn memory_search_compact_omits_large_fields_but_keeps_trust_metadata() {
+        let store = make_store();
+
+        for i in 0..5 {
+            handle_memory_add(
+                &store,
+                None,
+                AddParams {
+                    tenant_id: "test".to_string(),
+                    text: format!(
+                        "alpha compact response fixture {i} {}",
+                        "long repeated context ".repeat(80)
+                    ),
+                    chunk_type: "doc".to_string(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let result = handle_memory_search(
+            &store,
+            SearchParams {
+                tenant_id: "test".to_string(),
+                query: "alpha compact response".to_string(),
+                k: 5,
+                compact: true,
+                token_budget: Some(1200),
+                include_text: Some(false),
+                include_artifact: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let payload: SearchResult = parse_tool_payload(&result);
+        assert!(!payload.results.is_empty());
+        let budget = payload
+            .budget_info
+            .expect("compact search should include budget info");
+        assert_eq!(budget.requested_budget, Some(1200));
+        assert!(budget.omitted_fields.contains(&"text".to_string()));
+        assert!(budget.omitted_fields.contains(&"artifact".to_string()));
+
+        for hit in payload.results {
+            assert!(!hit.chunk_id.is_empty());
+            assert!(hit.text.is_empty());
+            assert!(hit.artifact.is_none());
+            assert_eq!(hit.trust_tier, TrustTier::SemanticCandidate);
+            assert!(hit.verification_hint.requires_verification);
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_health_reports_empty_and_duplicate_scopes() {
+        let (store, _dir) = make_persistent_store();
+        let metrics = MetricsCollector::new(10);
+
+        let empty = handle_memory_health(
+            &store,
+            &metrics,
+            HealthParams {
+                tenant_id: "tenant_empty".to_string(),
+                project_id: None,
+                include_examples: false,
+                duplicate_limit: 10,
+                include_recent: false,
+            },
+        )
+        .await
+        .unwrap();
+        let empty_payload: MemoryHealthResult = parse_tool_payload(&empty);
+        assert_eq!(empty_payload.counts.total_chunks, 0);
+        assert!(empty_payload
+            .warnings
+            .contains(&"no chunks found for requested scope".to_string()));
+
+        let tenant = TenantId::new("tenant_health").unwrap();
+        for text in [
+            "duplicate health text",
+            "duplicate health text",
+            "unique health text",
+        ] {
+            store
+                .add(MemoryChunk::new(tenant.clone(), text, ChunkType::Doc))
+                .await
+                .unwrap();
+        }
+        metrics.record_query(QueryMetrics {
+            total_ms: 42,
+            ..Default::default()
+        });
+
+        let result = handle_memory_health(
+            &store,
+            &metrics,
+            HealthParams {
+                tenant_id: "tenant_health".to_string(),
+                project_id: None,
+                include_examples: true,
+                duplicate_limit: 5,
+                include_recent: true,
+            },
+        )
+        .await
+        .unwrap();
+        let payload: MemoryHealthResult = parse_tool_payload(&result);
+
+        assert_eq!(payload.counts.total_chunks, 3);
+        assert_eq!(payload.duplicates.unique_text_count, 2);
+        assert_eq!(payload.duplicates.exact_duplicate_group_count, 1);
+        assert_eq!(payload.duplicates.duplicate_row_count, 1);
+        assert!((payload.duplicates.duplicate_row_ratio - (1.0 / 3.0)).abs() < 0.001);
+        assert_eq!(payload.duplicates.examples.len(), 1);
+        assert_eq!(payload.index_coverage.indexed_percentage, 100.0);
+        assert_eq!(payload.latency.recent_search_count, 1);
+        assert_eq!(payload.latency.p95_total_ms, 42);
     }
 
     #[tokio::test]
@@ -9094,6 +10005,10 @@ mod tests {
             include_history: None,
             oversample_factor: None,
             expand_event_siblings: false,
+            compact: false,
+            token_budget: None,
+            include_text: None,
+            include_artifact: None,
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -9113,11 +10028,11 @@ mod tests {
             episode_id: None,
             source: None,
             tags: vec![],
-        expires_at_ms: None,
-        review_after_ms: None,
-        
-        mode: None,
-        supersede_near_duplicates: None,
+            expires_at_ms: None,
+            review_after_ms: None,
+
+            mode: None,
+            supersede_near_duplicates: None,
         };
 
         let result = handle_memory_add(&store, None, params).await;
@@ -9155,11 +10070,11 @@ mod tests {
             episode_id: None,
             source: None,
             tags: vec![],
-        expires_at_ms: None,
-        review_after_ms: None,
-        
-        mode: None,
-        supersede_near_duplicates: None,
+            expires_at_ms: None,
+            review_after_ms: None,
+
+            mode: None,
+            supersede_near_duplicates: None,
         };
 
         handle_memory_add(&store, None, add_params).await.unwrap();
@@ -9178,6 +10093,10 @@ mod tests {
             include_history: None,
             oversample_factor: None,
             expand_event_siblings: false,
+            compact: false,
+            token_budget: None,
+            include_text: None,
+            include_artifact: None,
         };
 
         let result = handle_memory_search(&store, search_params).await.unwrap();
@@ -9199,11 +10118,11 @@ mod tests {
             episode_id: None,
             source: None,
             tags: vec![],
-        expires_at_ms: None,
-        review_after_ms: None,
-        
-        mode: None,
-        supersede_near_duplicates: None,
+            expires_at_ms: None,
+            review_after_ms: None,
+
+            mode: None,
+            supersede_near_duplicates: None,
         };
 
         handle_memory_add(&store, None, add_params).await.unwrap();
@@ -9222,6 +10141,10 @@ mod tests {
             include_history: None,
             oversample_factor: None,
             expand_event_siblings: false,
+            compact: false,
+            token_budget: None,
+            include_text: None,
+            include_artifact: None,
         };
 
         let result = handle_memory_search(&store, search_params).await.unwrap();
@@ -9256,12 +10179,12 @@ mod tests {
                     "ctx:subsystem:retrieval".to_string(),
                     "ctx:file:src/retrieval/mod.rs".to_string(),
                 ],
-            
-            expires_at_ms: None,
-            review_after_ms: None,
-            
-            mode: None,
-            supersede_near_duplicates: None,
+
+                expires_at_ms: None,
+                review_after_ms: None,
+
+                mode: None,
+                supersede_near_duplicates: None,
             },
         )
         .await
@@ -9285,12 +10208,12 @@ mod tests {
                     "ctx:subsystem:retrieval".to_string(),
                     "ctx:file:src/retrieval/index.rs".to_string(),
                 ],
-            
-            expires_at_ms: None,
-            review_after_ms: None,
-            
-            mode: None,
-            supersede_near_duplicates: None,
+
+                expires_at_ms: None,
+                review_after_ms: None,
+
+                mode: None,
+                supersede_near_duplicates: None,
             },
         )
         .await
@@ -9314,12 +10237,12 @@ mod tests {
                     "ctx:subsystem:planner".to_string(),
                     "ctx:file:src/planner/mod.rs".to_string(),
                 ],
-            
-            expires_at_ms: None,
-            review_after_ms: None,
-            
-            mode: None,
-            supersede_near_duplicates: None,
+
+                expires_at_ms: None,
+                review_after_ms: None,
+
+                mode: None,
+                supersede_near_duplicates: None,
             },
         )
         .await
@@ -9369,12 +10292,12 @@ mod tests {
                     "ctx:subsystem:storage".to_string(),
                     "ctx:file:crates/memd/src/store/hybrid.rs".to_string(),
                 ],
-            
-            expires_at_ms: None,
-            review_after_ms: None,
-            
-            mode: None,
-            supersede_near_duplicates: None,
+
+                expires_at_ms: None,
+                review_after_ms: None,
+
+                mode: None,
+                supersede_near_duplicates: None,
             },
         )
         .await
@@ -9425,12 +10348,12 @@ mod tests {
                         "ctx:subsystem:retrieval".to_string(),
                         tier_tag.to_string(),
                     ],
-                
-                expires_at_ms: None,
-                review_after_ms: None,
-                
-                mode: None,
-                supersede_near_duplicates: None,
+
+                    expires_at_ms: None,
+                    review_after_ms: None,
+
+                    mode: None,
+                    supersede_near_duplicates: None,
                 },
             )
             .await
@@ -9519,12 +10442,12 @@ mod tests {
                     "ctx:file:crates/memd/src/store/hybrid.rs".to_string(),
                     "ctx:tier:hot".to_string(),
                 ],
-            
-            expires_at_ms: None,
-            review_after_ms: None,
-            
-            mode: None,
-            supersede_near_duplicates: None,
+
+                expires_at_ms: None,
+                review_after_ms: None,
+
+                mode: None,
+                supersede_near_duplicates: None,
             },
         )
         .await
@@ -9872,6 +10795,10 @@ mod tests {
                     relation_kind: None,
                 }),
                 mode: None,
+                compact: false,
+                token_budget: None,
+                include_artifact: None,
+                include_matched_text: None,
             },
         )
         .await
@@ -9956,6 +10883,10 @@ mod tests {
                     ..Default::default()
                 }),
                 mode: None,
+                compact: false,
+                token_budget: None,
+                include_artifact: None,
+                include_matched_text: None,
             },
         )
         .await
@@ -9993,11 +10924,11 @@ mod tests {
                 episode_id: None,
                 source: None,
                 tags: vec![],
-            expires_at_ms: None,
-            review_after_ms: None,
-            
-            mode: None,
-            supersede_near_duplicates: None,
+                expires_at_ms: None,
+                review_after_ms: None,
+
+                mode: None,
+                supersede_near_duplicates: None,
             },
         )
         .await
@@ -10018,6 +10949,10 @@ mod tests {
                 include_history: None,
                 oversample_factor: None,
                 expand_event_siblings: false,
+                compact: false,
+                token_budget: None,
+                include_text: None,
+                include_artifact: None,
             },
         )
         .await
@@ -10083,6 +11018,190 @@ mod tests {
         let payload: SearchResult = parse_tool_payload(&result);
         assert_eq!(payload.results.len(), 1);
         assert_eq!(payload.results[0].text, "tenant a private alpha");
+    }
+
+    #[tokio::test]
+    async fn project_alias_search_is_explicit_and_annotates_origin() {
+        let _flag_guard = with_fallback_flag();
+        let _reset = ProjectAliasResetGuard;
+        set_cross_tenant_project_fallback(false);
+        set_project_aliases(Vec::new());
+
+        let store = make_store();
+        for (tenant_id, text) in [
+            ("default", "aliased memd history marker"),
+            ("other", "otheronly memd history marker"),
+        ] {
+            handle_memory_add(
+                &store,
+                None,
+                AddParams {
+                    tenant_id: tenant_id.to_string(),
+                    text: text.to_string(),
+                    chunk_type: "doc".to_string(),
+                    project_id: Some("memd".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let isolated = handle_memory_search(
+            &store,
+            SearchParams {
+                tenant_id: "memd".to_string(),
+                query: "aliased memd history".to_string(),
+                project_id: Some("memd".to_string()),
+                k: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let isolated_payload: SearchResult = parse_tool_payload(&isolated);
+        assert!(isolated_payload
+            .results
+            .iter()
+            .all(|result| result.tenant_id == "memd"));
+        assert!(isolated_payload.scope_expansion.is_none());
+
+        set_project_aliases(vec![ProjectAliasConfig {
+            tenant_id: "memd".to_string(),
+            project_id: "memd".to_string(),
+            aliases: vec![ProjectAliasScopeConfig {
+                tenant_id: "default".to_string(),
+                project_id: None,
+                reason: Some("fragmented_project_history".to_string()),
+            }],
+        }]);
+
+        let aliased = handle_memory_search(
+            &store,
+            SearchParams {
+                tenant_id: "memd".to_string(),
+                query: "aliased memd history".to_string(),
+                project_id: Some("memd".to_string()),
+                k: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let aliased_payload: SearchResult = parse_tool_payload(&aliased);
+        let alias_hit = aliased_payload
+            .results
+            .iter()
+            .find(|result| result.tenant_id == "default")
+            .expect("alias search should include the configured default tenant");
+        let origin = alias_hit
+            .origin
+            .as_ref()
+            .expect("alias hit should carry origin metadata");
+        assert_eq!(origin.requested_tenant_id, "memd");
+        assert_eq!(origin.origin_tenant_id, "default");
+        assert_eq!(origin.origin_project_id.as_deref(), Some("memd"));
+        assert_eq!(origin.alias_reason, "fragmented_project_history");
+        assert_eq!(
+            aliased_payload
+                .scope_expansion
+                .as_ref()
+                .expect("alias search should report scope expansion")
+                .aliases
+                .len(),
+            1
+        );
+
+        let unrelated = handle_memory_search(
+            &store,
+            SearchParams {
+                tenant_id: "memd".to_string(),
+                query: "otheronly".to_string(),
+                project_id: Some("memd".to_string()),
+                k: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let unrelated_payload: SearchResult = parse_tool_payload(&unrelated);
+        assert!(
+            unrelated_payload
+                .results
+                .iter()
+                .all(|result| result.tenant_id != "other"),
+            "explicit alias must not widen to every tenant with the same project_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn artifact_search_compact_omits_full_payload_but_keeps_identifiers() {
+        let store = make_store();
+
+        let start: TaskArtifactResult = parse_tool_payload(
+            &handle_task_start(
+                &store,
+                None,
+                TaskStartParams {
+                    tenant_id: "test".to_string(),
+                    project_id: Some("compact_artifacts".to_string()),
+                    parent_task_id: None,
+                    agent_id: Some("planner-1".to_string()),
+                    session_id: None,
+                    goal: "Keep compact artifact search useful".to_string(),
+                    motivation: "Agents should fetch full artifacts only when needed".to_string(),
+                    hypothesis: "Compact hits keep stable identifiers".to_string(),
+                    scientific_question: "Can compact artifact search preserve trust metadata?"
+                        .to_string(),
+                    dataset_refs: vec![],
+                    expected_outputs: vec!["compact artifact hit".to_string()],
+                    entity_refs: vec![],
+                    provenance: None,
+                },
+            )
+            .await
+            .unwrap(),
+        );
+
+        let result = handle_artifact_search(
+            &store,
+            TaskSearchParams {
+                tenant_id: "test".to_string(),
+                query: "compact artifact search".to_string(),
+                k: 5,
+                filters: Some(TaskSearchFiltersParams {
+                    project_id: Some("compact_artifacts".to_string()),
+                    ..Default::default()
+                }),
+                mode: None,
+                compact: true,
+                token_budget: Some(200),
+                include_artifact: Some(false),
+                include_matched_text: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+
+        let payload: ArtifactSearchResult = parse_tool_payload(&result);
+        assert_eq!(payload.results.len(), 1);
+        let hit = &payload.results[0];
+        assert_eq!(hit.artifact_id, start.artifact_id);
+        assert_eq!(hit.task_id, start.task_id);
+        assert_eq!(hit.artifact_kind, "task_start");
+        assert_eq!(hit.project_id.as_deref(), Some("compact_artifacts"));
+        assert!(hit.artifact.is_none());
+        assert!(hit.matched_text.is_none());
+        assert_eq!(hit.trust_tier, TrustTier::CanonicalRecord);
+        assert!(!hit.grounding_refs.is_empty());
+        assert!(!hit.verification_hint.requires_verification);
+
+        let budget = payload
+            .budget_info
+            .expect("compact artifact search should include budget info");
+        assert_eq!(budget.requested_budget, Some(200));
+        assert!(budget.omitted_fields.contains(&"artifact".to_string()));
+        assert!(budget.omitted_fields.contains(&"matched_text".to_string()));
     }
 
     #[tokio::test]
@@ -10261,6 +11380,10 @@ mod tests {
                         relation_kind: Some("reviews".to_string()),
                     }),
                     mode: None,
+                    compact: false,
+                    token_budget: None,
+                    include_artifact: None,
+                    include_matched_text: None,
                 },
             )
             .await
@@ -10268,7 +11391,11 @@ mod tests {
         );
         assert_eq!(search_payload.results.len(), 1);
         assert_eq!(
-            search_payload.results[0].artifact.artifact_id,
+            search_payload.results[0]
+                .artifact
+                .as_ref()
+                .expect("artifact should be included in full mode")
+                .artifact_id,
             review.artifact_id
         );
         assert_eq!(
@@ -10310,6 +11437,10 @@ mod tests {
                         relation_kind: Some("reviews".to_string()),
                     }),
                     mode: None,
+                    compact: false,
+                    token_budget: None,
+                    include_artifact: None,
+                    include_matched_text: None,
                 },
             )
             .await
@@ -10400,6 +11531,10 @@ mod tests {
                 include_history: None,
                 oversample_factor: None,
                 expand_event_siblings: false,
+                compact: false,
+                token_budget: None,
+                include_text: None,
+                include_artifact: None,
             },
         )
         .await
@@ -10480,6 +11615,10 @@ mod tests {
                 include_history: None,
                 oversample_factor: None,
                 expand_event_siblings: false,
+                compact: false,
+                token_budget: None,
+                include_text: None,
+                include_artifact: None,
             },
         )
         .await
@@ -11933,12 +13072,13 @@ mod tests {
             None,
         );
         page_params.artifact_role = Some("concept".to_string());
-        page_params.content = Some(
-            "# Verification boundary\n\nLLM-authored concept page body.".to_string(),
-        );
+        page_params.content =
+            Some("# Verification boundary\n\nLLM-authored concept page body.".to_string());
         page_params.related_artifact_ids = vec!["0199".to_string()];
 
-        let page_value = handle_artifact_create(&store, None, page_params).await.unwrap();
+        let page_value = handle_artifact_create(&store, None, page_params)
+            .await
+            .unwrap();
         let page_payload: TaskArtifactResult = parse_tool_payload(&page_value);
 
         let page = store
@@ -12280,6 +13420,79 @@ mod tests {
             second_payload.artifact.timestamp_created
         );
         assert_eq!(chunks_after_first, chunks_after_second);
+    }
+
+    #[tokio::test]
+    async fn digest_persistence_replaces_changed_projections_and_retires_orphans() {
+        let (store, _dir) = make_persistent_store();
+        let tenant = TenantId::new("tenant_digest_replace").unwrap();
+        let first_digest =
+            project_brief_digest_fixture(&tenant, "proj_digest_replace", "first digest summary", 1);
+        let first_projection_text = build_task_projections(&first_digest)[0].chunk.text.clone();
+
+        let orphan = MemoryChunk::new(tenant.clone(), &first_projection_text, ChunkType::Summary)
+            .with_project(ProjectId::new(Some("proj_digest_replace".to_string())));
+        let orphan_id = store.add(orphan).await.unwrap();
+
+        let persisted_first = persist_digest_artifact(&store, first_digest)
+            .await
+            .expect("initial digest persist should succeed");
+        let filters = TaskSearchFilters {
+            artifact_kind: Some(ArtifactKind::Digest),
+            artifact_role: Some(DIGEST_ROLE_PROJECT_BRIEF.to_string()),
+            project_id: Some("proj_digest_replace".to_string()),
+            ..Default::default()
+        };
+        let first_links = store
+            .search_task_projection_chunk_ids(&tenant, &filters, 20)
+            .await
+            .unwrap();
+        assert!(!first_links.is_empty());
+
+        let orphan_meta = store
+            .metadata()
+            .get(&tenant, &orphan_id)
+            .unwrap()
+            .expect("orphan digest projection should still have metadata");
+        assert_eq!(orphan_meta.status, ChunkStatus::Superseded);
+        assert_eq!(orphan_meta.lifecycle.tier, MemoryTier::History);
+
+        let second_digest = project_brief_digest_fixture(
+            &tenant,
+            "proj_digest_replace",
+            "second digest summary with changed content",
+            2,
+        );
+        let persisted_second = persist_digest_artifact(&store, second_digest)
+            .await
+            .expect("changed digest persist should succeed");
+        assert_eq!(persisted_first.artifact_id, persisted_second.artifact_id);
+
+        let second_links = store
+            .search_task_projection_chunk_ids(&tenant, &filters, 20)
+            .await
+            .unwrap();
+        assert!(!second_links.is_empty());
+        assert_ne!(first_links, second_links);
+
+        for old_id in first_links {
+            let meta = store
+                .metadata()
+                .get(&tenant, &old_id)
+                .unwrap()
+                .expect("old digest projection metadata should remain");
+            assert_eq!(meta.status, ChunkStatus::Superseded);
+            assert_eq!(meta.lifecycle.tier, MemoryTier::History);
+        }
+        for new_id in second_links {
+            let meta = store
+                .metadata()
+                .get(&tenant, &new_id)
+                .unwrap()
+                .expect("current digest projection metadata should remain");
+            assert_eq!(meta.status, ChunkStatus::Final);
+            assert_eq!(meta.lifecycle.tier, MemoryTier::LongTerm);
+        }
     }
 
     #[tokio::test]

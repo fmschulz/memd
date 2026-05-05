@@ -40,7 +40,7 @@ pub struct TieredStats {
 }
 use super::segment::{SegmentReader, SegmentWriter};
 use super::wal::{TaskArtifactWalPayload, WalReader, WalRecord, WalRecordType, WalWriter};
-use super::{rank_candidate_chunks, score_candidate_chunk, Store, StoreStats};
+use super::{rank_candidate_chunks, score_candidate_chunk, Store, StoreHealthSnapshot, StoreStats};
 use crate::embeddings::EmbeddingModel;
 use crate::error::{MemdError, Result};
 use crate::index::{Bm25Index, SparseIndex};
@@ -1716,6 +1716,17 @@ impl Store for PersistentStore {
         self.get_stats(tenant_id).await
     }
 
+    async fn health_snapshot(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        duplicate_limit: usize,
+    ) -> Result<Option<StoreHealthSnapshot>> {
+        self.metadata
+            .health_snapshot(tenant_id, project_id, duplicate_limit)
+            .map(Some)
+    }
+
     async fn list_chunks(
         &self,
         tenant_id: &TenantId,
@@ -3090,18 +3101,17 @@ impl PersistentStore {
 
     async fn get_stats(&self, tenant_id: &TenantId) -> Result<StoreStats> {
         let (active, deleted) = self.metadata.count_by_status(tenant_id)?;
-
-        // Get chunk types from metadata
-        let chunks = self.metadata.list(tenant_id, 10000, 0)?;
-        let mut chunk_types = HashMap::new();
-        for meta in &chunks {
-            *chunk_types.entry(meta.chunk_type.to_string()).or_insert(0) += 1;
-        }
+        let (chunk_types_active, chunk_types_deleted, chunk_types_all) =
+            self.metadata.count_chunk_types_by_status(tenant_id, None)?;
 
         Ok(StoreStats {
             total_chunks: active + deleted,
+            active_chunks: active,
             deleted_chunks: deleted,
-            chunk_types,
+            chunk_types: chunk_types_active.clone(),
+            chunk_types_active,
+            chunk_types_deleted,
+            chunk_types_all,
         })
     }
 }
@@ -3811,6 +3821,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stats_counts_chunk_types_without_list_cap() {
+        let (store, _dir) = make_test_store();
+        let tenant = make_tenant();
+        let mut rows = Vec::with_capacity(10_050);
+
+        for i in 0..10_050usize {
+            rows.push(ChunkMetadata {
+                chunk_id: ChunkId::new(),
+                tenant_id: tenant.clone(),
+                project_id: None,
+                segment_id: i as u64,
+                ordinal: 0,
+                chunk_type: if i % 2 == 0 {
+                    ChunkType::Doc
+                } else {
+                    ChunkType::Summary
+                },
+                status: if i < 5 {
+                    ChunkStatus::Deleted
+                } else {
+                    ChunkStatus::Final
+                },
+                timestamp_created: i as i64,
+                hash: format!("hash-{i}"),
+                source_uri: None,
+                lifecycle: crate::types::LifecycleMetadata::default(),
+                canonical_text: Some(format!("stats row {i}")),
+                ingestion_mode: crate::types::IngestionMode::Document,
+            });
+        }
+
+        store.metadata.insert_many(&rows).unwrap();
+
+        let stats = store.stats(&tenant).await.unwrap();
+        assert_eq!(stats.total_chunks, 10_050);
+        assert_eq!(stats.deleted_chunks, 5);
+        assert_eq!(stats.active_chunks, 10_045);
+        assert_eq!(
+            stats.chunk_types_all.values().sum::<usize>(),
+            stats.total_chunks
+        );
+        assert_eq!(
+            stats.chunk_types_active.values().sum::<usize>(),
+            stats.active_chunks
+        );
+        assert_eq!(
+            stats.chunk_types_deleted.values().sum::<usize>(),
+            stats.deleted_chunks
+        );
+        assert_eq!(stats.chunk_types, stats.chunk_types_active);
+    }
+
+    #[tokio::test]
     async fn add_long_document_splits_into_multiple_chunks() {
         let (store, _dir) = make_test_store();
         let tenant = make_tenant();
@@ -3939,9 +4002,7 @@ mod tests {
             "charlie tiered cache invalidation",
         ];
         for text in &texts {
-            Store::add(&store, make_chunk(&tenant, text))
-                .await
-                .unwrap();
+            Store::add(&store, make_chunk(&tenant, text)).await.unwrap();
         }
         // Sanity: search works while HNSW is warm.
         assert_eq!(dense_searcher.index_len(&tenant), texts.len());

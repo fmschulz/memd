@@ -19,6 +19,7 @@ pub mod wal;
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::compaction::{CompactionMetrics, CompactionResult};
 use crate::error::{MemdError, Result};
@@ -38,10 +39,72 @@ pub use feedback::{
 pub struct StoreStats {
     /// Total number of chunks (including deleted)
     pub total_chunks: usize,
+    /// Number of non-deleted chunks.
+    pub active_chunks: usize,
     /// Number of soft-deleted chunks
     pub deleted_chunks: usize,
-    /// Count of chunks by type
+    /// Backward-compatible count of active chunks by type.
     pub chunk_types: HashMap<String, usize>,
+    /// Count of active chunks by type.
+    pub chunk_types_active: HashMap<String, usize>,
+    /// Count of deleted chunks by type.
+    pub chunk_types_deleted: HashMap<String, usize>,
+    /// Count of all chunks by type, including deleted rows.
+    pub chunk_types_all: HashMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HealthCounts {
+    pub active_chunks: usize,
+    pub deleted_chunks: usize,
+    pub expired_chunks: usize,
+    pub superseded_chunks: usize,
+    pub history_chunks: usize,
+    pub total_chunks: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DuplicateExample {
+    pub canonical_text_preview: String,
+    pub count: usize,
+    pub byte_count: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DuplicateHealth {
+    pub unique_text_count: usize,
+    pub exact_duplicate_group_count: usize,
+    pub duplicate_row_count: usize,
+    pub duplicate_row_ratio: f64,
+    pub duplicate_byte_ratio: f64,
+    #[serde(default)]
+    pub examples: Vec<DuplicateExample>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IndexCoverageHealth {
+    pub pending: usize,
+    pub indexed: usize,
+    pub failed: usize,
+    pub indexed_percentage: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PayloadHealth {
+    pub p50_canonical_text_bytes: usize,
+    pub p95_canonical_text_bytes: usize,
+    pub max_canonical_text_bytes: usize,
+    pub p95_artifact_json_bytes: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StoreHealthSnapshot {
+    pub counts: HealthCounts,
+    pub chunk_types_active: HashMap<String, usize>,
+    pub chunk_types_all: HashMap<String, usize>,
+    pub duplicates: DuplicateHealth,
+    pub index_coverage: IndexCoverageHealth,
+    pub payload: PayloadHealth,
 }
 
 pub(crate) fn score_candidate_chunk(query: &str, chunk: &MemoryChunk) -> f32 {
@@ -303,6 +366,16 @@ pub trait Store: Send + Sync {
 
     /// Get statistics for a tenant
     async fn stats(&self, tenant_id: &TenantId) -> Result<StoreStats>;
+
+    /// Get read-only storage health aggregates for a tenant/project scope.
+    async fn health_snapshot(
+        &self,
+        _tenant_id: &TenantId,
+        _project_id: Option<&str>,
+        _duplicate_limit: usize,
+    ) -> Result<Option<StoreHealthSnapshot>> {
+        Ok(None)
+    }
 
     /// Search with tier info for debugging
     ///

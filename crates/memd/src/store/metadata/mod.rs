@@ -10,6 +10,9 @@ pub use pool::{PooledConnection, SqliteConnectionPool};
 pub use sqlite::SqliteMetadataStore;
 
 use crate::error::Result;
+use std::collections::HashMap;
+
+use crate::store::StoreHealthSnapshot;
 use crate::types::{ChunkId, ChunkStatus, ChunkType, LifecycleDelta, LifecycleMetadata, TenantId};
 
 /// Index lifecycle state for a chunk.
@@ -87,14 +90,29 @@ pub trait MetadataStore: Send + Sync {
     /// `PersistentStore::next_segment_id()` allocates per-tenant, so
     /// segment_id=1 legitimately exists in every tenant independently
     /// (Item 2).
-    fn get_by_segment(
-        &self,
-        tenant_id: &TenantId,
-        segment_id: u64,
-    ) -> Result<Vec<ChunkMetadata>>;
+    fn get_by_segment(&self, tenant_id: &TenantId, segment_id: u64) -> Result<Vec<ChunkMetadata>>;
 
     /// Count chunks by status for a tenant
     fn count_by_status(&self, tenant_id: &TenantId) -> Result<(usize, usize)>;
+
+    /// Count chunk types via aggregate SQL, returning active/deleted/all maps.
+    fn count_chunk_types_by_status(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+    ) -> Result<(
+        HashMap<String, usize>,
+        HashMap<String, usize>,
+        HashMap<String, usize>,
+    )>;
+
+    /// Compute read-only health aggregates for a tenant/project scope.
+    fn health_snapshot(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        duplicate_limit: usize,
+    ) -> Result<StoreHealthSnapshot>;
 
     /// Get all deleted chunk IDs for a tenant (for compaction)
     fn get_deleted_chunk_ids(&self, tenant_id: &TenantId) -> Result<Vec<ChunkId>>;

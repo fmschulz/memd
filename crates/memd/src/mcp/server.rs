@@ -28,23 +28,21 @@ use super::handlers::{
     handle_find_callers, handle_find_definition, handle_find_errors, handle_find_imports,
     handle_find_references, handle_find_tool_calls, handle_memory_add, handle_memory_add_batch,
     handle_memory_compact, handle_memory_consolidate_episode, handle_memory_delete,
-    handle_memory_feedback, handle_memory_get, handle_memory_metrics, handle_memory_search,
-    handle_memory_export_markdown, handle_memory_export_omf,
-    handle_memory_find_near_duplicates, handle_memory_import_omf,
-    handle_memory_preview_omf_import, handle_memory_set_expiry, handle_memory_stats,
-    handle_memory_supersede, handle_task_add_evidence, handle_task_finish,
-    handle_task_get, handle_task_progress, handle_task_resume, handle_task_run_finish,
-    handle_task_run_start, handle_task_search, handle_task_start, AddBatchParams, AddParams,
-    ArtifactCreateParams, ArtifactGetParams, ArtifactLibraryParams, ArtifactListThreadParams,
-    ArtifactVerifyParams, CompactParams, ConsolidateEpisodeParams, ContextFindRelevantContextParams,
-    ContextGetFilesForSubsystemParams, ContextGetHotContextParams, ContextListSubsystemsParams,
-    ContextSearchDocumentsParams, ContextSuggestAgentParams, DeleteParams, ExportMarkdownParams,
-    ExportOmfParams, FeedbackParams, FindCallersParams, FindDefinitionParams, FindErrorsParams,
-    FindImportsParams, FindNearDuplicatesParams, FindReferencesParams, FindToolCallsParams,
-    GetParams, ImportOmfParams, MetricsParams,
-    PreviewOmfImportParams, ProjectBriefParams,
-    SearchParams, SetExpiryParams, StatsParams, SupersedeParams, TaskAddEvidenceParams,
-    TaskFinishParams,
+    handle_memory_export_markdown, handle_memory_export_omf, handle_memory_feedback,
+    handle_memory_find_near_duplicates, handle_memory_get, handle_memory_health,
+    handle_memory_import_omf, handle_memory_metrics, handle_memory_preview_omf_import,
+    handle_memory_search, handle_memory_set_expiry, handle_memory_stats, handle_memory_supersede,
+    handle_task_add_evidence, handle_task_finish, handle_task_get, handle_task_progress,
+    handle_task_resume, handle_task_run_finish, handle_task_run_start, handle_task_search,
+    handle_task_start, AddBatchParams, AddParams, ArtifactCreateParams, ArtifactGetParams,
+    ArtifactLibraryParams, ArtifactListThreadParams, ArtifactVerifyParams, CompactParams,
+    ConsolidateEpisodeParams, ContextFindRelevantContextParams, ContextGetFilesForSubsystemParams,
+    ContextGetHotContextParams, ContextListSubsystemsParams, ContextSearchDocumentsParams,
+    ContextSuggestAgentParams, DeleteParams, ExportMarkdownParams, ExportOmfParams, FeedbackParams,
+    FindCallersParams, FindDefinitionParams, FindErrorsParams, FindImportsParams,
+    FindNearDuplicatesParams, FindReferencesParams, FindToolCallsParams, GetParams, HealthParams,
+    ImportOmfParams, MetricsParams, PreviewOmfImportParams, ProjectBriefParams, SearchParams,
+    SetExpiryParams, StatsParams, SupersedeParams, TaskAddEvidenceParams, TaskFinishParams,
     TaskGetParams, TaskProgressParams, TaskResumeParams, TaskRunFinishParams, TaskRunStartParams,
     TaskSearchParams, TaskStartParams,
 };
@@ -134,6 +132,8 @@ impl<S: Store> McpServer<S> {
         super::handlers::set_cross_tenant_project_fallback(
             config.server.allow_cross_tenant_project_fallback,
         );
+        #[cfg(not(test))]
+        super::handlers::set_project_aliases(config.server.project_aliases.clone());
 
         Self {
             config,
@@ -157,6 +157,8 @@ impl<S: Store> McpServer<S> {
         super::handlers::set_cross_tenant_project_fallback(
             config.server.allow_cross_tenant_project_fallback,
         );
+        #[cfg(not(test))]
+        super::handlers::set_project_aliases(config.server.project_aliases.clone());
 
         Self {
             config,
@@ -855,6 +857,12 @@ impl<S: Store> McpServer<S> {
                     let index_stats = self.store.get_index_stats(None);
                     handle_memory_metrics(&self.metrics, index_stats, params)
                 }
+                "memory.health" => {
+                    let params: HealthParams = serde_json::from_value(arguments).map_err(|e| {
+                        McpError::InvalidParams(format!("invalid health params: {}", e))
+                    })?;
+                    handle_memory_health(&*self.store, &self.metrics, params).await
+                }
                 "memory.compact" => {
                     let params: CompactParams = serde_json::from_value(arguments).map_err(|e| {
                         McpError::InvalidParams(format!("invalid compact params: {}", e))
@@ -864,17 +872,11 @@ impl<S: Store> McpServer<S> {
                 "memory.supersede" => {
                     let params: SupersedeParams =
                         serde_json::from_value(arguments).map_err(|e| {
-                            McpError::InvalidParams(format!(
-                                "invalid supersede params: {}",
-                                e
-                            ))
+                            McpError::InvalidParams(format!("invalid supersede params: {}", e))
                         })?;
-                    let (response, event) = handle_memory_supersede(
-                        &*self.store,
-                        self.tenant_manager.as_ref(),
-                        params,
-                    )
-                    .await?;
+                    let (response, event) =
+                        handle_memory_supersede(&*self.store, self.tenant_manager.as_ref(), params)
+                            .await?;
                     // Run structural indexing for the newly-written
                     // chunk, mirroring memory.add. The handler returns
                     // the event so the dispatch arm stays the single
@@ -891,10 +893,7 @@ impl<S: Store> McpServer<S> {
                 "memory.set_expiry" => {
                     let params: SetExpiryParams =
                         serde_json::from_value(arguments).map_err(|e| {
-                            McpError::InvalidParams(format!(
-                                "invalid set_expiry params: {}",
-                                e
-                            ))
+                            McpError::InvalidParams(format!("invalid set_expiry params: {}", e))
                         })?;
                     handle_memory_set_expiry(&*self.store, self.tenant_manager.as_ref(), params)
                         .await
@@ -910,8 +909,8 @@ impl<S: Store> McpServer<S> {
                     handle_memory_find_near_duplicates(&*self.store, params).await
                 }
                 "memory.export_markdown" => {
-                    let params: ExportMarkdownParams = serde_json::from_value(arguments)
-                        .map_err(|e| {
+                    let params: ExportMarkdownParams =
+                        serde_json::from_value(arguments).map_err(|e| {
                             McpError::InvalidParams(format!(
                                 "invalid export_markdown params: {}",
                                 e
@@ -927,8 +926,8 @@ impl<S: Store> McpServer<S> {
                     handle_memory_export_omf(&*self.store, params).await
                 }
                 "memory.preview_omf_import" => {
-                    let params: PreviewOmfImportParams =
-                        serde_json::from_value(arguments).map_err(|e| {
+                    let params: PreviewOmfImportParams = serde_json::from_value(arguments)
+                        .map_err(|e| {
                             McpError::InvalidParams(format!(
                                 "invalid preview_omf_import params: {}",
                                 e
@@ -1114,10 +1113,7 @@ impl<S: Store> McpServer<S> {
                 // metric separates "bad params for known tool" from
                 // "tool name does not exist". Previously both landed
                 // in `invalid-params`.
-                _ => Err(McpError::MethodNotFound(format!(
-                    "unknown tool '{}'",
-                    name
-                ))),
+                _ => Err(McpError::MethodNotFound(format!("unknown tool '{}'", name))),
             }
         }
         .await;

@@ -11,7 +11,10 @@ use rusqlite::Connection;
 use super::pool::SqliteConnectionPool;
 use super::{ChunkMetadata, IndexState, MetadataStore};
 use crate::error::Result;
-use crate::store::{normalize_query, FeedbackEntry, RelevanceLabel};
+use crate::store::{
+    normalize_query, DuplicateExample, DuplicateHealth, FeedbackEntry, HealthCounts,
+    IndexCoverageHealth, PayloadHealth, RelevanceLabel, StoreHealthSnapshot,
+};
 use crate::task_memory::{ArtifactKind, TaskArtifact, TaskRecord, TaskSearchFilters};
 use crate::types::{
     ChunkId, ChunkStatus, ChunkType, LifecycleDelta, LifecycleMetadata, MemoryTier, TenantId,
@@ -944,6 +947,55 @@ impl SqliteMetadataStore {
             )?;
         }
 
+        let old_projection_chunk_ids = if artifact.artifact_kind == ArtifactKind::Digest {
+            let mut stmt = tx.prepare(
+                "SELECT chunk_id FROM artifact_links
+                 WHERE artifact_id = ?1 AND link_kind = 'retrieval_projection'",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![artifact.artifact_id.as_str()], |row| {
+                row.get::<usize, String>(0)
+            })?;
+            let mut ids = Vec::new();
+            for row in rows {
+                ids.push(row?);
+            }
+            ids
+        } else {
+            Vec::new()
+        };
+
+        if artifact.artifact_kind == ArtifactKind::Digest {
+            let current_ids = projection_chunk_ids
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>();
+            for old_chunk_id in old_projection_chunk_ids {
+                if current_ids.contains(&old_chunk_id) {
+                    continue;
+                }
+                tx.execute(
+                    "UPDATE chunks
+                        SET status = 'superseded',
+                            tier = 'history',
+                            lifecycle_updated_at_ms = ?3
+                      WHERE tenant_id = ?1
+                        AND chunk_id = ?2
+                        AND status != 'deleted'",
+                    rusqlite::params![
+                        artifact.tenant_id.as_str(),
+                        old_chunk_id,
+                        artifact.timestamp_created,
+                    ],
+                )?;
+            }
+
+            tx.execute(
+                "DELETE FROM artifact_links
+                 WHERE artifact_id = ?1 AND link_kind = 'retrieval_projection'",
+                rusqlite::params![artifact.artifact_id.as_str()],
+            )?;
+        }
+
         for (idx, chunk_id) in projection_chunk_ids.iter().enumerate() {
             tx.execute(
                 "INSERT OR REPLACE INTO artifact_links (
@@ -955,6 +1007,38 @@ impl SqliteMetadataStore {
                     projection_kinds.get(idx).map(|kind| kind.as_str()),
                 ],
             )?;
+        }
+
+        if artifact.artifact_kind == ArtifactKind::Digest {
+            for chunk_id in projection_chunk_ids {
+                tx.execute(
+                    "UPDATE chunks
+                        SET status = 'superseded',
+                            tier = 'history',
+                            lifecycle_updated_at_ms = ?4
+                      WHERE tenant_id = ?1
+                        AND chunk_id != ?2
+                        AND chunk_id NOT IN (
+                            SELECT chunk_id FROM artifact_links
+                             WHERE artifact_id = ?5
+                               AND link_kind = 'retrieval_projection'
+                        )
+                        AND status != 'deleted'
+                        AND ((?3 IS NULL AND project_id IS NULL) OR project_id = ?3)
+                        AND canonical_text IS NOT NULL
+                        AND canonical_text = (
+                            SELECT canonical_text FROM chunks
+                             WHERE tenant_id = ?1 AND chunk_id = ?2
+                        )",
+                    rusqlite::params![
+                        artifact.tenant_id.as_str(),
+                        chunk_id,
+                        project_id,
+                        artifact.timestamp_created,
+                        artifact.artifact_id.as_str(),
+                    ],
+                )?;
+            }
         }
 
         if let Some(reply_to_artifact_id) = artifact.reply_to_artifact_id.as_deref() {
@@ -1636,6 +1720,57 @@ impl SqliteMetadataStore {
     }
 }
 
+fn lengths_for_scope(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    tenant_id: &TenantId,
+    project_id: Option<&str>,
+) -> Result<Vec<usize>> {
+    let mut sql = format!(
+        "SELECT LENGTH({column}) FROM {table}
+         WHERE tenant_id = ?1 AND {column} IS NOT NULL"
+    );
+    let mut params = vec![rusqlite::types::Value::Text(tenant_id.as_str().to_string())];
+    if let Some(project_id) = project_id {
+        sql.push_str(" AND project_id = ?2");
+        params.push(rusqlite::types::Value::Text(project_id.to_string()));
+    }
+    sql.push_str(&format!(" ORDER BY LENGTH({column}) ASC"));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+        Ok(row.get::<usize, i64>(0)? as usize)
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+fn percentile_usize(sorted: &[usize], p: usize) -> usize {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let idx = (p * (sorted.len() - 1) / 100).min(sorted.len() - 1);
+    sorted[idx]
+}
+
+fn compact_text_preview(text: &str, max_chars: usize) -> String {
+    if text.len() <= max_chars {
+        return text.to_string();
+    }
+    let mut end = 0;
+    for (idx, _) in text.char_indices() {
+        if idx > max_chars {
+            break;
+        }
+        end = idx;
+    }
+    text[..end].trim_end().to_string()
+}
+
 fn relevance_to_int(relevance: RelevanceLabel) -> i64 {
     match relevance {
         RelevanceLabel::Relevant => 1,
@@ -1897,6 +2032,253 @@ impl MetadataStore for SqliteMetadataStore {
         }
 
         Ok((active, deleted))
+    }
+
+    /// Count chunk types without paging through `list`.
+    ///
+    /// Returns `(active, deleted, all)` maps. "Active" here means every
+    /// non-deleted row; lifecycle-hidden rows such as superseded, expired,
+    /// or history-tier chunks remain counted as active storage rows.
+    fn count_chunk_types_by_status(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+    ) -> Result<(
+        HashMap<String, usize>,
+        HashMap<String, usize>,
+        HashMap<String, usize>,
+    )> {
+        let conn = self.pool.get();
+        let mut sql = String::from(
+            "SELECT chunk_type, status, COUNT(*) as cnt
+             FROM chunks
+             WHERE tenant_id = ?1",
+        );
+        let mut params = vec![rusqlite::types::Value::Text(tenant_id.as_str().to_string())];
+        if let Some(project_id) = project_id {
+            sql.push_str(" AND project_id = ?2");
+            params.push(rusqlite::types::Value::Text(project_id.to_string()));
+        }
+        sql.push_str(" GROUP BY chunk_type, status");
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            Ok((
+                row.get::<usize, String>(0)?,
+                row.get::<usize, String>(1)?,
+                row.get::<usize, i64>(2)? as usize,
+            ))
+        })?;
+
+        let mut active = HashMap::new();
+        let mut deleted = HashMap::new();
+        let mut all = HashMap::new();
+        for row in rows {
+            let (chunk_type, status, count) = row?;
+            *all.entry(chunk_type.clone()).or_insert(0) += count;
+            if status == "deleted" {
+                *deleted.entry(chunk_type).or_insert(0) += count;
+            } else {
+                *active.entry(chunk_type).or_insert(0) += count;
+            }
+        }
+
+        Ok((active, deleted, all))
+    }
+
+    fn health_snapshot(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        duplicate_limit: usize,
+    ) -> Result<StoreHealthSnapshot> {
+        let (chunk_types_active, _chunk_types_deleted, chunk_types_all) =
+            self.count_chunk_types_by_status(tenant_id, project_id)?;
+        let conn = self.pool.get();
+
+        let mut status_sql = String::from(
+            "SELECT status, tier, COUNT(*) as cnt
+             FROM chunks
+             WHERE tenant_id = ?1",
+        );
+        let mut status_params = vec![rusqlite::types::Value::Text(tenant_id.as_str().to_string())];
+        if let Some(project_id) = project_id {
+            status_sql.push_str(" AND project_id = ?2");
+            status_params.push(rusqlite::types::Value::Text(project_id.to_string()));
+        }
+        status_sql.push_str(" GROUP BY status, tier");
+        let mut stmt = conn.prepare(&status_sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(status_params), |row| {
+            Ok((
+                row.get::<usize, String>(0)?,
+                row.get::<usize, String>(1)?,
+                row.get::<usize, i64>(2)? as usize,
+            ))
+        })?;
+
+        let mut counts = HealthCounts::default();
+        for row in rows {
+            let (status, tier, count) = row?;
+            counts.total_chunks += count;
+            if status == "deleted" {
+                counts.deleted_chunks += count;
+            } else {
+                counts.active_chunks += count;
+            }
+            if status == "expired" {
+                counts.expired_chunks += count;
+            }
+            if status == "superseded" {
+                counts.superseded_chunks += count;
+            }
+            if tier == "history" {
+                counts.history_chunks += count;
+            }
+        }
+
+        let mut index_sql = String::from(
+            "SELECT index_state, COUNT(*) as cnt
+             FROM chunks
+             WHERE tenant_id = ?1 AND status != 'deleted'",
+        );
+        let mut index_params = vec![rusqlite::types::Value::Text(tenant_id.as_str().to_string())];
+        if let Some(project_id) = project_id {
+            index_sql.push_str(" AND project_id = ?2");
+            index_params.push(rusqlite::types::Value::Text(project_id.to_string()));
+        }
+        index_sql.push_str(" GROUP BY index_state");
+        let mut stmt = conn.prepare(&index_sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(index_params), |row| {
+            Ok((
+                row.get::<usize, String>(0)?,
+                row.get::<usize, i64>(1)? as usize,
+            ))
+        })?;
+        let mut index_coverage = IndexCoverageHealth::default();
+        for row in rows {
+            let (state, count) = row?;
+            match state.as_str() {
+                "pending" => index_coverage.pending = count,
+                "indexed" => index_coverage.indexed = count,
+                "failed" => index_coverage.failed = count,
+                _ => {}
+            }
+        }
+        let index_total = index_coverage.pending + index_coverage.indexed + index_coverage.failed;
+        if index_total > 0 {
+            index_coverage.indexed_percentage =
+                (index_coverage.indexed as f64 / index_total as f64) * 100.0;
+        }
+
+        let mut dup_summary_sql = String::from(
+            "SELECT COUNT(DISTINCT canonical_text),
+                    COUNT(canonical_text),
+                    COALESCE(SUM(LENGTH(canonical_text)), 0)
+             FROM chunks
+             WHERE tenant_id = ?1
+               AND status != 'deleted'
+               AND canonical_text IS NOT NULL",
+        );
+        let mut dup_params = vec![rusqlite::types::Value::Text(tenant_id.as_str().to_string())];
+        if let Some(project_id) = project_id {
+            dup_summary_sql.push_str(" AND project_id = ?2");
+            dup_params.push(rusqlite::types::Value::Text(project_id.to_string()));
+        }
+        let (unique_text_count, _text_rows, total_text_bytes): (usize, usize, usize) = conn
+            .query_row(
+                &dup_summary_sql,
+                rusqlite::params_from_iter(dup_params),
+                |row| {
+                    Ok((
+                        row.get::<usize, i64>(0)? as usize,
+                        row.get::<usize, i64>(1)? as usize,
+                        row.get::<usize, i64>(2)? as usize,
+                    ))
+                },
+            )?;
+
+        let mut dup_groups_sql = String::from(
+            "SELECT canonical_text, COUNT(*) as cnt, LENGTH(canonical_text) as bytes
+             FROM chunks
+             WHERE tenant_id = ?1
+               AND status != 'deleted'
+               AND canonical_text IS NOT NULL",
+        );
+        let mut dup_group_params =
+            vec![rusqlite::types::Value::Text(tenant_id.as_str().to_string())];
+        if let Some(project_id) = project_id {
+            dup_groups_sql.push_str(" AND project_id = ?2");
+            dup_group_params.push(rusqlite::types::Value::Text(project_id.to_string()));
+        }
+        dup_groups_sql.push_str(
+            " GROUP BY canonical_text
+              HAVING COUNT(*) > 1
+              ORDER BY COUNT(*) DESC, LENGTH(canonical_text) DESC",
+        );
+        if duplicate_limit > 0 {
+            dup_groups_sql.push_str(&format!(" LIMIT {}", duplicate_limit));
+        }
+        let mut stmt = conn.prepare(&dup_groups_sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(dup_group_params), |row| {
+            Ok((
+                row.get::<usize, String>(0)?,
+                row.get::<usize, i64>(1)? as usize,
+                row.get::<usize, i64>(2)? as usize,
+            ))
+        })?;
+        let mut duplicates = DuplicateHealth {
+            unique_text_count,
+            ..Default::default()
+        };
+        for row in rows {
+            let (canonical_text, count, bytes) = row?;
+            duplicates.exact_duplicate_group_count += 1;
+            duplicates.duplicate_row_count += count.saturating_sub(1);
+            let duplicate_bytes = count.saturating_sub(1).saturating_mul(bytes);
+            if duplicate_limit > 0 && duplicates.examples.len() < duplicate_limit {
+                let preview = compact_text_preview(&canonical_text, 160);
+                duplicates.examples.push(DuplicateExample {
+                    canonical_text_preview: preview,
+                    count,
+                    byte_count: count.saturating_mul(bytes),
+                });
+            }
+            duplicates.duplicate_byte_ratio += duplicate_bytes as f64;
+        }
+        if counts.active_chunks > 0 {
+            duplicates.duplicate_row_ratio =
+                duplicates.duplicate_row_count as f64 / counts.active_chunks as f64;
+        }
+        if total_text_bytes > 0 {
+            duplicates.duplicate_byte_ratio /= total_text_bytes as f64;
+        } else {
+            duplicates.duplicate_byte_ratio = 0.0;
+        }
+
+        let canonical_lengths =
+            lengths_for_scope(&conn, "chunks", "canonical_text", tenant_id, project_id)?;
+        let artifact_lengths = lengths_for_scope(
+            &conn,
+            "task_artifacts",
+            "canonical_json",
+            tenant_id,
+            project_id,
+        )?;
+        let payload = PayloadHealth {
+            p50_canonical_text_bytes: percentile_usize(&canonical_lengths, 50),
+            p95_canonical_text_bytes: percentile_usize(&canonical_lengths, 95),
+            max_canonical_text_bytes: canonical_lengths.last().copied().unwrap_or(0),
+            p95_artifact_json_bytes: percentile_usize(&artifact_lengths, 95),
+        };
+
+        Ok(StoreHealthSnapshot {
+            counts,
+            chunk_types_active,
+            chunk_types_all,
+            duplicates,
+            index_coverage,
+            payload,
+        })
     }
 
     fn get_deleted_chunk_ids(&self, tenant_id: &TenantId) -> Result<Vec<ChunkId>> {
@@ -2178,10 +2560,9 @@ impl MetadataStore for SqliteMetadataStore {
                AND expires_at_ms <= ?2
                AND status NOT IN ('deleted', 'expired', 'superseded', 'error')",
         )?;
-        let rows = stmt.query_map(
-            rusqlite::params![tenant_id.as_str(), now_ms],
-            |row| row.get::<_, String>(0),
-        )?;
+        let rows = stmt.query_map(rusqlite::params![tenant_id.as_str(), now_ms], |row| {
+            row.get::<_, String>(0)
+        })?;
         let mut ids = Vec::new();
         for row in rows {
             let s = row?;
@@ -2927,9 +3308,7 @@ mod tests {
         let store = SqliteMetadataStore::open(&tmp.path().join("m.db")).unwrap();
         let conn = store.pool.get();
         let mut stmt = conn.prepare("PRAGMA table_info(chunks)").unwrap();
-        let rows = stmt
-            .query_map([], |r| r.get::<usize, String>(1))
-            .unwrap();
+        let rows = stmt.query_map([], |r| r.get::<usize, String>(1)).unwrap();
         let mut cols: Vec<String> = Vec::new();
         for row in rows {
             cols.push(row.unwrap());
@@ -3023,9 +3402,7 @@ mod tests {
         let conn = store.pool.get();
         let cols: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(chunks)").unwrap();
-            let rows = stmt
-                .query_map([], |r| r.get::<usize, String>(1))
-                .unwrap();
+            let rows = stmt.query_map([], |r| r.get::<usize, String>(1)).unwrap();
             let mut names = Vec::new();
             for row in rows {
                 names.push(row.unwrap());
@@ -3508,11 +3885,11 @@ mod tests {
 
         let reloaded = store.get(&meta.tenant_id, &meta.chunk_id).unwrap().unwrap();
         assert_eq!(reloaded.status, ChunkStatus::Superseded);
+        assert_eq!(reloaded.lifecycle.superseded_by.as_ref().unwrap(), &new_id);
         assert_eq!(
-            reloaded.lifecycle.superseded_by.as_ref().unwrap(),
-            &new_id
+            reloaded.lifecycle.lifecycle_updated_at_ms,
+            1_700_000_000_000
         );
-        assert_eq!(reloaded.lifecycle.lifecycle_updated_at_ms, 1_700_000_000_000);
     }
 
     #[test]
@@ -3576,10 +3953,7 @@ mod tests {
         assert_eq!(old_r.lifecycle.lifecycle_updated_at_ms, 1_800_000_000_000);
 
         let new_r = store.get(&new.tenant_id, &new.chunk_id).unwrap().unwrap();
-        assert_eq!(
-            new_r.lifecycle.supersedes.as_ref().unwrap(),
-            &old.chunk_id
-        );
+        assert_eq!(new_r.lifecycle.supersedes.as_ref().unwrap(), &old.chunk_id);
         assert_eq!(new_r.lifecycle.lifecycle_updated_at_ms, 1_800_000_000_000);
     }
 
