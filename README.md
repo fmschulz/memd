@@ -45,6 +45,11 @@ Use `memory.search`, `task.search`, or `artifact.search` with `mode` set to
 `find_evidence`, or `find_highlights` to bias retrieval toward persisted
 digests and canonical summaries.
 
+For lower agent context cost, `memory.search` and `artifact.search` accept
+`compact: true` and `token_budget`. Compact responses keep stable IDs, scores,
+trust tier, verification hints, and grounding refs while omitting full text,
+matched text, or full artifact JSON unless requested.
+
 ## Architecture
 
 ```mermaid
@@ -200,9 +205,10 @@ See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough.
 - `memory.add` — single chunk (code, doc, note; code chunks with a real
   `source.path` are parsed into the structural index)
 - `memory.add_batch` — many chunks in one call
-- `memory.search` — hybrid retrieval with optional `mode`, `project_id`, and
-  event sibling expansion
-- `memory.get`, `memory.delete`, `memory.stats`, `memory.metrics`
+- `memory.search` — hybrid retrieval with optional `mode`, `project_id`,
+  compact/token-budgeted output, and event sibling expansion
+- `memory.get`, `memory.delete`, `memory.stats`, `memory.health`,
+  `memory.metrics`
 - `memory.compact` — explicit digest refresh; supports `digest_modes` and
   `force_digest_rebuild`
 
@@ -242,6 +248,11 @@ Inspection and retrieval:
 `artifact.create` remains registered for backwards compatibility with a
 deprecation warning. Digest artifacts are server-generated and cannot be forged
 through `artifact.create`.
+
+`artifact.search` defaults to the full legacy response. Passing `compact: true`
+adds `budget_info`; `include_artifact: false` and `include_matched_text: false`
+return only identifiers, summaries, ranking, and trust/grounding metadata so a
+caller can fetch selected records with `artifact.get`.
 
 ### `code.*` — structural navigation
 
@@ -353,12 +364,33 @@ Config file: `~/.config/memd/config.toml`. Notable keys:
 [server]
 allow_cross_tenant_project_fallback = false   # off by default in v0.3.1+
 
+[[server.project_aliases]]
+tenant_id = "memd"
+project_id = "memd"
+
+[[server.project_aliases.aliases]]
+tenant_id = "default"
+reason = "historical project_id=memd writes"
+
+[[server.project_aliases.aliases]]
+tenant_id = "fschulz"
+reason = "historical project_id=memd writes"
+
 [retrieval]
 search_variant = "hybrid"                     # or "hybrid-cross-encoder"
 ```
 
+Project aliases currently expand same-project scopes only: omit
+`aliases.project_id` or set it to the parent `project_id`.
+
 ## Observability
 
+- `memory.stats` reports uncapped `active_chunks`, `deleted_chunks`,
+  `total_chunks`, and active/deleted/all chunk-type maps. The legacy
+  `chunk_types` field remains the active-count map.
+- `memory.health` is a read-only tenant/project report for duplicate canonical
+  text, index coverage, canonical/artifact payload sizes, recent latency tails,
+  and warnings.
 - `memory.metrics` surfaces per-tool, per-reason rejection counts, cache hit
   rates, and HNSW state snapshots.
 - Every rejected tool call increments `MetricsCollector::record_rejection`.
