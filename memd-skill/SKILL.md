@@ -79,7 +79,7 @@ Trust boundary:
 
 ## Tool Surface
 
-`memd` exposes 54 MCP tools.
+`memd` exposes 55 MCP tools.
 
 ### Generic Memory
 
@@ -93,6 +93,7 @@ Trust boundary:
 - `memory.health`
 - `memory.metrics`
 - `memory.compact`
+- `memory.dream`
 - `memory.supersede`
 - `memory.set_expiry`
 - `memory.find_near_duplicates`
@@ -284,6 +285,8 @@ Use:
 
 `memory.compact` can also regenerate project brief and failure/decision/evidence/highlight digests explicitly via `project_id`, `digest_modes`, and `force_digest_rebuild`.
 
+Use `memory.dream` first with its default dry run when a project has duplicate digest projections or retention/compaction pressure. Apply mode should stay project-scoped and conservative: it retires duplicate digest projections through lifecycle metadata, can refresh digests, and emits a `dream_report` artifact for traceability. Segment rewrite requests are expected to report blocked until recovery-safe rewrite support lands.
+
 ### 7. Record critique and verification explicitly
 
 Use `artifact.create` when the important event is not a lifecycle checkpoint but an exchange artifact:
@@ -367,6 +370,7 @@ Default to compact retrieval for broad searches:
 - keep `include_artifact=false` and use `include_text=false` when IDs are enough
 - fetch full selected chunks with `memory.get` only after the compact pass
 - record notable duplicate, payload, or latency findings with `memory.health` in task artifacts
+- run `memory.dream` as a dry run before applying retention or compaction cleanup
 
 Examples:
 

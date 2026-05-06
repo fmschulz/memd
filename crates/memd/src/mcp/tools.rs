@@ -1670,6 +1670,79 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                 "required": []
             }),
         ),
+        ToolDefinition::new(
+            "memory.dream",
+            "Plan or apply conservative memory retention maintenance: report duplicate digest projections, retire safe duplicates through lifecycle metadata, refresh digests, and report physical compaction results. Defaults to dry_run=true.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier"
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional project identifier to scope planning and mutation"
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "When true, only report planned actions and perform no mutation"
+                    },
+                    "retention_profile": {
+                        "type": "string",
+                        "enum": ["safe", "aggressive"],
+                        "default": "safe"
+                    },
+                    "older_than_days": {
+                        "type": "integer",
+                        "default": 30,
+                        "minimum": 0
+                    },
+                    "history_after_days": {
+                        "type": "integer",
+                        "default": 90,
+                        "minimum": 0
+                    },
+                    "purge_after_days": {
+                        "type": ["integer", "null"],
+                        "default": null
+                    },
+                    "max_actions": {
+                        "type": "integer",
+                        "default": 1000,
+                        "minimum": 0
+                    },
+                    "duplicate_strategy": {
+                        "type": "string",
+                        "enum": ["none", "digest_projections", "exact_safe"],
+                        "default": "digest_projections"
+                    },
+                    "digest_modes": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["generic", "brief_project", "resume_task", "find_failures", "find_decisions", "find_evidence", "find_highlights"]
+                        },
+                        "description": "Optional digest modes to refresh during apply"
+                    },
+                    "physical": {
+                        "type": "object",
+                        "properties": {
+                            "run_store_compaction": {"type": "boolean", "default": true},
+                            "vacuum_metadata": {"type": "boolean", "default": false},
+                            "prune_sparse_index": {"type": "boolean", "default": true},
+                            "rewrite_segments": {"type": "boolean", "default": false}
+                        }
+                    },
+                    "require_archive_before_purge": {
+                        "type": "boolean",
+                        "default": true
+                    }
+                },
+                "required": []
+            }),
+        ),
         // LIFECYCLE-01: memory.supersede (Track A — A7)
         ToolDefinition::new(
             "memory.supersede",
@@ -2165,6 +2238,7 @@ pub fn tool_names() -> Vec<&'static str> {
         "memory.health",
         "memory.metrics",
         "memory.compact",
+        "memory.dream",
         "memory.supersede",
         "memory.set_expiry",
         "memory.find_near_duplicates",
@@ -2203,7 +2277,8 @@ mod tests {
         // Track D (D5): + memory.find_near_duplicates.
         // Track G (G2): + memory.export_markdown.
         // Track F (F5): + memory.export_omf + memory.preview_omf_import + memory.import_omf.
-        assert_eq!(tools.len(), 54);
+        // Dream maintenance: + memory.dream.
+        assert_eq!(tools.len(), 55);
     }
 
     #[test]
@@ -2527,7 +2602,8 @@ mod tests {
         // Track D (D5): + memory.find_near_duplicates.
         // Track G (G2): + memory.export_markdown.
         // Track F (F5): + memory.export_omf + memory.preview_omf_import + memory.import_omf.
-        assert_eq!(names.len(), 54);
+        // Dream maintenance: + memory.dream.
+        assert_eq!(names.len(), 55);
         assert!(names.contains(&"memory.supersede"));
         assert!(names.contains(&"memory.set_expiry"));
         assert!(names.contains(&"memory.find_near_duplicates"));
@@ -2544,6 +2620,7 @@ mod tests {
         assert!(names.contains(&"memory.metrics"));
         assert!(names.contains(&"memory.feedback"));
         assert!(names.contains(&"memory.compact"));
+        assert!(names.contains(&"memory.dream"));
         assert!(names.contains(&"memory.health"));
         assert!(names.contains(&"memory.consolidate_episode"));
         assert!(names.contains(&"task.start"));

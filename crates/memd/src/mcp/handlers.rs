@@ -106,6 +106,14 @@ use super::error::McpError;
 // nested path would be a silent semver shrink.
 pub use super::post_write_hooks::PostWriteEvent;
 use crate::config::ProjectAliasConfig;
+use crate::maintenance::{
+    apply_lifecycle_actions, build_reclaimed, disk_snapshot, estimated_hidden_payload_bytes,
+    plan_duplicate_projection_retirements, prune_sparse_index_for_actions,
+    related_artifact_ids_from_actions, related_artifact_ids_from_project_artifacts,
+    status_for_report, unsupported_exact_safe_warning, DreamAction, DreamParams, DreamPolicy,
+    DreamReport, DreamScope, DreamStateSnapshot, PhysicalCompactionResult,
+    DIGEST_ROLE_DREAM_REPORT,
+};
 use crate::metrics::{IndexStats, MetricsCollector};
 use crate::retrieval::{ContextPacker, PackerConfig, PackerInput};
 use crate::store::metadata::MetadataStore;
@@ -118,11 +126,11 @@ use crate::task_memory::{
     build_task_projections, build_task_projections_minimal, build_task_resume_digest_artifact,
     build_task_resume_view, derive_artifact_promotion_state, derive_artifact_trust_tier,
     derive_chunk_trust_tier, infer_decision_items, infer_evidence_items, infer_failure_items,
-    infer_highlight_items, ArtifactKind, ContributorRef, DatasetRef, DecisionViewItem, EntityRef,
-    EvidenceViewItem, FailureViewItem, HighlightViewItem, ProjectBriefView, TaskArtifact,
-    TaskProvenance, TaskResumeView, TaskSearchFilters, TrustTier, DIGEST_ROLE_DECISION_LIBRARY,
-    DIGEST_ROLE_EVIDENCE_LIBRARY, DIGEST_ROLE_FAILURE_LIBRARY, DIGEST_ROLE_HIGHLIGHT_LIBRARY,
-    DIGEST_ROLE_PROJECT_BRIEF, DIGEST_ROLE_TASK_RESUME,
+    infer_highlight_items, stable_digest_identity, ArtifactKind, ContributorRef, DatasetRef,
+    DecisionViewItem, EntityRef, EvidenceViewItem, FailureViewItem, HighlightViewItem,
+    ProjectBriefView, TaskArtifact, TaskProvenance, TaskResumeView, TaskSearchFilters, TrustTier,
+    DIGEST_ROLE_DECISION_LIBRARY, DIGEST_ROLE_EVIDENCE_LIBRARY, DIGEST_ROLE_FAILURE_LIBRARY,
+    DIGEST_ROLE_HIGHLIGHT_LIBRARY, DIGEST_ROLE_PROJECT_BRIEF, DIGEST_ROLE_TASK_RESUME,
 };
 use crate::tiered::TieredTiming;
 use crate::types::{
@@ -7858,6 +7866,304 @@ async fn fallback_health_snapshot<S: Store>(
         chunk_types_all: stats.chunk_types_all,
         ..Default::default()
     })
+}
+
+async fn scoped_health_snapshot<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    project_id: Option<&str>,
+    duplicate_limit: usize,
+) -> Result<StoreHealthSnapshot, McpError> {
+    match store
+        .health_snapshot(tenant_id, project_id, duplicate_limit)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?
+    {
+        Some(snapshot) => Ok(snapshot),
+        None => fallback_health_snapshot(store, tenant_id).await,
+    }
+}
+
+fn parse_dream_digest_modes(raw: Option<&[String]>) -> Result<Vec<QueryMode>, McpError> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    let mut modes = Vec::with_capacity(raw.len());
+    for mode in raw {
+        let parsed = match mode.trim() {
+            "generic" => QueryMode::Generic,
+            "brief_project" => QueryMode::BriefProject,
+            "resume_task" => QueryMode::ResumeTask,
+            "find_failures" => QueryMode::FindFailures,
+            "find_decisions" => QueryMode::FindDecisions,
+            "find_evidence" => QueryMode::FindEvidence,
+            "find_highlights" => QueryMode::FindHighlights,
+            other => {
+                return Err(McpError::InvalidParams(format!(
+                    "invalid digest mode '{}'",
+                    other
+                )));
+            }
+        };
+        modes.push(parsed);
+    }
+    Ok(modes)
+}
+
+fn build_dream_report_artifact(
+    tenant_id: &TenantId,
+    project_id: Option<&str>,
+    report: &DreamReport,
+    related_artifact_ids: Vec<String>,
+    now_ms: i64,
+) -> TaskArtifact {
+    let scope_key = build_scope_key(project_id, tenant_id, DIGEST_ROLE_DREAM_REPORT);
+    let (artifact_id, task_id, digest_key) =
+        stable_digest_identity(DIGEST_ROLE_DREAM_REPORT, &scope_key);
+    let mut artifact = TaskArtifact::new_digest(
+        tenant_id.clone(),
+        task_id,
+        digest_key,
+        DIGEST_ROLE_DREAM_REPORT,
+    );
+    artifact.artifact_id = artifact_id;
+    artifact.project_id = ProjectId::from(project_id.map(str::to_string));
+    artifact.summary = Some(format!(
+        "Dream maintenance report for {} retired {} duplicate projections; duplicate row ratio {:.4} -> {:.4}.",
+        project_id.unwrap_or(tenant_id.as_str()),
+        report.applied_actions.len(),
+        report.before.health.duplicates.duplicate_row_ratio,
+        report.after.health.duplicates.duplicate_row_ratio
+    ));
+    artifact.method_summary = Some(
+        "Deterministic maintenance report over metadata lifecycle, digest projection duplicates, and physical compaction results.".to_string(),
+    );
+    artifact.related_artifact_ids = related_artifact_ids;
+    artifact.metrics = Some(json!({
+        "planned_actions": report.planned_actions.len(),
+        "applied_actions": report.applied_actions.len(),
+        "before_duplicate_row_ratio": report.before.health.duplicates.duplicate_row_ratio,
+        "after_duplicate_row_ratio": report.after.health.duplicates.duplicate_row_ratio,
+        "estimated_hidden_payload_bytes": report.reclaimed.estimated_hidden_payload_bytes,
+        "metadata_bytes_reclaimed": report.reclaimed.metadata_bytes,
+        "sparse_index_bytes_reclaimed": report.reclaimed.sparse_index_bytes,
+        "tenant_bytes_reclaimed": report.reclaimed.tenant_bytes
+    }));
+    artifact.validation = report.verification.clone();
+    artifact.outputs = vec![serde_json::to_string(report).unwrap_or_default()];
+    artifact.source_updated_at_ms = Some(now_ms);
+    artifact
+}
+
+/// Handle memory.dream tool call.
+pub async fn handle_memory_dream<S: Store>(
+    store: &S,
+    tenant_manager: Option<&TenantManager>,
+    params: DreamParams,
+) -> Result<Value, McpError> {
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
+    if let Some(project_id) = params.project_id.as_deref() {
+        validate_identifier("project_id", project_id)?;
+    }
+    let Some(persistent) = store.as_persistent() else {
+        return Err(McpError::ToolError(
+            "memory.dream requires a persistent store".to_string(),
+        ));
+    };
+
+    let digest_modes = parse_dream_digest_modes(params.digest_modes.as_deref())?;
+    let before_health =
+        scoped_health_snapshot(store, &tenant_id, params.project_id.as_deref(), 10).await?;
+    let before_disk = disk_snapshot(tenant_manager, &tenant_id);
+    let mut warnings = Vec::new();
+    if let Some(warning) = unsupported_exact_safe_warning(params.duplicate_strategy) {
+        warnings.push(warning);
+    }
+
+    let mut planned_actions = match params.duplicate_strategy {
+        crate::maintenance::DuplicateStrategy::None => Vec::new(),
+        crate::maintenance::DuplicateStrategy::DigestProjections
+        | crate::maintenance::DuplicateStrategy::ExactSafe => {
+            plan_duplicate_projection_retirements(
+                store,
+                persistent,
+                &tenant_id,
+                params.project_id.as_deref(),
+                params.max_actions,
+            )
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?
+        }
+    };
+
+    let rewrite_blocked = params.physical.rewrite_segments;
+    if rewrite_blocked {
+        planned_actions.push(DreamAction::rewrite_segments_unsupported());
+        warnings.push(
+            "rewrite_segments is not supported until the shadow-copy segment rewrite phase lands"
+                .to_string(),
+        );
+    }
+
+    let now_ms = current_time_ms();
+    let mut applied_actions = Vec::new();
+    let mut physical = PhysicalCompactionResult::default();
+    let mut digest_artifacts = Vec::new();
+
+    if !params.dry_run && !rewrite_blocked {
+        applied_actions = apply_lifecycle_actions(persistent, &tenant_id, &planned_actions, now_ms)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+        if params.physical.prune_sparse_index && !applied_actions.is_empty() {
+            match prune_sparse_index_for_actions(persistent, &tenant_id, &applied_actions) {
+                Ok(count) => physical.sparse_pruned_chunks = count,
+                Err(err) => warnings.push(format!("sparse index prune failed: {}", err)),
+            }
+        }
+
+        if params.physical.run_store_compaction {
+            match persistent.run_compaction(&tenant_id) {
+                Ok(_) => physical.store_compaction_ran = true,
+                Err(err) => warnings.push(format!("store compaction skipped: {}", err)),
+            }
+        }
+
+        if params.physical.vacuum_metadata {
+            let before_pages = persistent.metadata().page_count_snapshot().ok();
+            if let Err(err) = persistent.metadata().checkpoint_wal() {
+                warnings.push(format!("metadata WAL checkpoint failed: {}", err));
+            }
+            match persistent.metadata().vacuum() {
+                Ok(()) => {
+                    physical.metadata_vacuum_ran = true;
+                    if let (Some((before_page_count, before_freelist)), Ok((after_page_count, _))) =
+                        (before_pages, persistent.metadata().page_count_snapshot())
+                    {
+                        if after_page_count >= before_page_count && before_freelist > 0 {
+                            warnings.push(
+                                "metadata VACUUM completed but did not reduce page count"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+                Err(err) => warnings.push(format!("metadata VACUUM failed: {}", err)),
+            }
+        }
+
+        if !applied_actions.is_empty() || !digest_modes.is_empty() {
+            digest_artifacts = rebuild_requested_digests(
+                store,
+                &tenant_id,
+                params.project_id.as_deref(),
+                &digest_modes,
+            )
+            .await?;
+        }
+    }
+
+    let after_health =
+        scoped_health_snapshot(store, &tenant_id, params.project_id.as_deref(), 10).await?;
+    let after_disk = disk_snapshot(tenant_manager, &tenant_id);
+    let before = DreamStateSnapshot {
+        health: before_health,
+        disk: before_disk.clone(),
+    };
+    let after = DreamStateSnapshot {
+        health: after_health,
+        disk: after_disk.clone(),
+    };
+    let mut reclaimed = build_reclaimed(&before_disk, &after_disk, &applied_actions);
+    if params.dry_run {
+        reclaimed.estimated_hidden_payload_bytes = estimated_hidden_payload_bytes(&planned_actions);
+    }
+    let mut verification = Vec::new();
+    if params.dry_run {
+        verification.push("dry-run performed no lifecycle or disk mutations".to_string());
+    }
+    if !params.dry_run && !rewrite_blocked {
+        verification.push(format!(
+            "applied {} lifecycle retirements",
+            applied_actions.len()
+        ));
+        verification.push(format!(
+            "duplicate row ratio {:.4} -> {:.4}",
+            before.health.duplicates.duplicate_row_ratio,
+            after.health.duplicates.duplicate_row_ratio
+        ));
+    }
+    if params.physical.rewrite_segments {
+        verification.push("segment rewrite was blocked before mutation".to_string());
+    }
+    if !params.dry_run && applied_actions.is_empty() && !rewrite_blocked {
+        warnings.push("no duplicate digest projections were eligible for retirement".to_string());
+    }
+    if !params.dry_run
+        && reclaimed.metadata_bytes == 0
+        && reclaimed.sparse_index_bytes == 0
+        && reclaimed.tenant_bytes == 0
+        && reclaimed.estimated_hidden_payload_bytes > 0
+    {
+        warnings.push(
+            "safe profile hid duplicate payloads but did not reclaim append-only segment bytes"
+                .to_string(),
+        );
+    }
+
+    let mut report = DreamReport {
+        status: status_for_report(rewrite_blocked, params.dry_run, applied_actions.len()),
+        scope: DreamScope {
+            tenant_id: tenant_id.to_string(),
+            project_id: params.project_id.clone(),
+        },
+        policy: DreamPolicy::from_params(&params),
+        before,
+        planned_actions,
+        applied_actions,
+        after,
+        summary_artifacts: digest_artifacts,
+        archive_artifacts: Vec::new(),
+        physical,
+        reclaimed,
+        warnings,
+        verification,
+    };
+
+    if !params.dry_run && !rewrite_blocked && !report.applied_actions.is_empty() {
+        let project_artifacts =
+            load_project_artifacts(store, &tenant_id, params.project_id.as_deref(), 500).await?;
+        let mut related_ids = related_artifact_ids_from_actions(&report.applied_actions);
+        related_ids.extend(related_artifact_ids_from_project_artifacts(
+            &project_artifacts,
+        ));
+        related_ids.sort();
+        related_ids.dedup();
+        let report_artifact_id = build_dream_report_artifact(
+            &tenant_id,
+            params.project_id.as_deref(),
+            &report,
+            related_ids.clone(),
+            now_ms,
+        )
+        .artifact_id;
+        report.summary_artifacts.push(report_artifact_id);
+        let report_artifact = build_dream_report_artifact(
+            &tenant_id,
+            params.project_id.as_deref(),
+            &report,
+            related_ids,
+            now_ms,
+        );
+        let persisted = persist_digest_artifact(store, report_artifact).await?;
+        if !report.summary_artifacts.contains(&persisted.artifact_id) {
+            report.summary_artifacts.push(persisted.artifact_id);
+        }
+        report.summary_artifacts.sort();
+        report.summary_artifacts.dedup();
+    }
+
+    format_mcp_response(&report)
 }
 
 /// Handle memory.health tool call
