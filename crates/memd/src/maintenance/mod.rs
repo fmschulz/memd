@@ -17,7 +17,8 @@ use crate::store::metadata::MetadataStore;
 use crate::store::persistent::PersistentStore;
 use crate::store::{Store, StoreHealthSnapshot, TenantManager};
 use crate::task_memory::TaskArtifact;
-use crate::types::{ChunkId, ChunkStatus, LifecycleDelta, MemoryTier, TenantId};
+use crate::types::{ChunkId, ChunkStatus, LifecycleDelta, MemoryChunk, MemoryTier, TenantId};
+use tracing::warn;
 
 pub const DIGEST_ROLE_DREAM_REPORT: &str = "dream_report";
 
@@ -292,6 +293,35 @@ fn is_digest_projection_chunk(chunk: &crate::types::MemoryChunk) -> bool {
         || chunk.text.starts_with("Task digest ")
 }
 
+async fn get_chunk_for_dream_planning<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    chunk_id: &ChunkId,
+) -> Result<Option<MemoryChunk>> {
+    match store.get(tenant_id, chunk_id).await {
+        Ok(chunk) => Ok(chunk),
+        Err(MemdError::StorageError(error)) => {
+            warn!(
+                tenant_id = %tenant_id,
+                chunk_id = %chunk_id,
+                error = %error,
+                "skipping unreadable chunk during memory.dream planning"
+            );
+            Ok(None)
+        }
+        Err(MemdError::IoError(error)) => {
+            warn!(
+                tenant_id = %tenant_id,
+                chunk_id = %chunk_id,
+                error = %error,
+                "skipping unreadable chunk during memory.dream planning"
+            );
+            Ok(None)
+        }
+        Err(err) => Err(err),
+    }
+}
+
 pub async fn plan_duplicate_projection_retirements<S: Store>(
     store: &S,
     persistent: &PersistentStore,
@@ -323,7 +353,8 @@ pub async fn plan_duplicate_projection_retirements<S: Store>(
         let Some(canonical_text) = row.canonical_text.clone() else {
             continue;
         };
-        let Some(chunk) = store.get(tenant_id, &row.chunk_id).await? else {
+        let Some(chunk) = get_chunk_for_dream_planning(store, tenant_id, &row.chunk_id).await?
+        else {
             continue;
         };
         if !is_digest_projection_chunk(&chunk) {

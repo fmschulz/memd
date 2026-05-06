@@ -2,6 +2,7 @@ mod common;
 
 use common::*;
 use memd::index::sparse::SparseIndex;
+use memd::store::metadata::MetadataStore;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
@@ -149,6 +150,67 @@ async fn dream_apply_retires_duplicate_digest_projections() {
     assert_eq!(all.len(), 2);
     assert!(all.contains(&old));
     assert!(all.contains(&survivor));
+}
+
+#[tokio::test]
+async fn dream_skips_unreadable_projection_payloads() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let tenant = "dream_unreadable_t";
+    let project = "dream_unreadable_p";
+    let text = "duplicate digest unreadable segment sentinel";
+    let first_chunk_id: String;
+
+    {
+        let store = persistent_store(tmp.path()).await;
+        let cfg = memd::config::Config {
+            data_dir: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let server = std::sync::Arc::new(memd::mcp::server::McpServer::new(cfg, store));
+        first_chunk_id = add_digest_projection_on(&server, tenant, project, text).await;
+        add_digest_projection_on(&server, tenant, project, text).await;
+    }
+
+    // Reopen once so WAL recovery finalizes the active segment and truncates
+    // the WAL. Corrupting after this point mirrors a live store where metadata
+    // points at a segment whose reader cannot be opened.
+    let recovered_segment_id = {
+        let store = persistent_store(tmp.path()).await;
+        let cfg = memd::config::Config {
+            data_dir: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let _server = std::sync::Arc::new(memd::mcp::server::McpServer::new(cfg, store.clone()));
+        let tenant_id = common::tenant(tenant);
+        let chunk_id = memd::types::ChunkId::parse(&first_chunk_id).unwrap();
+        store
+            .metadata()
+            .get(&tenant_id, &chunk_id)
+            .unwrap()
+            .unwrap()
+            .segment_id
+    };
+
+    let segment_dir = tmp
+        .path()
+        .join("tenants")
+        .join(tenant)
+        .join("segments")
+        .join(format!("seg_{recovered_segment_id:06}"));
+    let _ = std::fs::remove_file(segment_dir.join("meta"));
+    let _ = std::fs::remove_file(segment_dir.join("payload.idx"));
+
+    let store = persistent_store(tmp.path()).await;
+    let cfg = memd::config::Config {
+        data_dir: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let server = std::sync::Arc::new(memd::mcp::server::McpServer::new(cfg, store));
+    let report = dream_on(&server, tenant, project, true).await;
+
+    assert_eq!(report["status"], "dry_run");
+    assert_eq!(report["planned_actions"].as_array().unwrap().len(), 0);
+    assert_eq!(report["applied_actions"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
