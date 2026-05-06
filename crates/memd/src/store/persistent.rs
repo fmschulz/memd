@@ -245,6 +245,11 @@ impl PersistentStore {
         self.hybrid_searcher.as_deref()
     }
 
+    /// Borrow the sparse index when sparse retrieval is enabled.
+    pub fn sparse_index(&self) -> Option<&Bm25Index> {
+        self.sparse_index.as_deref()
+    }
+
     /// Borrow the metadata store.
     pub fn metadata(&self) -> &SqliteMetadataStore {
         self.metadata.as_ref()

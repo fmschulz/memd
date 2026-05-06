@@ -33,7 +33,7 @@ restarts without copy-paste.
 
 | Surface | Purpose | Primary tools |
 | --- | --- | --- |
-| `memory.*` | Raw searchable chunks (code, docs, notes, indexed files) | `memory.add`, `memory.add_batch`, `memory.search`, `memory.compact` |
+| `memory.*` | Raw searchable chunks (code, docs, notes, indexed files) | `memory.add`, `memory.add_batch`, `memory.search`, `memory.compact`, `memory.dream` |
 | `task.*` | Structured work history: goal, runs, evidence, outcomes | `task.start`, `task.progress`, `task.run_start`, `task.run_finish`, `task.add_evidence`, `task.finish`, `task.resume` |
 | `artifact.*` | Canonical collaboration: reviews, revisions, decisions, verifications, threads | `artifact.review`, `artifact.revision`, `artifact.decision`, `artifact.verification`, `artifact.list_thread`, `artifact.find_related` |
 | `code.*` | Structural navigation over indexed source | `code.find_definition`, `code.find_references`, `code.find_callers`, `code.find_imports` |
@@ -211,6 +211,8 @@ See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough.
   `memory.metrics`
 - `memory.compact` — explicit digest refresh; supports `digest_modes` and
   `force_digest_rebuild`
+- `memory.dream` — dry-run-first retention and compaction planning; safely
+  retires duplicate digest projections on apply and writes a traceable report
 
 Conversation-style chunks can carry caller-supplied `event:<id>` tags along
 with `entry:factual` or `entry:relational`. Passing
@@ -391,6 +393,10 @@ Project aliases currently expand same-project scopes only: omit
 - `memory.health` is a read-only tenant/project report for duplicate canonical
   text, index coverage, canonical/artifact payload sizes, recent latency tails,
   and warnings.
+- `memory.dream` can turn health findings into a bounded maintenance plan. It
+  defaults to `dry_run: true`; apply mode uses lifecycle retirement and sparse
+  index pruning, while append-only segment rewrite remains explicitly blocked
+  until recovery-safe rewrite support exists.
 - `memory.metrics` surfaces per-tool, per-reason rejection counts, cache hit
   rates, and HNSW state snapshots.
 - Every rejected tool call increments `MetricsCollector::record_rejection`.

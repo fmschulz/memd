@@ -54,6 +54,29 @@ impl SqliteMetadataStore {
         Ok(store)
     }
 
+    /// Return SQLite page and freelist counts for diagnostics/tests.
+    pub fn page_count_snapshot(&self) -> Result<(u64, u64)> {
+        let conn = self.pool.get();
+        let page_count: i64 = conn.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        let freelist_count: i64 = conn.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+        Ok((page_count.max(0) as u64, freelist_count.max(0) as u64))
+    }
+
+    /// Checkpoint the metadata WAL. `TRUNCATE` is used only for SQLite's own
+    /// metadata WAL, not the tenant append-only WAL.
+    pub fn checkpoint_wal(&self) -> Result<()> {
+        let conn = self.pool.get();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+        Ok(())
+    }
+
+    /// Run SQLite VACUUM on the metadata database.
+    pub fn vacuum(&self) -> Result<()> {
+        let conn = self.pool.get();
+        conn.execute_batch("VACUUM")?;
+        Ok(())
+    }
+
     /// Initialize the database schema
     fn init_schema(&self) -> Result<()> {
         let conn = self.pool.get();
@@ -2170,13 +2193,33 @@ impl MetadataStore for SqliteMetadataStore {
                 (index_coverage.indexed as f64 / index_total as f64) * 100.0;
         }
 
+        let mut visible_count_sql = String::from(
+            "SELECT COUNT(*)
+             FROM chunks
+             WHERE tenant_id = ?1
+               AND status NOT IN ('deleted', 'superseded', 'expired', 'error')
+               AND tier != 'history'",
+        );
+        let mut visible_count_params =
+            vec![rusqlite::types::Value::Text(tenant_id.as_str().to_string())];
+        if let Some(project_id) = project_id {
+            visible_count_sql.push_str(" AND project_id = ?2");
+            visible_count_params.push(rusqlite::types::Value::Text(project_id.to_string()));
+        }
+        let visible_chunks: usize = conn.query_row(
+            &visible_count_sql,
+            rusqlite::params_from_iter(visible_count_params),
+            |row| Ok(row.get::<usize, i64>(0)? as usize),
+        )?;
+
         let mut dup_summary_sql = String::from(
             "SELECT COUNT(DISTINCT canonical_text),
                     COUNT(canonical_text),
                     COALESCE(SUM(LENGTH(canonical_text)), 0)
              FROM chunks
              WHERE tenant_id = ?1
-               AND status != 'deleted'
+               AND status NOT IN ('deleted', 'superseded', 'expired', 'error')
+               AND tier != 'history'
                AND canonical_text IS NOT NULL",
         );
         let mut dup_params = vec![rusqlite::types::Value::Text(tenant_id.as_str().to_string())];
@@ -2201,7 +2244,8 @@ impl MetadataStore for SqliteMetadataStore {
             "SELECT canonical_text, COUNT(*) as cnt, LENGTH(canonical_text) as bytes
              FROM chunks
              WHERE tenant_id = ?1
-               AND status != 'deleted'
+               AND status NOT IN ('deleted', 'superseded', 'expired', 'error')
+               AND tier != 'history'
                AND canonical_text IS NOT NULL",
         );
         let mut dup_group_params =
@@ -2245,9 +2289,9 @@ impl MetadataStore for SqliteMetadataStore {
             }
             duplicates.duplicate_byte_ratio += duplicate_bytes as f64;
         }
-        if counts.active_chunks > 0 {
+        if visible_chunks > 0 {
             duplicates.duplicate_row_ratio =
-                duplicates.duplicate_row_count as f64 / counts.active_chunks as f64;
+                duplicates.duplicate_row_count as f64 / visible_chunks as f64;
         }
         if total_text_bytes > 0 {
             duplicates.duplicate_byte_ratio /= total_text_bytes as f64;

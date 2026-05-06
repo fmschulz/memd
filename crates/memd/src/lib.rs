@@ -8,6 +8,7 @@ pub mod embeddings;
 pub mod error;
 pub mod index;
 pub mod logging;
+pub mod maintenance;
 pub mod mcp;
 pub mod metrics;
 pub mod omf;
