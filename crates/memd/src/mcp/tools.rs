@@ -1411,7 +1411,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "default": 10,
                         "minimum": 0,
                         "maximum": 100,
-                        "description": "Maximum duplicate examples when include_examples=true"
+                        "description": "Maximum duplicate example groups when include_examples=true; aggregate counts and ratios always cover the full requested scope"
                     },
                     "include_recent": {
                         "type": "boolean",
@@ -1672,7 +1672,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
         ),
         ToolDefinition::new(
             "memory.dream",
-            "Plan or apply conservative memory retention maintenance: report duplicate digest projections, retire safe duplicates through lifecycle metadata, refresh digests, and report physical compaction results. Defaults to dry_run=true.",
+            "Plan or apply conservative memory retention maintenance: report duplicate pressure, retire duplicate digest projections through lifecycle metadata, refresh digests, and report physical compaction results. Defaults to dry_run=true.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1716,7 +1716,8 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "duplicate_strategy": {
                         "type": "string",
                         "enum": ["none", "digest_projections", "exact_safe"],
-                        "default": "digest_projections"
+                        "default": "digest_projections",
+                        "description": "Cleanup strategy. exact_safe is currently accepted for compatibility but behaves like digest_projections with a warning; non-digest exact duplicates are report-only."
                     },
                     "digest_modes": {
                         "type": "array",

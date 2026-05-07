@@ -2240,46 +2240,92 @@ impl MetadataStore for SqliteMetadataStore {
                 },
             )?;
 
-        let mut dup_groups_sql = String::from(
-            "SELECT canonical_text, COUNT(*) as cnt, LENGTH(canonical_text) as bytes
+        let mut dup_aggregate_sql = String::from(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(cnt - 1), 0),
+                    COALESCE(SUM((cnt - 1) * bytes), 0)
+             FROM (
+                 SELECT COUNT(*) as cnt, LENGTH(canonical_text) as bytes
+                 FROM chunks
+                 WHERE tenant_id = ?1
+                   AND status NOT IN ('deleted', 'superseded', 'expired', 'error')
+                   AND tier != 'history'
+                   AND canonical_text IS NOT NULL",
+        );
+        let mut dup_aggregate_params =
+            vec![rusqlite::types::Value::Text(tenant_id.as_str().to_string())];
+        if let Some(project_id) = project_id {
+            dup_aggregate_sql.push_str(" AND project_id = ?2");
+            dup_aggregate_params.push(rusqlite::types::Value::Text(project_id.to_string()));
+        }
+        dup_aggregate_sql.push_str(
+            " GROUP BY canonical_text
+              HAVING COUNT(*) > 1
+             )",
+        );
+        let (duplicate_group_count, duplicate_row_count, duplicate_byte_count): (
+            usize,
+            usize,
+            usize,
+        ) = conn.query_row(
+            &dup_aggregate_sql,
+            rusqlite::params_from_iter(dup_aggregate_params),
+            |row| {
+                Ok((
+                    row.get::<usize, i64>(0)? as usize,
+                    row.get::<usize, i64>(1)? as usize,
+                    row.get::<usize, i64>(2)? as usize,
+                ))
+            },
+        )?;
+
+        let mut duplicates = DuplicateHealth {
+            unique_text_count,
+            exact_duplicate_group_count: duplicate_group_count,
+            duplicate_row_count,
+            ..Default::default()
+        };
+
+        if visible_chunks > 0 {
+            duplicates.duplicate_row_ratio =
+                duplicates.duplicate_row_count as f64 / visible_chunks as f64;
+        }
+        if total_text_bytes > 0 {
+            duplicates.duplicate_byte_ratio = duplicate_byte_count as f64 / total_text_bytes as f64;
+        }
+
+        if duplicate_limit > 0 {
+            let mut dup_groups_sql = String::from(
+                "SELECT canonical_text, COUNT(*) as cnt, LENGTH(canonical_text) as bytes
              FROM chunks
              WHERE tenant_id = ?1
                AND status NOT IN ('deleted', 'superseded', 'expired', 'error')
                AND tier != 'history'
                AND canonical_text IS NOT NULL",
-        );
-        let mut dup_group_params =
-            vec![rusqlite::types::Value::Text(tenant_id.as_str().to_string())];
-        if let Some(project_id) = project_id {
-            dup_groups_sql.push_str(" AND project_id = ?2");
-            dup_group_params.push(rusqlite::types::Value::Text(project_id.to_string()));
-        }
-        dup_groups_sql.push_str(
-            " GROUP BY canonical_text
+            );
+            let mut dup_group_params =
+                vec![rusqlite::types::Value::Text(tenant_id.as_str().to_string())];
+            if let Some(project_id) = project_id {
+                dup_groups_sql.push_str(" AND project_id = ?2");
+                dup_group_params.push(rusqlite::types::Value::Text(project_id.to_string()));
+            }
+            dup_groups_sql.push_str(
+                " GROUP BY canonical_text
               HAVING COUNT(*) > 1
               ORDER BY COUNT(*) DESC, LENGTH(canonical_text) DESC",
-        );
-        if duplicate_limit > 0 {
+            );
             dup_groups_sql.push_str(&format!(" LIMIT {}", duplicate_limit));
-        }
-        let mut stmt = conn.prepare(&dup_groups_sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(dup_group_params), |row| {
-            Ok((
-                row.get::<usize, String>(0)?,
-                row.get::<usize, i64>(1)? as usize,
-                row.get::<usize, i64>(2)? as usize,
-            ))
-        })?;
-        let mut duplicates = DuplicateHealth {
-            unique_text_count,
-            ..Default::default()
-        };
-        for row in rows {
-            let (canonical_text, count, bytes) = row?;
-            duplicates.exact_duplicate_group_count += 1;
-            duplicates.duplicate_row_count += count.saturating_sub(1);
-            let duplicate_bytes = count.saturating_sub(1).saturating_mul(bytes);
-            if duplicate_limit > 0 && duplicates.examples.len() < duplicate_limit {
+
+            let mut stmt = conn.prepare(&dup_groups_sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(dup_group_params), |row| {
+                Ok((
+                    row.get::<usize, String>(0)?,
+                    row.get::<usize, i64>(1)? as usize,
+                    row.get::<usize, i64>(2)? as usize,
+                ))
+            })?;
+            for row in rows {
+                let (canonical_text, count, bytes) = row?;
                 let preview = compact_text_preview(&canonical_text, 160);
                 duplicates.examples.push(DuplicateExample {
                     canonical_text_preview: preview,
@@ -2287,16 +2333,6 @@ impl MetadataStore for SqliteMetadataStore {
                     byte_count: count.saturating_mul(bytes),
                 });
             }
-            duplicates.duplicate_byte_ratio += duplicate_bytes as f64;
-        }
-        if visible_chunks > 0 {
-            duplicates.duplicate_row_ratio =
-                duplicates.duplicate_row_count as f64 / visible_chunks as f64;
-        }
-        if total_text_bytes > 0 {
-            duplicates.duplicate_byte_ratio /= total_text_bytes as f64;
-        } else {
-            duplicates.duplicate_byte_ratio = 0.0;
         }
 
         let canonical_lengths =
@@ -3078,6 +3114,45 @@ mod tests {
         let (active, deleted) = store.count_by_status(&tenant_id).unwrap();
         assert_eq!(active, 3);
         assert_eq!(deleted, 2);
+    }
+
+    #[test]
+    fn health_duplicate_limit_only_limits_examples() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("health.db");
+        let store = SqliteMetadataStore::open(&db_path).unwrap();
+        let tenant_id = TenantId::new("tenant_health").unwrap();
+
+        let texts = [
+            "alpha duplicate",
+            "alpha duplicate",
+            "beta duplicate",
+            "beta duplicate",
+            "gamma duplicate",
+            "gamma duplicate",
+            "delta duplicate",
+            "delta duplicate",
+            "unique text",
+        ];
+        let mut rows = Vec::new();
+        for (idx, text) in texts.iter().enumerate() {
+            let chunk_id = ChunkId::new();
+            let mut metadata = create_test_metadata("tenant_health", &chunk_id);
+            metadata.segment_id = idx as u64 + 1;
+            metadata.timestamp_created = 1000 + idx as i64;
+            metadata.hash = format!("hash-{idx}");
+            metadata.canonical_text = Some((*text).to_string());
+            rows.push(metadata);
+        }
+        store.insert_many(&rows).unwrap();
+
+        let snapshot = store.health_snapshot(&tenant_id, None, 2).unwrap();
+        assert_eq!(snapshot.duplicates.unique_text_count, 5);
+        assert_eq!(snapshot.duplicates.exact_duplicate_group_count, 4);
+        assert_eq!(snapshot.duplicates.duplicate_row_count, 4);
+        assert_eq!(snapshot.duplicates.examples.len(), 2);
+        assert!((snapshot.duplicates.duplicate_row_ratio - (4.0 / 9.0)).abs() < f64::EPSILON);
+        assert!(snapshot.duplicates.duplicate_byte_ratio > 0.0);
     }
 
     #[test]

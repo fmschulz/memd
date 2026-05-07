@@ -1745,7 +1745,10 @@ impl Store for PersistentStore {
         let metadata_rows = self.metadata.list(tenant_id, limit, offset)?;
         let mut chunks = Vec::with_capacity(metadata_rows.len());
         for meta in metadata_rows {
-            if let Some(chunk) = self.get_chunk(tenant_id, &meta.chunk_id).await? {
+            if let Some(chunk) = self
+                .get_chunk_for_retrieval(tenant_id, &meta.chunk_id, "list_chunks")
+                .await?
+            {
                 chunks.push(chunk);
             }
         }
@@ -3178,6 +3181,19 @@ mod tests {
             .join("payload.bin")
     }
 
+    fn segment_index_path(
+        base_dir: &std::path::Path,
+        tenant: &TenantId,
+        segment_id: u64,
+    ) -> std::path::PathBuf {
+        base_dir
+            .join("tenants")
+            .join(tenant.as_str())
+            .join("segments")
+            .join(format!("seg_{:06}", segment_id))
+            .join("payload.idx")
+    }
+
     fn corrupt_segment_payload(base_dir: &std::path::Path, tenant: &TenantId, segment_id: u64) {
         let payload_path = segment_payload_path(base_dir, tenant, segment_id);
         let mut bytes = fs::read(&payload_path).unwrap();
@@ -3480,6 +3496,66 @@ mod tests {
 
         assert!(result_ids.contains(&healthy_id));
         assert!(!result_ids.contains(&corrupted_id));
+    }
+
+    #[tokio::test]
+    async fn list_chunks_skips_unreadable_finalized_segment() {
+        let dir = tempdir().unwrap();
+        let config = PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            segment_max_chunks: 1,
+            wal_checkpoint_interval: 10,
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            ..Default::default()
+        };
+        let tenant = make_tenant();
+        let unreadable_id;
+        let healthy_id;
+        let unreadable_segment_id;
+
+        {
+            let store = PersistentStore::open(config.clone()).unwrap();
+            unreadable_id = store
+                .add(make_chunk(&tenant, "unreadable context chunk"))
+                .await
+                .unwrap();
+            healthy_id = store
+                .add(make_chunk(&tenant, "healthy context chunk"))
+                .await
+                .unwrap();
+            unreadable_segment_id = store
+                .metadata
+                .get(&tenant, &unreadable_id)
+                .unwrap()
+                .expect("unreadable chunk metadata")
+                .segment_id;
+        }
+
+        fs::remove_file(segment_index_path(
+            dir.path(),
+            &tenant,
+            unreadable_segment_id,
+        ))
+        .unwrap();
+        fs::write(
+            dir.path()
+                .join("tenants")
+                .join(tenant.as_str())
+                .join("wal.log"),
+            [],
+        )
+        .unwrap();
+
+        let store = PersistentStore::open(config).unwrap();
+        let chunks = store.list_chunks(&tenant, 10, 0).await.unwrap();
+        let chunk_ids = chunks
+            .into_iter()
+            .map(|chunk| chunk.chunk_id)
+            .collect::<Vec<_>>();
+
+        assert!(chunk_ids.contains(&healthy_id));
+        assert!(!chunk_ids.contains(&unreadable_id));
     }
 
     #[tokio::test]

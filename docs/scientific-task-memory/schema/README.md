@@ -213,9 +213,11 @@ These filters are resolved first, then the candidate set is reranked for retriev
 
 `memory.compact` can explicitly refresh project brief and failure/decision/evidence/highlight library digests through `project_id`, `digest_modes`, and `force_digest_rebuild`.
 
-`memory.dream` plans tenant/project-scoped retention and compaction work. It defaults to `dry_run: true`; safe apply mode retires duplicate digest projections through lifecycle metadata, can refresh digests, and records a traceable `dream_report` artifact. Append-only segment rewrite is reported as blocked until recovery-safe physical rewrite support is implemented.
+`memory.dream` plans tenant/project-scoped retention and compaction work. It defaults to `dry_run: true`; safe apply mode retires duplicate digest projections through lifecycle metadata, can refresh digests, and records a traceable `dream_report` artifact. Exact duplicate raw chunks and non-digest task artifacts are reported by health but remain report-only under the current safe strategy. Append-only segment rewrite is reported as blocked until recovery-safe physical rewrite support is implemented.
 
-`memory.stats` uses aggregate counts and reports `active_chunks`, `deleted_chunks`, `total_chunks`, and active/deleted/all chunk-type maps. `memory.health` adds a read-only tenant/project report for duplicate canonical text, index coverage, payload-size percentiles, recent latency tails, and explicit alias scope information.
+`memory.stats` uses aggregate counts and reports `active_chunks`, `deleted_chunks`, `total_chunks`, and active/deleted/all chunk-type maps. `memory.health` adds a read-only tenant/project report for duplicate canonical text, index coverage, payload-size percentiles, recent latency tails, and explicit alias scope information. `include_examples` controls whether duplicate previews are returned; `duplicate_limit` limits only those previews, not the aggregate duplicate group, row, or byte counts.
+
+`context.find_relevant_context` can prepend hot-context chunks, but the hot pre-scan is wall-clock bounded so broad lookups on large tenants still continue through normal retrieval. List-style retrieval scans skip stale unreadable segment rows with a warning; strict point reads through `memory.get` still surface storage errors.
 
 ## Conversation Event Tags
 
