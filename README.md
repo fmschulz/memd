@@ -212,7 +212,9 @@ See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough.
 - `memory.compact` — explicit digest refresh; supports `digest_modes` and
   `force_digest_rebuild`
 - `memory.dream` — dry-run-first retention and compaction planning; safely
-  retires duplicate digest projections on apply and writes a traceable report
+  retires duplicate digest projections on apply and writes a traceable report.
+  Exact duplicate raw chunks are reported by health, but are not auto-retired
+  by the safe profile.
 
 Conversation-style chunks can carry caller-supplied `event:<id>` tags along
 with `entry:factual` or `entry:relational`. Passing
@@ -267,6 +269,11 @@ caller can fetch selected records with `artifact.get`.
 `context.brief_project`, `context.find_relevant_context`,
 `context.get_hot_context`, `context.get_files_for_subsystem`,
 `context.list_subsystems`, `context.suggest_agent`.
+
+`context.find_relevant_context` can prepend hot-context chunks when
+`include_hot` is true. That legacy hot pre-scan is bounded by a short
+wall-clock budget so large tenants still fall through to normal retrieval
+instead of blocking the whole lookup on a full payload scan.
 
 ## Trust boundary
 
@@ -348,6 +355,11 @@ Persistent mode writes to:
 
 Default data dir: `~/.memd/data`. Override with `--data-dir`.
 
+Retrieval/list scans are tolerant of stale metadata rows whose segment payload
+is no longer readable: unreadable chunks are logged and skipped. Direct
+`memory.get` remains strict so point lookups still surface storage corruption
+instead of silently returning the wrong record.
+
 ## Configuration
 
 Common environment variables:
@@ -392,11 +404,14 @@ Project aliases currently expand same-project scopes only: omit
   `chunk_types` field remains the active-count map.
 - `memory.health` is a read-only tenant/project report for duplicate canonical
   text, index coverage, canonical/artifact payload sizes, recent latency tails,
-  and warnings.
+  and warnings. When `include_examples` is true, `duplicate_limit` limits only
+  the number of example groups returned; aggregate duplicate counts and ratios
+  still cover the full requested scope.
 - `memory.dream` can turn health findings into a bounded maintenance plan. It
   defaults to `dry_run: true`; apply mode uses lifecycle retirement and sparse
-  index pruning, while append-only segment rewrite remains explicitly blocked
-  until recovery-safe rewrite support exists.
+  index pruning for duplicate digest projection chunks, while append-only
+  segment rewrite remains explicitly blocked until recovery-safe rewrite
+  support exists. Non-digest exact duplicates remain report-only.
 - `memory.metrics` surfaces per-tool, per-reason rejection counts, cache hit
   rates, and HNSW state snapshots.
 - Every rejected tool call increments `MetricsCollector::record_rejection`.

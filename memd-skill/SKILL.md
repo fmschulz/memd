@@ -285,7 +285,7 @@ Use:
 
 `memory.compact` can also regenerate project brief and failure/decision/evidence/highlight digests explicitly via `project_id`, `digest_modes`, and `force_digest_rebuild`.
 
-Use `memory.dream` first with its default dry run when a project has duplicate digest projections or retention/compaction pressure. Apply mode should stay project-scoped and conservative: it retires duplicate digest projections through lifecycle metadata, can refresh digests, and emits a `dream_report` artifact for traceability. Segment rewrite requests are expected to report blocked until recovery-safe rewrite support lands.
+Use `memory.dream` first with its default dry run when a project has duplicate digest projections or retention/compaction pressure. Apply mode should stay project-scoped and conservative: it retires duplicate digest projections through lifecycle metadata, can refresh digests, and emits a `dream_report` artifact for traceability. Exact duplicate raw chunks and non-digest artifacts are health findings, not automatic safe-cleanup targets. Segment rewrite requests are expected to report blocked until recovery-safe rewrite support lands.
 
 ### 7. Record critique and verification explicitly
 
@@ -370,6 +370,7 @@ Default to compact retrieval for broad searches:
 - keep `include_artifact=false` and use `include_text=false` when IDs are enough
 - fetch full selected chunks with `memory.get` only after the compact pass
 - record notable duplicate, payload, or latency findings with `memory.health` in task artifacts
+- when requesting duplicate examples, remember `duplicate_limit` limits only previews; aggregate duplicate ratios still cover the full tenant/project scope
 - run `memory.dream` as a dry run before applying retention or compaction cleanup
 
 Examples:

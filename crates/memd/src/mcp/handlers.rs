@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -20,6 +21,7 @@ use tracing::{debug, info, warn};
 /// `ServerConfig.allow_cross_tenant_project_fallback`.
 static ALLOW_CROSS_TENANT_PROJECT_FALLBACK: AtomicBool = AtomicBool::new(false);
 static PROJECT_ALIASES: OnceLock<std::sync::RwLock<Vec<ProjectAliasConfig>>> = OnceLock::new();
+const HOT_CONTEXT_SCAN_TIMEOUT_MS: u64 = 2_000;
 
 /// Enable or disable the cross-tenant project fallback. Called from
 /// `McpServer::new` / `McpServer::with_metrics` to honour the server
@@ -2969,6 +2971,51 @@ async fn collect_all_chunks<S: Store>(
     }
 
     Ok(chunks)
+}
+
+async fn collect_all_chunks_until_deadline<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    max_chunks: usize,
+    timeout: Duration,
+) -> Result<(Vec<MemoryChunk>, bool), McpError> {
+    if max_chunks == 0 {
+        return Ok((Vec::new(), false));
+    }
+
+    let started = Instant::now();
+    let page_size = 200usize.min(max_chunks.max(1));
+    let mut offset = 0usize;
+    let mut chunks = Vec::new();
+
+    loop {
+        if started.elapsed() >= timeout {
+            return Ok((chunks, true));
+        }
+
+        let page = store
+            .list_chunks(tenant_id, page_size, offset)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        if page.is_empty() {
+            break;
+        }
+
+        for chunk in page {
+            chunks.push(chunk);
+            if chunks.len() >= max_chunks {
+                return Ok((chunks, false));
+            }
+        }
+
+        if started.elapsed() >= timeout {
+            return Ok((chunks, true));
+        }
+
+        offset = offset.saturating_add(page_size);
+    }
+
+    Ok((chunks, false))
 }
 
 fn wildcard_match(pattern: &str, text: &str) -> bool {
@@ -8687,7 +8734,21 @@ pub async fn handle_context_find_relevant_context<S: Store>(
     let mut hot_included = false;
 
     if params.include_hot {
-        let mut hot_chunks = collect_all_chunks(store, &tenant_id, 20_000).await?;
+        let (mut hot_chunks, timed_out) = collect_all_chunks_until_deadline(
+            store,
+            &tenant_id,
+            20_000,
+            Duration::from_millis(HOT_CONTEXT_SCAN_TIMEOUT_MS),
+        )
+        .await?;
+        if timed_out {
+            warn!(
+                tenant_id = %tenant_id,
+                scanned_chunks = hot_chunks.len(),
+                timeout_ms = HOT_CONTEXT_SCAN_TIMEOUT_MS,
+                "context.find_relevant_context hot scan timed out; continuing with retrieval results"
+            );
+        }
         hot_chunks.retain(|chunk| {
             has_exact_tag(&chunk.tags, TAG_CTX_TIER_HOT)
                 && chunk_matches_any_subsystem(chunk, &subsystem_keys)
