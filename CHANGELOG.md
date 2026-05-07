@@ -6,6 +6,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Fixed
+
+- `memory.health` now computes duplicate aggregate counts and ratios over the
+  full requested tenant/project scope even when `include_examples=true`.
+  `duplicate_limit` limits only the returned example groups, so
+  `memory.dream` reports no longer understate duplicate pressure.
+- `context.find_relevant_context(include_hot=true)` now bounds the legacy
+  hot-context pre-scan before falling through to normal retrieval, avoiding
+  long lookups on large or duplicate-heavy tenants.
+- Retrieval/list scans now skip unreadable stale segment rows with a warning
+  instead of aborting the whole scan; strict `memory.get` behavior is
+  unchanged.
+
 ## [0.12.0] - 2026-04-21
 
 ### Added
