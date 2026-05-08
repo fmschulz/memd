@@ -147,6 +147,104 @@ pub struct RejectionStats {
     pub by_reason: HashMap<String, u64>,
 }
 
+/// Per-call MCP payload token estimate.
+///
+/// These counters estimate tokens added by the MCP tool request params and
+/// handler response payloads that `memd` can observe. They do not include the
+/// agent's hidden reasoning, system prompt, repo/tool transcripts outside
+/// `memd`, or provider-side cache accounting.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolTokenUsage {
+    /// Timestamp (Unix ms)
+    pub timestamp: i64,
+    /// MCP tool name, e.g. `"memory.search"`.
+    pub tool: String,
+    /// Serialized MCP request params size.
+    pub request_bytes: u64,
+    /// Serialized MCP response or error size.
+    pub response_bytes: u64,
+    /// Estimated request tokens.
+    pub estimated_request_tokens: u64,
+    /// Estimated response tokens.
+    pub estimated_response_tokens: u64,
+    /// Estimated request + response tokens.
+    pub estimated_total_tokens: u64,
+    /// Whether the tool call returned `Ok`.
+    pub success: bool,
+}
+
+impl ToolTokenUsage {
+    /// Build usage from serialized payload sizes.
+    pub fn from_payload_sizes(
+        tool: impl Into<String>,
+        request_bytes: usize,
+        response_bytes: usize,
+        success: bool,
+    ) -> Self {
+        let request_bytes = request_bytes as u64;
+        let response_bytes = response_bytes as u64;
+        let estimated_request_tokens = estimate_tokens_from_bytes(request_bytes);
+        let estimated_response_tokens = estimate_tokens_from_bytes(response_bytes);
+
+        Self {
+            timestamp: now_unix_ms(),
+            tool: tool.into(),
+            request_bytes,
+            response_bytes,
+            estimated_request_tokens,
+            estimated_response_tokens,
+            estimated_total_tokens: estimated_request_tokens + estimated_response_tokens,
+            success,
+        }
+    }
+}
+
+/// Aggregated token estimate for one MCP tool.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolTokenAggregate {
+    /// Tool calls observed.
+    pub calls: u64,
+    /// Calls that returned an error.
+    pub errors: u64,
+    /// Total serialized request bytes.
+    pub request_bytes: u64,
+    /// Total serialized response/error bytes.
+    pub response_bytes: u64,
+    /// Total estimated request tokens.
+    pub estimated_request_tokens: u64,
+    /// Total estimated response tokens.
+    pub estimated_response_tokens: u64,
+    /// Total estimated request + response tokens.
+    pub estimated_total_tokens: u64,
+}
+
+impl ToolTokenAggregate {
+    fn record(&mut self, usage: &ToolTokenUsage) {
+        self.calls += 1;
+        if !usage.success {
+            self.errors += 1;
+        }
+        self.request_bytes += usage.request_bytes;
+        self.response_bytes += usage.response_bytes;
+        self.estimated_request_tokens += usage.estimated_request_tokens;
+        self.estimated_response_tokens += usage.estimated_response_tokens;
+        self.estimated_total_tokens += usage.estimated_total_tokens;
+    }
+}
+
+/// Aggregated MCP payload token estimates.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TokenUsageStats {
+    /// Estimator used for all token fields.
+    pub estimator: String,
+    /// Aggregate over all MCP tool calls.
+    pub total: ToolTokenAggregate,
+    /// Aggregate per MCP tool.
+    pub by_tool: HashMap<String, ToolTokenAggregate>,
+    /// Recent MCP tool payload estimates.
+    pub recent_tool_calls: Vec<ToolTokenUsage>,
+}
+
 /// Complete metrics snapshot
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MetricsSnapshot {
@@ -163,6 +261,9 @@ pub struct MetricsSnapshot {
     /// Phase 4.4: per-tool / per-reason rejection counts.
     #[serde(default)]
     pub rejections: RejectionStats,
+    /// Estimated MCP payload token usage by tool.
+    #[serde(default)]
+    pub token_usage: TokenUsageStats,
 }
 
 /// Metrics collector
@@ -190,6 +291,15 @@ pub struct MetricsCollector {
     rejections_total: AtomicU64,
     rejections_by_tool: RwLock<HashMap<String, u64>>,
     rejections_by_reason: RwLock<HashMap<String, u64>>,
+    /// MCP payload token estimates.
+    tool_token_calls: AtomicU64,
+    tool_token_errors: AtomicU64,
+    tool_token_request_bytes: AtomicU64,
+    tool_token_response_bytes: AtomicU64,
+    tool_token_request_tokens: AtomicU64,
+    tool_token_response_tokens: AtomicU64,
+    tool_token_by_tool: RwLock<HashMap<String, ToolTokenAggregate>>,
+    tool_token_recent: RwLock<Vec<ToolTokenUsage>>,
 }
 
 impl Default for MetricsCollector {
@@ -217,6 +327,22 @@ impl Clone for MetricsCollector {
             rejections_total: AtomicU64::new(self.rejections_total.load(Ordering::Relaxed)),
             rejections_by_tool: RwLock::new(self.rejections_by_tool.read().clone()),
             rejections_by_reason: RwLock::new(self.rejections_by_reason.read().clone()),
+            tool_token_calls: AtomicU64::new(self.tool_token_calls.load(Ordering::Relaxed)),
+            tool_token_errors: AtomicU64::new(self.tool_token_errors.load(Ordering::Relaxed)),
+            tool_token_request_bytes: AtomicU64::new(
+                self.tool_token_request_bytes.load(Ordering::Relaxed),
+            ),
+            tool_token_response_bytes: AtomicU64::new(
+                self.tool_token_response_bytes.load(Ordering::Relaxed),
+            ),
+            tool_token_request_tokens: AtomicU64::new(
+                self.tool_token_request_tokens.load(Ordering::Relaxed),
+            ),
+            tool_token_response_tokens: AtomicU64::new(
+                self.tool_token_response_tokens.load(Ordering::Relaxed),
+            ),
+            tool_token_by_tool: RwLock::new(self.tool_token_by_tool.read().clone()),
+            tool_token_recent: RwLock::new(self.tool_token_recent.read().clone()),
         }
     }
 }
@@ -241,6 +367,14 @@ impl MetricsCollector {
             rejections_total: AtomicU64::new(0),
             rejections_by_tool: RwLock::new(HashMap::new()),
             rejections_by_reason: RwLock::new(HashMap::new()),
+            tool_token_calls: AtomicU64::new(0),
+            tool_token_errors: AtomicU64::new(0),
+            tool_token_request_bytes: AtomicU64::new(0),
+            tool_token_response_bytes: AtomicU64::new(0),
+            tool_token_request_tokens: AtomicU64::new(0),
+            tool_token_response_tokens: AtomicU64::new(0),
+            tool_token_by_tool: RwLock::new(HashMap::new()),
+            tool_token_recent: RwLock::new(Vec::with_capacity(max_history)),
         }
     }
 
@@ -271,6 +405,61 @@ impl MetricsCollector {
             total: self.rejections_total.load(Ordering::Relaxed),
             by_tool: self.rejections_by_tool.read().clone(),
             by_reason: self.rejections_by_reason.read().clone(),
+        }
+    }
+
+    /// Record estimated MCP request/response tokens for one tool call.
+    pub fn record_tool_token_usage(&self, usage: ToolTokenUsage) {
+        self.tool_token_calls.fetch_add(1, Ordering::Relaxed);
+        if !usage.success {
+            self.tool_token_errors.fetch_add(1, Ordering::Relaxed);
+        }
+        self.tool_token_request_bytes
+            .fetch_add(usage.request_bytes, Ordering::Relaxed);
+        self.tool_token_response_bytes
+            .fetch_add(usage.response_bytes, Ordering::Relaxed);
+        self.tool_token_request_tokens
+            .fetch_add(usage.estimated_request_tokens, Ordering::Relaxed);
+        self.tool_token_response_tokens
+            .fetch_add(usage.estimated_response_tokens, Ordering::Relaxed);
+
+        self.tool_token_by_tool
+            .write()
+            .entry(usage.tool.clone())
+            .or_default()
+            .record(&usage);
+
+        let mut recent = self.tool_token_recent.write();
+        if recent.len() >= self.max_history {
+            recent.remove(0);
+        }
+        recent.push(usage);
+    }
+
+    /// Get recent MCP tool token estimates.
+    pub fn get_recent_tool_token_usage(&self, limit: usize) -> Vec<ToolTokenUsage> {
+        let recent = self.tool_token_recent.read();
+        recent.iter().rev().take(limit).cloned().collect()
+    }
+
+    /// Get aggregated MCP payload token estimates.
+    pub fn get_token_usage_stats(&self) -> TokenUsageStats {
+        let request_tokens = self.tool_token_request_tokens.load(Ordering::Relaxed);
+        let response_tokens = self.tool_token_response_tokens.load(Ordering::Relaxed);
+
+        TokenUsageStats {
+            estimator: "ceil(serialized_mcp_payload_bytes / 4)".to_string(),
+            total: ToolTokenAggregate {
+                calls: self.tool_token_calls.load(Ordering::Relaxed),
+                errors: self.tool_token_errors.load(Ordering::Relaxed),
+                request_bytes: self.tool_token_request_bytes.load(Ordering::Relaxed),
+                response_bytes: self.tool_token_response_bytes.load(Ordering::Relaxed),
+                estimated_request_tokens: request_tokens,
+                estimated_response_tokens: response_tokens,
+                estimated_total_tokens: request_tokens + response_tokens,
+            },
+            by_tool: self.tool_token_by_tool.read().clone(),
+            recent_tool_calls: self.get_recent_tool_token_usage(10),
         }
     }
 
@@ -417,8 +606,20 @@ impl MetricsCollector {
             recent_queries: self.get_recent_queries(10),
             tiered: self.get_tiered_stats(),
             rejections: self.get_rejection_stats(),
+            token_usage: self.get_token_usage_stats(),
         }
     }
+}
+
+fn now_unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn estimate_tokens_from_bytes(bytes: u64) -> u64 {
+    bytes.saturating_add(3) / 4
 }
 
 fn percentile(sorted: &[u64], p: usize) -> u64 {
@@ -565,6 +766,39 @@ mod tests {
         assert_eq!(stats.count, 0);
         assert_eq!(stats.avg_total_ms, 0.0);
         assert_eq!(stats.p50_total_ms, 0);
+    }
+
+    #[test]
+    fn test_tool_token_usage_recording() {
+        let collector = MetricsCollector::new(10);
+
+        collector.record_tool_token_usage(ToolTokenUsage::from_payload_sizes(
+            "memory.search",
+            15,
+            400,
+            true,
+        ));
+        collector.record_tool_token_usage(ToolTokenUsage::from_payload_sizes(
+            "memory.search",
+            5,
+            7,
+            false,
+        ));
+
+        let stats = collector.get_token_usage_stats();
+        assert_eq!(stats.total.calls, 2);
+        assert_eq!(stats.total.errors, 1);
+        assert_eq!(stats.total.request_bytes, 20);
+        assert_eq!(stats.total.response_bytes, 407);
+        assert_eq!(stats.total.estimated_request_tokens, 6);
+        assert_eq!(stats.total.estimated_response_tokens, 102);
+        assert_eq!(stats.total.estimated_total_tokens, 108);
+
+        let search = stats.by_tool.get("memory.search").unwrap();
+        assert_eq!(search.calls, 2);
+        assert_eq!(search.errors, 1);
+        assert_eq!(stats.recent_tool_calls.len(), 2);
+        assert!(!stats.recent_tool_calls[0].success);
     }
 
     #[test]
