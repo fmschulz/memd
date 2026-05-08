@@ -33,6 +33,7 @@ pub use logging::init_logging;
 pub use mcp::{run_http_server, run_server, McpServer};
 pub use metrics::{
     IndexStats, LatencyStats, MetricsCollector, MetricsSnapshot, QueryMetrics, Timer,
+    TokenUsageStats, ToolTokenAggregate, ToolTokenUsage,
 };
 pub use retrieval::{
     ChunkWithMeta, CrossEncoderReranker, FeatureReranker, FusedResult, FusionCandidate,

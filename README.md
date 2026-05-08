@@ -413,7 +413,12 @@ Project aliases currently expand same-project scopes only: omit
   segment rewrite remains explicitly blocked until recovery-safe rewrite
   support exists. Non-digest exact duplicates remain report-only.
 - `memory.metrics` surfaces per-tool, per-reason rejection counts, cache hit
-  rates, and HNSW state snapshots.
+  rates, HNSW state snapshots, and estimated MCP payload token usage by tool.
+  Token usage is estimated from serialized request/response bytes; exact
+  whole-agent or provider billing tokens still require agent/API usage capture.
+  See
+  [`token_overhead.md`](docs/scientific-task-memory/benchmark-results/token_overhead.md)
+  for the benchmark parser and pilot measurement protocol.
 - Every rejected tool call increments `MetricsCollector::record_rejection`.
 - `tracing` subscriber emits structured JSON logs when `RUST_LOG` is set.
 - Deprecation warnings for `artifact.create` (mega-schema),
