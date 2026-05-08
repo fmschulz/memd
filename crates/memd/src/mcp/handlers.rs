@@ -8294,6 +8294,7 @@ pub fn handle_memory_metrics(
 
     if !params.include_recent {
         snapshot.recent_queries.clear();
+        snapshot.token_usage.recent_tool_calls.clear();
     }
 
     // Clear tiered stats if not requested

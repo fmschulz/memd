@@ -91,7 +91,7 @@ Trust boundary:
 - `memory.feedback`
 - `memory.stats`
 - `memory.health`
-- `memory.metrics`
+- `memory.metrics` (includes estimated MCP payload token usage by tool)
 - `memory.compact`
 - `memory.dream`
 - `memory.supersede`

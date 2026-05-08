@@ -50,7 +50,7 @@ use super::handlers::{
 use super::protocol::{Request, Response, RpcError};
 use super::tools::get_all_tools;
 use crate::maintenance::DreamParams;
-use crate::metrics::MetricsCollector;
+use crate::metrics::{MetricsCollector, ToolTokenUsage};
 use crate::store::{Store, TenantManager};
 use crate::structural::{
     CallGraphIndexer, CallGraphSymbolRecord, StructuralStore, SymbolIndexer, SymbolQueryService,
@@ -542,11 +542,15 @@ impl<S: Store> McpServer<S> {
 
         info!(tool = %name, "tool call received");
 
+        let request_bytes = serialized_json_len(&params);
+
         // Phase 4.4: bind the dispatch result so we can record a
         // rejection metric when any tool handler returns an error.
         // `record_rejection` is cheap (two atomic bumps + one
         // HashMap entry) and gives operators a per-tool / per-reason
-        // count in `memory.metrics`.
+        // count in `memory.metrics`. We also record request/response
+        // payload sizes after dispatch to estimate how many MCP payload
+        // tokens `memd` added to the agent transcript.
         let tool_name_for_metrics = name.to_string();
         let dispatch_result = async {
             // Dispatch to tool handlers
@@ -1126,6 +1130,18 @@ impl<S: Store> McpServer<S> {
         }
         .await;
 
+        let response_bytes = match &dispatch_result {
+            Ok(value) => serialized_json_len(value),
+            Err(err) => err.to_string().len(),
+        };
+        self.metrics
+            .record_tool_token_usage(ToolTokenUsage::from_payload_sizes(
+                &tool_name_for_metrics,
+                request_bytes,
+                response_bytes,
+                dispatch_result.is_ok(),
+            ));
+
         if let Err(ref err) = dispatch_result {
             self.metrics
                 .record_rejection(&tool_name_for_metrics, err.reason_label());
@@ -1158,6 +1174,12 @@ fn negotiate_protocol_version(params: Option<&Value>) -> &'static str {
             }),
         None => DEFAULT_PROTOCOL_VERSION,
     }
+}
+
+fn serialized_json_len(value: &Value) -> usize {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0)
 }
 
 fn is_supported_protocol_version(version: &str) -> bool {
@@ -3099,6 +3121,12 @@ mod tests {
             fetch_ms: 2,
             total_ms: 17,
         });
+        metrics.record_tool_token_usage(ToolTokenUsage::from_payload_sizes(
+            "memory.search",
+            20,
+            200,
+            true,
+        ));
         let server = McpServer::with_metrics(test_config(), store, metrics);
 
         let result = server
@@ -3115,6 +3143,10 @@ mod tests {
         let response: serde_json::Value = serde_json::from_str(text).unwrap();
         assert!(response["index"].is_object());
         assert!(response["recent_queries"].as_array().unwrap().is_empty());
+        assert!(response["token_usage"]["recent_tool_calls"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -3134,6 +3166,40 @@ mod tests {
         let text = result["content"][0]["text"].as_str().unwrap();
         let response: serde_json::Value = serde_json::from_str(text).unwrap();
         assert_eq!(response["index"]["test_tenant"]["chunks_indexed"], 3);
+    }
+
+    #[tokio::test]
+    async fn handle_tool_metrics_includes_tool_token_usage() {
+        let store = Arc::new(MemoryStore::new());
+        let metrics = Arc::new(MetricsCollector::default());
+        let server = McpServer::with_metrics(test_config(), store, metrics);
+
+        server
+            .handle_tools_call(Some(json!({
+                "name": "memory.stats",
+                "arguments": {}
+            })))
+            .await
+            .expect("memory.stats should succeed");
+
+        let metrics_response = server
+            .handle_tools_call(Some(json!({
+                "name": "memory.metrics",
+                "arguments": {}
+            })))
+            .await
+            .expect("memory.metrics should succeed");
+        let text = metrics_response["content"][0]["text"].as_str().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+
+        assert_eq!(parsed["token_usage"]["total"]["calls"], 1);
+        assert!(
+            parsed["token_usage"]["total"]["estimated_total_tokens"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(parsed["token_usage"]["by_tool"]["memory.stats"]["calls"], 1);
     }
 
     /// Phase 4.4: a tool call that fails validation must bump the

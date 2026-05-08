@@ -217,6 +217,8 @@ These filters are resolved first, then the candidate set is reranked for retriev
 
 `memory.stats` uses aggregate counts and reports `active_chunks`, `deleted_chunks`, `total_chunks`, and active/deleted/all chunk-type maps. `memory.health` adds a read-only tenant/project report for duplicate canonical text, index coverage, payload-size percentiles, recent latency tails, and explicit alias scope information. `include_examples` controls whether duplicate previews are returned; `duplicate_limit` limits only those previews, not the aggregate duplicate group, row, or byte counts.
 
+`memory.metrics` reports latency, index, tiered-cache, rejection, and estimated token-usage metrics. The `token_usage` block counts MCP tool request/response bytes and estimates tokens as `ceil(serialized_mcp_payload_bytes / 4)` by tool and in recent calls. This is the part `memd` can observe directly; full agent token deltas still require paired agent runs that capture provider/API usage or CLI token footers.
+
 `context.find_relevant_context` can prepend hot-context chunks, but the hot pre-scan is wall-clock bounded so broad lookups on large tenants still continue through normal retrieval. List-style retrieval scans skip stale unreadable segment rows with a warning; strict point reads through `memory.get` still surface storage errors.
 
 ## Conversation Event Tags

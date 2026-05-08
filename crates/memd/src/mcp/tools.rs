@@ -1425,7 +1425,7 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
         // MCP-08: memory.metrics
         ToolDefinition::new(
             "memory.metrics",
-            "Get system metrics including index sizes and query latency breakdown. Returns: timestamp, per-tenant index stats (chunks, embeddings, memory), latency statistics (avg, p50, p90, p99), recent query breakdown.",
+            "Get system metrics including index sizes, query latency, cache stats, rejection counts, and estimated MCP payload token usage by tool. Token usage is estimated from serialized request/response bytes and is not whole-model billing usage.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1435,7 +1435,11 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     },
                     "include_recent": {
                         "type": "boolean",
-                        "description": "Include recent query latency breakdown (default: true)"
+                        "description": "Include recent query latency and recent tool token breakdowns (default: true)"
+                    },
+                    "include_tiered": {
+                        "type": "boolean",
+                        "description": "Include tiered cache/search metrics (default: true)"
                     }
                 },
                 "required": []
