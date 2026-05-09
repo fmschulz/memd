@@ -1,0 +1,145 @@
+{
+  "run_set": "suite5_interface_probe_codex",
+  "agents": [
+    "codex"
+  ],
+  "conditions": [
+    "thin_mcp",
+    "cli_search"
+  ],
+  "rows": [
+    {
+      "agent": "codex",
+      "condition": "thin_mcp",
+      "interface_condition": "thin_mcp",
+      "requested_condition": "thin_mcp",
+      "episode_id": "schema_defaults_transfer",
+      "kind": "transfer",
+      "cli_rc": 0,
+      "test_rc": 0,
+      "tests_passed": true,
+      "elapsed_seconds": 38,
+      "estimated_transcript_tokens": 3990,
+      "patch_chars": 1091,
+      "test_output_chars": 97,
+      "final_chars": 495,
+      "final": "Fixed the schema-default failure in [migrations.py](/home/fschulz/dev/software/memd/evals/bench/memd-multiturn-token-savings/results/suite5_interface_probe_codex/worktrees/codex__thin_mcp__schema_defaults_transfer/migrations.py:6). `add_required_tier` now backfills existing rows with `tier=\"standard\"` before marking the column required, leaving ingest and reporting behavior unchanged.\n\nTests run: `python3 -m unittest -q` \u2014 passed, 4 tests.\n\nUsed prior experience id: `mt-schema-defaults-v1`.",
+      "cli_retrieval_calls": 1,
+      "cli_retrieval_output_bytes": 7643,
+      "cli_retrieval_output_estimated_tokens": 1911,
+      "cli_retrieval_result_count": 3,
+      "cli_retrieval_files": [
+        "/home/fschulz/dev/software/memd/evals/bench/memd-multiturn-token-savings/results/suite5_interface_probe_codex/retrieval/codex__thin_mcp__schema_defaults_transfer/memd_search_1778338123993.json"
+      ],
+      "provider_total_tokens": 23846,
+      "token_source": "codex_footer",
+      "agent_turns": 5,
+      "memd_tool_attempts": 1,
+      "memd_tool_calls": 1,
+      "memd_tools": {
+        "memdthin/memd_search": 1
+      },
+      "memd_tool_attempts_by_tool": {
+        "memdthin/memd_search": 1
+      },
+      "shell_calls": 11,
+      "cli_search_command_mentions": 0,
+      "retrieval_correct": true,
+      "memd_raw_total_delta": 3378,
+      "memd_request_payload_tokens": 73,
+      "memd_response_payload_tokens": 1577,
+      "memd_total_payload_tokens": 1650,
+      "memd_payload_components_by_tool": {
+        "memory.search": {
+          "request": 73,
+          "response": 1577,
+          "total": 1650
+        }
+      }
+    },
+    {
+      "agent": "codex",
+      "condition": "cli_search",
+      "interface_condition": "cli_search",
+      "requested_condition": "cli_search",
+      "episode_id": "schema_defaults_transfer",
+      "kind": "transfer",
+      "cli_rc": 0,
+      "test_rc": 0,
+      "tests_passed": true,
+      "elapsed_seconds": 110,
+      "estimated_transcript_tokens": 6501,
+      "patch_chars": 1097,
+      "test_output_chars": 97,
+      "final_chars": 322,
+      "final": "Patched `migrations.py` so `add_required_tier` backfills missing existing `tier` values to `\"standard\"` before enforcing the required column. Public function names are unchanged; ingest and reporting were left alone.\n\nTests run: `python3 -m unittest -q` passed, 4 tests.\n\nUsed prior experience id: `mt-schema-defaults-v1`.",
+      "cli_retrieval_calls": 1,
+      "cli_retrieval_output_bytes": 11874,
+      "cli_retrieval_output_estimated_tokens": 2969,
+      "cli_retrieval_result_count": 5,
+      "cli_retrieval_files": [
+        "/home/fschulz/dev/software/memd/evals/bench/memd-multiturn-token-savings/results/suite5_interface_probe_codex/retrieval/codex__cli_search__schema_defaults_transfer/memd_search_1778337611755.json"
+      ],
+      "provider_total_tokens": 35582,
+      "token_source": "codex_footer",
+      "agent_turns": 6,
+      "memd_tool_attempts": 0,
+      "memd_tool_calls": 0,
+      "memd_tools": {},
+      "memd_tool_attempts_by_tool": {},
+      "shell_calls": 9,
+      "cli_search_command_mentions": 2,
+      "retrieval_correct": true,
+      "memd_raw_total_delta": 5809,
+      "memd_request_payload_tokens": 56,
+      "memd_response_payload_tokens": 2497,
+      "memd_total_payload_tokens": 2553,
+      "memd_payload_components_by_tool": {
+        "memory.search": {
+          "request": 56,
+          "response": 2497,
+          "total": 2553
+        }
+      }
+    }
+  ],
+  "pairs": [],
+  "aggregates": [
+    {
+      "agent": "codex",
+      "interface_condition": "cli_search",
+      "cells": 1,
+      "tests_passed": 1,
+      "retrieval_correct": 1,
+      "provider_total_tokens": 35582,
+      "additive_mcp_payload_tokens": 0,
+      "observed_memory_search_payload_tokens": 2553,
+      "cli_retrieval_output_estimated_tokens": 2969,
+      "total_including_retrieval": 35582,
+      "elapsed_seconds_total": 110,
+      "elapsed_seconds_median": 110,
+      "claude_model_cache_creation_input_tokens": null,
+      "claude_model_cache_read_input_tokens": null,
+      "visible_tool_count_median": null,
+      "visible_memd_tool_count_median": null
+    },
+    {
+      "agent": "codex",
+      "interface_condition": "thin_mcp",
+      "cells": 1,
+      "tests_passed": 1,
+      "retrieval_correct": 1,
+      "provider_total_tokens": 23846,
+      "additive_mcp_payload_tokens": 1650,
+      "observed_memory_search_payload_tokens": 1650,
+      "cli_retrieval_output_estimated_tokens": 1911,
+      "total_including_retrieval": 25496,
+      "elapsed_seconds_total": 38,
+      "elapsed_seconds_median": 38,
+      "claude_model_cache_creation_input_tokens": null,
+      "claude_model_cache_read_input_tokens": null,
+      "visible_tool_count_median": null,
+      "visible_memd_tool_count_median": null
+    }
+  ]
+}

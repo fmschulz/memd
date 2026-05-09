@@ -1,0 +1,71 @@
+{
+  "run_set": "suite5_cli_prefetch_smoke",
+  "agents": [
+    "codex"
+  ],
+  "conditions": [
+    "cli_prefetch"
+  ],
+  "rows": [
+    {
+      "agent": "codex",
+      "condition": "cli_prefetch",
+      "interface_condition": "cli_prefetch",
+      "requested_condition": "cli_prefetch",
+      "episode_id": "schema_defaults_transfer",
+      "kind": "transfer",
+      "cli_rc": 0,
+      "test_rc": 0,
+      "tests_passed": true,
+      "elapsed_seconds": 28,
+      "estimated_transcript_tokens": 4254,
+      "patch_chars": 1094,
+      "test_output_chars": 97,
+      "final_chars": 578,
+      "final": "Implemented the schema-default fix in [migrations.py](/home/fschulz/dev/software/memd/evals/bench/memd-multiturn-token-savings/results/suite5_cli_prefetch_smoke/worktrees/codex__cli_prefetch__schema_defaults_transfer/migrations.py:8): existing rows now get `tier=\"standard\"` before `tier` is enforced as required. Reporting and ingest behavior were left unchanged.\n\nTests run: `python3 -m unittest -q` passed, 4 tests.\n\nUsed prior experience id: `mt-schema-defaults-v1`, because the current failure matched its evidence about required schema fields needing a migration backfill.",
+      "cli_retrieval_calls": 1,
+      "cli_retrieval_output_bytes": 11959,
+      "cli_retrieval_output_estimated_tokens": 2990,
+      "cli_retrieval_result_count": 5,
+      "cli_retrieval_files": [
+        "/home/fschulz/dev/software/memd/evals/bench/memd-multiturn-token-savings/results/suite5_cli_prefetch_smoke/retrieval/codex__cli_prefetch__schema_defaults_transfer/memd_search_1778344271523.json"
+      ],
+      "provider_total_tokens": 31487,
+      "token_source": "codex_footer",
+      "agent_turns": 5,
+      "memd_tool_attempts": 0,
+      "memd_tool_calls": 0,
+      "memd_tools": {},
+      "memd_tool_attempts_by_tool": {},
+      "shell_calls": 8,
+      "cli_search_command_mentions": 0,
+      "retrieval_correct": true,
+      "memd_raw_total_delta": 1728,
+      "memd_request_payload_tokens": 0,
+      "memd_response_payload_tokens": 0,
+      "memd_total_payload_tokens": 0,
+      "memd_payload_components_by_tool": {}
+    }
+  ],
+  "pairs": [],
+  "aggregates": [
+    {
+      "agent": "codex",
+      "interface_condition": "cli_prefetch",
+      "cells": 1,
+      "tests_passed": 1,
+      "retrieval_correct": 1,
+      "provider_total_tokens": 31487,
+      "additive_mcp_payload_tokens": 0,
+      "observed_memory_search_payload_tokens": 0,
+      "cli_retrieval_output_estimated_tokens": 2990,
+      "total_including_retrieval": 31487,
+      "elapsed_seconds_total": 28,
+      "elapsed_seconds_median": 28,
+      "claude_model_cache_creation_input_tokens": null,
+      "claude_model_cache_read_input_tokens": null,
+      "visible_tool_count_median": null,
+      "visible_memd_tool_count_median": null
+    }
+  ]
+}
