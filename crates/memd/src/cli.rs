@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tracing::info;
 
-use crate::error::Result;
+use crate::error::{MemdError, Result};
+use crate::mcp::handlers::{handle_memory_search, QueryMode, SearchParams};
 use crate::store::metadata::MetadataStore;
 use crate::store::{Store, TenantManager};
 use crate::types::{ChunkId, ChunkType, MemoryChunk, ProjectId, Source, TenantId};
@@ -36,6 +37,33 @@ pub enum TenantScopeMode {
     Global,
     /// Read only from explicitly allowed tenants.
     Allowlist,
+}
+
+/// Retrieval intent for CLI search/orchestration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum CliQueryMode {
+    Generic,
+    BriefProject,
+    ResumeTask,
+    FindFailures,
+    FindDecisions,
+    FindEvidence,
+    FindHighlights,
+}
+
+impl From<CliQueryMode> for QueryMode {
+    fn from(value: CliQueryMode) -> Self {
+        match value {
+            CliQueryMode::Generic => QueryMode::Generic,
+            CliQueryMode::BriefProject => QueryMode::BriefProject,
+            CliQueryMode::ResumeTask => QueryMode::ResumeTask,
+            CliQueryMode::FindFailures => QueryMode::FindFailures,
+            CliQueryMode::FindDecisions => QueryMode::FindDecisions,
+            CliQueryMode::FindEvidence => QueryMode::FindEvidence,
+            CliQueryMode::FindHighlights => QueryMode::FindHighlights,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +140,102 @@ pub enum CliCommand {
         /// Maximum number of results
         #[arg(long, default_value = "10")]
         k: usize,
+
+        /// Optional project identifier
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Use memory.search compact shaping instead of the legacy raw chunk array
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        compact: bool,
+
+        /// Approximate result token budget; also enables compact shaping
+        #[arg(long)]
+        token_budget: Option<usize>,
+
+        /// Retrieval intent for digest-biased searches
+        #[arg(long, value_enum, default_value = "generic")]
+        mode: CliQueryMode,
+
+        /// Omit chunk text from compact output
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        no_text: bool,
+
+        /// Include linked canonical artifacts in compact output
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        include_artifact: bool,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "json")]
+        format: ExportFormat,
+
+        /// Output file path (defaults to stdout)
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    /// Build a bounded local context file for agents using CLI-only retrieval.
+    ///
+    /// This is the preferred no-MCP orchestration path: a controller runs
+    /// retrieval before launching the agent, writes a compact context file
+    /// into the workspace, and the agent reads that file instead of seeing
+    /// MCP tools or spawning search during the solve.
+    AgentContext {
+        /// Tenant identifier
+        #[arg(long)]
+        tenant_id: String,
+
+        /// Optional project identifier
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Search query. May be repeated; results are merged and deduplicated.
+        #[arg(long, required = true, action = ArgAction::Append)]
+        query: Vec<String>,
+
+        /// Maximum results per query before deduplication
+        #[arg(long, default_value = "2")]
+        k: usize,
+
+        /// Approximate token budget per query
+        #[arg(long, default_value = "700")]
+        token_budget: usize,
+
+        /// Retrieval intent for digest-biased searches
+        #[arg(long, value_enum, default_value = "generic")]
+        mode: CliQueryMode,
+
+        /// Omit chunk text from compact output
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        no_text: bool,
+
+        /// Include linked canonical artifacts in compact output
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        include_artifact: bool,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: ExportFormat,
+
+        /// Output file path (defaults to stdout)
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Optional directory for benchmark/audit JSON logs
+        #[arg(long)]
+        log_dir: Option<PathBuf>,
+
+        /// Optional long-lived local memd daemon URL for faster controller-side retrieval.
+        ///
+        /// When set, `agent-context` does not open the persistent store in
+        /// this process. This keeps the agent-facing interface CLI-only while
+        /// avoiding one-shot store startup cost.
+        #[arg(long)]
+        url: Option<String>,
+
+        /// HTTP timeout in seconds when --url is used
+        #[arg(long, default_value_t = 30)]
+        timeout: u64,
     },
 
     /// Get a chunk by ID
@@ -313,7 +437,10 @@ pub enum CliCommand {
 impl CliCommand {
     /// Whether this command needs an initialized backing store.
     pub fn requires_store(&self) -> bool {
-        !matches!(self, CliCommand::Init { .. })
+        !matches!(
+            self,
+            CliCommand::Init { .. } | CliCommand::AgentContext { url: Some(_), .. }
+        )
     }
 }
 
@@ -393,26 +520,62 @@ pub async fn run_cli<S: Store>(
             tenant_id,
             query,
             k,
+            project_id,
+            compact,
+            token_budget,
+            mode,
+            no_text,
+            include_artifact,
+            format,
+            output,
         } => {
-            let tenant = TenantId::new(&tenant_id)?;
-            let results = store.search(&tenant, &query, k).await?;
+            let payload = cli_search_payload(
+                store,
+                tenant_id,
+                project_id,
+                query,
+                k,
+                compact,
+                token_budget,
+                mode,
+                no_text,
+                include_artifact,
+            )
+            .await?;
+            write_rendered(output.as_deref(), &render_search_payload(&payload, format)?)?;
+        }
 
-            info!(count = results.len(), "search complete");
-
-            let output: Vec<_> = results
-                .iter()
-                .map(|c| {
-                    json!({
-                        "chunk_id": c.chunk_id.to_string(),
-                        "text": c.text,
-                        "chunk_type": c.chunk_type.to_string(),
-                        "timestamp_created": c.timestamp_created,
-                        "tags": c.tags,
-                    })
-                })
-                .collect();
-
-            println!("{}", serde_json::to_string_pretty(&output)?);
+        CliCommand::AgentContext {
+            tenant_id,
+            project_id,
+            query,
+            k,
+            token_budget,
+            mode,
+            no_text,
+            include_artifact,
+            format,
+            output,
+            log_dir,
+            url,
+            timeout,
+        } => {
+            let payload = cli_agent_context_payload(
+                store,
+                &tenant_id,
+                project_id.as_deref(),
+                &query,
+                k,
+                token_budget,
+                mode,
+                no_text,
+                include_artifact,
+                url.as_deref(),
+                timeout,
+            )
+            .await?;
+            write_cli_log(log_dir.as_deref(), "memd_search", &payload)?;
+            write_rendered(output.as_deref(), &render_agent_context(&payload, format)?)?;
         }
 
         CliCommand::Get {
@@ -1268,6 +1431,372 @@ fn export_format_name(format: ExportFormat) -> &'static str {
     }
 }
 
+async fn cli_search_payload<S: Store>(
+    store: &S,
+    tenant_id: String,
+    project_id: Option<String>,
+    query: String,
+    k: usize,
+    compact: bool,
+    token_budget: Option<usize>,
+    mode: CliQueryMode,
+    no_text: bool,
+    include_artifact: bool,
+) -> Result<Value> {
+    let payload = direct_memory_search_payload(
+        store,
+        tenant_id.as_str(),
+        project_id.as_deref(),
+        query.as_str(),
+        k,
+        compact,
+        token_budget,
+        mode,
+        no_text,
+        include_artifact,
+    )
+    .await?;
+    let result_count = payload
+        .get("results")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+
+    info!(count = result_count, "search complete");
+    Ok(payload)
+}
+
+async fn cli_agent_context_payload<S: Store>(
+    store: &S,
+    tenant_id: &str,
+    project_id: Option<&str>,
+    queries: &[String],
+    k: usize,
+    token_budget: usize,
+    mode: CliQueryMode,
+    no_text: bool,
+    include_artifact: bool,
+    url: Option<&str>,
+    timeout: u64,
+) -> Result<Value> {
+    let mut seen = std::collections::HashSet::new();
+    let mut merged_results = Vec::new();
+    let mut query_summaries = Vec::new();
+
+    for query in queries {
+        let payload = if let Some(url) = url {
+            daemon_memory_search_payload(
+                url,
+                timeout,
+                tenant_id,
+                project_id,
+                query,
+                k,
+                Some(token_budget),
+                mode,
+                no_text,
+                include_artifact,
+            )?
+        } else {
+            direct_memory_search_payload(
+                store,
+                tenant_id,
+                project_id,
+                query,
+                k,
+                true,
+                Some(token_budget),
+                mode,
+                no_text,
+                include_artifact,
+            )
+            .await?
+        };
+        let results = payload
+            .get("results")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for result in &results {
+            let Some(chunk_id) = result.get("chunk_id").and_then(Value::as_str) else {
+                continue;
+            };
+            if seen.insert(chunk_id.to_string()) {
+                merged_results.push(result.clone());
+            }
+        }
+        query_summaries.push(json!({
+            "query": query,
+            "result_count": results.len(),
+            "budget_info": payload.get("budget_info").cloned().unwrap_or(Value::Null),
+        }));
+    }
+
+    Ok(json!({
+        "tool": "memd.agent_context",
+        "interface": "cli_prefetch",
+        "retrieval_backend": if url.is_some() { "daemon" } else { "direct_store" },
+        "tenant_id": tenant_id,
+        "project_id": project_id,
+        "queries": query_summaries,
+        "k_per_query": k,
+        "token_budget_per_query": token_budget,
+        "result_count": merged_results.len(),
+        "results": merged_results,
+    }))
+}
+
+async fn direct_memory_search_payload<S: Store>(
+    store: &S,
+    tenant_id: &str,
+    project_id: Option<&str>,
+    query: &str,
+    k: usize,
+    compact: bool,
+    token_budget: Option<usize>,
+    mode: CliQueryMode,
+    no_text: bool,
+    include_artifact: bool,
+) -> Result<Value> {
+    let params = SearchParams {
+        tenant_id: tenant_id.to_string(),
+        query: query.to_string(),
+        project_id: project_id.map(ToString::to_string),
+        k,
+        mode: Some(mode.into()),
+        compact,
+        token_budget,
+        include_text: no_text.then_some(false),
+        include_artifact: include_artifact.then_some(true),
+        ..Default::default()
+    };
+    let mcp_value = handle_memory_search(store, params)
+        .await
+        .map_err(|e| MemdError::ProtocolError(e.to_string()))?;
+    unwrap_mcp_content_payload(mcp_value)
+}
+
+fn daemon_memory_search_payload(
+    url: &str,
+    timeout: u64,
+    tenant_id: &str,
+    project_id: Option<&str>,
+    query: &str,
+    k: usize,
+    token_budget: Option<usize>,
+    mode: CliQueryMode,
+    no_text: bool,
+    include_artifact: bool,
+) -> Result<Value> {
+    let mut arguments = json!({
+        "tenant_id": tenant_id,
+        "query": query,
+        "k": k,
+        "compact": true,
+        "mode": cli_query_mode_name(mode),
+    });
+    if let Some(project_id) = project_id {
+        arguments["project_id"] = json!(project_id);
+    }
+    if let Some(token_budget) = token_budget {
+        arguments["token_budget"] = json!(token_budget);
+    }
+    if no_text {
+        arguments["include_text"] = json!(false);
+    }
+    if include_artifact {
+        arguments["include_artifact"] = json!(true);
+    }
+
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "memory.search",
+            "arguments": arguments,
+        },
+    });
+    let timeout = std::time::Duration::from_secs(timeout);
+    let response = ureq::post(url)
+        .timeout(timeout)
+        .set("content-type", "application/json")
+        .send_string(&serde_json::to_string(&request)?)
+        .map_err(|e| MemdError::ProtocolError(format!("daemon search request failed: {e}")))?;
+    let body = response.into_string().map_err(|e| {
+        MemdError::ProtocolError(format!("failed to read daemon search response: {e}"))
+    })?;
+    let value: Value = serde_json::from_str(&body)?;
+    if let Some(error) = value.get("error") {
+        return Err(MemdError::ProtocolError(format!(
+            "daemon memory.search failed: {error}"
+        )));
+    }
+    let result = value.get("result").cloned().ok_or_else(|| {
+        MemdError::ProtocolError("daemon memory.search returned no result".to_string())
+    })?;
+    unwrap_mcp_content_payload(result)
+}
+
+fn cli_query_mode_name(mode: CliQueryMode) -> &'static str {
+    match mode {
+        CliQueryMode::Generic => "generic",
+        CliQueryMode::BriefProject => "brief_project",
+        CliQueryMode::ResumeTask => "resume_task",
+        CliQueryMode::FindFailures => "find_failures",
+        CliQueryMode::FindDecisions => "find_decisions",
+        CliQueryMode::FindEvidence => "find_evidence",
+        CliQueryMode::FindHighlights => "find_highlights",
+    }
+}
+
+fn unwrap_mcp_content_payload(value: Value) -> Result<Value> {
+    let text = value
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("text"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            MemdError::ProtocolError("memory.search returned no MCP text payload".to_string())
+        })?;
+    Ok(serde_json::from_str(text)?)
+}
+
+fn render_search_payload(payload: &Value, format: ExportFormat) -> Result<String> {
+    match format {
+        ExportFormat::Json => Ok(serde_json::to_string_pretty(payload)? + "\n"),
+        ExportFormat::Jsonl => render_results_jsonl(payload),
+        ExportFormat::Markdown => render_memory_markdown(payload, "memd search"),
+    }
+}
+
+fn render_agent_context(payload: &Value, format: ExportFormat) -> Result<String> {
+    match format {
+        ExportFormat::Json => Ok(serde_json::to_string_pretty(payload)? + "\n"),
+        ExportFormat::Jsonl => render_results_jsonl(payload),
+        ExportFormat::Markdown => render_memory_markdown(payload, "memd CLI Context"),
+    }
+}
+
+fn render_results_jsonl(payload: &Value) -> Result<String> {
+    let mut out = String::new();
+    if let Some(results) = payload.get("results").and_then(Value::as_array) {
+        for result in results {
+            out.push_str(&serde_json::to_string(result)?);
+            out.push('\n');
+        }
+    }
+    Ok(out)
+}
+
+fn render_memory_markdown(payload: &Value, title: &str) -> Result<String> {
+    let mut out = String::new();
+    out.push_str("# ");
+    out.push_str(title);
+    out.push_str("\n\n");
+
+    if let Some(tenant_id) = payload.get("tenant_id").and_then(Value::as_str) {
+        out.push_str(&format!("- tenant_id: `{tenant_id}`\n"));
+    }
+    if let Some(project_id) = payload.get("project_id").and_then(Value::as_str) {
+        out.push_str(&format!("- project_id: `{project_id}`\n"));
+    }
+    if let Some(count) = payload.get("result_count").and_then(Value::as_u64) {
+        out.push_str(&format!("- result_count: `{count}`\n"));
+    }
+    out.push_str("- interface: `cli_only`\n");
+    out.push_str("- contract: use these memories only when they match current evidence; cite chunk_id or citation_id when used.\n");
+
+    if let Some(queries) = payload.get("queries").and_then(Value::as_array) {
+        out.push_str("\n## Queries\n\n");
+        for query in queries {
+            if let Some(text) = query.get("query").and_then(Value::as_str) {
+                let count = query
+                    .get("result_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                out.push_str(&format!("- `{text}` -> {count} result(s)\n"));
+            }
+        }
+    }
+
+    out.push_str("\n## Results\n\n");
+    let Some(results) = payload.get("results").and_then(Value::as_array) else {
+        return Ok(out);
+    };
+    for (idx, result) in results.iter().enumerate() {
+        let chunk_id = result
+            .get("chunk_id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let chunk_type = result
+            .get("chunk_type")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let score = result.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+        out.push_str(&format!(
+            "### {}. `{}` ({}, score {:.3})\n\n",
+            idx + 1,
+            chunk_id,
+            chunk_type,
+            score
+        ));
+        if let Some(citation_id) = result
+            .get("citation")
+            .and_then(|c| c.get("citation_id"))
+            .and_then(Value::as_str)
+        {
+            out.push_str(&format!("- citation_id: `{citation_id}`\n"));
+        }
+        if let Some(trust_tier) = result.get("trust_tier").and_then(Value::as_str) {
+            out.push_str(&format!("- trust_tier: `{trust_tier}`\n"));
+        }
+        if let Some(text) = result.get("text").and_then(Value::as_str) {
+            if !text.is_empty() {
+                out.push_str("\n");
+                out.push_str(text.trim());
+                out.push_str("\n");
+            }
+        }
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn write_rendered(path: Option<&Path>, rendered: &str) -> Result<()> {
+    if let Some(path) = path {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, rendered)?;
+    } else {
+        print!("{rendered}");
+    }
+    Ok(())
+}
+
+fn write_cli_log(log_dir: Option<&Path>, prefix: &str, payload: &Value) -> Result<()> {
+    let Some(log_dir) = log_dir else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(log_dir)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| MemdError::ValidationError(format!("system time before epoch: {e}")))?
+        .as_millis();
+    let path = log_dir.join(format!("{prefix}_{stamp}.json"));
+    let rendered = serde_json::to_string_pretty(payload)? + "\n";
+    std::fs::write(path, rendered)?;
+    let jsonl_path = log_dir.join(format!("{prefix}_log.jsonl"));
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(jsonl_path)?;
+    writeln!(file, "{}", serde_json::to_string(payload)?)?;
+    Ok(())
+}
+
 fn render_export(
     chunks: &[MemoryChunk],
     tenant: &TenantId,
@@ -1624,6 +2153,53 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["text"], "json export chunk");
         let _ = std::fs::remove_file(output_path);
+    }
+
+    #[tokio::test]
+    async fn agent_context_builds_cli_prefetch_payload() {
+        let store = MemoryStore::new();
+        let tenant = TenantId::new("agent_context_tenant").unwrap();
+        let chunk = MemoryChunk::new(
+            tenant,
+            "experience_id=mt-schema-defaults-v1 repair rule: shared defaults belong in one schema layer",
+            ChunkType::Research,
+        )
+        .with_project(ProjectId::from("schema_defaults"));
+        store.add(chunk).await.unwrap();
+
+        let payload = cli_agent_context_payload(
+            &store,
+            "agent_context_tenant",
+            Some("schema_defaults"),
+            &[
+                "mt-schema-defaults-v1 repair rules".to_string(),
+                "schema defaults repair rules".to_string(),
+            ],
+            5,
+            1200,
+            CliQueryMode::Generic,
+            false,
+            false,
+            None,
+            30,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(payload["interface"], "cli_prefetch");
+        assert!(payload["result_count"].as_u64().unwrap_or(0) >= 1);
+        let markdown = render_agent_context(&payload, ExportFormat::Markdown).unwrap();
+        assert!(markdown.contains("mt-schema-defaults-v1"));
+        assert!(markdown.contains("interface: `cli_only`"));
+
+        let dir = tempdir().unwrap();
+        write_cli_log(Some(dir.path()), "memd_search", &payload).unwrap();
+        let files = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(files.iter().any(|name| name.starts_with("memd_search_")));
+        assert!(files.iter().any(|name| name == "memd_search_log.jsonl"));
     }
 
     #[tokio::test]

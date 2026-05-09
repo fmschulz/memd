@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "memdthin": {
+      "type": "stdio",
+      "command": "env",
+      "args": [
+        "MEMD_THIN_LOG_DIR=.bench/memd-search-logs",
+        "python3",
+        "/home/fschulz/dev/software/memd/evals/bench/memd-multiturn-token-savings/tools/thin_mcp_search_server.py"
+      ]
+    }
+  }
+}

@@ -1,0 +1,131 @@
+{
+  "episodes": [
+    {
+      "id": "timezone_boundary_transfer",
+      "kind": "transfer",
+      "fixture": "fixtures/timezone_boundary_transfer",
+      "tenant_id": "bench_mt_tokens",
+      "project_id": "timezone_boundary",
+      "experience_id": "mt-timezone-boundary-v1",
+      "target_tests": "python3 -m unittest -q",
+      "expected_files": [
+        "scheduler.py"
+      ],
+      "success_markers": [
+        "OK"
+      ],
+      "retrieval_markers": [
+        "mt-timezone-boundary-v1",
+        "converted to UTC twice",
+        "Normalize to timezone-aware UTC at input boundary only"
+      ],
+      "prompt": "Fix the failing scheduler tests in this fixture. Keep the public function names unchanged. Run `python3 -m unittest -q` before your final answer. In the final answer, include the tests run and whether you used a prior experience id."
+    },
+    {
+      "id": "timezone_boundary_transfer_v2",
+      "kind": "transfer",
+      "fixture": "fixtures/timezone_boundary_transfer_v2",
+      "tenant_id": "bench_mt_tokens",
+      "project_id": "timezone_boundary",
+      "experience_id": "mt-timezone-boundary-v2",
+      "target_tests": "python3 -m unittest -q",
+      "expected_files": [
+        "time_math.py"
+      ],
+      "success_markers": [
+        "OK"
+      ],
+      "retrieval_markers": [
+        "mt-timezone-boundary-v2",
+        "offset-bearing ISO timestamp was converted to UTC twice",
+        "Use timedelta for reminder offsets",
+        "blackout policy and audit key hypotheses were not causal"
+      ],
+      "prompt": "Fix the failing dispatch scheduler tests in this fixture. Keep public function names unchanged. Do not rewrite policy, audit, or formatting behavior unless a failing test proves it is causal. Run `python3 -m unittest -q` before your final answer. In the final answer, include the tests run and whether you used a prior experience id."
+    },
+    {
+      "id": "pagination_cursor_transfer",
+      "kind": "transfer",
+      "fixture": "fixtures/pagination_cursor_transfer",
+      "tenant_id": "bench_mt_tokens",
+      "project_id": "pagination_cursor",
+      "experience_id": "mt-pagination-cursor-v1",
+      "target_tests": "python3 -m unittest -q",
+      "expected_files": [
+        "sync_worker.py"
+      ],
+      "success_markers": [
+        "OK"
+      ],
+      "retrieval_markers": [
+        "mt-pagination-cursor-v1",
+        "advance the cursor only after the page write succeeds",
+        "API page boundaries and idempotent upserts were not causal"
+      ],
+      "prompt": "Fix the failing pagination cursor tests in this fixture. Keep public function names unchanged. Do not rewrite source API pagination, idempotent store upserts, or state shape unless a failing test proves it is causal. Run `python3 -m unittest -q` before your final answer. In the final answer, include the tests run and whether you used a prior experience id."
+    },
+    {
+      "id": "cache_key_scope_transfer",
+      "kind": "transfer",
+      "fixture": "fixtures/cache_key_scope_transfer",
+      "tenant_id": "bench_mt_tokens",
+      "project_id": "cache_key_scope",
+      "experience_id": "mt-cache-key-scope-v1",
+      "target_tests": "python3 -m unittest -q",
+      "expected_files": [
+        "cache.py"
+      ],
+      "success_markers": [
+        "OK"
+      ],
+      "retrieval_markers": [
+        "mt-cache-key-scope-v1",
+        "cache key omitted tenant_id",
+        "authorization and flag defaults were not causal"
+      ],
+      "prompt": "Fix the failing tenant cache tests in this fixture. Keep public function names unchanged. Do not rewrite authorization or flag default behavior unless a failing test proves it is causal. Run `python3 -m unittest -q` before your final answer. In the final answer, include the tests run and whether you used a prior experience id."
+    },
+    {
+      "id": "schema_defaults_transfer",
+      "kind": "transfer",
+      "fixture": "fixtures/schema_defaults_transfer",
+      "tenant_id": "bench_mt_tokens",
+      "project_id": "schema_defaults",
+      "experience_id": "mt-schema-defaults-v1",
+      "target_tests": "python3 -m unittest -q",
+      "expected_files": [
+        "migrations.py"
+      ],
+      "success_markers": [
+        "OK"
+      ],
+      "retrieval_markers": [
+        "mt-schema-defaults-v1",
+        "required column lacked a backfill default for existing rows",
+        "report formatting and ingest defaults were not causal"
+      ],
+      "prompt": "Fix the failing schema-default tests in this fixture. Keep public function names unchanged. Do not rewrite reporting or ingest behavior unless a failing test proves it is causal. Run `python3 -m unittest -q` before your final answer. In the final answer, include the tests run and whether you used a prior experience id."
+    },
+    {
+      "id": "stream_backpressure_transfer",
+      "kind": "transfer",
+      "fixture": "fixtures/stream_backpressure_transfer",
+      "tenant_id": "bench_mt_tokens",
+      "project_id": "stream_backpressure",
+      "experience_id": "mt-stream-backpressure-v1",
+      "target_tests": "python3 -m unittest -q",
+      "expected_files": [
+        "exporter.py"
+      ],
+      "success_markers": [
+        "OK"
+      ],
+      "retrieval_markers": [
+        "mt-stream-backpressure-v1",
+        "drain pending chunks before the final flush",
+        "filtering and formatting were not causal"
+      ],
+      "prompt": "Fix the failing stream backpressure tests in this fixture. Keep public function names unchanged. Do not rewrite filtering, formatting, or writer internals unless a failing test proves it is causal. Run `python3 -m unittest -q` before your final answer. In the final answer, include the tests run and whether you used a prior experience id."
+    }
+  ]
+}
