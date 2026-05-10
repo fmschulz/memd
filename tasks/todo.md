@@ -68,3 +68,28 @@
 - `cargo test -p memd mcp::tools::tests`: 25 passed; only pre-existing unused-mut warnings.
 - `cargo test -p memd --tests`: 648 passed, 4 ignored in lib tests; integration targets passed (`hnsw_persistence` 6, `http_integration` 7, `lifecycle_overlay` 20, `test_chunking_integration` 1, `trace_tools` 13).
 - `git diff --check`: passed.
+
+## 2026-05-10 Track D Conflict-Aware Ingestion
+
+### Plan
+
+- [x] Add tests for exact/fuzzy near-duplicate preview and supersede-on-add.
+- [x] Extend supersession canonicalization with fuzzy trigram similarity helpers.
+- [x] Persist canonical text from persistent `memory.add` writes.
+- [x] Add `memory.find_near_duplicates` preview tool.
+- [x] Add `supersede_near_duplicates` exact and opt-in fuzzy behavior to `memory.add`.
+- [x] Run focused tests, tool schema tests, broad verification, and record results in memd.
+
+### Progress
+
+- Track C committed and pushed as `bfee846 feat(lifecycle): add temporal maintenance`.
+- Track D added exact canonical duplicate lookup, opt-in fuzzy trigram matching, `memory.find_near_duplicates`, and `memory.add` supersede-on-add for active duplicate candidates.
+
+### Review / Results
+
+- Red test pass before implementation: `cargo test -p memd --test lifecycle_overlay` failed the four new Track D cases as expected.
+- `cargo test -p memd --test lifecycle_overlay`: 24 passed.
+- `cargo test -p memd mcp::tools::tests`: 25 passed; only pre-existing unused-mut warnings.
+- `cargo test -p memd store::supersession::tests`: 6 passed; same warning baseline.
+- `cargo test -p memd --tests`: 651 passed, 4 ignored in lib tests; integration targets passed (`hnsw_persistence` 6, `http_integration` 7, `lifecycle_overlay` 24, `test_chunking_integration` 1, `trace_tools` 13).
+- `git diff --check`: passed.
