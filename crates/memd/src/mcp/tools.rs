@@ -180,6 +180,11 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         },
                         "description": "Optional tags for filtering"
                     },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["conversation", "document"],
+                        "description": "Ingestion mode label. Defaults to document and stores ingestion_mode:<mode>; conversation requires a persistent store for review scheduling and defaults review_after_ms to 14 days when omitted"
+                    },
                     "expires_at_ms": {
                         "type": "integer",
                         "description": "Optional unix timestamp in milliseconds after which the chunk is hidden by default"
@@ -252,6 +257,11 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                                         "type": "string"
                                     },
                                     "description": "Optional tags"
+                                },
+                                "mode": {
+                                    "type": "string",
+                                    "enum": ["conversation", "document"],
+                                    "description": "Ingestion mode label. Defaults to document and stores ingestion_mode:<mode>; conversation requires a persistent store for review scheduling and defaults review_after_ms to 14 days"
                                 }
                             },
                             "required": ["text", "type"]
