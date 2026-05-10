@@ -80,11 +80,13 @@ impl SqliteMetadataStore {
                 review_after_ms INTEGER,
                 lifecycle_updated_at_ms INTEGER NOT NULL DEFAULT 0,
                 canonical_text TEXT,
-                UNIQUE(segment_id, ordinal)
+                UNIQUE(tenant_id, segment_id, ordinal)
             )",
             [],
         )?;
 
+        Self::ensure_index_columns(&conn)?;
+        Self::ensure_tenant_scoped_segment_ordinal(&conn)?;
         Self::ensure_index_columns(&conn)?;
 
         // Critical: tenant_id index for isolation queries
@@ -454,6 +456,65 @@ impl SqliteMetadataStore {
             "ALTER TABLE task_artifacts ADD COLUMN source_updated_at_ms INTEGER",
         )?;
 
+        Ok(())
+    }
+
+    fn ensure_tenant_scoped_segment_ordinal(conn: &Connection) -> Result<()> {
+        let sql: String = conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chunks'",
+            [],
+            |row| row.get(0),
+        )?;
+        let normalized = sql.split_whitespace().collect::<String>();
+        if !normalized.contains("UNIQUE(segment_id,ordinal)") {
+            return Ok(());
+        }
+
+        conn.execute_batch(
+            "ALTER TABLE chunks RENAME TO chunks_old_segment_unique;
+             CREATE TABLE chunks (
+                chunk_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                project_id TEXT,
+                segment_id INTEGER NOT NULL,
+                ordinal INTEGER NOT NULL,
+                chunk_type TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'final',
+                timestamp_created INTEGER NOT NULL,
+                hash TEXT NOT NULL,
+                source_uri TEXT,
+                index_state TEXT NOT NULL DEFAULT 'indexed',
+                index_attempts INTEGER NOT NULL DEFAULT 0,
+                index_last_error TEXT,
+                indexed_at_ms INTEGER,
+                index_updated_at_ms INTEGER NOT NULL DEFAULT 0,
+                tier TEXT NOT NULL DEFAULT 'long_term',
+                supersedes TEXT,
+                superseded_by TEXT,
+                expires_at_ms INTEGER,
+                review_after_ms INTEGER,
+                lifecycle_updated_at_ms INTEGER NOT NULL DEFAULT 0,
+                canonical_text TEXT,
+                UNIQUE(tenant_id, segment_id, ordinal)
+             );
+             INSERT OR REPLACE INTO chunks (
+                chunk_id, tenant_id, project_id, segment_id, ordinal,
+                chunk_type, status, timestamp_created, hash, source_uri,
+                index_state, index_attempts, index_last_error, indexed_at_ms,
+                index_updated_at_ms, tier, supersedes, superseded_by,
+                expires_at_ms, review_after_ms, lifecycle_updated_at_ms,
+                canonical_text
+             )
+             SELECT
+                chunk_id, tenant_id, project_id, segment_id, ordinal,
+                chunk_type, status, timestamp_created, hash, source_uri,
+                index_state, index_attempts, index_last_error, indexed_at_ms,
+                index_updated_at_ms, tier, supersedes, superseded_by,
+                expires_at_ms, review_after_ms, lifecycle_updated_at_ms,
+                canonical_text
+             FROM chunks_old_segment_unique;
+             DROP TABLE chunks_old_segment_unique;",
+        )?;
         Ok(())
     }
 
@@ -1529,6 +1590,16 @@ impl MetadataStore for SqliteMetadataStore {
         }
     }
 
+    fn chunk_id_exists(&self, chunk_id: &ChunkId) -> Result<bool> {
+        let conn = self.pool.get();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(1) FROM chunks WHERE chunk_id = ?1",
+            rusqlite::params![chunk_id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     fn list(
         &self,
         tenant_id: &TenantId,
@@ -2541,6 +2612,33 @@ mod tests {
         assert!(names.contains("index_last_error"));
         assert!(names.contains("indexed_at_ms"));
         assert!(names.contains("index_updated_at_ms"));
+
+        let schema: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chunks'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let normalized = schema.split_whitespace().collect::<String>();
+        assert!(normalized.contains("UNIQUE(tenant_id,segment_id,ordinal)"));
+
+        let mut stmt = conn.prepare("PRAGMA index_list(chunks)").unwrap();
+        let rows = stmt
+            .query_map([], |row| row.get::<usize, String>(1))
+            .unwrap();
+        let mut indexes = std::collections::HashSet::new();
+        for row in rows {
+            indexes.insert(row.unwrap());
+        }
+        for idx in &[
+            "idx_chunks_expiry",
+            "idx_chunks_supersedes",
+            "idx_chunks_tier_status",
+            "idx_chunks_canonical",
+        ] {
+            assert!(indexes.contains(*idx), "missing index: {idx}");
+        }
     }
 
     #[test]
