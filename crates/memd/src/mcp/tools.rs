@@ -63,6 +63,21 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                         "minimum": 1,
                         "maximum": 100
                     },
+                    "include_superseded": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "When true, include chunks marked Superseded instead of hiding them."
+                    },
+                    "include_expired": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "When true, include chunks marked Expired or past expires_at_ms instead of hiding them."
+                    },
+                    "include_history": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "When true, include chunks in the History tier instead of hiding them."
+                    },
                     "filters": {
                         "type": "object",
                         "description": "Optional filters to narrow results",
