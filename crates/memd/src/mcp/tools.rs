@@ -179,6 +179,14 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                             "type": "string"
                         },
                         "description": "Optional tags for filtering"
+                    },
+                    "expires_at_ms": {
+                        "type": "integer",
+                        "description": "Optional unix timestamp in milliseconds after which the chunk is hidden by default"
+                    },
+                    "review_after_ms": {
+                        "type": "integer",
+                        "description": "Optional unix timestamp in milliseconds after which the chunk should be reviewed"
                     }
                 },
                 "required": ["text", "type"]
@@ -1559,6 +1567,43 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                 "required": ["old_chunk_id", "new_text", "type"]
             }),
         ),
+        // LIFECYCLE-02: memory.set_expiry (Track C)
+        ToolDefinition::new(
+            "memory.set_expiry",
+            "Set or clear temporal lifecycle fields for an existing chunk.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier for data isolation"
+                    },
+                    "chunk_id": {
+                        "type": "string",
+                        "description": "UUID of the chunk to update"
+                    },
+                    "expires_at_ms": {
+                        "type": "integer",
+                        "description": "Unix timestamp in milliseconds after which the chunk is hidden by default"
+                    },
+                    "review_after_ms": {
+                        "type": "integer",
+                        "description": "Unix timestamp in milliseconds after which the chunk should be reviewed"
+                    },
+                    "clear_expiry": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Clear expires_at_ms"
+                    },
+                    "clear_review_after": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Clear review_after_ms"
+                    }
+                },
+                "required": ["chunk_id"]
+            }),
+        ),
         // MEMORY-09: memory.consolidate_episode
         ToolDefinition::new(
             "memory.consolidate_episode",
@@ -1818,6 +1863,7 @@ pub fn tool_names() -> Vec<&'static str> {
         "memory.metrics",
         "memory.compact",
         "memory.supersede",
+        "memory.set_expiry",
         "memory.consolidate_episode",
         "context.list_subsystems",
         "context.get_files_for_subsystem",
@@ -1845,7 +1891,8 @@ mod tests {
         // Phase 2.3: 42 legacy tools + four focused artifact tools
         // (artifact.review / revision / decision / verification).
         // Track A (A7): + memory.supersede.
-        assert_eq!(tools.len(), 47);
+        // Track C: + memory.set_expiry.
+        assert_eq!(tools.len(), 48);
     }
 
     #[test]
@@ -1874,6 +1921,7 @@ mod tests {
         assert!(names.contains(&"memory.delete"));
         assert!(names.contains(&"memory.feedback"));
         assert!(names.contains(&"memory.stats"));
+        assert!(names.contains(&"memory.set_expiry"));
         assert!(names.contains(&"memory.consolidate_episode"));
     }
 
@@ -2165,8 +2213,10 @@ mod tests {
         let names = tool_names();
         // Phase 2.3: 42 legacy + 4 focused artifact tools.
         // Track A (A7): + memory.supersede.
-        assert_eq!(names.len(), 47);
+        // Track C: + memory.set_expiry.
+        assert_eq!(names.len(), 48);
         assert!(names.contains(&"memory.supersede"));
+        assert!(names.contains(&"memory.set_expiry"));
         assert!(names.contains(&"artifact.find_related"));
         assert!(names.contains(&"artifact.review"));
         assert!(names.contains(&"artifact.revision"));
