@@ -715,3 +715,257 @@ async fn context_search_documents_hides_lifecycle_hidden_rows_and_refills() {
         Some("contextneedle visible context")
     );
 }
+
+#[tokio::test]
+async fn memory_add_accepts_expires_at_ms_and_search_hides_expired_rows() {
+    let (server, _tmp) = test_server().await;
+
+    let expired_id = add_with_expiry(&server, "t", "expiryneedle already expired", 1).await;
+
+    let get = call_tool(
+        &server,
+        "memory.get",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunk_id": expired_id.to_string()
+        }),
+    )
+    .await;
+    let body = parse_result_text(&get);
+    assert_eq!(body["found"].as_bool(), Some(true), "{body}");
+    assert_eq!(body["hidden"].as_bool(), Some(true), "{body}");
+
+    let search = call_tool(
+        &server,
+        "memory.search",
+        serde_json::json!({
+            "tenant_id": "t",
+            "query": "expiryneedle",
+            "k": 5
+        }),
+    )
+    .await;
+    let body = parse_result_text(&search);
+    assert_eq!(body["results"].as_array().unwrap().len(), 0, "{body}");
+
+    let search = call_tool(
+        &server,
+        "memory.search",
+        serde_json::json!({
+            "tenant_id": "t",
+            "query": "expiryneedle",
+            "k": 5,
+            "include_expired": true
+        }),
+    )
+    .await;
+    let body = parse_result_text(&search);
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1, "{body}");
+    assert_eq!(
+        results[0]["chunk_id"].as_str(),
+        Some(expired_id.to_string().as_str())
+    );
+}
+
+#[tokio::test]
+async fn memory_set_expiry_sets_and_clears_temporal_fields() {
+    let (server, _tmp) = test_server().await;
+    let chunk_id = add_chunk(&server, "t", "setexpiry visible document").await;
+
+    let set = call_tool(
+        &server,
+        "memory.set_expiry",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunk_id": chunk_id.to_string(),
+            "expires_at_ms": 4_000_000_000_000i64,
+            "review_after_ms": 3_000_000_000_000i64
+        }),
+    )
+    .await;
+    let body = parse_result_text(&set);
+    assert_eq!(body["updated"].as_bool(), Some(true), "{body}");
+    assert_eq!(body["expires_at_ms"].as_i64(), Some(4_000_000_000_000));
+    assert_eq!(body["review_after_ms"].as_i64(), Some(3_000_000_000_000));
+
+    let get = call_tool(
+        &server,
+        "memory.get",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunk_id": chunk_id.to_string()
+        }),
+    )
+    .await;
+    let body = parse_result_text(&get);
+    assert_eq!(
+        body["lifecycle"]["expires_at_ms"].as_i64(),
+        Some(4_000_000_000_000)
+    );
+    assert_eq!(
+        body["lifecycle"]["review_after_ms"].as_i64(),
+        Some(3_000_000_000_000)
+    );
+
+    let clear = call_tool(
+        &server,
+        "memory.set_expiry",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunk_id": chunk_id.to_string(),
+            "clear_expiry": true,
+            "clear_review_after": true
+        }),
+    )
+    .await;
+    let body = parse_result_text(&clear);
+    assert_eq!(body["updated"].as_bool(), Some(true), "{body}");
+    assert!(body["expires_at_ms"].is_null(), "{body}");
+    assert!(body["review_after_ms"].is_null(), "{body}");
+}
+
+#[tokio::test]
+async fn expiry_sweep_marks_due_chunks_expired() {
+    let (server, _tmp) = test_server().await;
+    let ps = server.store().as_persistent().expect("persistent store");
+    let t = tenant("t");
+
+    let due_id = ps
+        .add(chunk_at(&t, "sweepneedle due", 1_000))
+        .await
+        .unwrap();
+    let future_id = ps
+        .add(chunk_at(&t, "sweepneedle future", 2_000))
+        .await
+        .unwrap();
+    ps.update_lifecycle(
+        &t,
+        &due_id,
+        &LifecycleDelta {
+            expires_at_ms: Some(Some(500)),
+            lifecycle_updated_at_ms: Some(10),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    ps.update_lifecycle(
+        &t,
+        &future_id,
+        &LifecycleDelta {
+            expires_at_ms: Some(Some(2_000)),
+            lifecycle_updated_at_ms: Some(11),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let expired = ps.expire_chunks_before(&t, 1_000, 100).await.unwrap();
+    assert_eq!(expired, 1);
+
+    let due = ps.get_with_lifecycle(&t, &due_id).await.unwrap().unwrap();
+    assert_eq!(due.status, ChunkStatus::Expired);
+    assert_eq!(due.lifecycle.lifecycle_updated_at_ms, 1_000);
+
+    let future = ps
+        .get_with_lifecycle(&t, &future_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(future.status, ChunkStatus::Final);
+}
+
+#[tokio::test]
+async fn history_promotion_moves_stale_hidden_rows_to_history() {
+    let (server, _tmp) = test_server().await;
+    let ps = server.store().as_persistent().expect("persistent store");
+    let t = tenant("t");
+
+    let expired_id = ps
+        .add(chunk_at(&t, "historyneedle expired", 1_000))
+        .await
+        .unwrap();
+    let superseded_id = ps
+        .add(chunk_at(&t, "historyneedle superseded", 2_000))
+        .await
+        .unwrap();
+    let fresh_id = ps
+        .add(chunk_at(&t, "historyneedle fresh", 3_000))
+        .await
+        .unwrap();
+
+    for (chunk_id, status, updated_at) in [
+        (&expired_id, ChunkStatus::Expired, 100),
+        (&superseded_id, ChunkStatus::Superseded, 200),
+        (&fresh_id, ChunkStatus::Expired, 2_000),
+    ] {
+        ps.update_lifecycle(
+            &t,
+            chunk_id,
+            &LifecycleDelta {
+                status: Some(status),
+                lifecycle_updated_at_ms: Some(updated_at),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let promoted = ps
+        .promote_stale_lifecycle_hidden_to_history(&t, 1_000, 100)
+        .await
+        .unwrap();
+    assert_eq!(promoted, 2);
+
+    let expired = ps
+        .get_with_lifecycle(&t, &expired_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let superseded = ps
+        .get_with_lifecycle(&t, &superseded_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let fresh = ps.get_with_lifecycle(&t, &fresh_id).await.unwrap().unwrap();
+    assert_eq!(expired.lifecycle.tier, MemoryTier::History);
+    assert_eq!(superseded.lifecycle.tier, MemoryTier::History);
+    assert_eq!(fresh.lifecycle.tier, MemoryTier::LongTerm);
+}
+
+#[tokio::test]
+async fn memory_compact_runs_lifecycle_maintenance() {
+    let (server, _tmp) = test_server().await;
+    let expired_id = add_with_expiry(&server, "t", "compactexpiry due", 1).await;
+
+    let compact = call_tool(
+        &server,
+        "memory.compact",
+        serde_json::json!({
+            "tenant_id": "t"
+        }),
+    )
+    .await;
+    let body = parse_result_text(&compact);
+    assert_eq!(
+        body["lifecycle_maintenance"]["expired_chunks"].as_u64(),
+        Some(1),
+        "{body}"
+    );
+
+    let get = call_tool(
+        &server,
+        "memory.get",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunk_id": expired_id.to_string(),
+            "include_expired": true
+        }),
+    )
+    .await;
+    let body = parse_result_text(&get);
+    assert_eq!(body["status"].as_str(), Some("expired"), "{body}");
+}

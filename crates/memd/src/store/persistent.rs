@@ -46,7 +46,7 @@ use crate::error::{MemdError, Result};
 use crate::index::{Bm25Index, SparseIndex};
 use crate::metrics::{IndexStats, MetricsCollector, QueryMetrics, TieredQueryMetrics};
 use crate::retrieval::RerankerMode;
-use crate::types::lifecycle::{LifecycleDelta, ResolvedChunk};
+use crate::types::lifecycle::{LifecycleDelta, MemoryTier, ResolvedChunk};
 use crate::types::{ChunkId, ChunkStatus, MemoryChunk, TenantId};
 
 /// Configuration for persistent store
@@ -1996,6 +1996,82 @@ impl PersistentStore {
             h.bump_tenant_memory_version(tenant_id);
         }
         Ok(())
+    }
+
+    /// Mark chunks whose expiry deadline has elapsed as `Expired`.
+    ///
+    /// This is the Track C expiry sweep primitive. The caller supplies
+    /// `now_ms` so tests and background maintenance can share the same
+    /// deterministic clock.
+    pub async fn expire_chunks_before(
+        &self,
+        tenant_id: &TenantId,
+        now_ms: i64,
+        limit: usize,
+    ) -> Result<usize> {
+        if limit == 0 {
+            return Ok(0);
+        }
+
+        let ids = self.metadata.list_expired_before(tenant_id, now_ms)?;
+        let mut expired = 0usize;
+        for chunk_id in ids.into_iter().take(limit) {
+            self.metadata.update_lifecycle(
+                tenant_id,
+                &chunk_id,
+                &LifecycleDelta {
+                    status: Some(ChunkStatus::Expired),
+                    lifecycle_updated_at_ms: Some(now_ms),
+                    ..Default::default()
+                },
+            )?;
+            expired += 1;
+        }
+
+        if expired > 0 {
+            if let Some(h) = self.hybrid() {
+                h.bump_tenant_memory_version(tenant_id);
+            }
+        }
+
+        Ok(expired)
+    }
+
+    /// Demote stale superseded/expired chunks to the history tier.
+    pub async fn promote_stale_lifecycle_hidden_to_history(
+        &self,
+        tenant_id: &TenantId,
+        older_than_ms: i64,
+        limit: usize,
+    ) -> Result<usize> {
+        if limit == 0 {
+            return Ok(0);
+        }
+
+        let ids = self
+            .metadata
+            .list_stale_superseded(tenant_id, older_than_ms)?;
+        let mut promoted = 0usize;
+        for chunk_id in ids.into_iter().take(limit) {
+            self.metadata.update_lifecycle(
+                tenant_id,
+                &chunk_id,
+                &LifecycleDelta {
+                    tier: Some(MemoryTier::History),
+                    lifecycle_updated_at_ms: Some(current_time_ms()),
+                    ..Default::default()
+                },
+            )?;
+            promoted += 1;
+        }
+
+        if promoted > 0 {
+            if let Some(h) = self.hybrid() {
+                h.bump_tenant_memory_version(tenant_id);
+            }
+        }
+
+        Ok(promoted)
     }
 
     /// Write a chunk plus its initial lifecycle overlay in one logical step.
