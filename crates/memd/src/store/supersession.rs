@@ -5,31 +5,79 @@
 //! conflict-aware add path (Track D) that rewrites near-duplicates into
 //! explicit supersession edges.
 //!
-//! For A6 we only need a deterministic canonical form that downstream
-//! dedup logic can hash over; the richer trigram / shingling layer lives
-//! in Track D (`D1`). Keeping this stub behind its own module means the
-//! Track D expansion is a drop-in replacement without ripping through
-//! `persistent.rs`.
-//!
-//! Rule of thumb for the stub:
-//! - Trim leading/trailing whitespace.
-//! - Lowercase.
-//! - Collapse internal whitespace runs to a single space.
-//!
-//! The chunk type is accepted now so D1 can specialize per-type
-//! canonicalization without another signature change.
+//! The chunk type lets docs/messages normalize natural-language noise
+//! while code/trace chunks preserve punctuation and case for exact
+//! identity checks.
 
-use crate::types::ChunkType;
+use std::collections::HashSet;
 
-// TODO(D1): extend with trigram scaffolding and per-type specializations
-// (e.g. code identifiers preserved verbatim, docs lowercased + punctuation
-// stripped). The A6 writer path only needs a stable canonical string.
-pub(crate) fn canonicalize_for_type(text: &str, _kind: ChunkType) -> String {
-    text.trim()
-        .to_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+use crate::types::{ChunkId, ChunkType};
+
+#[derive(Debug, Clone)]
+pub struct NearDuplicateCandidate {
+    pub chunk_id: ChunkId,
+    pub text: String,
+    pub score: f32,
+    pub exact: bool,
+}
+
+pub(crate) fn canonicalize_for_type(text: &str, kind: ChunkType) -> String {
+    match kind {
+        ChunkType::Code | ChunkType::Trace => collapse_whitespace(text),
+        _ => collapse_whitespace(
+            &text
+                .chars()
+                .map(|ch| {
+                    if ch.is_alphanumeric() {
+                        ch.to_lowercase().collect::<String>()
+                    } else {
+                        " ".to_string()
+                    }
+                })
+                .collect::<String>(),
+        ),
+    }
+}
+
+fn collapse_whitespace(text: &str) -> String {
+    text.trim().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub(crate) fn trigram_jaccard(left: &str, right: &str) -> f32 {
+    if left == right {
+        return 1.0;
+    }
+
+    let left = trigrams(left);
+    let right = trigrams(right);
+    if left.is_empty() && right.is_empty() {
+        return 1.0;
+    }
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+
+    let intersection = left.intersection(&right).count() as f32;
+    let union = left.union(&right).count() as f32;
+    if union == 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
+}
+
+fn trigrams(text: &str) -> HashSet<String> {
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return HashSet::new();
+    }
+    if chars.len() < 3 {
+        return [text.to_string()].into_iter().collect();
+    }
+    chars
+        .windows(3)
+        .map(|window| window.iter().collect::<String>())
+        .collect()
 }
 
 #[cfg(test)]
@@ -43,6 +91,18 @@ mod tests {
     }
 
     #[test]
+    fn canonicalize_docs_strips_punctuation() {
+        let out = canonicalize_for_type("Hello, World!", ChunkType::Doc);
+        assert_eq!(out, "hello world");
+    }
+
+    #[test]
+    fn canonicalize_code_preserves_case_and_punctuation() {
+        let out = canonicalize_for_type("  Fn::Name ( X )  ", ChunkType::Code);
+        assert_eq!(out, "Fn::Name ( X )");
+    }
+
+    #[test]
     fn canonicalize_is_stable_on_idempotent_input() {
         let once = canonicalize_for_type("already canonical", ChunkType::Code);
         let twice = canonicalize_for_type(&once, ChunkType::Code);
@@ -53,5 +113,12 @@ mod tests {
     fn canonicalize_handles_empty_and_whitespace_only() {
         assert_eq!(canonicalize_for_type("", ChunkType::Doc), "");
         assert_eq!(canonicalize_for_type("   \t\n ", ChunkType::Doc), "");
+    }
+
+    #[test]
+    fn trigram_jaccard_scores_exact_and_related_text() {
+        assert_eq!(trigram_jaccard("abc", "abc"), 1.0);
+        assert!(trigram_jaccard("retention policy memd", "retention policy memory") > 0.5);
+        assert_eq!(trigram_jaccard("abc", "xyz"), 0.0);
     }
 }

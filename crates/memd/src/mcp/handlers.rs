@@ -158,6 +158,12 @@ pub struct AddParams {
     pub expires_at_ms: Option<i64>,
     #[serde(default)]
     pub review_after_ms: Option<i64>,
+    #[serde(default)]
+    pub supersede_near_duplicates: bool,
+    #[serde(default)]
+    pub fuzzy_dedupe: bool,
+    #[serde(default)]
+    pub dedupe_threshold: Option<f32>,
 }
 
 /// Source information for a chunk
@@ -720,6 +726,24 @@ pub struct GetParams {
     pub include_history: Option<bool>,
 }
 
+/// Parameters for memory.find_near_duplicates
+#[derive(Debug, Deserialize)]
+pub struct FindNearDuplicatesParams {
+    #[serde(default)]
+    pub tenant_id: String,
+    pub text: String,
+    #[serde(rename = "type")]
+    pub chunk_type: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub fuzzy: bool,
+    #[serde(default)]
+    pub threshold: Option<f32>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
 /// Parameters for memory.set_expiry
 #[derive(Debug, Deserialize)]
 pub struct SetExpiryParams {
@@ -1135,6 +1159,10 @@ pub struct VerificationHint {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AddResult {
     pub chunk_id: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub superseded_chunk_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub duplicate_score: Option<f32>,
 }
 
 /// Result of a batch add operation
@@ -1528,6 +1556,10 @@ pub struct ImportInfoResult {
 
 // ---------- Helper Functions ----------
 
+const DEFAULT_NEAR_DUPLICATE_LIMIT: usize = 10;
+const MAX_NEAR_DUPLICATE_LIMIT: usize = 100;
+const DEFAULT_FUZZY_DEDUPE_THRESHOLD: f32 = 0.85;
+
 fn validate_search_k(k: usize) -> Result<(), McpError> {
     if (1..=100).contains(&k) {
         return Ok(());
@@ -1545,6 +1577,26 @@ fn validate_timestamp_ms(name: &str, value: Option<i64>) -> Result<(), McpError>
         )));
     }
     Ok(())
+}
+
+fn resolve_similarity_threshold(name: &str, value: Option<f32>) -> Result<f32, McpError> {
+    let threshold = value.unwrap_or(DEFAULT_FUZZY_DEDUPE_THRESHOLD);
+    if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+        return Err(McpError::InvalidParams(format!(
+            "{name} must be between 0.0 and 1.0"
+        )));
+    }
+    Ok(threshold)
+}
+
+fn resolve_near_duplicate_limit(value: Option<usize>) -> Result<usize, McpError> {
+    let limit = value.unwrap_or(DEFAULT_NEAR_DUPLICATE_LIMIT);
+    if limit == 0 || limit > MAX_NEAR_DUPLICATE_LIMIT {
+        return Err(McpError::InvalidParams(format!(
+            "limit must be between 1 and {MAX_NEAR_DUPLICATE_LIMIT}"
+        )));
+    }
+    Ok(limit)
 }
 
 fn validate_search_time_range(
@@ -3932,7 +3984,8 @@ pub async fn handle_memory_add<S: Store>(
     let chunk_type = parse_chunk_type(&params.chunk_type)?;
     validate_timestamp_ms("expires_at_ms", params.expires_at_ms)?;
     validate_timestamp_ms("review_after_ms", params.review_after_ms)?;
-    let has_temporal_overlay = params.expires_at_ms.is_some() || params.review_after_ms.is_some();
+    let dedupe_threshold =
+        resolve_similarity_threshold("dedupe_threshold", params.dedupe_threshold)?;
 
     info!(
         tenant_id = %tenant_id,
@@ -3947,7 +4000,7 @@ pub async fn handle_memory_add<S: Store>(
             .map_err(|e| McpError::ToolError(e.to_string()))?;
     }
 
-    let mut chunk = MemoryChunk::new(tenant_id, &params.text, chunk_type);
+    let mut chunk = MemoryChunk::new(tenant_id.clone(), &params.text, chunk_type);
 
     // Apply optional fields
     if let Some(project_id) = &params.project_id {
@@ -3969,33 +4022,77 @@ pub async fn handle_memory_add<S: Store>(
         chunk = chunk.with_tags(tags);
     }
 
-    let chunk_id = if has_temporal_overlay {
-        let ps = store.as_persistent().ok_or_else(|| {
-            McpError::ToolError(
-                "memory.add temporal lifecycle fields require a persistent store".into(),
-            )
-        })?;
-        ps.add_chunk_with_lifecycle(
-            chunk,
-            LifecycleDelta {
-                expires_at_ms: params.expires_at_ms.map(Some),
-                review_after_ms: params.review_after_ms.map(Some),
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(|e| McpError::ToolError(e.to_string()))?
-    } else {
-        store
+    let lifecycle_delta = LifecycleDelta {
+        expires_at_ms: params.expires_at_ms.map(Some),
+        review_after_ms: params.review_after_ms.map(Some),
+        ..Default::default()
+    };
+
+    let (chunk_id, superseded_chunk_id, duplicate_score) = if let Some(ps) = store.as_persistent() {
+        if params.supersede_near_duplicates {
+            let matches = ps
+                .find_near_duplicates(
+                    &tenant_id,
+                    params.project_id.as_deref(),
+                    &params.text,
+                    chunk_type,
+                    params.fuzzy_dedupe,
+                    dedupe_threshold,
+                    1,
+                )
+                .await
+                .map_err(|e| McpError::ToolError(e.to_string()))?;
+            if let Some(candidate) = matches.first() {
+                let chunk_id = ps
+                    .supersede_chunk(&tenant_id, &candidate.chunk_id, chunk)
+                    .await
+                    .map_err(|e| McpError::ToolError(e.to_string()))?;
+                if !lifecycle_delta.is_empty() {
+                    let mut delta = lifecycle_delta.clone();
+                    if delta.lifecycle_updated_at_ms.is_none() {
+                        delta.lifecycle_updated_at_ms = Some(current_time_ms());
+                    }
+                    ps.update_lifecycle(&tenant_id, &chunk_id, &delta)
+                        .await
+                        .map_err(|e| McpError::ToolError(e.to_string()))?;
+                }
+                (
+                    chunk_id,
+                    Some(candidate.chunk_id.to_string()),
+                    Some(candidate.score),
+                )
+            } else {
+                let chunk_id = ps
+                    .add_chunk_with_lifecycle(chunk, lifecycle_delta)
+                    .await
+                    .map_err(|e| McpError::ToolError(e.to_string()))?;
+                (chunk_id, None, None)
+            }
+        } else {
+            let chunk_id = ps
+                .add_chunk_with_lifecycle(chunk, lifecycle_delta)
+                .await
+                .map_err(|e| McpError::ToolError(e.to_string()))?;
+            (chunk_id, None, None)
+        }
+    } else if lifecycle_delta.is_empty() && !params.supersede_near_duplicates {
+        let chunk_id = store
             .add(chunk)
             .await
-            .map_err(|e| McpError::ToolError(e.to_string()))?
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        (chunk_id, None, None)
+    } else {
+        return Err(McpError::ToolError(
+            "memory.add lifecycle and dedupe fields require a persistent store".into(),
+        ));
     };
 
     info!(chunk_id = %chunk_id, "chunk added");
 
     format_mcp_response(&AddResult {
         chunk_id: chunk_id.to_string(),
+        superseded_chunk_id,
+        duplicate_score,
     })
 }
 
@@ -5845,6 +5942,49 @@ fn current_time_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Handle memory.find_near_duplicates tool call.
+pub async fn handle_memory_find_near_duplicates<S: Store>(
+    store: &S,
+    params: FindNearDuplicatesParams,
+) -> Result<Value, McpError> {
+    let ps = store.as_persistent().ok_or_else(|| {
+        McpError::ToolError("memory.find_near_duplicates requires a persistent store".into())
+    })?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
+    let chunk_type = parse_chunk_type(&params.chunk_type)?;
+    let threshold = resolve_similarity_threshold("threshold", params.threshold)?;
+    let limit = resolve_near_duplicate_limit(params.limit)?;
+
+    let matches = ps
+        .find_near_duplicates(
+            &tenant_id,
+            params.project_id.as_deref(),
+            &params.text,
+            chunk_type,
+            params.fuzzy,
+            threshold,
+            limit,
+        )
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    let matches = matches
+        .into_iter()
+        .map(|candidate| {
+            json!({
+                "chunk_id": candidate.chunk_id.to_string(),
+                "score": candidate.score,
+                "exact": candidate.exact,
+                "text": candidate.text,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    format_mcp_response(&json!({
+        "matches": matches
+    }))
+}
+
 /// Handle memory.set_expiry tool call.
 pub async fn handle_memory_set_expiry<S: Store>(
     store: &S,
@@ -7296,6 +7436,9 @@ mod tests {
             tags: vec![],
             expires_at_ms: None,
             review_after_ms: None,
+            supersede_near_duplicates: false,
+            fuzzy_dedupe: false,
+            dedupe_threshold: None,
         };
 
         let add_result = handle_memory_add(&store, None, add_params).await.unwrap();
@@ -7341,6 +7484,9 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+                supersede_near_duplicates: false,
+                fuzzy_dedupe: false,
+                dedupe_threshold: None,
             },
         )
         .await
@@ -7359,6 +7505,9 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+                supersede_near_duplicates: false,
+                fuzzy_dedupe: false,
+                dedupe_threshold: None,
             },
         )
         .await
@@ -7410,6 +7559,9 @@ mod tests {
                     tags: vec![],
                     expires_at_ms: None,
                     review_after_ms: None,
+                    supersede_near_duplicates: false,
+                    fuzzy_dedupe: false,
+                    dedupe_threshold: None,
                 },
             )
             .await
@@ -7515,6 +7667,9 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+                supersede_near_duplicates: false,
+                fuzzy_dedupe: false,
+                dedupe_threshold: None,
             },
         )
         .await
@@ -7533,6 +7688,9 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+                supersede_near_duplicates: false,
+                fuzzy_dedupe: false,
+                dedupe_threshold: None,
             },
         )
         .await
@@ -7598,6 +7756,9 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+                supersede_near_duplicates: false,
+                fuzzy_dedupe: false,
+                dedupe_threshold: None,
             },
         )
         .await
@@ -7657,6 +7818,9 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+                supersede_near_duplicates: false,
+                fuzzy_dedupe: false,
+                dedupe_threshold: None,
             },
         )
         .await
@@ -7715,6 +7879,9 @@ mod tests {
             tags: vec!["rust".to_string(), "function".to_string()],
             expires_at_ms: None,
             review_after_ms: None,
+            supersede_near_duplicates: false,
+            fuzzy_dedupe: false,
+            dedupe_threshold: None,
         };
 
         let result = handle_memory_add(&store, None, add_params).await.unwrap();
@@ -7789,6 +7956,9 @@ mod tests {
             tags: vec![],
             expires_at_ms: None,
             review_after_ms: None,
+            supersede_near_duplicates: false,
+            fuzzy_dedupe: false,
+            dedupe_threshold: None,
         };
 
         let add_result = handle_memory_add(&store, None, add_params).await.unwrap();
@@ -7842,6 +8012,9 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+                supersede_near_duplicates: false,
+                fuzzy_dedupe: false,
+                dedupe_threshold: None,
             },
         )
         .await
@@ -7882,6 +8055,9 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+                supersede_near_duplicates: false,
+                fuzzy_dedupe: false,
+                dedupe_threshold: None,
             };
             handle_memory_add(&store, None, add_params).await.unwrap();
         }
@@ -7935,6 +8111,9 @@ mod tests {
             tags: vec![],
             expires_at_ms: None,
             review_after_ms: None,
+            supersede_near_duplicates: false,
+            fuzzy_dedupe: false,
+            dedupe_threshold: None,
         };
 
         let result = handle_memory_add(&store, None, params).await;
@@ -7974,6 +8153,9 @@ mod tests {
             tags: vec![],
             expires_at_ms: None,
             review_after_ms: None,
+            supersede_near_duplicates: false,
+            fuzzy_dedupe: false,
+            dedupe_threshold: None,
         };
 
         handle_memory_add(&store, None, add_params).await.unwrap();
@@ -8013,6 +8195,9 @@ mod tests {
             tags: vec![],
             expires_at_ms: None,
             review_after_ms: None,
+            supersede_near_duplicates: false,
+            fuzzy_dedupe: false,
+            dedupe_threshold: None,
         };
 
         handle_memory_add(&store, None, add_params).await.unwrap();
@@ -8065,6 +8250,9 @@ mod tests {
                 ],
                 expires_at_ms: None,
                 review_after_ms: None,
+                supersede_near_duplicates: false,
+                fuzzy_dedupe: false,
+                dedupe_threshold: None,
             },
         )
         .await
@@ -8090,6 +8278,9 @@ mod tests {
                 ],
                 expires_at_ms: None,
                 review_after_ms: None,
+                supersede_near_duplicates: false,
+                fuzzy_dedupe: false,
+                dedupe_threshold: None,
             },
         )
         .await
@@ -8115,6 +8306,9 @@ mod tests {
                 ],
                 expires_at_ms: None,
                 review_after_ms: None,
+                supersede_near_duplicates: false,
+                fuzzy_dedupe: false,
+                dedupe_threshold: None,
             },
         )
         .await
@@ -8166,6 +8360,9 @@ mod tests {
                 ],
                 expires_at_ms: None,
                 review_after_ms: None,
+                supersede_near_duplicates: false,
+                fuzzy_dedupe: false,
+                dedupe_threshold: None,
             },
         )
         .await
@@ -8218,6 +8415,9 @@ mod tests {
                     ],
                     expires_at_ms: None,
                     review_after_ms: None,
+                    supersede_near_duplicates: false,
+                    fuzzy_dedupe: false,
+                    dedupe_threshold: None,
                 },
             )
             .await
@@ -8308,6 +8508,9 @@ mod tests {
                 ],
                 expires_at_ms: None,
                 review_after_ms: None,
+                supersede_near_duplicates: false,
+                fuzzy_dedupe: false,
+                dedupe_threshold: None,
             },
         )
         .await
@@ -8778,6 +8981,9 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+                supersede_near_duplicates: false,
+                fuzzy_dedupe: false,
+                dedupe_threshold: None,
             },
         )
         .await
