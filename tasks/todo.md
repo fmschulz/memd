@@ -104,8 +104,8 @@
 - [x] Run focused Track F tests, Claude Code CLI review, then commit and push Track F.
 - [x] Track G: implement CLI-only markdown projection with guarded output paths.
 - [x] Run focused Track G tests, Claude Code CLI review, then commit and push Track G.
-- [ ] Run the benchmark suite again and check behavior.
-- [ ] Align README/quickstart/docs, then update manuscript.
+- [x] Run the benchmark suite again and check behavior.
+- [x] Align README/quickstart/docs, then update manuscript.
 
 ### Progress
 
@@ -145,3 +145,11 @@
 - `cargo test -p memd --test lifecycle_overlay`: 34 passed.
 - `cargo test -p memd --lib`: 658 passed, 4 ignored; only pre-existing unused-mut warnings.
 - Claude Code CLI Track G review reported no blocking findings; follow-up test coverage added for symlink escape, absolute/relative parent components, and project-filter-before-limit behavior.
+
+### Benchmark / Documentation Review / Results
+
+- `cargo run -p memd-evals -- --suite benchmark --dataset-path evals/bench/datasets/retrieval/code_pairs.json --embedding-model all-minilm --system-variant hybrid-feature --bootstrap-iterations 1000 --seed 42 --threshold-recall 0.8 --threshold-mrr 0.6 --report-json /tmp/memd-tracks-efg-code_pairs.json`: passed 4/4; Recall@10 1.00, MRR 1.00, Precision@10 0.20.
+- `cargo run -p memd-evals -- --suite benchmark-regression --skip-build ...`: initial run failed on stale baseline dataset path mismatch only; normalized temp candidate path run passed 9/9 with no metric regression.
+- `cargo run -p memd-evals -- --suite compaction --skip-build --memd-path target/debug/memd --embedding-model all-minilm`: passed 6/6.
+- `./evals/bench/scripts/run_task_memory_benchmark.sh`: completed and refreshed tracked task-memory benchmark reports; current memd-native results are chunk baseline hit@3 1.00 / MRR 0.98 / avg 301.6ms and task-memory hit@3 1.00 / MRR 0.84 / avg 5.1ms.
+- Documentation updated to describe Track E/F/G behavior, the CLI-only markdown projection, current benchmark interpretation, and the revised manuscript claims.
