@@ -10,6 +10,7 @@ pub mod index;
 pub mod logging;
 pub mod mcp;
 pub mod metrics;
+pub mod omf;
 pub mod retrieval;
 pub mod store;
 pub mod structural;

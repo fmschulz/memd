@@ -100,7 +100,7 @@
 
 - [x] Track E: add `mode` to `memory.add` / `memory.add_batch`, store ingestion-mode labels, and default conversation review windows.
 - [x] Run focused Track E tests, Claude Code CLI review, then commit and push Track E.
-- [ ] Track F: implement OMF export/import with lifecycle and ingestion-mode round trips plus semantic merge behavior.
+- [x] Track F: implement OMF export/import with lifecycle and ingestion-mode round trips plus semantic merge behavior.
 - [ ] Run focused Track F tests, Claude Code CLI review, then commit and push Track F.
 - [ ] Track G: implement markdown projection MCP/CLI support with guarded output paths.
 - [ ] Run focused Track G tests, Claude Code CLI review, then commit and push Track G.
@@ -114,6 +114,8 @@
 - Track E red tests were added first. `cargo test -p memd --test lifecycle_overlay ingestion_mode` failed as expected because current handlers ignore `mode`.
 - Track E implementation adds authoritative `ingestion_mode:<mode>` tags, defaults missing mode to `document`, and sets conversation `review_after_ms` to now + 14 days unless explicitly supplied.
 - Claude Code CLI review flagged semantic contracts to lock down: explicit review timestamp precedence, invalid mode errors, ingestion-mode tag normalization, supersede-on-add with conversation mode, non-persistent batch failure, and sequential persistent writes for conversation batches. Tests/comments were added for those.
+- Track F adds `memory.export_omf` / `memory.import_omf`, a versioned `memd.omf` envelope, lifecycle and ingestion-mode round trips, semantic duplicate merge, and append fallback.
+- Track F also fixed a cross-tenant metadata bug discovered by the OMF test: segment ordinals are now unique per tenant, with a schema migration for older DBs.
 
 ### Track E Review / Results
 
@@ -121,3 +123,12 @@
 - `cargo test -p memd --lib`: 652 passed, 4 ignored; only pre-existing unused-mut warnings remain.
 - `git diff --check`: passed.
 - Claude Code CLI Track E review completed; follow-up findings were addressed before commit.
+
+### Track F Review / Results
+
+- `cargo test -p memd --test lifecycle_overlay`: 34 passed.
+- `cargo test -p memd mcp::tools::tests`: 25 passed; only pre-existing unused-mut warnings.
+- `cargo test -p memd store::metadata::sqlite::tests::open_migrates_legacy_chunks_schema_with_index_columns`: 1 passed.
+- `cargo test -p memd --lib`: 652 passed, 4 ignored; same warning baseline.
+- `git diff --check`: passed.
+- Claude Code CLI Track F review found five blockers; all were fixed and the follow-up plus a narrow final review reported no blocking findings.
