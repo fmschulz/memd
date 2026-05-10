@@ -75,6 +75,7 @@ class LoadConfigTests(unittest.TestCase):
             self.assertIsNone(result.outdir)
             self.assertIsNone(result.max_tasks)
             self.assertIsNone(result.library_k)
+            self.assertIsNone(result.memd_bin)
             self.assertIsNone(result.memd_url)
 
     def test_parses_wiki_subsection(self) -> None:
@@ -90,7 +91,7 @@ class LoadConfigTests(unittest.TestCase):
                             "outdir": "docs/compiled_wiki",
                             "max_tasks": 42,
                             "library_k": 7,
-                            "memd_url": "http://127.0.0.1:9999/mcp",
+                            "memd_bin": "/opt/memd/bin/memd",
                         },
                     }
                 ),
@@ -99,7 +100,7 @@ class LoadConfigTests(unittest.TestCase):
             result = load_config(project)
             self.assertEqual(result.max_tasks, 42)
             self.assertEqual(result.library_k, 7)
-            self.assertEqual(result.memd_url, "http://127.0.0.1:9999/mcp")
+            self.assertEqual(result.memd_bin, "/opt/memd/bin/memd")
             # Relative outdir resolves against project root (parent of .memd/)
             self.assertEqual(result.outdir, project / "docs" / "compiled_wiki")
 

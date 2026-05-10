@@ -2,9 +2,9 @@
 set -euo pipefail
 
 TMP_DIR="$(mktemp -d)"
-TENANT="memd_cli_enforcement_verify"
-PROJECT="verify"
-MARKER="verify memd cli enforcement 20260509"
+TENANT="cli_workflow_verify"
+PROJECT="verification"
+MARKER="marker_from_cli_20260509"
 
 cleanup() {
   rm -rf "${TMP_DIR}"
@@ -18,40 +18,26 @@ require_cmd() {
   fi
 }
 
-require_cmd memd
-
-if ! grep -Fq "<!-- memd-enforcement:start -->" "${HOME}/.codex/AGENTS.md"; then
-  echo "missing memd enforcement block in ~/.codex/AGENTS.md" >&2
-  exit 1
-fi
-
-if ! grep -Fq "Mandatory \`memd\` CLI contract" "${HOME}/.codex/AGENTS.md"; then
-  echo "missing CLI memd contract in ~/.codex/AGENTS.md" >&2
-  exit 1
-fi
-
-if ! grep -Fq "<!-- memd-enforcement:start -->" "${HOME}/.claude/CLAUDE.md"; then
-  echo "missing memd enforcement block in ~/.claude/CLAUDE.md" >&2
-  exit 1
-fi
-
-if ! grep -Fq "Mandatory \`memd\` CLI contract" "${HOME}/.claude/CLAUDE.md"; then
-  echo "missing CLI memd contract in ~/.claude/CLAUDE.md" >&2
-  exit 1
+if [[ -x "./target/release/memd" ]]; then
+  MEMD_BIN="./target/release/memd"
+else
+  require_cmd cargo
+  cargo build --release -p memd >/dev/null
+  MEMD_BIN="./target/release/memd"
 fi
 
 DATA_DIR="${TMP_DIR}/data"
 CONTEXT_FILE="${TMP_DIR}/context.md"
 LOG_DIR="${TMP_DIR}/logs"
 
-memd --data-dir "${DATA_DIR}" add \
+"${MEMD_BIN}" --data-dir "${DATA_DIR}" add \
   --tenant-id "${TENANT}" \
   --project-id "${PROJECT}" \
   --chunk-type summary \
-  --tags kind:verify,source:skill \
+  --tags kind:verify,source:script \
   --text "${MARKER}" >/dev/null
 
-memd --data-dir "${DATA_DIR}" search \
+"${MEMD_BIN}" --data-dir "${DATA_DIR}" search \
   --tenant-id "${TENANT}" \
   --project-id "${PROJECT}" \
   --query "${MARKER}" \
@@ -62,7 +48,7 @@ memd --data-dir "${DATA_DIR}" search \
 
 grep -Fq "${MARKER}" "${TMP_DIR}/search.md"
 
-memd --data-dir "${DATA_DIR}" agent-context \
+"${MEMD_BIN}" --data-dir "${DATA_DIR}" agent-context \
   --tenant-id "${TENANT}" \
   --project-id "${PROJECT}" \
   --query "${MARKER}" \
@@ -77,4 +63,4 @@ grep -Fq 'interface: `cli_only`' "${CONTEXT_FILE}"
 grep -Fq "${MARKER}" "${CONTEXT_FILE}"
 test -s "${LOG_DIR}/memd_search_log.jsonl"
 
-echo "Verified memd skill + CLI enforcement and CLI memory workflow"
+echo "Verified skill + CLI memd workflow: add, search, agent-context, and audit logs"

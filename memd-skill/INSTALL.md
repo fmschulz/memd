@@ -1,14 +1,13 @@
 # Installing the memd Skill
 
-This skill tells agents when to use `memory.*`, `task.*`, and `artifact.*`.
+This skill makes `memd` a skill + CLI workflow. Agents retrieve context with
+`memd agent-context` or `memd search` and record durable memory with `memd add`.
 
-It also ships with a bundled Linux binary:
+It ships with a bundled Linux binary:
 
 - [bin/linux-x64/memd](bin/linux-x64/memd)
 
-The preferred shared-session setup is a single local `memd` HTTP daemon that both Codex CLI and Claude Code connect to.
-
-## Install the skill files
+## Install the Skill Files
 
 ### Claude Code
 
@@ -31,7 +30,7 @@ ln -s /path/to/memd/memd-skill ~/.claude/skills/memd
 ln -s /path/to/memd/memd-skill ~/.codex/skills/memd
 ```
 
-## Install the bundled binary
+## Install the Bundled Binary
 
 If `memd` is not already on `PATH`, use the bundled binary.
 
@@ -41,10 +40,10 @@ cp ~/.claude/skills/memd/bin/linux-x64/memd ~/.local/bin/memd
 chmod +x ~/.local/bin/memd
 ```
 
-Or use a symlink:
+Or use the installer:
 
 ```bash
-ln -sf ~/.claude/skills/memd/bin/linux-x64/memd ~/.local/bin/memd
+./memd-skill/install_memd_enforcement.sh --install-binary
 ```
 
 Check it:
@@ -54,176 +53,110 @@ which memd
 memd --version
 ```
 
-## Start the shared local daemon
-
-Use persistent mode for cross-session sharing:
-
-```bash
-memd --mode mcp --transport http --http-bind 127.0.0.1:8787
-```
-
-For a disposable local test run:
-
-```bash
-memd --mode mcp --transport http --http-bind 127.0.0.1:8787 --in-memory --data-dir /tmp/memd-demo
-```
-
-The default data dir is still `~/.memd/data`. You can override it globally in `~/.config/memd/config.toml`.
-
-## Register the MCP server with clients
-
-Prefer the client CLIs over manual file editing.
-
-If you want the strongest available default behavior, use the enforcement installer:
+## Install CLI Enforcement Instructions
 
 ```bash
 ./memd-skill/install_memd_enforcement.sh
 ```
 
-That script:
+The script:
 
-- registers `memd` for Codex CLI and Claude Code
-- upserts stronger `memd`-usage blocks into `~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`
-- makes `memd` mandatory for substantive multi-step technical and scientific work
-- tells agents not to silently skip memory writes when `memd` is available
+- upserts CLI-first `memd` rules into `~/.codex/AGENTS.md`
+- upserts CLI-first `memd` rules into `~/.claude/CLAUDE.md`
+- makes CLI retrieval mandatory before substantive work
+- makes CLI writes mandatory before final substantive answers
+- adds a pre-refusal rule requiring a relevant CLI memory search before an
+  agent says work is impossible, blocked, or unknowable
 
-Optional wrapper install:
+It does not register external client tools and does not install wrapper guards.
 
-```bash
-./memd-skill/install_memd_enforcement.sh --install-wrappers
-```
+## Basic CLI Workflow
 
-That installs:
-
-- `codex-memd` and `claude-memd` as lightweight convenience wrappers
-- `codex-memd-guard` and `claude-memd-guard` as stricter one-shot refusal guards
-- `memd-refusal-guard` as the shared helper used by the guarded wrappers
-
-Guarded wrapper scope:
-
-- `codex-memd-guard` is for `codex exec`-style one-shot runs
-- `claude-memd-guard` is for `claude -p` / `--print` one-shot runs
-- interactive sessions still rely on the instruction-level enforcement blocks
-
-Guarded wrapper environment:
-
-- `MEMD_URL` selects the memd HTTP endpoint to audit against
-- `MEMD_GUARD_TENANT_ID` selects the tenant used for the post-run tool-call audit
-
-Example:
+Add a memory:
 
 ```bash
-MEMD_URL=http://127.0.0.1:8787/mcp \
-MEMD_GUARD_TENANT_ID=default \
-codex-memd-guard --skip-git-repo-check --ephemeral -C /path/to/repo "Investigate the failing benchmark"
+memd add \
+  --tenant-id quickstart \
+  --project-id auth \
+  --chunk-type summary \
+  --tags kind:note,source:install \
+  --text "parseConfig reads TOML and validates required auth fields"
 ```
 
-### Codex CLI
+Search:
 
 ```bash
-codex mcp add memd --url http://127.0.0.1:8787/mcp
+memd search \
+  --tenant-id quickstart \
+  --project-id auth \
+  --query "auth config validation" \
+  --compact \
+  --token-budget 2000 \
+  --format markdown
 ```
 
-Codex stores this in `~/.codex/config.toml`.
-
-The skill includes a matching template at:
-
-- [mcp_config_codex.toml](mcp_config_codex.toml)
-
-### Claude Code
+Build bounded context for an agent:
 
 ```bash
-claude mcp add --transport http --scope user memd http://127.0.0.1:8787/mcp
+memd agent-context \
+  --tenant-id quickstart \
+  --project-id auth \
+  --query "auth config validation prior work" \
+  --k 2 \
+  --token-budget 700 \
+  --format markdown \
+  --output .memd/context.md \
+  --log-dir .memd/search-logs
 ```
 
-From a repo checkout, you can also run the helper:
+Keep repeated retrieval hot with the private CLI warm worker:
 
 ```bash
-./scripts/install_shared_http_clients.sh --append-snippets
+memd warm start
+memd search --warm required \
+  --tenant-id quickstart \
+  --project-id auth \
+  --query "auth config validation"
+memd warm stop
 ```
 
-That older helper is still useful for lightweight shared setup, but the stronger enforcement path is:
+Run many structured operations in one loaded process:
 
 ```bash
-./memd-skill/install_memd_enforcement.sh
+printf '%s\n' \
+  '{"tool":"memory.search","arguments":{"tenant_id":"quickstart","project_id":"auth","query":"auth config validation","k":3}}' \
+  | memd batch --jsonl -
 ```
 
-Claude stores this in `~/.claude.json`.
-
-The skill includes a matching template at:
-
-- [mcp_config_claude.json](mcp_config_claude.json)
-
-## Add instruction snippets
-
-MCP registration makes the tools available. The instruction snippets below make the agents use them reliably.
-
-### `~/.codex/AGENTS.md`
-
-```md
-Use the `memd` MCP server as a shared knowledge base across sessions and agents.
-
-Before substantive work, search `memd` with the current `tenant_id`.
-Before saying the work is impossible, blocked, cannot be answered, or needs user context that might already exist in shared memory, consult `memd` first and say so explicitly if no relevant record is found.
-For meaningful work, record `task.start`, `task.progress`, `task.run_start`, `task.run_finish`, `task.add_evidence`, and `task.finish`.
-Use `artifact.create`, `artifact.search`, `artifact.get`, and `artifact.list_thread` when critique, revision, verification, or thread inspection matters.
-Use the same `tenant_id` for agents that should share knowledge unless the user asks for a different memory scope. On one trusted machine or trust domain, the preferred model is one stable shared tenant and narrower retrieval through `project_id`.
-```
-
-For summary-first retrieval, the same daemon should now expose `context.brief_project`, `task.resume`, `artifact.find_failures`, `artifact.find_decisions`, `artifact.find_evidence`, and `artifact.find_highlights`. `memory.search`, `task.search`, and `artifact.search` also accept `mode` to bias retrieval toward those digests. `memory.compact` can refresh project brief and failure/decision/evidence/highlight digests explicitly with `project_id`, `digest_modes`, and `force_digest_rebuild`. `memory.health` reports full duplicate aggregates even when `duplicate_limit` is used to return only a few examples. `memory.dream` can plan tenant/project-scoped retention and compaction cleanup; run it in dry-run mode before applying lifecycle changes, and treat non-digest exact duplicates as report-only unless a future safe-retirement policy lands.
-
-For trust-sensitive workflows, use the explicit grounded path:
-
-1. search with `memory.search`, `task.search`, or `artifact.search`
-2. ground the claim with `artifact.verify`
-3. trust the supporting canonical artifact IDs rather than digest text alone
-
-When `project_id` is supplied, the MCP retrieval path can also widen across other local tenants on the same daemon that already contain that project. This helps recover older fragmented histories, but it should not replace a deliberate shared-tenant convention for future work.
-
-### `~/.claude/CLAUDE.md`
-
-```md
-Use the `memd` MCP server as a shared knowledge base across sessions and agents.
-
-Before substantive work, search `memd` with the current `tenant_id`.
-Before saying the work is impossible, blocked, cannot be answered, or needs user context that might already exist in shared memory, consult `memd` first and say so explicitly if no relevant record is found.
-For meaningful work, record `task.start`, `task.progress`, `task.run_start`, `task.run_finish`, `task.add_evidence`, and `task.finish`.
-Use `artifact.create`, `artifact.search`, `artifact.get`, and `artifact.list_thread` when critique, revision, verification, or thread inspection matters.
-Use the same `tenant_id` for agents that should share knowledge unless the user asks for a different memory scope. On one trusted machine or trust domain, the preferred model is one stable shared tenant and narrower retrieval through `project_id`.
-```
-
-## Verify the install
-
-### Check the daemon directly
+Record progress:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8787/mcp \
-  -H 'Accept: application/json, text/event-stream' \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"quickcheck","version":"0.1.0"}}}'
+memd add \
+  --tenant-id quickstart \
+  --project-id auth \
+  --chunk-type summary \
+  --tags kind:progress,task:jwt-auth \
+  --text "Mapped auth middleware touchpoints; next step is RS256 issuance and validation tests."
 ```
 
-### Check Codex config
+## Repository Guardrails
+
+Initialize a repository-scoped `.memd/` directory:
 
 ```bash
-codex mcp list
-codex mcp get memd
+memd init --tenant-id quickstart --project-id auth
 ```
 
-### Check Claude config
+Generated files:
 
-```bash
-claude mcp list
-claude mcp get memd
-```
+- `.memd/memory_guardrails.md`
+- `.memd/tenant_scope.json`
+- `.memd/project_scope.json`
 
-### Run the full cross-session verification
+If `AGENTS.md` and `CLAUDE.md` are writable in the project root, `memd init`
+can upsert local CLI guardrail sections there as well.
 
-```bash
-./scripts/verify_shared_http_clients.sh
-```
-
-### Verify the stronger enforcement setup
+## Verify the Install
 
 ```bash
 ./memd-skill/verify_memd_enforcement.sh
@@ -231,82 +164,42 @@ claude mcp get memd
 
 That verifier checks:
 
-- the enforcement blocks exist in `~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`
-- the stronger pre-refusal memd-check rule exists in both files
-- `memd` is registered for both clients
-- Codex can write a task artifact into `memd`
-- Claude can recover that task artifact from the same shared tenant
-- if guarded wrappers are installed, a deliberate refusal-style one-shot response is blocked unless memd retrieval occurs first
-
-After that, verify that `memd` exposes the current tool surface, especially:
-
-- `memory.add`
-- `memory.add_batch`
-- `memory.search`
-- `task.start`
-- `task.progress`
-- `task.run_start`
-- `task.run_finish`
-- `task.add_evidence`
-- `task.finish`
-- `task.get`
-- `task.search`
-- `task.resume`
-- `artifact.create`
-- `artifact.get`
-- `artifact.search`
-- `artifact.verify`
-- `artifact.find_failures`
-- `artifact.find_decisions`
-- `artifact.find_evidence`
-- `artifact.find_highlights`
-- `artifact.list_thread`
-- `context.brief_project`
+- the enforcement blocks exist in `~/.codex/AGENTS.md` and
+  `~/.claude/CLAUDE.md`
+- both blocks describe the CLI contract
+- `memd add` stores a test memory
+- `memd search` recovers it
+- `memd agent-context` writes a CLI-only context file and JSONL audit log
 
 ## Troubleshooting
 
-### `task.*` tools are missing
+### `memd` is not found
 
-Likely causes:
-
-1. The daemon is not running
-2. The client points at the wrong URL
-3. The client was not restarted after config changes
-
-Check:
+Install the bundled binary:
 
 ```bash
-curl -sS http://127.0.0.1:8787/mcp -H 'Accept: text/event-stream' -i
-codex mcp get memd
-claude mcp get memd
+./memd-skill/install_memd_enforcement.sh --install-binary
 ```
 
-`GET /mcp` returning `405 Method Not Allowed` is expected. It confirms the endpoint exists even though `memd` does not expose an SSE stream.
+Then make sure `~/.local/bin` is on `PATH`.
 
 ### Agents are not sharing memory
 
 Check:
 
 1. Same `tenant_id`
-2. Same daemon URL
-3. Same `data_dir`
-4. Persistent mode, not `--in-memory`
+2. Same `project_id` when project scope matters
+3. Same `--data-dir` or default `~/.memd/data`
+4. Persistent mode, not a disposable temp data directory
 
-### Agents still are not using `memd` often enough
+### Agents are not using `memd`
 
 Check:
 
 1. You ran `./memd-skill/install_memd_enforcement.sh`
-2. The enforcement block exists in both `~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`
+2. The enforcement block exists in both instruction files
 3. The clients were restarted after the files changed
-4. The work is actually substantive enough to trigger the contract
-
-### Manual config locations
-
-If you prefer editing config files directly instead of using the client CLIs:
-
-- Codex: `~/.codex/config.toml`
-- Claude: `~/.claude.json`
+4. The work is substantive enough to trigger the contract
 
 ## Next
 

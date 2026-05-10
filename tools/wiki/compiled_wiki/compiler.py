@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -8,9 +9,10 @@ from typing import Any
 
 from .containment import (
     check_outdir_containment,
+    normalize_absolute,
     reject_if_any_symlink_inside_outdir,
 )
-from .mcp_client import McpHttpClient
+from .cli_client import MemdCliClient, MemdCliError
 from .render import (
     artifact_heading,
     artifact_summary,
@@ -27,10 +29,12 @@ from .render import (
 
 @dataclass
 class BuildConfig:
-    memd_url: str
     tenant_id: str
     project_id: str
     output_dir: Path
+    memd_bin: str = "memd"
+    data_dir: Path | None = None
+    memd_url: str | None = None  # accepted for older configs; CLI builds use memd_bin
     max_tasks: int = 25
     library_k: int = 20
     timeout: float = 30.0
@@ -49,6 +53,8 @@ class BuildResult:
     task_count: int
     log_entry_count: int
     output_dir: Path
+    skipped_task_count: int = 0
+    skipped_task_ids: list[str] = field(default_factory=list)
 
 
 def build_wiki(config: BuildConfig) -> BuildResult:
@@ -56,7 +62,11 @@ def build_wiki(config: BuildConfig) -> BuildResult:
         config.output_dir,
         config.forbidden_data_dirs,
     )
-    client = McpHttpClient(url=config.memd_url, timeout=config.timeout)
+    client = MemdCliClient(
+        memd_bin=config.memd_bin,
+        data_dir=config.data_dir,
+        timeout=config.timeout,
+    )
 
     project_payload = client.call_tool(
         "context.brief_project",
@@ -129,15 +139,22 @@ def build_wiki(config: BuildConfig) -> BuildResult:
 
     tasks: list[dict[str, Any]] = []
     force_emit_tasks: list[dict[str, Any]] = []
+    skipped_task_ids: list[str] = []
     for task_id in all_task_ids:
-        resume_payload = client.call_tool(
-            "task.resume",
-            {"tenant_id": config.tenant_id, "task_id": task_id, "k": 8},
-        )
-        thread_payload = client.call_tool(
-            "artifact.list_thread",
-            {"tenant_id": config.tenant_id, "thread_id": task_id},
-        )
+        try:
+            resume_payload = client.call_tool(
+                "task.resume",
+                {"tenant_id": config.tenant_id, "task_id": task_id, "k": 8},
+            )
+            thread_payload = client.call_tool(
+                "artifact.list_thread",
+                {"tenant_id": config.tenant_id, "thread_id": task_id},
+            )
+        except MemdCliError as exc:
+            if _is_missing_task_error(exc):
+                skipped_task_ids.append(task_id)
+                continue
+            raise
         bundle = {
             "task_id": task_id,
             "resume_payload": resume_payload,
@@ -150,8 +167,12 @@ def build_wiki(config: BuildConfig) -> BuildResult:
         else:
             force_emit_tasks.append(bundle)
 
+    if skipped_task_ids:
+        prune_missing_task_refs(project_payload, libraries, set(skipped_task_ids))
+    ensure_library_grounding_refs(libraries)
+
     # Primary: most-recently-updated first. Secondary: task_id for
-    # stable ordering when timestamps tie or when the MCP backend
+    # stable ordering when timestamps tie or when the backend
     # does not guarantee a specific order across runs.
     tasks.sort(
         key=lambda item: (
@@ -187,6 +208,7 @@ def build_wiki(config: BuildConfig) -> BuildResult:
         library_payload["results"] = results
     snapshot_at_ms = determine_snapshot_timestamp(project_payload, libraries, tasks)
     log_entries = build_log_entries(tasks)
+    project_page_path = f"projects/{safe_project_page_stem(config.project_id)}.md"
 
     written_files = 0
     unchanged_files = 0
@@ -213,12 +235,20 @@ def build_wiki(config: BuildConfig) -> BuildResult:
 
     files = {
         config.output_dir / "index.md": render_index(
-            config.tenant_id, config.project_id, snapshot_at_ms, tasks
+            config.tenant_id,
+            config.project_id,
+            snapshot_at_ms,
+            tasks,
+            project_page_path,
         ),
         config.output_dir / "log.md": render_log_page(
-            config.tenant_id, config.project_id, snapshot_at_ms, log_entries
+            config.tenant_id,
+            config.project_id,
+            snapshot_at_ms,
+            log_entries,
+            project_page_path,
         ),
-        config.output_dir / "projects" / f"{config.project_id}.md": render_project_page(
+        config.output_dir / project_page_path: render_project_page(
             config.tenant_id,
             config.project_id,
             snapshot_at_ms,
@@ -227,16 +257,32 @@ def build_wiki(config: BuildConfig) -> BuildResult:
             libraries,
         ),
         config.output_dir / "libraries" / "failures.md": render_library_page(
-            "failures", config.project_id, snapshot_at_ms, libraries["failures"]
+            "failures",
+            config.project_id,
+            snapshot_at_ms,
+            libraries["failures"],
+            project_page_path,
         ),
         config.output_dir / "libraries" / "decisions.md": render_library_page(
-            "decisions", config.project_id, snapshot_at_ms, libraries["decisions"]
+            "decisions",
+            config.project_id,
+            snapshot_at_ms,
+            libraries["decisions"],
+            project_page_path,
         ),
         config.output_dir / "libraries" / "evidence.md": render_library_page(
-            "evidence", config.project_id, snapshot_at_ms, libraries["evidence"]
+            "evidence",
+            config.project_id,
+            snapshot_at_ms,
+            libraries["evidence"],
+            project_page_path,
         ),
         config.output_dir / "libraries" / "highlights.md": render_library_page(
-            "highlights", config.project_id, snapshot_at_ms, libraries["highlights"]
+            "highlights",
+            config.project_id,
+            snapshot_at_ms,
+            libraries["highlights"],
+            project_page_path,
         ),
         config.output_dir / "manifest.json": render_manifest(
             config,
@@ -245,6 +291,7 @@ def build_wiki(config: BuildConfig) -> BuildResult:
             log_entries,
             project_payload,
             wiki_page_records,
+            skipped_task_ids=skipped_task_ids,
         ),
     }
     for record in wiki_page_records:
@@ -273,8 +320,10 @@ def build_wiki(config: BuildConfig) -> BuildResult:
             config.project_id,
             snapshot_at_ms,
             task,
+            project_page_path,
         )
 
+    remove_stale_owned_output(config.output_dir, outdir_abs, set(files))
     for path, content in files.items():
         changed = write_text_if_changed(path, content, outdir_abs=outdir_abs)
         if changed:
@@ -288,7 +337,161 @@ def build_wiki(config: BuildConfig) -> BuildResult:
         task_count=len(tasks),
         log_entry_count=len(log_entries),
         output_dir=config.output_dir,
+        skipped_task_count=len(skipped_task_ids),
+        skipped_task_ids=sorted(skipped_task_ids),
     )
+
+
+def _is_missing_task_error(exc: Exception) -> bool:
+    return "task not found" in str(exc).lower()
+
+
+def remove_stale_owned_output(
+    output_dir: Path,
+    outdir_abs: Path,
+    keep_files: set[Path],
+) -> None:
+    """Remove stale compiler-managed files before writing a fresh snapshot.
+
+    Rebuilds must be idempotent at the directory level. Without this,
+    old generated pages can survive after a project_id-safe path change
+    or after a task/library falls out of the current snapshot, causing
+    manifest drift and stale navigation. Current files are left in
+    place so an identical second build still reports zero writes.
+    """
+    keep = {normalize_absolute(path) for path in keep_files}
+    for rel in COMPILER_OWNED_PREFIXES + LLM_AUTHORED_PREFIXES:
+        target = output_dir / rel
+        if not target.exists() and not target.is_symlink():
+            continue
+        reject_if_any_symlink_inside_outdir(target, outdir_abs)
+        if target.is_file() or target.is_symlink():
+            if normalize_absolute(target) in keep:
+                continue
+            target.unlink()
+            continue
+        for path in sorted(target.rglob("*"), reverse=True):
+            reject_if_any_symlink_inside_outdir(path, outdir_abs)
+            if path.is_file():
+                if normalize_absolute(path) in keep:
+                    continue
+                path.unlink()
+            elif path.is_dir():
+                try:
+                    path.rmdir()
+                except OSError:
+                    pass
+
+
+def prune_missing_task_refs(
+    project_payload: dict[str, Any],
+    libraries: dict[str, dict[str, Any]],
+    missing_task_ids: set[str],
+) -> None:
+    """Drop links to task records that the local memd store can no longer resume.
+
+    Historical digest artifacts can outlive the canonical task rows they
+    cite. The compiler's force-emit guarantee should avoid dangling links
+    for resolvable tasks, but it must not let one stale task id fail an
+    otherwise buildable project.
+    """
+    if not missing_task_ids:
+        return
+
+    brief = project_payload.get("brief")
+    if isinstance(brief, dict):
+        source_task_ids = brief.get("source_task_ids")
+        if isinstance(source_task_ids, list):
+            brief["source_task_ids"] = [
+                task_id
+                for task_id in source_task_ids
+                if not (isinstance(task_id, str) and task_id in missing_task_ids)
+            ]
+
+    project_payload["grounding_refs"] = _drop_missing_refs(
+        project_payload.get("grounding_refs") or [],
+        missing_task_ids,
+    )
+
+    for library_payload in libraries.values():
+        library_payload["results"] = [
+            item
+            for item in library_payload.get("results") or []
+            if not _item_has_missing_task(item, missing_task_ids)
+        ]
+        library_payload["grounding_refs"] = _drop_missing_refs(
+            library_payload.get("grounding_refs") or [],
+            missing_task_ids,
+        )
+
+
+def _drop_missing_refs(
+    refs: list[Any],
+    missing_task_ids: set[str],
+) -> list[Any]:
+    return [
+        ref
+        for ref in refs
+        if not (
+            isinstance(ref, dict)
+            and isinstance(ref.get("task_id"), str)
+            and ref["task_id"] in missing_task_ids
+        )
+    ]
+
+
+def _item_has_missing_task(item: Any, missing_task_ids: set[str]) -> bool:
+    return (
+        isinstance(item, dict)
+        and isinstance(item.get("task_id"), str)
+        and item["task_id"] in missing_task_ids
+    )
+
+
+def ensure_library_grounding_refs(libraries: dict[str, dict[str, Any]]) -> None:
+    """Backfill digest-library grounding refs from concrete result rows.
+
+    Some historical digest helpers return useful result items without
+    populating the digest payload's top-level ``grounding_refs`` field.
+    The rendered library page can still ground those items by linking
+    each result's canonical task/artifact pair.
+    """
+    for payload in libraries.values():
+        if payload.get("grounding_refs"):
+            continue
+        refs: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in payload.get("results") or []:
+            if not isinstance(item, dict):
+                continue
+            task_id = item.get("task_id")
+            artifact_id = item.get("artifact_id")
+            if not isinstance(task_id, str) or not task_id:
+                continue
+            if not isinstance(artifact_id, str) or not artifact_id:
+                continue
+            key = (task_id, artifact_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            refs.append(
+                {
+                    "task_id": task_id,
+                    "artifact_id": artifact_id,
+                    "artifact_kind": str(item.get("artifact_kind") or "artifact"),
+                }
+            )
+        if refs:
+            refs.sort(key=lambda ref: (ref["task_id"], ref["artifact_id"]))
+            payload["grounding_refs"] = refs
+
+
+_PROJECT_PAGE_STEM_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def safe_project_page_stem(project_id: str) -> str:
+    stem = _PROJECT_PAGE_STEM_RE.sub("-", project_id).strip("-._")
+    return stem or "project"
 
 
 def collect_referenced_task_ids(
@@ -389,12 +592,12 @@ HUMAN_OWNED_PREFIXES: tuple[str, ...] = (
 
 
 def fetch_wiki_pages(
-    client: McpHttpClient, config: BuildConfig
+    client: MemdCliClient, config: BuildConfig
 ) -> list[dict[str, Any]]:
     """Return every `wiki_page` artifact for the configured project.
 
     Wraps `artifact.search` with `artifact_kind=wiki_page` and
-    requests up to 100 hits in one call (the documented MCP cap). v2
+    requests up to 100 hits in one call. v2
     treats concept pages as a small set per project; if it grows past
     100 we will need to paginate or change the surface.
     """
@@ -410,7 +613,7 @@ def fetch_wiki_pages(
         },
     )
     # `artifact.search` returns `{"results": [ArtifactSearchHit, ...]}`
-    # per `ArtifactSearchResult` in `crates/memd/src/mcp/handlers.rs`.
+    # per `ArtifactSearchResult` in the Rust operation handlers.
     # Each hit carries the resolved canonical artifact under `.artifact`.
     results = payload.get("results") or []
     return [
@@ -443,7 +646,7 @@ def sort_wiki_pages(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def build_concept_page_record(
-    client: McpHttpClient,
+    client: MemdCliClient,
     config: BuildConfig,
     page: dict[str, Any],
 ) -> dict[str, Any]:
@@ -521,7 +724,7 @@ def build_concept_page_record(
 
 
 def _fetch_verification_children(
-    client: McpHttpClient,
+    client: MemdCliClient,
     config: BuildConfig,
     wiki_page_artifact_id: str | None,
 ) -> list[dict[str, Any]]:
@@ -530,8 +733,7 @@ def _fetch_verification_children(
     Plan §4.2 trust model: a wiki_page itself stays at
     ``CanonicalRecord``; UI-facing "verified" state is derived from
     presence of children whose ``reply_to_artifact_id`` points at the
-    page AND whose ``promotion_state`` is ``verified`` (the server-side
-    countersignature signal). The renderer surfaces these as
+    page AND whose ``promotion_state`` is ``verified``. The renderer surfaces these as
     ``Verified by: <agent_id> on <date>`` lines in the page footer; the
     Phase 3 lint validates the contract.
     """
@@ -578,8 +780,8 @@ def _grounding_trust_tier(artifact: dict[str, Any]) -> str:
     """Mirror Rust's `derive_artifact_trust_tier` for a Python dict.
 
     Used for rendering only. The authoritative computation lives in
-    the Rust server; this surface keeps Phase 2 free of an extra MCP
-    call per artifact when all we need is the displayed tier.
+    the Rust task-memory model; this surface keeps Phase 2 free of an
+    extra CLI call per artifact when all we need is the displayed tier.
     """
     promotion = artifact.get("promotion_state")
     if promotion == "verified":
@@ -596,8 +798,10 @@ def render_manifest(
     log_entries: list[dict[str, Any]],
     project_payload: dict[str, Any],
     wiki_page_records: list[dict[str, Any]] | None = None,
+    skipped_task_ids: list[str] | None = None,
 ) -> str:
     wiki_page_records = wiki_page_records or []
+    skipped_task_ids = sorted(skipped_task_ids or [])
     concept_pages = [
         {
             "artifact_id": record["artifact_id"],
@@ -622,14 +826,16 @@ def render_manifest(
         "llm_authored_prefixes": list(LLM_AUTHORED_PREFIXES),
         "human_owned_prefixes": list(HUMAN_OWNED_PREFIXES),
         "source_snapshot_at_ms": snapshot_at_ms,
-        "memd_url": config.memd_url,
+        "memd_bin": config.memd_bin,
         "tenant_id": config.tenant_id,
         "project_id": config.project_id,
+        "project_page_path": f"projects/{safe_project_page_stem(config.project_id)}.md",
         "task_count": len(tasks),
         "log_entry_count": len(log_entries),
         "project_digest_artifact_id": project_payload["artifact"].get("artifact_id"),
         "project_trust_tier": project_payload.get("trust_tier"),
         "task_ids": [task["task_id"] for task in tasks],
+        "skipped_task_ids": skipped_task_ids,
         "concept_pages": concept_pages,
     }
     return json.dumps(manifest, indent=2, sort_keys=True) + "\n"

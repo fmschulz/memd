@@ -1,7 +1,7 @@
 """CLI-side tests for the --check-staleness lint flag wiring.
 
 The full lint engine logic lives in ``test_lint.py``; this file focuses
-on ``_build_staleness_lookup`` — the closure that wraps ``McpHttpClient``
+on ``_build_staleness_lookup`` — the closure that wraps ``MemdCliClient``
 and is the only bridge between the CLI and the memd oracle.
 """
 
@@ -18,7 +18,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from compiled_wiki.cli import (  # noqa: E402
-    DEFAULT_MEMD_URL,
+    DEFAULT_MEMD_BIN,
     DEFAULT_TIMEOUT,
     _build_staleness_lookup,
 )
@@ -31,7 +31,7 @@ def _args(**overrides: object) -> argparse.Namespace:
         project_id=None,
         output_dir=None,
         config_start=None,
-        memd_url=None,
+        memd_bin=None,
         timeout=DEFAULT_TIMEOUT,
         check_staleness=True,
     )
@@ -47,6 +47,7 @@ def _discovered(**overrides: object) -> DiscoveredConfig:
         outdir=None,
         max_tasks=None,
         library_k=None,
+        memd_bin=None,
         memd_url=None,
     )
     base.update(overrides)
@@ -83,10 +84,10 @@ class BuildStalenessLookupTests(unittest.TestCase):
 
     def test_initialize_failure_degrades_gracefully(self) -> None:
         args = _args(tenant_id="memd", project_id="memd")
-        fake = _FakeClient(init_raises=RuntimeError("daemon down"))
+        fake = _FakeClient(init_raises=RuntimeError("cli down"))
         stderr = io.StringIO()
         with (
-            patch("compiled_wiki.mcp_client.McpHttpClient", return_value=fake),
+            patch("compiled_wiki.cli_client.MemdCliClient", return_value=fake),
             redirect_stderr(stderr),
         ):
             lookup = _build_staleness_lookup(args, _discovered())
@@ -105,7 +106,7 @@ class BuildStalenessLookupTests(unittest.TestCase):
                 "task-4": {"task": {}},
             }
         )
-        with patch("compiled_wiki.mcp_client.McpHttpClient", return_value=fake):
+        with patch("compiled_wiki.cli_client.MemdCliClient", return_value=fake):
             lookup = _build_staleness_lookup(args, _discovered())
         self.assertEqual(lookup("task-1"), 123_000)
         self.assertEqual(lookup("task-2"), 777)
@@ -115,7 +116,7 @@ class BuildStalenessLookupTests(unittest.TestCase):
     def test_results_are_cached_per_task(self) -> None:
         args = _args(tenant_id="memd", project_id="memd")
         fake = _FakeClient(responses={"task-1": {"task": {"updated_at_ms": 5}}})
-        with patch("compiled_wiki.mcp_client.McpHttpClient", return_value=fake):
+        with patch("compiled_wiki.cli_client.MemdCliClient", return_value=fake):
             lookup = _build_staleness_lookup(args, _discovered())
         self.assertEqual(lookup("task-1"), 5)
         self.assertEqual(lookup("task-1"), 5)
@@ -128,11 +129,11 @@ class BuildStalenessLookupTests(unittest.TestCase):
         args = _args(tenant_id="memd", project_id="memd")
         fake = _FakeClient(
             responses={"task-good": {"task": {"updated_at_ms": 1}}},
-            call_raises={"task-bad": RuntimeError("rpc boom")},
+            call_raises={"task-bad": RuntimeError("cli boom")},
         )
         stderr = io.StringIO()
         with (
-            patch("compiled_wiki.mcp_client.McpHttpClient", return_value=fake),
+            patch("compiled_wiki.cli_client.MemdCliClient", return_value=fake),
             redirect_stderr(stderr),
         ):
             lookup = _build_staleness_lookup(args, _discovered())
@@ -144,43 +145,43 @@ class BuildStalenessLookupTests(unittest.TestCase):
             self.assertIsNone(lookup("task-other"))
         self.assertIn("task.resume failed", stderr.getvalue())
 
-    def test_uses_memd_url_precedence(self) -> None:
+    def test_uses_memd_bin_precedence(self) -> None:
         """CLI flag wins over config wins over default."""
-        args = _args(tenant_id="memd", project_id="memd", memd_url="http://cli/mcp")
-        discovered = _discovered(memd_url="http://cfg/mcp")
+        args = _args(tenant_id="memd", project_id="memd", memd_bin="/cli/memd")
+        discovered = _discovered(memd_bin="/cfg/memd")
         fake = _FakeClient()
         captured = {}
 
-        def _ctor(url, timeout):
-            captured["url"] = url
+        def _ctor(memd_bin, timeout):
+            captured["memd_bin"] = memd_bin
             captured["timeout"] = timeout
             return fake
 
-        with patch("compiled_wiki.mcp_client.McpHttpClient", side_effect=_ctor):
+        with patch("compiled_wiki.cli_client.MemdCliClient", side_effect=_ctor):
             _build_staleness_lookup(args, discovered)
-        self.assertEqual(captured["url"], "http://cli/mcp")
+        self.assertEqual(captured["memd_bin"], "/cli/memd")
 
-        args2 = _args(tenant_id="memd", project_id="memd", memd_url=None)
+        args2 = _args(tenant_id="memd", project_id="memd", memd_bin=None)
         captured2 = {}
 
-        def _ctor2(url, timeout):
-            captured2["url"] = url
+        def _ctor2(memd_bin, timeout):
+            captured2["memd_bin"] = memd_bin
             return fake
 
-        with patch("compiled_wiki.mcp_client.McpHttpClient", side_effect=_ctor2):
+        with patch("compiled_wiki.cli_client.MemdCliClient", side_effect=_ctor2):
             _build_staleness_lookup(args2, discovered)
-        self.assertEqual(captured2["url"], "http://cfg/mcp")
+        self.assertEqual(captured2["memd_bin"], "/cfg/memd")
 
-        args3 = _args(tenant_id="memd", project_id="memd", memd_url=None)
+        args3 = _args(tenant_id="memd", project_id="memd", memd_bin=None)
         captured3 = {}
 
-        def _ctor3(url, timeout):
-            captured3["url"] = url
+        def _ctor3(memd_bin, timeout):
+            captured3["memd_bin"] = memd_bin
             return fake
 
-        with patch("compiled_wiki.mcp_client.McpHttpClient", side_effect=_ctor3):
+        with patch("compiled_wiki.cli_client.MemdCliClient", side_effect=_ctor3):
             _build_staleness_lookup(args3, _discovered())
-        self.assertEqual(captured3["url"], DEFAULT_MEMD_URL)
+        self.assertEqual(captured3["memd_bin"], DEFAULT_MEMD_BIN)
 
 
 if __name__ == "__main__":

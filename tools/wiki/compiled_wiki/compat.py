@@ -1,17 +1,16 @@
-"""Server-version compatibility gate for memd-wiki ↔ memd.
+"""Executable-version compatibility gate for memd-wiki ↔ memd.
 
-Per the Item 7 plan §9.3: compare parsed MAJOR.MINOR between the running
-``memd`` server (from its MCP ``initialize`` response ``serverInfo.version``)
-and this ``memd-wiki`` build (``compiled_wiki.__version__``).
+Compare parsed MAJOR.MINOR between the local ``memd`` executable and this
+``memd-wiki`` build (``compiled_wiki.__version__``).
 
 - MAJOR.MINOR mismatch: hard fail (severity ``"fail"``).
 - PATCH-only mismatch: warn (severity ``"warn"``).
 - Match: ok.
-- Unparseable server version: warn (we don't know what we're talking to).
+- Unparseable executable version: warn (we don't know what we're calling).
 
 The gate function is pure; callers decide how to surface failures
 (raise, log, exit). This keeps the test matrix small and independent of
-transport.
+process execution details.
 
 v2 phase 4 also adds ``check_manifest_version`` for the manifest
 schema-version compat gate documented in plan §4.4 — a memd-wiki that
@@ -54,7 +53,7 @@ class ServerIncompatibleError(RuntimeError):
 
     def __init__(self, client_version: str, server_version: str) -> None:
         super().__init__(
-            f"memd server version {server_version!r} is incompatible with "
+            f"memd executable version {server_version!r} is incompatible with "
             f"memd-wiki {client_version!r} (MAJOR.MINOR must match)"
         )
         self.client_version = client_version
@@ -90,7 +89,7 @@ def check_server_compat(
         return CompatResult(
             severity="warn",
             message=(
-                f"memd server did not report serverInfo.version; "
+                f"memd executable did not report a version; "
                 f"memd-wiki is {client}. Proceeding, but compat cannot be verified."
             ),
             client_version=client_display,
@@ -103,7 +102,7 @@ def check_server_compat(
         return CompatResult(
             severity="warn",
             message=(
-                f"could not parse memd server version {server_version!r}: {exc}. "
+                f"could not parse memd executable version {server_version!r}: {exc}. "
                 f"Proceeding, but compat cannot be verified."
             ),
             client_version=client_display,
@@ -120,9 +119,9 @@ def _compare(client: Semver, server: Semver) -> CompatResult:
         return CompatResult(
             severity="fail",
             message=(
-                f"memd-wiki {client_display} requires memd server "
+                f"memd-wiki {client_display} requires memd executable "
                 f"MAJOR.MINOR={client.major}.{client.minor}.x, "
-                f"but server reports {server_display}"
+                f"but executable reports {server_display}"
             ),
             client_version=client_display,
             server_version=server_display,
@@ -132,14 +131,14 @@ def _compare(client: Semver, server: Semver) -> CompatResult:
             severity="warn",
             message=(
                 f"patch-level version skew: memd-wiki {client_display} "
-                f"vs memd server {server_display}. Proceeding."
+                f"vs memd executable {server_display}. Proceeding."
             ),
             client_version=client_display,
             server_version=server_display,
         )
     return CompatResult(
         severity="ok",
-        message=f"memd-wiki {client_display} matches memd server {server_display}",
+        message=f"memd-wiki {client_display} matches memd executable {server_display}",
         client_version=client_display,
         server_version=server_display,
     )

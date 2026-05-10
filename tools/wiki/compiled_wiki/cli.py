@@ -19,7 +19,7 @@ from .containment import OutdirContainmentError, resolve_forbidden_data_dirs
 from .lint import LintReport, lint_output_dir
 from .serve import _add_serve_subparser, _run_serve
 
-DEFAULT_MEMD_URL = "http://127.0.0.1:8787/mcp"
+DEFAULT_MEMD_BIN = "memd"
 DEFAULT_MAX_TASKS = 25
 DEFAULT_LIBRARY_K = 20
 DEFAULT_OUTPUT_SUBDIR = "compiled_wiki"
@@ -69,7 +69,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="memd-wiki",
         description=(
             "memd-wiki: compile and lint a Karpathy-style markdown wiki "
-            "over memd project state (MCP HTTP)."
+            "over memd project state via the local CLI."
         ),
     )
     subparsers = parser.add_subparsers(dest="command")
@@ -99,11 +99,11 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_shared_config_args(build)
     build.add_argument(
-        "--memd-url",
+        "--memd-bin",
         default=None,
         help=(
-            f"HTTP MCP endpoint. Default: `wiki.memd_url` from config, "
-            f"else {DEFAULT_MEMD_URL!r}."
+            f"memd executable path. Default: `wiki.memd_bin` from config, "
+            f"else {DEFAULT_MEMD_BIN!r}."
         ),
     )
     build.add_argument(
@@ -128,7 +128,7 @@ def _add_build_subparser(subparsers: argparse._SubParsersAction) -> None:
         "--timeout",
         type=float,
         default=DEFAULT_TIMEOUT,
-        help=f"HTTP timeout for MCP requests. Default: {DEFAULT_TIMEOUT}s.",
+        help=f"Timeout for memd CLI calls. Default: {DEFAULT_TIMEOUT}s.",
     )
     build.add_argument(
         "--data-dir",
@@ -180,25 +180,25 @@ def _add_lint_subparser(subparsers: argparse._SubParsersAction) -> None:
         "--check-staleness",
         action="store_true",
         help=(
-            "Query memd via MCP HTTP and warn when a task page snapshot "
+            "Query memd via CLI and warn when a task page snapshot "
             "is older than the task's current updated_at_ms. Default is "
             "offline filesystem-only; this flag adds one `task.resume` "
             "call per emitted task page."
         ),
     )
     lint.add_argument(
-        "--memd-url",
+        "--memd-bin",
         default=None,
         help=(
-            f"HTTP MCP endpoint (lint --check-staleness only). Default: "
-            f"`wiki.memd_url` from config, else {DEFAULT_MEMD_URL!r}."
+            f"memd executable path (lint --check-staleness only). Default: "
+            f"`wiki.memd_bin` from config, else {DEFAULT_MEMD_BIN!r}."
         ),
     )
     lint.add_argument(
         "--timeout",
         type=float,
         default=DEFAULT_TIMEOUT,
-        help=f"HTTP timeout for MCP requests. Default: {DEFAULT_TIMEOUT}s.",
+        help=f"Timeout for memd CLI calls. Default: {DEFAULT_TIMEOUT}s.",
     )
 
 
@@ -245,7 +245,7 @@ def resolve_build_config(
         )
 
     output_dir = _resolve_output_dir(args.output_dir, discovered)
-    memd_url = args.memd_url or discovered.memd_url or DEFAULT_MEMD_URL
+    memd_bin = args.memd_bin or discovered.memd_bin or DEFAULT_MEMD_BIN
     max_tasks = args.max_tasks if args.max_tasks is not None else (
         discovered.max_tasks if discovered.max_tasks is not None else DEFAULT_MAX_TASKS
     )
@@ -257,10 +257,11 @@ def resolve_build_config(
         start=args.config_start or Path.cwd(),
     )
     return BuildConfig(
-        memd_url=memd_url,
         tenant_id=tenant_id,
         project_id=project_id,
         output_dir=output_dir,
+        memd_bin=memd_bin,
+        data_dir=args.data_dir,
         max_tasks=max_tasks,
         library_k=library_k,
         timeout=args.timeout,
@@ -418,7 +419,7 @@ def _build_staleness_lookup(
     to stderr and subsequent lookups return None so the lint falls back
     to file-only behavior for the remaining pages.
     """
-    from .mcp_client import McpHttpClient
+    from .cli_client import MemdCliClient
 
     tenant_id = _normalize(args.tenant_id) or discovered.tenant_id
     project_id = _normalize(args.project_id) or discovered.project_id
@@ -430,14 +431,14 @@ def _build_staleness_lookup(
         )
         return lambda _task_id: None
 
-    memd_url = args.memd_url or discovered.memd_url or DEFAULT_MEMD_URL
-    client = McpHttpClient(memd_url, timeout=args.timeout)
+    memd_bin = args.memd_bin or discovered.memd_bin or DEFAULT_MEMD_BIN
+    client = MemdCliClient(memd_bin=memd_bin, timeout=args.timeout)
     try:
         client.initialize()
-    except Exception as exc:  # noqa: BLE001 — daemon is an opaque dep here.
+    except Exception as exc:  # noqa: BLE001 — local executable is an opaque dep here.
         print(
-            f"memd-wiki: warning: could not initialize memd client at "
-            f"{memd_url}: {exc}; skipping staleness check",
+            f"memd-wiki: warning: could not initialize memd client "
+            f"{memd_bin}: {exc}; skipping staleness check",
             file=sys.stderr,
         )
         return lambda _task_id: None

@@ -1,36 +1,41 @@
-//! MCP-specific error types
+//! Local operation error types.
 //!
-//! Maps MCP error conditions to JSON-RPC error codes.
+//! The enum name is retained for API compatibility with the existing handler
+//! layer; the executable reports these errors through CLI output.
 
-use super::protocol::{error_codes, RpcError};
+const PARSE_ERROR: i32 = -32700;
+const INVALID_REQUEST: i32 = -32600;
+const METHOD_NOT_FOUND: i32 = -32601;
+const INVALID_PARAMS: i32 = -32602;
+const INTERNAL_ERROR: i32 = -32603;
 
-/// MCP-specific error variants
+/// Operation-specific error variants.
 #[derive(Debug, Clone)]
 pub enum McpError {
-    /// Failed to parse JSON (maps to PARSE_ERROR -32700)
+    /// Failed to parse JSON.
     ParseError(String),
-    /// Invalid request structure (maps to INVALID_REQUEST -32600)
+    /// Invalid request structure.
     InvalidRequest(String),
-    /// Method not found (maps to METHOD_NOT_FOUND -32601)
+    /// Method not found.
     MethodNotFound(String),
-    /// Invalid method parameters (maps to INVALID_PARAMS -32602)
+    /// Invalid method parameters.
     InvalidParams(String),
-    /// Internal server error (maps to INTERNAL_ERROR -32603)
+    /// Internal operation error.
     InternalError(String),
-    /// Tool execution error (application-specific, uses -32000)
+    /// Operation execution error.
     ToolError(String),
 }
 
 impl McpError {
-    /// Get the JSON-RPC error code for this error
+    /// Get the stable legacy numeric error code for this error.
     pub fn code(&self) -> i32 {
         match self {
-            McpError::ParseError(_) => error_codes::PARSE_ERROR,
-            McpError::InvalidRequest(_) => error_codes::INVALID_REQUEST,
-            McpError::MethodNotFound(_) => error_codes::METHOD_NOT_FOUND,
-            McpError::InvalidParams(_) => error_codes::INVALID_PARAMS,
-            McpError::InternalError(_) => error_codes::INTERNAL_ERROR,
-            McpError::ToolError(_) => -32000, // Application-defined error range
+            McpError::ParseError(_) => PARSE_ERROR,
+            McpError::InvalidRequest(_) => INVALID_REQUEST,
+            McpError::MethodNotFound(_) => METHOD_NOT_FOUND,
+            McpError::InvalidParams(_) => INVALID_PARAMS,
+            McpError::InternalError(_) => INTERNAL_ERROR,
+            McpError::ToolError(_) => -32000,
         }
     }
 
@@ -57,12 +62,6 @@ impl McpError {
             McpError::InternalError(_) => "internal-error",
             McpError::ToolError(_) => "tool-error",
         }
-    }
-}
-
-impl From<McpError> for RpcError {
-    fn from(err: McpError) -> Self {
-        RpcError::new(err.code(), err.message())
     }
 }
 
@@ -97,16 +96,7 @@ mod tests {
     #[test]
     fn tool_error_uses_application_range() {
         let err = McpError::ToolError("failed".into());
-        // Application-defined errors should be in -32000 to -32099 range
         assert!(err.code() >= -32099 && err.code() <= -32000);
-    }
-
-    #[test]
-    fn error_converts_to_rpc_error() {
-        let mcp_err = McpError::MethodNotFound("unknown".into());
-        let rpc_err: RpcError = mcp_err.into();
-        assert_eq!(rpc_err.code, -32601);
-        assert_eq!(rpc_err.message, "unknown");
     }
 
     #[test]
