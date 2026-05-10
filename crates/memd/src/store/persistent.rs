@@ -4,7 +4,7 @@
 //! Implements crash recovery via WAL replay on startup.
 //! Uses hybrid search (dense + sparse) for retrieval.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,8 +46,9 @@ use crate::error::{MemdError, Result};
 use crate::index::{Bm25Index, SparseIndex};
 use crate::metrics::{IndexStats, MetricsCollector, QueryMetrics, TieredQueryMetrics};
 use crate::retrieval::RerankerMode;
+use crate::store::supersession::{canonicalize_for_type, trigram_jaccard, NearDuplicateCandidate};
 use crate::types::lifecycle::{LifecycleDelta, MemoryTier, ResolvedChunk};
-use crate::types::{ChunkId, ChunkStatus, MemoryChunk, TenantId};
+use crate::types::{ChunkId, ChunkStatus, ChunkType, MemoryChunk, TenantId, VisibilityPolicy};
 
 /// Configuration for persistent store
 #[derive(Debug, Clone)]
@@ -2072,6 +2073,119 @@ impl PersistentStore {
         }
 
         Ok(promoted)
+    }
+
+    /// Find active chunks that are exact or fuzzy near-duplicates of `text`.
+    pub async fn find_near_duplicates(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        text: &str,
+        chunk_type: ChunkType,
+        fuzzy: bool,
+        threshold: f32,
+        limit: usize,
+    ) -> Result<Vec<NearDuplicateCandidate>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let canonical = canonicalize_for_type(text, chunk_type);
+        if canonical.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut seen = HashSet::new();
+        let mut matches = Vec::new();
+        let policy = VisibilityPolicy::default();
+        let now_ms = current_time_ms();
+
+        for meta in self
+            .metadata
+            .list_by_canonical_text(tenant_id, project_id, &canonical)?
+        {
+            if meta.chunk_type != chunk_type
+                || !policy.is_visible_at(meta.status, &meta.lifecycle, now_ms)
+            {
+                continue;
+            }
+            if let Some(chunk) = self.get(tenant_id, &meta.chunk_id).await? {
+                let timestamp_created = meta.timestamp_created;
+                seen.insert(meta.chunk_id.clone());
+                matches.push((
+                    NearDuplicateCandidate {
+                        chunk_id: meta.chunk_id.clone(),
+                        text: chunk.text,
+                        score: 1.0,
+                        exact: true,
+                    },
+                    timestamp_created,
+                ));
+            }
+        }
+
+        if fuzzy || matches.len() < limit {
+            let scan_limit = limit.saturating_mul(10).max(100);
+            for meta in self
+                .metadata
+                .list_recent_for_project(tenant_id, project_id, scan_limit)?
+            {
+                if seen.contains(&meta.chunk_id)
+                    || meta.chunk_type != chunk_type
+                    || !policy.is_visible_at(meta.status, &meta.lifecycle, now_ms)
+                {
+                    continue;
+                }
+
+                let Some(chunk) = self.get(tenant_id, &meta.chunk_id).await? else {
+                    continue;
+                };
+                let candidate_canonical = meta
+                    .canonical_text
+                    .clone()
+                    .unwrap_or_else(|| canonicalize_for_type(&chunk.text, chunk.chunk_type));
+                if candidate_canonical.is_empty() {
+                    continue;
+                }
+
+                let exact = candidate_canonical == canonical;
+                let score = if exact {
+                    1.0
+                } else if fuzzy {
+                    trigram_jaccard(&canonical, &candidate_canonical)
+                } else {
+                    continue;
+                };
+                if !exact && score < threshold {
+                    continue;
+                }
+
+                let timestamp_created = meta.timestamp_created;
+                matches.push((
+                    NearDuplicateCandidate {
+                        chunk_id: meta.chunk_id.clone(),
+                        text: chunk.text,
+                        score,
+                        exact,
+                    },
+                    timestamp_created,
+                ));
+            }
+        }
+
+        matches.sort_by(|(left, left_ts), (right, right_ts)| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| right.exact.cmp(&left.exact))
+                .then_with(|| right_ts.cmp(left_ts))
+        });
+        matches.truncate(limit);
+        Ok(matches
+            .into_iter()
+            .map(|(candidate, _)| candidate)
+            .collect())
     }
 
     /// Write a chunk plus its initial lifecycle overlay in one logical step.
