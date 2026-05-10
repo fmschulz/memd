@@ -78,15 +78,18 @@ impl CompactionRunner {
 
         tracing::info!(tenant_id = %tenant_id, "compaction started");
 
-        // 1. Get deleted chunk IDs from metadata
+        // 1. Get chunks that must not survive a dense-index rebuild.
         let deleted_chunk_ids = metadata.get_deleted_chunk_ids(tenant_id)?;
-        let deleted_chunk_ids_set: HashSet<ChunkId> = deleted_chunk_ids.iter().cloned().collect();
+        let lifecycle_hidden_chunk_ids = metadata.list_lifecycle_hidden(tenant_id)?;
+        let hnsw_excluded_chunk_ids =
+            hnsw_excluded_chunk_ids(&deleted_chunk_ids, lifecycle_hidden_chunk_ids);
         let tombstones_processed = deleted_chunk_ids.len();
 
         tracing::debug!(
             tenant_id = %tenant_id,
             tombstones = tombstones_processed,
-            "gathered tombstones for compaction"
+            hnsw_excluded = hnsw_excluded_chunk_ids.len(),
+            "gathered compaction exclusion sets"
         );
 
         // 2. Gather metrics for threshold checks
@@ -111,7 +114,7 @@ impl CompactionRunner {
                 "triggering HNSW rebuild"
             );
 
-            match dense_searcher.rebuild_hnsw_for_tenant(tenant_id, &deleted_chunk_ids_set) {
+            match dense_searcher.rebuild_hnsw_for_tenant(tenant_id, &hnsw_excluded_chunk_ids) {
                 Ok(result) => {
                     tracing::info!(
                         tenant_id = %tenant_id,
@@ -256,6 +259,15 @@ impl Default for CompactionRunner {
     }
 }
 
+fn hnsw_excluded_chunk_ids(
+    deleted_chunk_ids: &[ChunkId],
+    lifecycle_hidden_chunk_ids: Vec<ChunkId>,
+) -> HashSet<ChunkId> {
+    let mut excluded: HashSet<ChunkId> = deleted_chunk_ids.iter().cloned().collect();
+    excluded.extend(lifecycle_hidden_chunk_ids);
+    excluded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,5 +332,22 @@ mod tests {
             ..Default::default()
         };
         assert!(runner.should_run(&metrics));
+    }
+
+    #[test]
+    fn hnsw_excluded_chunk_ids_include_lifecycle_hidden_rows() {
+        let deleted = ChunkId::new();
+        let superseded = ChunkId::new();
+        let history = ChunkId::new();
+
+        let excluded = hnsw_excluded_chunk_ids(
+            &[deleted.clone(), superseded.clone()],
+            vec![superseded.clone(), history.clone()],
+        );
+
+        assert_eq!(excluded.len(), 3);
+        assert!(excluded.contains(&deleted));
+        assert!(excluded.contains(&superseded));
+        assert!(excluded.contains(&history));
     }
 }
