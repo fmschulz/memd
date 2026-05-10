@@ -2,7 +2,7 @@
 
 - Corpus: `docs/scientific-task-memory/benchmark-results/task_memory_benchmark_corpus.json`
 - Version: `2026-03-21.v2`
-- Generated at: `2026-03-21T23:20:30Z`
+- Generated at: `2026-05-10T23:44:02Z`
 - Embedding model: `all-minilm`
 - Search variant: `hybrid-feature`
 
@@ -25,33 +25,13 @@
 
 | System | Mode | hit@3 | MRR | avg search ms | p95 search ms | Fresh rank | Concurrency success | Concurrency ops/s | Seed ms |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| memd_chunk_baseline | memory.search over flattened chunk-native benchmark artifacts | 0.00 | 0.00 | 145.4 | 256.9 | 1 | 100.00% | 5.20 | 65574.3 |
-| memd_task_memory | task.* lifecycle writes plus task.search over exact-filtered task artifacts | 0.96 | 0.82 | 2.9 | 5.7 | 1 | 100.00% | 1.16 | 106875.9 |
+| memd_chunk_baseline | memory.search over flattened chunk-native benchmark artifacts | 1.00 | 0.98 | 301.6 | 409.1 | 3 | 100.00% | 2.98 | 100159.5 |
+| memd_task_memory | task.* lifecycle writes plus task.search over exact-filtered task artifacts | 1.00 | 0.84 | 5.1 | 11.1 | 1 | 100.00% | 1.41 | 176854.3 |
 
 ## Why memd-native Modes Differ
 
-- `memd_chunk_baseline` flattened the corpus into `56` generic chunks and searched them with `memory.search`. On the hardened sibling-task corpus, that representation did not recover the correct task in the top 3 results.
-- `memd_task_memory` wrote `144` lifecycle projections and searched them with `task.search`, exact artifact filters, and candidate reranking. That increased seed time from `65.6s` to `106.9s`, but improved retrieval from `hit@3=0.00` / `MRR=0.00` to `hit@3=0.96` / `MRR=0.82` and reduced average search latency from `145.4ms` to `2.9ms`.
-
-## Live external comparison
-
-| System | Mode | hit@3 | MRR | avg search ms | p95 search ms | Fresh rank | Concurrency success | Concurrency ops/s | Seed ms |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| gpt54_live_cli | gpt54 live CLI context search over the same seeded benchmark corpus | 0.91 | 0.83 | 477.7 | 503.7 | 1 | 100.00% | 2.12 | 40243.6 |
-| gpt54_live_daemon | gpt54 live daemon context search over the same seeded benchmark corpus | 0.91 | 0.83 | 146.9 | 151.8 | 1 | 100.00% | 2.52 | 35768.0 |
-| gpt54_live_tantivy | gpt54 live warm Tantivy service search over the same seeded benchmark corpus | 0.91 | 0.83 | 21.2 | 31.6 | 1 | 100.00% | 2.46 | 28918.1 |
-| claude_live | claude ark live CLI artifact search on the same benchmark corpus | 0.00 | 0.00 | 397.6 | 426.9 | 1 | 100.00% | 3.16 | 10335.0 |
-| geminipro_live | geminipro live CLI search on the same benchmark corpus | 0.96 | 0.84 | 6192.3 | 6293.0 | 1 | 100.00% | 0.76 | 121102.0 |
-| geminiultra_live | geminiultra live CLI search on the same benchmark corpus | 1.00 | 0.93 | 6205.7 | 6316.1 | 1 | 100.00% | 0.76 | 132541.4 |
-
-## GenesisM unified benchmark reference
-
-These numbers are imported from GenesisM's unified benchmark and are not directly comparable to the memd-native Phase 5 task benchmark because the old GenesisM `memd` measurement predated memd's task-lifecycle tools.
-
-| External system | Search backend | lifecycle ms | hit@3 | MRR | avg search ms | fresh rank | concurrency success | concurrency ops/s |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| gpt54 | Tantivy daemon by default when configured, fallback SQLite/ DuckDB | 1943.1 | 1.00 | 1.00 | 42.2 | 1 | 100.00% | 3.02 |
-| memd | Warm MCP process with hybrid dense+sparse+rereanking retrieval | 702.2 | 1.00 | 0.97 | 18.5 | 1 | 100.00% | 8.51 |
+- `memd_chunk_baseline` flattened the corpus into `56` generic chunks and searched them with `memory.search`. On the hardened sibling-task corpus, that representation produced `hit@3=1.00` and `MRR=0.98`.
+- `memd_task_memory` wrote `112` lifecycle projections and searched them with `task.search`, exact artifact filters, and candidate reranking. That increased seed time from `100.2s` to `176.9s`, changed retrieval from `hit@3=1.00` / `MRR=0.98` to `hit@3=1.00` / `MRR=0.84`, and changed average search latency from `301.6ms` to `5.1ms`.
 
 ## Reproducibility
 
