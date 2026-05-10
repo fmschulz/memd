@@ -187,6 +187,22 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                     "review_after_ms": {
                         "type": "integer",
                         "description": "Optional unix timestamp in milliseconds after which the chunk should be reviewed"
+                    },
+                    "supersede_near_duplicates": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "When true, supersede the best active duplicate instead of adding an unrelated chunk"
+                    },
+                    "fuzzy_dedupe": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "When true with supersede_near_duplicates, allow fuzzy trigram matches"
+                    },
+                    "dedupe_threshold": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                        "description": "Minimum fuzzy similarity score for supersede_near_duplicates"
                     }
                 },
                 "required": ["text", "type"]
@@ -1567,6 +1583,51 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                 "required": ["old_chunk_id", "new_text", "type"]
             }),
         ),
+        // LIFECYCLE-03: memory.find_near_duplicates (Track D)
+        ToolDefinition::new(
+            "memory.find_near_duplicates",
+            "Preview exact or opt-in fuzzy near-duplicates for a candidate chunk.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier for data isolation"
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Candidate chunk text"
+                    },
+                    "type": {
+                        "type": "string",
+                        "enum": ["code", "doc", "trace", "decision", "plan", "research", "message", "summary", "other"],
+                        "description": "Candidate chunk type"
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional project identifier"
+                    },
+                    "fuzzy": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Allow fuzzy trigram matches in addition to exact canonical matches"
+                    },
+                    "threshold": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                        "description": "Minimum fuzzy similarity score"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "description": "Maximum matches to return"
+                    }
+                },
+                "required": ["text", "type"]
+            }),
+        ),
         // LIFECYCLE-02: memory.set_expiry (Track C)
         ToolDefinition::new(
             "memory.set_expiry",
@@ -1863,6 +1924,7 @@ pub fn tool_names() -> Vec<&'static str> {
         "memory.metrics",
         "memory.compact",
         "memory.supersede",
+        "memory.find_near_duplicates",
         "memory.set_expiry",
         "memory.consolidate_episode",
         "context.list_subsystems",
@@ -1892,7 +1954,8 @@ mod tests {
         // (artifact.review / revision / decision / verification).
         // Track A (A7): + memory.supersede.
         // Track C: + memory.set_expiry.
-        assert_eq!(tools.len(), 48);
+        // Track D: + memory.find_near_duplicates.
+        assert_eq!(tools.len(), 49);
     }
 
     #[test]
@@ -1921,6 +1984,7 @@ mod tests {
         assert!(names.contains(&"memory.delete"));
         assert!(names.contains(&"memory.feedback"));
         assert!(names.contains(&"memory.stats"));
+        assert!(names.contains(&"memory.find_near_duplicates"));
         assert!(names.contains(&"memory.set_expiry"));
         assert!(names.contains(&"memory.consolidate_episode"));
     }
@@ -2214,8 +2278,10 @@ mod tests {
         // Phase 2.3: 42 legacy + 4 focused artifact tools.
         // Track A (A7): + memory.supersede.
         // Track C: + memory.set_expiry.
-        assert_eq!(names.len(), 48);
+        // Track D: + memory.find_near_duplicates.
+        assert_eq!(names.len(), 49);
         assert!(names.contains(&"memory.supersede"));
+        assert!(names.contains(&"memory.find_near_duplicates"));
         assert!(names.contains(&"memory.set_expiry"));
         assert!(names.contains(&"artifact.find_related"));
         assert!(names.contains(&"artifact.review"));
