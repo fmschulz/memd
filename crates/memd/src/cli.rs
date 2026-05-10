@@ -3,14 +3,17 @@
 //! Provides command-line interface for manual testing and debugging
 //! without MCP protocol overhead.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use clap::{ArgAction, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tracing::info;
 
-use crate::error::Result;
+use crate::error::{MemdError, Result};
+use crate::markdown_projection::{
+    build_markdown_projection, filter_projection_chunks, MarkdownProjectionFile,
+};
 use crate::store::{Store, TenantManager};
 use crate::types::{ChunkId, ChunkType, MemoryChunk, ProjectId, Source, TenantId};
 
@@ -159,6 +162,29 @@ pub enum CliCommand {
         /// Pagination size for chunk collection
         #[arg(long, default_value_t = 500)]
         page_size: usize,
+    },
+
+    /// Project tenant memory into Markdown files under the memd data directory
+    ProjectMarkdown {
+        /// Tenant identifier
+        #[arg(long)]
+        tenant_id: String,
+
+        /// Optional project identifier
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Output directory. Relative paths are resolved under the memd data directory.
+        #[arg(long)]
+        output_dir: PathBuf,
+
+        /// Pagination size for chunk collection
+        #[arg(long, default_value_t = 500)]
+        page_size: usize,
+
+        /// Maximum chunks to project
+        #[arg(long, default_value_t = 1000)]
+        max_chunks: usize,
     },
 
     /// Initialize memd guardrails and MCP config snippets for agent workflows
@@ -403,6 +429,32 @@ pub async fn run_cli<S: Store>(
             } else {
                 print!("{rendered}");
             }
+        }
+
+        CliCommand::ProjectMarkdown {
+            tenant_id,
+            project_id,
+            output_dir,
+            page_size,
+            max_chunks,
+        } => {
+            let tenant = TenantId::new(&tenant_id)?;
+            let page_size = page_size.max(1).min(10_000);
+            let max_chunks = max_chunks.max(1).min(10_000);
+            let chunks = collect_all_chunks(store, &tenant, page_size).await?;
+            let chunks = filter_projection_chunks(chunks, project_id.as_deref(), max_chunks);
+            let files = build_markdown_projection(&chunks, &tenant, project_id.as_deref());
+            let output_root = guarded_projection_output_dir(tenant_manager, &output_dir)?;
+            write_markdown_projection_files(&output_root, &files)?;
+
+            let summary = json!({
+                "tenant_id": tenant.to_string(),
+                "project_id": project_id,
+                "chunks_projected": chunks.len(),
+                "files_written": files.len(),
+                "output_dir": output_root,
+            });
+            println!("{}", serde_json::to_string_pretty(&summary)?);
         }
 
         CliCommand::Init {
@@ -694,6 +746,118 @@ fn render_export(
             Ok(out)
         }
     }
+}
+
+fn guarded_projection_output_dir(
+    tenant_manager: Option<&TenantManager>,
+    output_dir: &Path,
+) -> Result<PathBuf> {
+    let tenant_manager = tenant_manager.ok_or_else(|| {
+        MemdError::StorageError(
+            "project-markdown requires a tenant manager to guard output paths".to_string(),
+        )
+    })?;
+    let data_dir = tenant_manager.data_dir();
+    std::fs::create_dir_all(data_dir)?;
+    let data_dir = data_dir.canonicalize()?;
+
+    let output_dir = if output_dir.is_absolute() {
+        if output_dir
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        {
+            return Err(MemdError::StorageError(format!(
+                "project-markdown output_dir must stay under data_dir {}",
+                data_dir.display()
+            )));
+        }
+        if !output_dir.starts_with(&data_dir) {
+            return Err(MemdError::StorageError(format!(
+                "project-markdown output_dir must stay under data_dir {}",
+                data_dir.display()
+            )));
+        }
+        output_dir.to_path_buf()
+    } else {
+        if !is_safe_relative_projection_path(output_dir) {
+            return Err(MemdError::StorageError(
+                "project-markdown output_dir must use simple relative path components".to_string(),
+            ));
+        }
+        data_dir.join(output_dir)
+    };
+    ensure_no_projection_symlink_escape(&data_dir, &output_dir)?;
+    std::fs::create_dir_all(&output_dir)?;
+    let output_dir = output_dir.canonicalize()?;
+    if !output_dir.starts_with(&data_dir) {
+        return Err(MemdError::StorageError(format!(
+            "project-markdown output_dir must stay under data_dir {}",
+            data_dir.display()
+        )));
+    }
+    Ok(output_dir)
+}
+
+fn ensure_no_projection_symlink_escape(data_dir: &Path, output_dir: &Path) -> Result<()> {
+    let relative = output_dir.strip_prefix(data_dir).map_err(|_| {
+        MemdError::StorageError(format!(
+            "project-markdown output_dir must stay under data_dir {}",
+            data_dir.display()
+        ))
+    })?;
+    let mut path = data_dir.to_path_buf();
+    for component in relative.components() {
+        if !matches!(component, Component::Normal(_)) {
+            return Err(MemdError::StorageError(format!(
+                "project-markdown output_dir must stay under data_dir {}",
+                data_dir.display()
+            )));
+        }
+        path.push(component.as_os_str());
+        if let Ok(metadata) = std::fs::symlink_metadata(&path) {
+            if metadata.file_type().is_symlink() {
+                return Err(MemdError::StorageError(format!(
+                    "project-markdown output_dir must stay under data_dir {}",
+                    data_dir.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_markdown_projection_files(
+    output_root: &Path,
+    files: &[MarkdownProjectionFile],
+) -> Result<()> {
+    for file in files {
+        let relative = Path::new(&file.path);
+        if !is_safe_relative_projection_path(relative) {
+            return Err(MemdError::StorageError(format!(
+                "unsafe projection path: {}",
+                file.path
+            )));
+        }
+        let path = output_root.join(relative);
+        if !path.starts_with(output_root) {
+            return Err(MemdError::StorageError(format!(
+                "projection path escaped output root: {}",
+                file.path
+            )));
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, &file.content)?;
+    }
+    Ok(())
+}
+
+fn is_safe_relative_projection_path(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 fn build_claude_snippet(memd_url: &str) -> Value {
@@ -1033,6 +1197,149 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["text"], "json export chunk");
         let _ = std::fs::remove_file(output_path);
+    }
+
+    #[tokio::test]
+    async fn project_markdown_writes_under_data_dir() {
+        let store = MemoryStore::new();
+        let tenant = TenantId::new("projection_tenant").unwrap();
+        let chunk = MemoryChunk::new(tenant, "project me", ChunkType::Doc)
+            .with_project(ProjectId::from("proj_a"));
+        store.add(chunk).await.unwrap();
+
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let manager = TenantManager::new(data_dir.clone());
+        run_cli(
+            &store,
+            Some(&manager),
+            CliCommand::ProjectMarkdown {
+                tenant_id: "projection_tenant".to_string(),
+                project_id: Some("proj_a".to_string()),
+                output_dir: PathBuf::from("projections/proj_a"),
+                page_size: 100,
+                max_chunks: 100,
+            },
+        )
+        .await
+        .unwrap();
+
+        let root = data_dir.join("projections").join("proj_a");
+        let index = std::fs::read_to_string(root.join("index.md")).unwrap();
+        assert!(index.contains("# memd markdown projection"));
+        assert!(index.contains("proj_a"));
+        let chunks_dir = root.join("chunks");
+        let entries = std::fs::read_dir(chunks_dir).unwrap().count();
+        assert_eq!(entries, 1);
+    }
+
+    #[tokio::test]
+    async fn project_markdown_rejects_output_outside_data_dir() {
+        let store = MemoryStore::new();
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let manager = TenantManager::new(dir.path().join("data"));
+        let outside_projection = outside.path().join("projection");
+
+        let err = run_cli(
+            &store,
+            Some(&manager),
+            CliCommand::ProjectMarkdown {
+                tenant_id: "projection_tenant".to_string(),
+                project_id: None,
+                output_dir: outside_projection.clone(),
+                page_size: 100,
+                max_chunks: 100,
+            },
+        )
+        .await
+        .expect_err("outside output_dir must be rejected");
+
+        assert!(err
+            .to_string()
+            .contains("output_dir must stay under data_dir"));
+        assert!(!outside_projection.exists());
+    }
+
+    #[tokio::test]
+    async fn project_markdown_rejects_relative_parent_components() {
+        let store = MemoryStore::new();
+        let dir = tempdir().unwrap();
+        let manager = TenantManager::new(dir.path().join("data"));
+
+        let err = run_cli(
+            &store,
+            Some(&manager),
+            CliCommand::ProjectMarkdown {
+                tenant_id: "projection_tenant".to_string(),
+                project_id: None,
+                output_dir: PathBuf::from("../projection"),
+                page_size: 100,
+                max_chunks: 100,
+            },
+        )
+        .await
+        .expect_err("parent components must be rejected");
+
+        assert!(err
+            .to_string()
+            .contains("output_dir must use simple relative path components"));
+    }
+
+    #[tokio::test]
+    async fn project_markdown_rejects_absolute_parent_components() {
+        let store = MemoryStore::new();
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let manager = TenantManager::new(data_dir.clone());
+
+        let err = run_cli(
+            &store,
+            Some(&manager),
+            CliCommand::ProjectMarkdown {
+                tenant_id: "projection_tenant".to_string(),
+                project_id: None,
+                output_dir: data_dir.join("nested").join("..").join("projection"),
+                page_size: 100,
+                max_chunks: 100,
+            },
+        )
+        .await
+        .expect_err("absolute parent components must be rejected");
+
+        assert!(err
+            .to_string()
+            .contains("output_dir must stay under data_dir"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_markdown_rejects_symlink_output_escape() {
+        let store = MemoryStore::new();
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::os::unix::fs::symlink(outside.path(), data_dir.join("linked")).unwrap();
+        let manager = TenantManager::new(data_dir);
+
+        let err = run_cli(
+            &store,
+            Some(&manager),
+            CliCommand::ProjectMarkdown {
+                tenant_id: "projection_tenant".to_string(),
+                project_id: None,
+                output_dir: PathBuf::from("linked/projection"),
+                page_size: 100,
+                max_chunks: 100,
+            },
+        )
+        .await
+        .expect_err("symlink escapes must be rejected");
+
+        assert!(err
+            .to_string()
+            .contains("output_dir must stay under data_dir"));
     }
 
     #[tokio::test]
