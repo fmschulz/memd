@@ -93,3 +93,31 @@
 - `cargo test -p memd store::supersession::tests`: 6 passed; same warning baseline.
 - `cargo test -p memd --tests`: 651 passed, 4 ignored in lib tests; integration targets passed (`hnsw_persistence` 6, `http_integration` 7, `lifecycle_overlay` 24, `test_chunking_integration` 1, `trace_tools` 13).
 - `git diff --check`: passed.
+
+## 2026-05-10 Tracks E-F-G Completion
+
+### Plan
+
+- [x] Track E: add `mode` to `memory.add` / `memory.add_batch`, store ingestion-mode labels, and default conversation review windows.
+- [x] Run focused Track E tests, Claude Code CLI review, then commit and push Track E.
+- [ ] Track F: implement OMF export/import with lifecycle and ingestion-mode round trips plus semantic merge behavior.
+- [ ] Run focused Track F tests, Claude Code CLI review, then commit and push Track F.
+- [ ] Track G: implement markdown projection MCP/CLI support with guarded output paths.
+- [ ] Run focused Track G tests, Claude Code CLI review, then commit and push Track G.
+- [ ] Run the benchmark suite again and check behavior.
+- [ ] Align README/quickstart/docs, then update manuscript.
+
+### Progress
+
+- Resource check: 64 logical CPU cores, 251.52 GB RAM, 367.77 GB available disk, 3 CUDA GPUs. Benchmarks can run locally with high parallelism available.
+- The original 2026-04-18 detailed plan file is absent in this checkout; implementation follows the active handoffs and current Track A-D code.
+- Track E red tests were added first. `cargo test -p memd --test lifecycle_overlay ingestion_mode` failed as expected because current handlers ignore `mode`.
+- Track E implementation adds authoritative `ingestion_mode:<mode>` tags, defaults missing mode to `document`, and sets conversation `review_after_ms` to now + 14 days unless explicitly supplied.
+- Claude Code CLI review flagged semantic contracts to lock down: explicit review timestamp precedence, invalid mode errors, ingestion-mode tag normalization, supersede-on-add with conversation mode, non-persistent batch failure, and sequential persistent writes for conversation batches. Tests/comments were added for those.
+
+### Track E Review / Results
+
+- `cargo test -p memd --test lifecycle_overlay`: 31 passed.
+- `cargo test -p memd --lib`: 652 passed, 4 ignored; only pre-existing unused-mut warnings remain.
+- `git diff --check`: passed.
+- Claude Code CLI Track E review completed; follow-up findings were addressed before commit.
