@@ -45,3 +45,26 @@
 - Re-ran `git diff --check`: passed.
 - Re-ran touched-file `rustfmt --edition 2021 --check`: passed.
 - Re-ran `cargo test -p memd --tests`: 648 passed, 4 ignored in lib tests; integration targets passed (`hnsw_persistence` 6, `http_integration` 7, `lifecycle_overlay` 15, `test_chunking_integration` 1, `trace_tools` 13).
+
+## 2026-05-10 Track C Temporal Fields + Lifecycle Maintenance
+
+### Plan
+
+- [x] Add tests for temporal add, explicit expiry updates, expiry sweep, history promotion, and compact maintenance.
+- [x] Implement temporal fields on `memory.add` with lifecycle overlay writes.
+- [x] Add `memory.set_expiry` for setting/clearing `expires_at_ms` and `review_after_ms`.
+- [x] Add persistent-store helpers for expiry sweep and stale lifecycle-hidden history promotion.
+- [x] Wire lifecycle maintenance into `memory.compact`.
+- [x] Run focused tests, broad tests, whitespace checks, and record results in memd.
+
+### Progress
+
+- Track B committed and pushed as `6f6bb1a feat(search): hide lifecycle-retired chunks`.
+- Track C added temporal lifecycle writes to `memory.add`, `memory.set_expiry`, expiry sweep/history promotion helpers, and `memory.compact` lifecycle maintenance reporting.
+
+### Review / Results
+
+- `cargo test -p memd --test lifecycle_overlay`: 20 passed.
+- `cargo test -p memd mcp::tools::tests`: 25 passed; only pre-existing unused-mut warnings.
+- `cargo test -p memd --tests`: 648 passed, 4 ignored in lib tests; integration targets passed (`hnsw_persistence` 6, `http_integration` 7, `lifecycle_overlay` 20, `test_chunking_integration` 1, `trace_tools` 13).
+- `git diff --check`: passed.
