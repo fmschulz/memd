@@ -1,0 +1,47 @@
+# Todo
+
+## 2026-05-09 Track B Visibility Filter + Benchmarks
+
+### Plan
+
+- [x] Verify current worktree state against pickup handoff and memd records.
+- [x] Implement remaining Track B visibility filtering for `memory.search` and context search paths.
+- [x] Extend compaction HNSW rebuild exclusions to lifecycle-hidden chunks.
+- [x] Run focused tests and benchmark gates.
+- [x] Record results and follow-ups in memd.
+
+### Progress
+
+- Worktree is clean on `feature/nanomem-inspired` at `ac5b79b`.
+- The handoff's plan file is not present in this checkout, so implementation follows the handoff, memd records, and current code.
+- Current code has Track A lifecycle overlay and `memory.get` visibility, but `memory.search` and context handlers still need B1 filtering.
+- Implemented `memory.search` include flags, lifecycle-aware result filtering, and over-fetch/refill after hidden rows.
+- Applied the same default visibility filter and over-fetch behavior to context search paths.
+- Compaction HNSW rebuild exclusions now union deleted chunk IDs with lifecycle-hidden chunk IDs.
+
+### Review / Results
+
+- `cargo test -p memd --test lifecycle_overlay lifecycle_hidden`: 2 passed.
+- `cargo test -p memd --test lifecycle_overlay`: 15 passed.
+- `cargo test -p memd compaction::runner::tests::hnsw_excluded_chunk_ids_include_lifecycle_hidden_rows`: 1 passed.
+- `cargo test -p memd mcp::tools::tests`: 25 passed; pre-existing unrelated `unused_mut` warnings remain.
+- Retrieval smoke benchmark:
+  `cargo run -p memd-evals -- --suite benchmark --dataset-path evals/bench/datasets/retrieval/code_pairs.json --embedding-model all-minilm --system-variant hybrid-feature --bootstrap-iterations 1000 --seed 42 --threshold-recall 0.8 --threshold-mrr 0.6 --report-json /tmp/memd-track-b-code_pairs.json`
+  passed 4/4 with Recall@10 1.000, MRR 1.000, Precision@10 0.200.
+- Compaction suite:
+  `cargo run -p memd-evals -- --suite compaction --skip-build --memd-path target/debug/memd --embedding-model all-minilm`
+  passed 6/6; F5 latency p50 79ms, p99 84ms under the 500ms threshold.
+- `git diff --check`: passed.
+- Touched Rust files pass `rustfmt --edition 2021 --check`.
+- `cargo fmt -p memd --check` still reports pre-existing unrelated formatting drift in `crates/memd/src/mcp/server.rs`, `crates/memd/src/store/metadata/sqlite.rs`, and `crates/memd/src/types.rs`; no broad formatter pass was applied.
+
+### 2026-05-10 Verification Addendum
+
+- Re-read the Track B diff after pickup; no additional code patch was needed.
+- Re-ran `cargo test -p memd --test lifecycle_overlay lifecycle_hidden`: 2 passed.
+- Re-ran `cargo test -p memd --test lifecycle_overlay`: 15 passed.
+- Re-ran `cargo test -p memd compaction::runner::tests::hnsw_excluded_chunk_ids_include_lifecycle_hidden_rows`: 1 passed; Cargo still reports unrelated pre-existing `unused_mut` warnings.
+- Re-ran `cargo test -p memd mcp::tools::tests`: 25 passed; same unrelated warning baseline.
+- Re-ran `git diff --check`: passed.
+- Re-ran touched-file `rustfmt --edition 2021 --check`: passed.
+- Re-ran `cargo test -p memd --tests`: 648 passed, 4 ignored in lib tests; integration targets passed (`hnsw_persistence` 6, `http_integration` 7, `lifecycle_overlay` 15, `test_chunking_integration` 1, `trace_tools` 13).

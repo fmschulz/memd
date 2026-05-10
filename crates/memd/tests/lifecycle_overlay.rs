@@ -7,7 +7,23 @@ use common::*;
 use memd::store::metadata::MetadataStore;
 use memd::store::Store;
 use memd::types::lifecycle::{LifecycleDelta, MemoryTier};
-use memd::types::{ChunkId, ChunkStatus, ChunkType, MemoryChunk};
+use memd::types::{ChunkId, ChunkStatus, ChunkType, MemoryChunk, TenantId};
+
+fn chunk_at(tenant_id: &TenantId, text: &str, timestamp_created: i64) -> MemoryChunk {
+    let mut chunk = MemoryChunk::new(tenant_id.clone(), text, ChunkType::Doc);
+    chunk.timestamp_created = timestamp_created;
+    chunk
+}
+
+fn context_chunk_at(tenant_id: &TenantId, text: &str, timestamp_created: i64) -> MemoryChunk {
+    let mut chunk = chunk_at(tenant_id, text, timestamp_created);
+    chunk.tags = vec![
+        "ctx:doc".to_string(),
+        "ctx:subsystem:search".to_string(),
+        "ctx:tier:cold".to_string(),
+    ];
+    chunk
+}
 
 #[tokio::test]
 async fn persistent_store_returns_lifecycle_overlay() {
@@ -325,7 +341,12 @@ async fn memory_supersede_handler_matches_store_op() {
         .unwrap();
     assert_eq!(resolved.status, ChunkStatus::Superseded);
     assert_eq!(
-        resolved.lifecycle.superseded_by.as_ref().unwrap().to_string(),
+        resolved
+            .lifecycle
+            .superseded_by
+            .as_ref()
+            .unwrap()
+            .to_string(),
         new_id
     );
 }
@@ -505,4 +526,192 @@ async fn memory_get_returns_found_false_when_chunk_absent() {
     .await;
     let body = parse_result_text(&resp);
     assert_eq!(body["found"].as_bool(), Some(false));
+}
+
+#[tokio::test]
+async fn memory_search_hides_lifecycle_hidden_by_default_and_refills() {
+    let (server, _tmp) = test_server().await;
+    let ps = server.store().as_persistent().expect("persistent store");
+    let t = tenant("t");
+
+    let visible_id = ps
+        .add(chunk_at(&t, "needle visible survivor", 1_000))
+        .await
+        .unwrap();
+    let history_id = ps
+        .add(chunk_at(&t, "needle history archive", 2_000))
+        .await
+        .unwrap();
+    let superseded_id = ps
+        .add(chunk_at(&t, "needle superseded retired", 3_000))
+        .await
+        .unwrap();
+    let error_id = ps
+        .add(chunk_at(&t, "needle error diagnostic", 500))
+        .await
+        .unwrap();
+
+    ps.update_lifecycle(
+        &t,
+        &history_id,
+        &LifecycleDelta {
+            tier: Some(MemoryTier::History),
+            lifecycle_updated_at_ms: Some(10),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    ps.update_lifecycle(
+        &t,
+        &superseded_id,
+        &LifecycleDelta {
+            status: Some(ChunkStatus::Superseded),
+            lifecycle_updated_at_ms: Some(11),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    ps.update_lifecycle(
+        &t,
+        &error_id,
+        &LifecycleDelta {
+            status: Some(ChunkStatus::Error),
+            lifecycle_updated_at_ms: Some(12),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let resp = call_tool(
+        &server,
+        "memory.search",
+        serde_json::json!({
+            "tenant_id": "t",
+            "query": "needle",
+            "k": 1
+        }),
+    )
+    .await;
+    let body = parse_result_text(&resp);
+    let results = body["results"].as_array().expect("results array");
+
+    assert_eq!(
+        results.len(),
+        1,
+        "search should refill from over-fetched visible rows: {body}"
+    );
+    let visible_id_text = visible_id.to_string();
+    assert_eq!(
+        results[0]["chunk_id"].as_str(),
+        Some(visible_id_text.as_str())
+    );
+    assert_eq!(results[0]["text"].as_str(), Some("needle visible survivor"));
+
+    let resp = call_tool(
+        &server,
+        "memory.search",
+        serde_json::json!({
+            "tenant_id": "t",
+            "query": "needle",
+            "k": 4,
+            "include_superseded": true,
+            "include_expired": true,
+            "include_history": true
+        }),
+    )
+    .await;
+    let body = parse_result_text(&resp);
+    let texts = body["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .filter_map(|result| result["text"].as_str())
+        .collect::<Vec<_>>();
+
+    assert!(texts.contains(&"needle visible survivor"), "{body}");
+    assert!(texts.contains(&"needle superseded retired"), "{body}");
+    assert!(texts.contains(&"needle history archive"), "{body}");
+    assert!(
+        !texts.contains(&"needle error diagnostic"),
+        "Error rows must remain hidden even with all include flags: {body}"
+    );
+}
+
+#[tokio::test]
+async fn context_search_documents_hides_lifecycle_hidden_rows_and_refills() {
+    let (server, _tmp) = test_server().await;
+    let ps = server.store().as_persistent().expect("persistent store");
+    let t = tenant("t");
+
+    let visible_id = ps
+        .add(context_chunk_at(&t, "contextneedle visible context", 1_000))
+        .await
+        .unwrap();
+    let history_id = ps
+        .add(context_chunk_at(&t, "contextneedle history context", 2_000))
+        .await
+        .unwrap();
+    let superseded_id = ps
+        .add(context_chunk_at(
+            &t,
+            "contextneedle superseded context",
+            3_000,
+        ))
+        .await
+        .unwrap();
+
+    ps.update_lifecycle(
+        &t,
+        &history_id,
+        &LifecycleDelta {
+            tier: Some(MemoryTier::History),
+            lifecycle_updated_at_ms: Some(20),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    ps.update_lifecycle(
+        &t,
+        &superseded_id,
+        &LifecycleDelta {
+            status: Some(ChunkStatus::Superseded),
+            lifecycle_updated_at_ms: Some(21),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let resp = call_tool(
+        &server,
+        "context.search_context_documents",
+        serde_json::json!({
+            "tenant_id": "t",
+            "query": "contextneedle",
+            "subsystem_key": "search",
+            "k": 1
+        }),
+    )
+    .await;
+    let body = parse_result_text(&resp);
+    let results = body["results"].as_array().expect("results array");
+
+    assert_eq!(
+        results.len(),
+        1,
+        "context search should refill from over-fetched visible rows: {body}"
+    );
+    let visible_id_text = visible_id.to_string();
+    assert_eq!(
+        results[0]["chunk_id"].as_str(),
+        Some(visible_id_text.as_str())
+    );
+    assert_eq!(
+        results[0]["text"].as_str(),
+        Some("contextneedle visible context")
+    );
 }

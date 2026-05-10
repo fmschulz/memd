@@ -72,7 +72,9 @@ use crate::task_memory::{
     DIGEST_ROLE_PROJECT_BRIEF, DIGEST_ROLE_TASK_RESUME,
 };
 use crate::tiered::TieredTiming;
-use crate::types::{ChunkId, ChunkType, MemoryChunk, ProjectId, Source, TenantId, VisibilityPolicy};
+use crate::types::{
+    ChunkId, ChunkType, MemoryChunk, ProjectId, Source, TenantId, VisibilityPolicy,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -106,6 +108,12 @@ pub struct SearchParams {
     pub debug_tiers: Option<bool>,
     #[serde(default)]
     pub mode: Option<QueryMode>,
+    #[serde(default)]
+    pub include_superseded: Option<bool>,
+    #[serde(default)]
+    pub include_expired: Option<bool>,
+    #[serde(default)]
+    pub include_history: Option<bool>,
 }
 
 fn default_k() -> usize {
@@ -1577,11 +1585,10 @@ fn parse_search_filters(filters: Option<&SearchFilters>) -> Result<ParsedSearchF
     })
 }
 
-fn apply_search_filters(
+fn apply_search_filters_unbounded(
     scored_chunks: Vec<(MemoryChunk, f32)>,
     project_id: Option<&str>,
     filters: &ParsedSearchFilters,
-    k: usize,
 ) -> Vec<(MemoryChunk, f32)> {
     scored_chunks
         .into_iter()
@@ -1619,8 +1626,33 @@ fn apply_search_filters(
 
             true
         })
-        .take(k)
         .collect()
+}
+
+async fn apply_visibility_filter<S: Store>(
+    store: &S,
+    scored_chunks: Vec<(MemoryChunk, f32)>,
+    policy: &VisibilityPolicy,
+) -> Result<Vec<(MemoryChunk, f32)>, McpError> {
+    let now_ms = current_time_ms();
+    let mut visible = Vec::with_capacity(scored_chunks.len());
+
+    for (chunk, score) in scored_chunks {
+        let resolved = store
+            .get_with_lifecycle(&chunk.tenant_id, &chunk.chunk_id)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+        let Some(resolved) = resolved else {
+            continue;
+        };
+
+        if policy.is_visible_at(resolved.status, &resolved.lifecycle, now_ms) {
+            visible.push((resolved.chunk, score));
+        }
+    }
+
+    Ok(visible)
 }
 
 fn parse_tag_usize(tags: &[String], prefix: &str) -> Option<usize> {
@@ -2108,6 +2140,11 @@ fn adaptive_fetch_k(k: usize, query: &str, has_filters: bool) -> usize {
     }
 
     k
+}
+
+fn visibility_fetch_k(k: usize, query: &str, has_filters: bool) -> usize {
+    let base = adaptive_fetch_k(k, query, has_filters);
+    base.max(k.saturating_mul(3).clamp(1, 100))
 }
 
 fn normalize_query_for_repair(query: &str) -> Option<String> {
@@ -3637,7 +3674,12 @@ pub async fn handle_memory_search<S: Store>(
     let mode = params.mode.unwrap_or_default();
     let project_id_filter = params.project_id.as_deref();
     let has_filters = has_active_search_filters(project_id_filter, &parsed_filters);
-    let fetch_k = adaptive_fetch_k(params.k, &params.query, has_filters);
+    let visibility_policy = VisibilityPolicy {
+        include_superseded: params.include_superseded.unwrap_or(false),
+        include_expired: params.include_expired.unwrap_or(false),
+        include_history: params.include_history.unwrap_or(false),
+    };
+    let fetch_k = visibility_fetch_k(params.k, &params.query, has_filters);
     let digest_tenants = scoped_tenants_for_project(store, &tenant_id, project_id_filter).await?;
     let search_tenants = if project_id_filter.is_some() {
         let all = store
@@ -3676,12 +3718,17 @@ pub async fn handle_memory_search<S: Store>(
             params.k.min(8),
         )
         .await?;
-        let mut scored_chunks = apply_search_filters(
-            merge_preferred_and_raw(preferred, scored_chunks, fetch_k),
-            project_id_filter,
-            &parsed_filters,
-            params.k,
-        );
+        let mut scored_chunks = apply_visibility_filter(
+            store,
+            apply_search_filters_unbounded(
+                merge_preferred_and_raw(preferred, scored_chunks, fetch_k),
+                project_id_filter,
+                &parsed_filters,
+            ),
+            &visibility_policy,
+        )
+        .await?;
+        scored_chunks.truncate(params.k);
         let mut timing = timing;
         let mut repair_info = None;
 
@@ -3694,12 +3741,17 @@ pub async fn handle_memory_search<S: Store>(
                     fetch_k,
                 )
                 .await?;
-                let repaired_filtered = apply_search_filters(
-                    repair_scored,
-                    project_id_filter,
-                    &parsed_filters,
-                    params.k,
-                );
+                let mut repaired_filtered = apply_visibility_filter(
+                    store,
+                    apply_search_filters_unbounded(
+                        repair_scored,
+                        project_id_filter,
+                        &parsed_filters,
+                    ),
+                    &visibility_policy,
+                )
+                .await?;
+                repaired_filtered.truncate(params.k);
                 let repaired = !repaired_filtered.is_empty();
                 if repaired {
                     scored_chunks = repaired_filtered;
@@ -3781,12 +3833,17 @@ pub async fn handle_memory_search<S: Store>(
         params.k.min(8),
     )
     .await?;
-    let mut scored_chunks = apply_search_filters(
-        merge_preferred_and_raw(preferred, scored_chunks, fetch_k),
-        project_id_filter,
-        &parsed_filters,
-        params.k,
-    );
+    let mut scored_chunks = apply_visibility_filter(
+        store,
+        apply_search_filters_unbounded(
+            merge_preferred_and_raw(preferred, scored_chunks, fetch_k),
+            project_id_filter,
+            &parsed_filters,
+        ),
+        &visibility_policy,
+    )
+    .await?;
+    scored_chunks.truncate(params.k);
     let mut repair_info = None;
 
     if scored_chunks.is_empty() && !params.query.is_empty() {
@@ -3794,8 +3851,13 @@ pub async fn handle_memory_search<S: Store>(
             let repair_scored =
                 search_with_scores_for_tenants(store, &search_tenants, &repaired_query, fetch_k)
                     .await?;
-            let repaired_filtered =
-                apply_search_filters(repair_scored, project_id_filter, &parsed_filters, params.k);
+            let mut repaired_filtered = apply_visibility_filter(
+                store,
+                apply_search_filters_unbounded(repair_scored, project_id_filter, &parsed_filters),
+                &visibility_policy,
+            )
+            .await?;
+            repaired_filtered.truncate(params.k);
             let repaired = !repaired_filtered.is_empty();
             if repaired {
                 scored_chunks = repaired_filtered;
@@ -6244,7 +6306,7 @@ pub async fn handle_context_search_documents<S: Store>(
         .map(str::trim)
         .filter(|s| !s.is_empty());
     let has_filters = subsystem_key.is_some() || tier.is_some();
-    let fetch_k = adaptive_fetch_k(params.k, &params.query, has_filters);
+    let fetch_k = visibility_fetch_k(params.k, &params.query, has_filters);
 
     info!(
         tenant_id = %tenant_id,
@@ -6256,14 +6318,12 @@ pub async fn handle_context_search_documents<S: Store>(
         "context.search_context_documents"
     );
 
-    // TODO(B1): apply VisibilityPolicy via apply_visibility_filter to hide
-    // superseded/expired/history chunks. memory.get (A8) enforces this at
-    // the point-lookup; the search path still leaks non-active content
-    // until Track B1 wires the overlay into search_with_scores.
     let scored_chunks = store
         .search_with_scores(&tenant_id, &params.query, fetch_k)
         .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let scored_chunks =
+        apply_visibility_filter(store, scored_chunks, &VisibilityPolicy::default()).await?;
 
     let mut filtered = Vec::new();
     for (chunk, score) in scored_chunks {
@@ -6312,7 +6372,7 @@ pub async fn handle_context_find_relevant_context<S: Store>(
         .collect();
 
     let has_filters = !subsystem_keys.is_empty();
-    let fetch_k = adaptive_fetch_k(params.k, &params.task, has_filters);
+    let fetch_k = visibility_fetch_k(params.k, &params.task, has_filters);
 
     info!(
         tenant_id = %tenant_id,
@@ -6329,7 +6389,16 @@ pub async fn handle_context_find_relevant_context<S: Store>(
     let mut hot_included = false;
 
     if params.include_hot {
-        let mut hot_chunks = collect_all_chunks(store, &tenant_id, 20_000).await?;
+        let hot_chunks = collect_all_chunks(store, &tenant_id, 20_000).await?;
+        let mut hot_chunks = apply_visibility_filter(
+            store,
+            hot_chunks.into_iter().map(|chunk| (chunk, 1.0)).collect(),
+            &VisibilityPolicy::default(),
+        )
+        .await?
+        .into_iter()
+        .map(|(chunk, _)| chunk)
+        .collect::<Vec<_>>();
         hot_chunks.retain(|chunk| {
             has_exact_tag(&chunk.tags, TAG_CTX_TIER_HOT)
                 && chunk_matches_any_subsystem(chunk, &subsystem_keys)
@@ -6345,14 +6414,12 @@ pub async fn handle_context_find_relevant_context<S: Store>(
         }
     }
 
-    // TODO(B1): apply VisibilityPolicy via apply_visibility_filter to hide
-    // superseded/expired/history chunks. memory.get (A8) enforces this at
-    // the point-lookup; the search path still leaks non-active content
-    // until Track B1 wires the overlay into search_with_scores.
     let scored_chunks = store
         .search_with_scores(&tenant_id, &params.task, fetch_k)
         .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let scored_chunks =
+        apply_visibility_filter(store, scored_chunks, &VisibilityPolicy::default()).await?;
 
     for (chunk, score) in scored_chunks {
         if !is_context_chunk(&chunk) {
@@ -6922,6 +6989,9 @@ mod tests {
             filters: None,
             debug_tiers: None,
             mode: None,
+            include_superseded: None,
+            include_expired: None,
+            include_history: None,
         };
 
         let result = handle_memory_search(&store, params).await.unwrap();
@@ -6943,6 +7013,9 @@ mod tests {
             filters: None,
             debug_tiers: None,
             mode: None,
+            include_superseded: None,
+            include_expired: None,
+            include_history: None,
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -6961,6 +7034,9 @@ mod tests {
             filters: None,
             debug_tiers: None,
             mode: None,
+            include_superseded: None,
+            include_expired: None,
+            include_history: None,
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -7062,6 +7138,9 @@ mod tests {
             filters: None,
             debug_tiers: None,
             mode: None,
+            include_superseded: None,
+            include_expired: None,
+            include_history: None,
         };
 
         let search_result = handle_memory_search(&store, search_params).await.unwrap();
@@ -7117,6 +7196,9 @@ mod tests {
                 filters: None,
                 debug_tiers: None,
                 mode: None,
+                include_superseded: None,
+                include_expired: None,
+                include_history: None,
             },
         )
         .await
@@ -7168,6 +7250,9 @@ mod tests {
                 }),
                 debug_tiers: None,
                 mode: None,
+                include_superseded: None,
+                include_expired: None,
+                include_history: None,
             },
         )
         .await
@@ -7219,6 +7304,9 @@ mod tests {
                 }),
                 debug_tiers: None,
                 mode: None,
+                include_superseded: None,
+                include_expired: None,
+                include_history: None,
             },
         )
         .await
@@ -7280,6 +7368,9 @@ mod tests {
                 }),
                 debug_tiers: None,
                 mode: None,
+                include_superseded: None,
+                include_expired: None,
+                include_history: None,
             },
         )
         .await
@@ -7336,6 +7427,9 @@ mod tests {
                 filters: None,
                 debug_tiers: None,
                 mode: None,
+                include_superseded: None,
+                include_expired: None,
+                include_history: None,
             },
         )
         .await
@@ -7390,6 +7484,9 @@ mod tests {
                 filters: None,
                 debug_tiers: None,
                 mode: None,
+                include_superseded: None,
+                include_expired: None,
+                include_history: None,
             },
         )
         .await
@@ -7618,6 +7715,9 @@ mod tests {
             filters: None,
             debug_tiers: None,
             mode: None,
+            include_superseded: None,
+            include_expired: None,
+            include_history: None,
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -7687,6 +7787,9 @@ mod tests {
             filters: None,
             debug_tiers: None,
             mode: None,
+            include_superseded: None,
+            include_expired: None,
+            include_history: None,
         };
 
         let result = handle_memory_search(&store, search_params).await.unwrap();
@@ -7721,6 +7824,9 @@ mod tests {
             filters: None,
             debug_tiers: Some(true),
             mode: None,
+            include_superseded: None,
+            include_expired: None,
+            include_history: None,
         };
 
         let result = handle_memory_search(&store, search_params).await.unwrap();
@@ -8471,6 +8577,9 @@ mod tests {
                 filters: None,
                 debug_tiers: None,
                 mode: None,
+                include_superseded: None,
+                include_expired: None,
+                include_history: None,
             },
         )
         .await
@@ -8794,6 +8903,9 @@ mod tests {
                 filters: None,
                 debug_tiers: None,
                 mode: None,
+                include_superseded: None,
+                include_expired: None,
+                include_history: None,
             },
         )
         .await
@@ -8869,6 +8981,9 @@ mod tests {
                 filters: None,
                 debug_tiers: None,
                 mode: None,
+                include_superseded: None,
+                include_expired: None,
+                include_history: None,
             },
         )
         .await
