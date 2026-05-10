@@ -73,7 +73,8 @@ use crate::task_memory::{
 };
 use crate::tiered::TieredTiming;
 use crate::types::{
-    ChunkId, ChunkType, LifecycleDelta, MemoryChunk, ProjectId, Source, TenantId, VisibilityPolicy,
+    ChunkId, ChunkType, IngestionMode, LifecycleDelta, MemoryChunk, ProjectId, Source, TenantId,
+    VisibilityPolicy,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -155,6 +156,8 @@ pub struct AddParams {
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
     pub expires_at_ms: Option<i64>,
     #[serde(default)]
     pub review_after_ms: Option<i64>,
@@ -191,6 +194,8 @@ pub struct BatchChunkParams {
     pub source: Option<SourceParams>,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 /// Parameters for memory.add_batch
@@ -1750,6 +1755,33 @@ fn extract_episode_id(tags: &[String]) -> Option<String> {
 
 fn make_episode_tag(episode_id: &str) -> String {
     format!("episode:{}", episode_id)
+}
+
+const INGESTION_MODE_TAG_PREFIX: &str = "ingestion_mode:";
+const CONVERSATION_REVIEW_WINDOW_MS: i64 = 14 * 24 * 60 * 60 * 1_000;
+
+fn parse_ingestion_mode(mode: Option<&str>) -> Result<IngestionMode, McpError> {
+    match mode {
+        Some(raw) => {
+            IngestionMode::from_str(raw).map_err(|e| McpError::InvalidParams(format!("mode: {e}")))
+        }
+        None => Ok(IngestionMode::default()),
+    }
+}
+
+fn apply_ingestion_mode_tag(tags: &mut Vec<String>, mode: IngestionMode) {
+    // The parsed `mode` parameter is authoritative. Normalize any
+    // caller-supplied ingestion_mode labels to one stable tag so OMF
+    // export/import can round-trip the mode without ambiguous duplicates.
+    tags.retain(|tag| !tag.starts_with(INGESTION_MODE_TAG_PREFIX));
+    tags.push(format!("{INGESTION_MODE_TAG_PREFIX}{mode}"));
+}
+
+fn review_after_for_ingestion_mode(mode: IngestionMode, explicit: Option<i64>) -> Option<i64> {
+    explicit.or_else(|| {
+        (mode == IngestionMode::Conversation)
+            .then(|| current_time_ms().saturating_add(CONVERSATION_REVIEW_WINDOW_MS))
+    })
 }
 
 fn validate_episode_id(episode_id: &str) -> Result<(), McpError> {
@@ -3982,10 +4014,12 @@ pub async fn handle_memory_add<S: Store>(
 ) -> Result<Value, McpError> {
     let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     let chunk_type = parse_chunk_type(&params.chunk_type)?;
+    let ingestion_mode = parse_ingestion_mode(params.mode.as_deref())?;
     validate_timestamp_ms("expires_at_ms", params.expires_at_ms)?;
     validate_timestamp_ms("review_after_ms", params.review_after_ms)?;
     let dedupe_threshold =
         resolve_similarity_threshold("dedupe_threshold", params.dedupe_threshold)?;
+    let review_after_ms = review_after_for_ingestion_mode(ingestion_mode, params.review_after_ms);
 
     info!(
         tenant_id = %tenant_id,
@@ -4021,10 +4055,13 @@ pub async fn handle_memory_add<S: Store>(
         tags.extend(params.tags);
         chunk = chunk.with_tags(tags);
     }
+    let mut tags = chunk.tags.clone();
+    apply_ingestion_mode_tag(&mut tags, ingestion_mode);
+    chunk = chunk.with_tags(tags);
 
     let lifecycle_delta = LifecycleDelta {
         expires_at_ms: params.expires_at_ms.map(Some),
-        review_after_ms: params.review_after_ms.map(Some),
+        review_after_ms: review_after_ms.map(Some),
         ..Default::default()
     };
 
@@ -4221,9 +4258,12 @@ pub async fn handle_memory_add_batch<S: Store>(
     }
 
     let mut chunks = Vec::with_capacity(params.chunks.len());
+    let mut lifecycle_deltas = Vec::with_capacity(params.chunks.len());
 
     for chunk_params in params.chunks {
         let chunk_type = parse_chunk_type(&chunk_params.chunk_type)?;
+        let ingestion_mode = parse_ingestion_mode(chunk_params.mode.as_deref())?;
+        let review_after_ms = review_after_for_ingestion_mode(ingestion_mode, None);
         let mut chunk = MemoryChunk::new(tenant_id.clone(), &chunk_params.text, chunk_type);
 
         if let Some(project_id) = &chunk_params.project_id {
@@ -4244,14 +4284,42 @@ pub async fn handle_memory_add_batch<S: Store>(
             tags.extend(chunk_params.tags);
             chunk = chunk.with_tags(tags);
         }
+        let mut tags = chunk.tags.clone();
+        apply_ingestion_mode_tag(&mut tags, ingestion_mode);
+        chunk = chunk.with_tags(tags);
 
         chunks.push(chunk);
+        lifecycle_deltas.push(LifecycleDelta {
+            review_after_ms: review_after_ms.map(Some),
+            ..Default::default()
+        });
     }
 
-    let chunk_ids = store
-        .add_batch(chunks)
-        .await
-        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let needs_lifecycle = lifecycle_deltas.iter().any(|delta| !delta.is_empty());
+    let chunk_ids = if needs_lifecycle {
+        let ps = store.as_persistent().ok_or_else(|| {
+            McpError::ToolError(
+                "memory.add_batch conversation mode requires a persistent store".into(),
+            )
+        })?;
+        // Conversation mode needs per-row lifecycle initialization. The
+        // persistent batch writer does not yet accept lifecycle deltas, so
+        // this path writes rows sequentially while preserving chunk order.
+        let mut ids = Vec::with_capacity(chunks.len());
+        for (chunk, lifecycle_delta) in chunks.into_iter().zip(lifecycle_deltas) {
+            ids.push(
+                ps.add_chunk_with_lifecycle(chunk, lifecycle_delta)
+                    .await
+                    .map_err(|e| McpError::ToolError(e.to_string()))?,
+            );
+        }
+        ids
+    } else {
+        store
+            .add_batch(chunks)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?
+    };
 
     info!(count = chunk_ids.len(), "batch add completed");
 
@@ -7436,6 +7504,7 @@ mod tests {
             tags: vec![],
             expires_at_ms: None,
             review_after_ms: None,
+            mode: None,
             supersede_near_duplicates: false,
             fuzzy_dedupe: false,
             dedupe_threshold: None,
@@ -7484,6 +7553,7 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+                mode: None,
                 supersede_near_duplicates: false,
                 fuzzy_dedupe: false,
                 dedupe_threshold: None,
@@ -7505,6 +7575,7 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+                mode: None,
                 supersede_near_duplicates: false,
                 fuzzy_dedupe: false,
                 dedupe_threshold: None,
@@ -7559,6 +7630,7 @@ mod tests {
                     tags: vec![],
                     expires_at_ms: None,
                     review_after_ms: None,
+                    mode: None,
                     supersede_near_duplicates: false,
                     fuzzy_dedupe: false,
                     dedupe_threshold: None,
@@ -7667,6 +7739,7 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+                mode: None,
                 supersede_near_duplicates: false,
                 fuzzy_dedupe: false,
                 dedupe_threshold: None,
@@ -7688,6 +7761,7 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+                mode: None,
                 supersede_near_duplicates: false,
                 fuzzy_dedupe: false,
                 dedupe_threshold: None,
@@ -7756,6 +7830,7 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+                mode: None,
                 supersede_near_duplicates: false,
                 fuzzy_dedupe: false,
                 dedupe_threshold: None,
@@ -7818,6 +7893,7 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+                mode: None,
                 supersede_near_duplicates: false,
                 fuzzy_dedupe: false,
                 dedupe_threshold: None,
@@ -7879,6 +7955,7 @@ mod tests {
             tags: vec!["rust".to_string(), "function".to_string()],
             expires_at_ms: None,
             review_after_ms: None,
+            mode: None,
             supersede_near_duplicates: false,
             fuzzy_dedupe: false,
             dedupe_threshold: None,
@@ -7906,7 +7983,10 @@ mod tests {
         assert_eq!(chunk.text, "function hello() {}");
         assert_eq!(chunk.chunk_type, ChunkType::Code);
         assert_eq!(chunk.source.path, Some("src/main.rs".to_string()));
-        assert_eq!(chunk.tags, vec!["rust", "function"]);
+        assert_eq!(
+            chunk.tags,
+            vec!["rust", "function", "ingestion_mode:document"]
+        );
     }
 
     #[tokio::test]
@@ -7923,6 +8003,7 @@ mod tests {
                     episode_id: None,
                     source: None,
                     tags: vec![],
+                    mode: None,
                 },
                 BatchChunkParams {
                     text: "chunk 2".to_string(),
@@ -7931,6 +8012,7 @@ mod tests {
                     episode_id: None,
                     source: None,
                     tags: vec![],
+                    mode: None,
                 },
             ],
         };
@@ -7939,6 +8021,31 @@ mod tests {
         let text = result["content"][0]["text"].as_str().unwrap();
         let response: AddBatchResult = serde_json::from_str(text).unwrap();
         assert_eq!(response.chunk_ids.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn add_batch_conversation_mode_requires_persistent_store() {
+        let store = make_store();
+
+        let params = AddBatchParams {
+            tenant_id: "test".to_string(),
+            chunks: vec![BatchChunkParams {
+                text: "conversation batch chunk".to_string(),
+                chunk_type: "message".to_string(),
+                project_id: None,
+                episode_id: None,
+                source: None,
+                tags: vec![],
+                mode: Some("conversation".to_string()),
+            }],
+        };
+
+        let err = handle_memory_add_batch(&store, None, params)
+            .await
+            .expect_err("conversation batch needs lifecycle overlay");
+        assert!(
+            matches!(err, McpError::ToolError(message) if message.contains("persistent store"))
+        );
     }
 
     #[tokio::test]
@@ -7956,6 +8063,7 @@ mod tests {
             tags: vec![],
             expires_at_ms: None,
             review_after_ms: None,
+            mode: None,
             supersede_near_duplicates: false,
             fuzzy_dedupe: false,
             dedupe_threshold: None,
@@ -8012,6 +8120,7 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+                mode: None,
                 supersede_near_duplicates: false,
                 fuzzy_dedupe: false,
                 dedupe_threshold: None,
@@ -8055,6 +8164,7 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+                mode: None,
                 supersede_near_duplicates: false,
                 fuzzy_dedupe: false,
                 dedupe_threshold: None,
@@ -8111,6 +8221,7 @@ mod tests {
             tags: vec![],
             expires_at_ms: None,
             review_after_ms: None,
+            mode: None,
             supersede_near_duplicates: false,
             fuzzy_dedupe: false,
             dedupe_threshold: None,
@@ -8153,6 +8264,7 @@ mod tests {
             tags: vec![],
             expires_at_ms: None,
             review_after_ms: None,
+            mode: None,
             supersede_near_duplicates: false,
             fuzzy_dedupe: false,
             dedupe_threshold: None,
@@ -8195,6 +8307,7 @@ mod tests {
             tags: vec![],
             expires_at_ms: None,
             review_after_ms: None,
+            mode: None,
             supersede_near_duplicates: false,
             fuzzy_dedupe: false,
             dedupe_threshold: None,
@@ -8250,6 +8363,7 @@ mod tests {
                 ],
                 expires_at_ms: None,
                 review_after_ms: None,
+                mode: None,
                 supersede_near_duplicates: false,
                 fuzzy_dedupe: false,
                 dedupe_threshold: None,
@@ -8278,6 +8392,7 @@ mod tests {
                 ],
                 expires_at_ms: None,
                 review_after_ms: None,
+                mode: None,
                 supersede_near_duplicates: false,
                 fuzzy_dedupe: false,
                 dedupe_threshold: None,
@@ -8306,6 +8421,7 @@ mod tests {
                 ],
                 expires_at_ms: None,
                 review_after_ms: None,
+                mode: None,
                 supersede_near_duplicates: false,
                 fuzzy_dedupe: false,
                 dedupe_threshold: None,
@@ -8360,6 +8476,7 @@ mod tests {
                 ],
                 expires_at_ms: None,
                 review_after_ms: None,
+                mode: None,
                 supersede_near_duplicates: false,
                 fuzzy_dedupe: false,
                 dedupe_threshold: None,
@@ -8415,6 +8532,7 @@ mod tests {
                     ],
                     expires_at_ms: None,
                     review_after_ms: None,
+                    mode: None,
                     supersede_near_duplicates: false,
                     fuzzy_dedupe: false,
                     dedupe_threshold: None,
@@ -8508,6 +8626,7 @@ mod tests {
                 ],
                 expires_at_ms: None,
                 review_after_ms: None,
+                mode: None,
                 supersede_near_duplicates: false,
                 fuzzy_dedupe: false,
                 dedupe_threshold: None,
@@ -8981,6 +9100,7 @@ mod tests {
                 tags: vec![],
                 expires_at_ms: None,
                 review_after_ms: None,
+                mode: None,
                 supersede_near_duplicates: false,
                 fuzzy_dedupe: false,
                 dedupe_threshold: None,
