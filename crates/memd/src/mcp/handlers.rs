@@ -73,7 +73,7 @@ use crate::task_memory::{
 };
 use crate::tiered::TieredTiming;
 use crate::types::{
-    ChunkId, ChunkType, MemoryChunk, ProjectId, Source, TenantId, VisibilityPolicy,
+    ChunkId, ChunkType, LifecycleDelta, MemoryChunk, ProjectId, Source, TenantId, VisibilityPolicy,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -154,6 +154,10 @@ pub struct AddParams {
     pub source: Option<SourceParams>,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub expires_at_ms: Option<i64>,
+    #[serde(default)]
+    pub review_after_ms: Option<i64>,
 }
 
 /// Source information for a chunk
@@ -714,6 +718,22 @@ pub struct GetParams {
     pub include_expired: Option<bool>,
     #[serde(default)]
     pub include_history: Option<bool>,
+}
+
+/// Parameters for memory.set_expiry
+#[derive(Debug, Deserialize)]
+pub struct SetExpiryParams {
+    #[serde(default)]
+    pub tenant_id: String,
+    pub chunk_id: String,
+    #[serde(default)]
+    pub expires_at_ms: Option<i64>,
+    #[serde(default)]
+    pub review_after_ms: Option<i64>,
+    #[serde(default)]
+    pub clear_expiry: bool,
+    #[serde(default)]
+    pub clear_review_after: bool,
 }
 
 /// Parameters for memory.delete
@@ -1516,6 +1536,15 @@ fn validate_search_k(k: usize) -> Result<(), McpError> {
     Err(McpError::InvalidParams(
         "invalid 'k': must be between 1 and 100".to_string(),
     ))
+}
+
+fn validate_timestamp_ms(name: &str, value: Option<i64>) -> Result<(), McpError> {
+    if matches!(value, Some(v) if v < 0) {
+        return Err(McpError::InvalidParams(format!(
+            "{name} must be a non-negative unix timestamp in milliseconds"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_search_time_range(
@@ -3901,6 +3930,9 @@ pub async fn handle_memory_add<S: Store>(
 ) -> Result<Value, McpError> {
     let tenant_id = resolve_tenant_id(&params.tenant_id)?;
     let chunk_type = parse_chunk_type(&params.chunk_type)?;
+    validate_timestamp_ms("expires_at_ms", params.expires_at_ms)?;
+    validate_timestamp_ms("review_after_ms", params.review_after_ms)?;
+    let has_temporal_overlay = params.expires_at_ms.is_some() || params.review_after_ms.is_some();
 
     info!(
         tenant_id = %tenant_id,
@@ -3937,10 +3969,28 @@ pub async fn handle_memory_add<S: Store>(
         chunk = chunk.with_tags(tags);
     }
 
-    let chunk_id = store
-        .add(chunk)
+    let chunk_id = if has_temporal_overlay {
+        let ps = store.as_persistent().ok_or_else(|| {
+            McpError::ToolError(
+                "memory.add temporal lifecycle fields require a persistent store".into(),
+            )
+        })?;
+        ps.add_chunk_with_lifecycle(
+            chunk,
+            LifecycleDelta {
+                expires_at_ms: params.expires_at_ms.map(Some),
+                review_after_ms: params.review_after_ms.map(Some),
+                ..Default::default()
+            },
+        )
         .await
-        .map_err(|e| McpError::ToolError(e.to_string()))?;
+        .map_err(|e| McpError::ToolError(e.to_string()))?
+    } else {
+        store
+            .add(chunk)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?
+    };
 
     info!(chunk_id = %chunk_id, "chunk added");
 
@@ -5795,6 +5845,78 @@ fn current_time_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Handle memory.set_expiry tool call.
+pub async fn handle_memory_set_expiry<S: Store>(
+    store: &S,
+    params: SetExpiryParams,
+) -> Result<Value, McpError> {
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
+    let chunk_id = validate_chunk_id(&params.chunk_id)?;
+    validate_timestamp_ms("expires_at_ms", params.expires_at_ms)?;
+    validate_timestamp_ms("review_after_ms", params.review_after_ms)?;
+
+    if params.expires_at_ms.is_some() && params.clear_expiry {
+        return Err(McpError::InvalidParams(
+            "expires_at_ms and clear_expiry are mutually exclusive".to_string(),
+        ));
+    }
+    if params.review_after_ms.is_some() && params.clear_review_after {
+        return Err(McpError::InvalidParams(
+            "review_after_ms and clear_review_after are mutually exclusive".to_string(),
+        ));
+    }
+
+    let mut delta = LifecycleDelta::default();
+    if let Some(expires_at_ms) = params.expires_at_ms {
+        delta.expires_at_ms = Some(Some(expires_at_ms));
+    } else if params.clear_expiry {
+        delta.expires_at_ms = Some(None);
+    }
+    if let Some(review_after_ms) = params.review_after_ms {
+        delta.review_after_ms = Some(Some(review_after_ms));
+    } else if params.clear_review_after {
+        delta.review_after_ms = Some(None);
+    }
+
+    if delta.is_empty() {
+        return Err(McpError::InvalidParams(
+            "memory.set_expiry requires at least one temporal field to set or clear".to_string(),
+        ));
+    }
+    delta.lifecycle_updated_at_ms = Some(current_time_ms());
+
+    let ps = store.as_persistent().ok_or_else(|| {
+        McpError::ToolError("memory.set_expiry requires a persistent store".into())
+    })?;
+    if ps
+        .get_with_lifecycle(&tenant_id, &chunk_id)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?
+        .is_none()
+    {
+        return Err(McpError::InvalidParams(
+            "chunk_id not found for tenant".to_string(),
+        ));
+    }
+
+    ps.update_lifecycle(&tenant_id, &chunk_id, &delta)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let resolved = ps
+        .get_with_lifecycle(&tenant_id, &chunk_id)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?
+        .ok_or_else(|| McpError::ToolError("chunk disappeared after lifecycle update".into()))?;
+
+    format_mcp_response(&json!({
+        "updated": true,
+        "chunk_id": chunk_id.to_string(),
+        "expires_at_ms": resolved.lifecycle.expires_at_ms,
+        "review_after_ms": resolved.lifecycle.review_after_ms,
+        "lifecycle_updated_at_ms": resolved.lifecycle.lifecycle_updated_at_ms
+    }))
+}
+
 /// Handle memory.delete tool call
 pub async fn handle_memory_delete<S: Store>(
     store: &S,
@@ -5961,6 +6083,46 @@ pub fn handle_memory_metrics(
     format_mcp_response(&snapshot)
 }
 
+const DEFAULT_HISTORY_PROMOTION_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
+const LIFECYCLE_MAINTENANCE_LIMIT: usize = 10_000;
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct LifecycleMaintenanceResult {
+    expired_chunks: usize,
+    promoted_to_history: usize,
+}
+
+async fn run_lifecycle_maintenance<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+) -> Result<LifecycleMaintenanceResult, McpError> {
+    let Some(ps) = store.as_persistent() else {
+        return Ok(LifecycleMaintenanceResult {
+            expired_chunks: 0,
+            promoted_to_history: 0,
+        });
+    };
+
+    let now_ms = current_time_ms();
+    let expired_chunks = ps
+        .expire_chunks_before(tenant_id, now_ms, LIFECYCLE_MAINTENANCE_LIMIT)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let promoted_to_history = ps
+        .promote_stale_lifecycle_hidden_to_history(
+            tenant_id,
+            now_ms.saturating_sub(DEFAULT_HISTORY_PROMOTION_AGE_MS),
+            LIFECYCLE_MAINTENANCE_LIMIT,
+        )
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    Ok(LifecycleMaintenanceResult {
+        expired_chunks,
+        promoted_to_history,
+    })
+}
+
 /// Handle memory.compact tool call
 pub async fn handle_memory_compact<S: Store>(
     store: &S,
@@ -5978,6 +6140,7 @@ pub async fn handle_memory_compact<S: Store>(
 
     let digest_modes = params.digest_modes.clone().unwrap_or_default();
     let should_rebuild_digests = params.force_digest_rebuild || !digest_modes.is_empty();
+    let lifecycle_maintenance = run_lifecycle_maintenance(store, &tenant_id).await?;
 
     // Phase 3.4: before checking thresholds, drain the writer-side
     // dirty tracker and regenerate any digests that were flagged by
@@ -6039,7 +6202,8 @@ pub async fn handle_memory_compact<S: Store>(
                 })),
                 "cache_entries_invalidated": result.cache_entries_invalidated,
                 "duration_ms": result.duration.as_millis(),
-                "digest_artifacts": digest_artifacts
+                "digest_artifacts": digest_artifacts,
+                "lifecycle_maintenance": lifecycle_maintenance
         }));
     }
 
@@ -6085,7 +6249,8 @@ pub async fn handle_memory_compact<S: Store>(
                 })),
                 "cache_entries_invalidated": result.cache_entries_invalidated,
                 "duration_ms": result.duration.as_millis(),
-                "digest_artifacts": digest_artifacts
+                "digest_artifacts": digest_artifacts,
+                "lifecycle_maintenance": lifecycle_maintenance
             }))
         }
         Ok(None) => {
@@ -6104,9 +6269,16 @@ pub async fn handle_memory_compact<S: Store>(
             };
 
             format_mcp_response(&json!({
-                "status": if digest_artifacts.is_empty() { "skipped" } else { "completed" },
-                "reason": if digest_artifacts.is_empty() { "No compaction needed - all thresholds below limits" } else { "Storage compaction skipped; digests refreshed" },
-                "digest_artifacts": digest_artifacts
+                "status": if digest_artifacts.is_empty()
+                    && lifecycle_maintenance.expired_chunks == 0
+                    && lifecycle_maintenance.promoted_to_history == 0
+                { "skipped" } else { "completed" },
+                "reason": if digest_artifacts.is_empty()
+                    && lifecycle_maintenance.expired_chunks == 0
+                    && lifecycle_maintenance.promoted_to_history == 0
+                { "No compaction needed - all thresholds below limits" } else { "Storage compaction skipped; maintenance completed" },
+                "digest_artifacts": digest_artifacts,
+                "lifecycle_maintenance": lifecycle_maintenance
             }))
         }
         Err(e) => Err(McpError::ToolError(e.to_string())),
@@ -7122,6 +7294,8 @@ mod tests {
             episode_id: None,
             source: None,
             tags: vec![],
+            expires_at_ms: None,
+            review_after_ms: None,
         };
 
         let add_result = handle_memory_add(&store, None, add_params).await.unwrap();
@@ -7165,6 +7339,8 @@ mod tests {
                 episode_id: None,
                 source: None,
                 tags: vec![],
+                expires_at_ms: None,
+                review_after_ms: None,
             },
         )
         .await
@@ -7181,6 +7357,8 @@ mod tests {
                 episode_id: None,
                 source: None,
                 tags: vec![],
+                expires_at_ms: None,
+                review_after_ms: None,
             },
         )
         .await
@@ -7230,6 +7408,8 @@ mod tests {
                     episode_id: None,
                     source: None,
                     tags: vec![],
+                    expires_at_ms: None,
+                    review_after_ms: None,
                 },
             )
             .await
@@ -7333,6 +7513,8 @@ mod tests {
                 episode_id: Some("ep1".to_string()),
                 source: None,
                 tags: vec![],
+                expires_at_ms: None,
+                review_after_ms: None,
             },
         )
         .await
@@ -7349,6 +7531,8 @@ mod tests {
                 episode_id: Some("ep2".to_string()),
                 source: None,
                 tags: vec![],
+                expires_at_ms: None,
+                review_after_ms: None,
             },
         )
         .await
@@ -7412,6 +7596,8 @@ mod tests {
                     tool_call_id: Some("call-1".to_string()),
                 }),
                 tags: vec![],
+                expires_at_ms: None,
+                review_after_ms: None,
             },
         )
         .await
@@ -7469,6 +7655,8 @@ mod tests {
                 episode_id: None,
                 source: None,
                 tags: vec![],
+                expires_at_ms: None,
+                review_after_ms: None,
             },
         )
         .await
@@ -7525,6 +7713,8 @@ mod tests {
                 ..Default::default()
             }),
             tags: vec!["rust".to_string(), "function".to_string()],
+            expires_at_ms: None,
+            review_after_ms: None,
         };
 
         let result = handle_memory_add(&store, None, add_params).await.unwrap();
@@ -7597,6 +7787,8 @@ mod tests {
             episode_id: None,
             source: None,
             tags: vec![],
+            expires_at_ms: None,
+            review_after_ms: None,
         };
 
         let add_result = handle_memory_add(&store, None, add_params).await.unwrap();
@@ -7648,6 +7840,8 @@ mod tests {
                 episode_id: None,
                 source: None,
                 tags: vec![],
+                expires_at_ms: None,
+                review_after_ms: None,
             },
         )
         .await
@@ -7686,6 +7880,8 @@ mod tests {
                 episode_id: None,
                 source: None,
                 tags: vec![],
+                expires_at_ms: None,
+                review_after_ms: None,
             };
             handle_memory_add(&store, None, add_params).await.unwrap();
         }
@@ -7737,6 +7933,8 @@ mod tests {
             episode_id: None,
             source: None,
             tags: vec![],
+            expires_at_ms: None,
+            review_after_ms: None,
         };
 
         let result = handle_memory_add(&store, None, params).await;
@@ -7774,6 +7972,8 @@ mod tests {
             episode_id: None,
             source: None,
             tags: vec![],
+            expires_at_ms: None,
+            review_after_ms: None,
         };
 
         handle_memory_add(&store, None, add_params).await.unwrap();
@@ -7811,6 +8011,8 @@ mod tests {
             episode_id: None,
             source: None,
             tags: vec![],
+            expires_at_ms: None,
+            review_after_ms: None,
         };
 
         handle_memory_add(&store, None, add_params).await.unwrap();
@@ -7861,6 +8063,8 @@ mod tests {
                     "ctx:subsystem:retrieval".to_string(),
                     "ctx:file:src/retrieval/mod.rs".to_string(),
                 ],
+                expires_at_ms: None,
+                review_after_ms: None,
             },
         )
         .await
@@ -7884,6 +8088,8 @@ mod tests {
                     "ctx:subsystem:retrieval".to_string(),
                     "ctx:file:src/retrieval/index.rs".to_string(),
                 ],
+                expires_at_ms: None,
+                review_after_ms: None,
             },
         )
         .await
@@ -7907,6 +8113,8 @@ mod tests {
                     "ctx:subsystem:planner".to_string(),
                     "ctx:file:src/planner/mod.rs".to_string(),
                 ],
+                expires_at_ms: None,
+                review_after_ms: None,
             },
         )
         .await
@@ -7956,6 +8164,8 @@ mod tests {
                     "ctx:subsystem:storage".to_string(),
                     "ctx:file:crates/memd/src/store/hybrid.rs".to_string(),
                 ],
+                expires_at_ms: None,
+                review_after_ms: None,
             },
         )
         .await
@@ -8006,6 +8216,8 @@ mod tests {
                         "ctx:subsystem:retrieval".to_string(),
                         tier_tag.to_string(),
                     ],
+                    expires_at_ms: None,
+                    review_after_ms: None,
                 },
             )
             .await
@@ -8094,6 +8306,8 @@ mod tests {
                     "ctx:file:crates/memd/src/store/hybrid.rs".to_string(),
                     "ctx:tier:hot".to_string(),
                 ],
+                expires_at_ms: None,
+                review_after_ms: None,
             },
         )
         .await
@@ -8562,6 +8776,8 @@ mod tests {
                 episode_id: None,
                 source: None,
                 tags: vec![],
+                expires_at_ms: None,
+                review_after_ms: None,
             },
         )
         .await
