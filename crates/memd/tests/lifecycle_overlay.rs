@@ -969,3 +969,174 @@ async fn memory_compact_runs_lifecycle_maintenance() {
     let body = parse_result_text(&get);
     assert_eq!(body["status"].as_str(), Some("expired"), "{body}");
 }
+
+#[tokio::test]
+async fn memory_find_near_duplicates_reports_exact_matches() {
+    let (server, _tmp) = test_server().await;
+    let old_id = add_chunk(&server, "t", "Exactduplicate Alpha   Beta").await;
+
+    let preview = call_tool(
+        &server,
+        "memory.find_near_duplicates",
+        serde_json::json!({
+            "tenant_id": "t",
+            "text": "exactduplicate alpha beta",
+            "type": "doc"
+        }),
+    )
+    .await;
+    let body = parse_result_text(&preview);
+    let matches = body["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 1, "{body}");
+    assert_eq!(
+        matches[0]["chunk_id"].as_str(),
+        Some(old_id.to_string().as_str())
+    );
+    assert_eq!(matches[0]["score"].as_f64(), Some(1.0));
+    assert_eq!(matches[0]["exact"].as_bool(), Some(true));
+}
+
+#[tokio::test]
+async fn memory_add_supersedes_exact_duplicate_when_requested() {
+    let (server, _tmp) = test_server().await;
+    let old_id = add_chunk(&server, "t", "Exactadd duplicate payload").await;
+
+    let add = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "text": "exactadd   duplicate payload",
+            "type": "doc",
+            "supersede_near_duplicates": true
+        }),
+    )
+    .await;
+    let body = parse_result_text(&add);
+    let new_id = body["chunk_id"].as_str().unwrap();
+    assert_ne!(new_id, old_id.to_string());
+    assert_eq!(
+        body["superseded_chunk_id"].as_str(),
+        Some(old_id.to_string().as_str())
+    );
+    assert_eq!(body["duplicate_score"].as_f64(), Some(1.0));
+
+    let old = call_tool(
+        &server,
+        "memory.get",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunk_id": old_id.to_string()
+        }),
+    )
+    .await;
+    let body = parse_result_text(&old);
+    assert_eq!(body["hidden"].as_bool(), Some(true), "{body}");
+    assert_eq!(body["status"].as_str(), Some("superseded"), "{body}");
+
+    let search = call_tool(
+        &server,
+        "memory.search",
+        serde_json::json!({
+            "tenant_id": "t",
+            "query": "exactadd",
+            "k": 5
+        }),
+    )
+    .await;
+    let body = parse_result_text(&search);
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1, "{body}");
+    assert_eq!(results[0]["chunk_id"].as_str(), Some(new_id));
+}
+
+#[tokio::test]
+async fn memory_find_near_duplicates_supports_opt_in_fuzzy() {
+    let (server, _tmp) = test_server().await;
+    let old_id = add_chunk(
+        &server,
+        "t",
+        "Fuzzyduplicate retention policy for memd chunks",
+    )
+    .await;
+
+    let exact_only = call_tool(
+        &server,
+        "memory.find_near_duplicates",
+        serde_json::json!({
+            "tenant_id": "t",
+            "text": "Fuzzyduplicate retention policy for memory chunks",
+            "type": "doc"
+        }),
+    )
+    .await;
+    let body = parse_result_text(&exact_only);
+    assert_eq!(body["matches"].as_array().unwrap().len(), 0, "{body}");
+
+    let fuzzy = call_tool(
+        &server,
+        "memory.find_near_duplicates",
+        serde_json::json!({
+            "tenant_id": "t",
+            "text": "Fuzzyduplicate retention policy for memory chunks",
+            "type": "doc",
+            "fuzzy": true,
+            "threshold": 0.55
+        }),
+    )
+    .await;
+    let body = parse_result_text(&fuzzy);
+    let matches = body["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 1, "{body}");
+    assert_eq!(
+        matches[0]["chunk_id"].as_str(),
+        Some(old_id.to_string().as_str())
+    );
+    assert_eq!(matches[0]["exact"].as_bool(), Some(false));
+    assert!(matches[0]["score"].as_f64().unwrap() >= 0.55, "{body}");
+}
+
+#[tokio::test]
+async fn memory_add_supersedes_fuzzy_duplicate_only_when_opted_in() {
+    let (server, _tmp) = test_server().await;
+    let old_id = add_chunk(
+        &server,
+        "t",
+        "Fuzzyadd lifecycle retention policy for memd chunks",
+    )
+    .await;
+
+    let add = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "text": "Fuzzyadd lifecycle retention policy for memory chunks",
+            "type": "doc",
+            "supersede_near_duplicates": true,
+            "fuzzy_dedupe": true,
+            "dedupe_threshold": 0.55
+        }),
+    )
+    .await;
+    let body = parse_result_text(&add);
+    let new_id = body["chunk_id"].as_str().unwrap();
+    assert_ne!(new_id, old_id.to_string());
+    assert_eq!(
+        body["superseded_chunk_id"].as_str(),
+        Some(old_id.to_string().as_str())
+    );
+    assert!(body["duplicate_score"].as_f64().unwrap() >= 0.55, "{body}");
+
+    let old = call_tool(
+        &server,
+        "memory.get",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunk_id": old_id.to_string()
+        }),
+    )
+    .await;
+    let body = parse_result_text(&old);
+    assert_eq!(body["status"].as_str(), Some("superseded"), "{body}");
+}
