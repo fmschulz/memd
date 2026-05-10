@@ -126,7 +126,17 @@ For external systems with flatter schemas, the benchmark currently scores task-l
 - queries with `task.search`
 - uses task-aware exact filters plus candidate reranking
 
-That is why the task-memory mode takes longer to seed, but is both more accurate and faster to query on the hardened corpus.
+That is why the task-memory mode takes longer to seed, but can query the
+structured task surface much faster. The current checked-in run has equal
+hit@3 for both memd-native modes, higher MRR for the flattened chunk baseline,
+and much lower average search latency for task-memory search.
+
+Current checked-in run (`2026-05-10T23:44:02Z`):
+
+| System | hit@3 | MRR | avg search ms | p95 search ms | Seed ms |
+|---|---:|---:|---:|---:|---:|
+| `memd_chunk_baseline` | 1.00 | 0.98 | 301.6 | 409.1 | 100159.5 |
+| `memd_task_memory` | 1.00 | 0.84 | 5.1 | 11.1 | 176854.3 |
 
 ## How To Run
 

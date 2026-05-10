@@ -2546,14 +2546,15 @@ def render_markdown(report: dict[str, Any]) -> str:
             "",
             (
                 f"- `memd_chunk_baseline` flattened the corpus into `{baseline['documents_seeded']}` generic chunks and searched them with "
-                f"`memory.search`. On the hardened sibling-task corpus, that representation did not recover the correct task in the top 3 results."
+                f"`memory.search`. On the hardened sibling-task corpus, that representation produced "
+                f"`hit@3={baseline['search_quality']['hit3']:.2f}` and `MRR={baseline['search_quality']['mrr']:.2f}`."
             ),
             (
                 f"- `memd_task_memory` wrote `{task_memory['documents_seeded']}` lifecycle projections and searched them with `task.search`, "
                 f"exact artifact filters, and candidate reranking. That increased seed time from `{baseline['seed_total_ms'] / 1000.0:.1f}s` to "
-                f"`{task_memory['seed_total_ms'] / 1000.0:.1f}s`, but improved retrieval from `hit@3={baseline['search_quality']['hit3']:.2f}` / "
+                f"`{task_memory['seed_total_ms'] / 1000.0:.1f}s`, changed retrieval from `hit@3={baseline['search_quality']['hit3']:.2f}` / "
                 f"`MRR={baseline['search_quality']['mrr']:.2f}` to `hit@3={task_memory['search_quality']['hit3']:.2f}` / "
-                f"`MRR={task_memory['search_quality']['mrr']:.2f}` and reduced average search latency from "
+                f"`MRR={task_memory['search_quality']['mrr']:.2f}`, and changed average search latency from "
                 f"`{baseline['search_quality']['avg_search_ms']:.1f}ms` to `{task_memory['search_quality']['avg_search_ms']:.1f}ms`."
             ),
         ]

@@ -3,14 +3,15 @@
 [![Version](https://img.shields.io/badge/version-0.4.0-blue)](https://github.com/fmschulz/memd/releases/tag/v0.4.0)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-`memd` is a local MCP daemon that gives coding agents and AI scientists a single
-shared, persistent memory: raw searchable content, structured task history, and
-canonical collaboration artifacts — indexed by a hybrid dense + sparse retrieval
-stack and gated by an explicit trust boundary.
+`memd` is a local memory daemon and CLI that gives coding agents and AI
+scientists a single shared, persistent memory: raw searchable content,
+structured task history, and canonical collaboration artifacts — indexed by a
+hybrid dense + sparse retrieval stack and gated by an explicit trust boundary.
 
-Every session on the same machine talks to one `memd` over HTTP, so task
-context, evidence, decisions, and digests carry across agents, models, and
-restarts without copy-paste.
+The MCP-compatible daemon remains available for agent integrations, while the
+CLI provides direct local operations for export, inspection, and guarded
+Markdown projection. In either mode, task context, evidence, decisions, and
+digests carry across agents, models, and restarts without copy-paste.
 
 ## Contents
 
@@ -32,12 +33,13 @@ restarts without copy-paste.
 
 | Surface | Purpose | Primary tools |
 | --- | --- | --- |
-| `memory.*` | Raw searchable chunks (code, docs, notes, indexed files) | `memory.add`, `memory.add_batch`, `memory.search`, `memory.compact` |
+| `memory.*` | Raw searchable chunks (code, docs, notes, indexed files) | `memory.add`, `memory.add_batch`, `memory.search`, `memory.supersede`, `memory.compact` |
 | `task.*` | Structured work history: goal, runs, evidence, outcomes | `task.start`, `task.progress`, `task.run_start`, `task.run_finish`, `task.add_evidence`, `task.finish`, `task.resume` |
 | `artifact.*` | Canonical collaboration: reviews, revisions, decisions, verifications, threads | `artifact.review`, `artifact.revision`, `artifact.decision`, `artifact.verification`, `artifact.list_thread`, `artifact.find_related` |
 | `code.*` | Structural navigation over indexed source | `code.find_definition`, `code.find_references`, `code.find_callers`, `code.find_imports` |
 | `context.*` | Summary-first briefing and retrieval | `context.brief_project`, `context.find_relevant_context`, `context.get_hot_context` |
 | `debug.*` | Post-hoc session introspection | `debug.find_tool_calls`, `debug.find_errors` |
+| CLI export | Local file export without adding new MCP tools | `export`, `project-markdown` |
 
 Use `memory.search`, `task.search`, or `artifact.search` with `mode` set to
 `brief_project`, `resume_task`, `find_failures`, `find_decisions`,
@@ -197,12 +199,18 @@ See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough.
 ### `memory.*` — raw searchable content
 
 - `memory.add` — single chunk (code, doc, note; code chunks with a real
-  `source.path` are parsed into the structural index)
+  `source.path` are parsed into the structural index; `mode` labels ingestion
+  as `document` or `conversation`)
 - `memory.add_batch` — many chunks in one call
 - `memory.search` — hybrid retrieval with optional `mode` and `project_id`
+- `memory.supersede`, `memory.set_expiry`, `memory.find_near_duplicates`
+- `memory.export_omf`, `memory.import_omf` for lifecycle-aware OMF exchange
 - `memory.get`, `memory.delete`, `memory.stats`, `memory.metrics`
 - `memory.compact` — explicit digest refresh; supports `digest_modes` and
   `force_digest_rebuild`
+
+Conversation ingestion defaults `review_after_ms` to roughly 14 days when the
+caller does not provide an explicit review timestamp.
 
 ### `task.*` — structured work
 
@@ -246,6 +254,27 @@ through `artifact.create`.
 `context.brief_project`, `context.find_relevant_context`,
 `context.get_hot_context`, `context.get_files_for_subsystem`,
 `context.list_subsystems`, `context.suggest_agent`.
+
+### CLI export surfaces
+
+The CLI supports direct export without going through a new MCP tool:
+
+```bash
+./target/release/memd --mode cli export \
+  --tenant-id default \
+  --format markdown \
+  --output /tmp/memd-export.md
+
+./target/release/memd --mode cli project-markdown \
+  --tenant-id default \
+  --project-id auth \
+  --output-dir projections/auth
+```
+
+`project-markdown` writes an `index.md` plus per-chunk Markdown files. Relative
+`--output-dir` values are resolved under the configured memd data directory;
+absolute paths must already be under that data directory. Parent components and
+symlink escapes are rejected before files are written.
 
 ## Trust boundary
 
@@ -372,6 +401,17 @@ Task-memory benchmark (projection write-amplification, retrieval latency):
 ```bash
 ./evals/bench/scripts/run_task_memory_benchmark.sh
 ```
+
+Most recent local validation on this branch:
+
+- `code_pairs.json` smoke gate: Recall@10 `1.00`, MRR `1.00`, Precision@10
+  `0.20`; quality thresholds passed.
+- Regression gate against the checked-in baseline passed after normalizing the
+  stale dataset path recorded in the baseline report.
+- Compaction suite: `6/6` passed.
+- Task-memory benchmark: `memd_chunk_baseline` hit@3 `1.00`, MRR `0.98`,
+  avg search `301.6ms`; `memd_task_memory` hit@3 `1.00`, MRR `0.84`, avg
+  search `5.1ms`.
 
 ## Optional ONNX cross-encoder
 

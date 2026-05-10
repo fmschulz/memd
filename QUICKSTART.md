@@ -129,11 +129,16 @@ Example:
       "text": "parseConfig reads TOML and validates fields",
       "type": "code",
       "project_id": "backend",
+      "mode": "document",
       "tags": ["rust", "config"]
     }
   }
 }
 ```
+
+For conversation snippets that should come back for review, use
+`"mode": "conversation"`. When `review_after_ms` is omitted, `memd` defaults
+the review window to roughly 14 days.
 
 For structural tools such as `code.find_definition` and `code.find_callers`,
 add code with a real `source.path` so `memd` can build the structural index.
@@ -190,7 +195,31 @@ Other summary-first helpers:
 
 To refresh project brief and library digests explicitly, call `memory.compact` with `project_id` and, when needed, `digest_modes` plus `force_digest_rebuild`.
 
-## 8. Register clients and install the skill if needed
+## 8. Export local Markdown when you need files
+
+The CLI can export tenant memory without adding another MCP tool:
+
+```bash
+./target/release/memd --mode cli export \
+  --tenant-id quickstart \
+  --format markdown \
+  --output /tmp/memd-quickstart.md
+```
+
+For a small file tree that agents and humans can read directly:
+
+```bash
+./target/release/memd --mode cli project-markdown \
+  --tenant-id quickstart \
+  --project-id backend \
+  --output-dir projections/backend
+```
+
+Relative `--output-dir` values are resolved under the configured memd data
+directory. Absolute paths, `..` components, and symlink escapes outside that
+data directory are rejected.
+
+## 9. Register clients and install the skill if needed
 
 See:
 
@@ -223,7 +252,7 @@ If you also want runtime refusal guarding for one-shot runs, install wrappers an
 
 Set `MEMD_URL` and `MEMD_GUARD_TENANT_ID` when the audited memd endpoint or tenant is not the default local setup.
 
-## 9. Optional ONNX cross-encoder reranker
+## 10. Optional ONNX cross-encoder reranker
 
 ONNX here means the optional cross-encoder reranker, not the default embedding path.
 
