@@ -40,6 +40,11 @@ impl TenantManager {
         Self { data_dir }
     }
 
+    /// Return the root data directory managed by this tenant manager.
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     /// Get the path to the tenants directory
     fn tenants_dir(&self) -> PathBuf {
         self.data_dir.join("tenants")

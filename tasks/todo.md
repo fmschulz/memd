@@ -101,9 +101,9 @@
 - [x] Track E: add `mode` to `memory.add` / `memory.add_batch`, store ingestion-mode labels, and default conversation review windows.
 - [x] Run focused Track E tests, Claude Code CLI review, then commit and push Track E.
 - [x] Track F: implement OMF export/import with lifecycle and ingestion-mode round trips plus semantic merge behavior.
-- [ ] Run focused Track F tests, Claude Code CLI review, then commit and push Track F.
-- [ ] Track G: implement markdown projection MCP/CLI support with guarded output paths.
-- [ ] Run focused Track G tests, Claude Code CLI review, then commit and push Track G.
+- [x] Run focused Track F tests, Claude Code CLI review, then commit and push Track F.
+- [x] Track G: implement CLI-only markdown projection with guarded output paths.
+- [x] Run focused Track G tests, Claude Code CLI review, then commit and push Track G.
 - [ ] Run the benchmark suite again and check behavior.
 - [ ] Align README/quickstart/docs, then update manuscript.
 
@@ -132,3 +132,16 @@
 - `cargo test -p memd --lib`: 652 passed, 4 ignored; same warning baseline.
 - `git diff --check`: passed.
 - Claude Code CLI Track F review found five blockers; all were fixed and the follow-up plus a narrow final review reported no blocking findings.
+
+### Track G Review / Results
+
+- User correction: Track G is CLI-only now; the historical MCP projection tool plan was intentionally not added.
+- `rg "project_markdown|ProjectMarkdown|memory\\.project_markdown" crates/memd/src/mcp crates/memd/tests`: no MCP projection tool/handler/dispatch remains.
+- `rustfmt --edition 2021 --check crates/memd/src/cli.rs crates/memd/src/markdown_projection.rs`: passed.
+- `git diff --check`: passed.
+- `cargo test -p memd cli::tests::project_markdown`: 5 passed.
+- `cargo test -p memd markdown_projection::tests`: 1 passed.
+- `cargo test -p memd mcp::tools::tests`: 25 passed; tool count remains 51.
+- `cargo test -p memd --test lifecycle_overlay`: 34 passed.
+- `cargo test -p memd --lib`: 658 passed, 4 ignored; only pre-existing unused-mut warnings.
+- Claude Code CLI Track G review reported no blocking findings; follow-up test coverage added for symlink escape, absolute/relative parent components, and project-filter-before-limit behavior.
