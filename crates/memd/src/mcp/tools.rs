@@ -1638,6 +1638,64 @@ static MEMORY_TOOLS: LazyLock<Vec<ToolDefinition>> = LazyLock::new(|| {
                 "required": ["text", "type"]
             }),
         ),
+        // Track F: OMF export/import with lifecycle metadata.
+        ToolDefinition::new(
+            "memory.export_omf",
+            "Export chunks as a versioned memd OMF envelope including lifecycle and ingestion mode.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Tenant identifier for data isolation"
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional project identifier to export"
+                    },
+                    "include_history": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Include non-active lifecycle history rows"
+                    }
+                }
+            }),
+        ),
+        ToolDefinition::new(
+            "memory.import_omf",
+            "Import a memd OMF envelope with semantic merge or append behavior.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "Target tenant identifier; defaults to the envelope tenant when omitted"
+                    },
+                    "omf": {
+                        "type": "object",
+                        "description": "OMF envelope returned by memory.export_omf"
+                    },
+                    "merge_strategy": {
+                        "type": "string",
+                        "enum": ["semantic", "append"],
+                        "default": "semantic",
+                        "description": "Use semantic dedupe by default, or append all chunks"
+                    },
+                    "fuzzy": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Allow fuzzy trigram duplicate matches during semantic import"
+                    },
+                    "dedupe_threshold": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                        "description": "Minimum fuzzy similarity score"
+                    }
+                },
+                "required": ["omf"]
+            }),
+        ),
         // LIFECYCLE-02: memory.set_expiry (Track C)
         ToolDefinition::new(
             "memory.set_expiry",
@@ -1928,6 +1986,8 @@ pub fn tool_names() -> Vec<&'static str> {
         "artifact.find_highlights",
         "artifact.list_thread",
         "memory.get",
+        "memory.export_omf",
+        "memory.import_omf",
         "memory.delete",
         "memory.feedback",
         "memory.stats",
@@ -1965,7 +2025,8 @@ mod tests {
         // Track A (A7): + memory.supersede.
         // Track C: + memory.set_expiry.
         // Track D: + memory.find_near_duplicates.
-        assert_eq!(tools.len(), 49);
+        // Track F: + memory.export_omf / memory.import_omf.
+        assert_eq!(tools.len(), 51);
     }
 
     #[test]
@@ -1991,6 +2052,8 @@ mod tests {
         assert!(names.contains(&"artifact.find_highlights"));
         assert!(names.contains(&"artifact.list_thread"));
         assert!(names.contains(&"memory.get"));
+        assert!(names.contains(&"memory.export_omf"));
+        assert!(names.contains(&"memory.import_omf"));
         assert!(names.contains(&"memory.delete"));
         assert!(names.contains(&"memory.feedback"));
         assert!(names.contains(&"memory.stats"));
@@ -2289,10 +2352,13 @@ mod tests {
         // Track A (A7): + memory.supersede.
         // Track C: + memory.set_expiry.
         // Track D: + memory.find_near_duplicates.
-        assert_eq!(names.len(), 49);
+        // Track F: + memory.export_omf / memory.import_omf.
+        assert_eq!(names.len(), 51);
         assert!(names.contains(&"memory.supersede"));
         assert!(names.contains(&"memory.find_near_duplicates"));
         assert!(names.contains(&"memory.set_expiry"));
+        assert!(names.contains(&"memory.export_omf"));
+        assert!(names.contains(&"memory.import_omf"));
         assert!(names.contains(&"artifact.find_related"));
         assert!(names.contains(&"artifact.review"));
         assert!(names.contains(&"artifact.revision"));

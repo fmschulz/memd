@@ -68,6 +68,13 @@ pub trait MetadataStore: Send + Sync {
     /// Get metadata by chunk_id (tenant_id required for isolation)
     fn get(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<Option<ChunkMetadata>>;
 
+    /// Check for a chunk_id across all tenants.
+    ///
+    /// Chunk ids are globally unique in the SQLite schema today. Importers
+    /// use this before preserving externally supplied ids so a cross-tenant
+    /// import cannot replace an existing row through `INSERT OR REPLACE`.
+    fn chunk_id_exists(&self, chunk_id: &ChunkId) -> Result<bool>;
+
     /// List chunks for a tenant (non-deleted only)
     fn list(&self, tenant_id: &TenantId, limit: usize, offset: usize)
         -> Result<Vec<ChunkMetadata>>;

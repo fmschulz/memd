@@ -28,9 +28,9 @@ use super::handlers::{
     handle_find_callers, handle_find_definition, handle_find_errors, handle_find_imports,
     handle_find_references, handle_find_tool_calls, handle_memory_add, handle_memory_add_batch,
     handle_memory_compact, handle_memory_consolidate_episode, handle_memory_delete,
-    handle_memory_feedback, handle_memory_find_near_duplicates, handle_memory_get,
-    handle_memory_metrics, handle_memory_search, handle_memory_set_expiry, handle_memory_stats,
-    handle_memory_supersede,
+    handle_memory_export_omf, handle_memory_feedback, handle_memory_find_near_duplicates,
+    handle_memory_get, handle_memory_import_omf, handle_memory_metrics, handle_memory_search,
+    handle_memory_set_expiry, handle_memory_stats, handle_memory_supersede,
     handle_task_add_evidence, handle_task_finish, handle_task_get, handle_task_progress,
     handle_task_resume, handle_task_run_finish, handle_task_run_start, handle_task_search,
     handle_task_start, AddBatchParams, AddParams, ArtifactCreateParams, ArtifactGetParams,
@@ -39,10 +39,10 @@ use super::handlers::{
     ContextGetHotContextParams, ContextListSubsystemsParams, ContextSearchDocumentsParams,
     ContextSuggestAgentParams, DeleteParams, FeedbackParams, FindCallersParams,
     FindDefinitionParams, FindErrorsParams, FindImportsParams, FindNearDuplicatesParams,
-    FindReferencesParams, FindToolCallsParams, GetParams, MetricsParams, ProjectBriefParams,
-    SearchParams, SetExpiryParams, StatsParams, SupersedeParams, TaskAddEvidenceParams,
-    TaskFinishParams, TaskGetParams, TaskProgressParams, TaskResumeParams, TaskRunFinishParams,
-    TaskRunStartParams, TaskSearchParams, TaskStartParams,
+    FindReferencesParams, FindToolCallsParams, GetParams, MetricsParams, OmfExportParams,
+    OmfImportParams, ProjectBriefParams, SearchParams, SetExpiryParams, StatsParams,
+    SupersedeParams, TaskAddEvidenceParams, TaskFinishParams, TaskGetParams, TaskProgressParams,
+    TaskResumeParams, TaskRunFinishParams, TaskRunStartParams, TaskSearchParams, TaskStartParams,
 };
 use super::protocol::{Request, Response, RpcError};
 use super::tools::get_all_tools;
@@ -824,6 +824,20 @@ impl<S: Store> McpServer<S> {
                         McpError::InvalidParams(format!("invalid get params: {}", e))
                     })?;
                     handle_memory_get(&*self.store, params).await
+                }
+                "memory.export_omf" => {
+                    let params: OmfExportParams =
+                        serde_json::from_value(arguments).map_err(|e| {
+                            McpError::InvalidParams(format!("invalid export_omf params: {}", e))
+                        })?;
+                    handle_memory_export_omf(&*self.store, params).await
+                }
+                "memory.import_omf" => {
+                    let params: OmfImportParams =
+                        serde_json::from_value(arguments).map_err(|e| {
+                            McpError::InvalidParams(format!("invalid import_omf params: {}", e))
+                        })?;
+                    handle_memory_import_omf(&*self.store, params).await
                 }
                 "memory.delete" => {
                     let params: DeleteParams = serde_json::from_value(arguments).map_err(|e| {
