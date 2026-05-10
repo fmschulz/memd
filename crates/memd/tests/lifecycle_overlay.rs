@@ -25,6 +25,13 @@ fn context_chunk_at(tenant_id: &TenantId, text: &str, timestamp_created: i64) ->
     chunk
 }
 
+fn unix_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
 #[tokio::test]
 async fn persistent_store_returns_lifecycle_overlay() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1139,4 +1146,307 @@ async fn memory_add_supersedes_fuzzy_duplicate_only_when_opted_in() {
     .await;
     let body = parse_result_text(&old);
     assert_eq!(body["status"].as_str(), Some("superseded"), "{body}");
+}
+
+#[tokio::test]
+async fn memory_add_labels_ingestion_mode_and_defaults_conversation_review_window() {
+    let (server, _tmp) = test_server().await;
+    let before_ms = unix_now_ms();
+
+    let add = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "text": "conversation mode needs review",
+            "type": "message",
+            "mode": "conversation"
+        }),
+    )
+    .await;
+    let body = parse_result_text(&add);
+    let chunk_id = body["chunk_id"].as_str().unwrap();
+    let after_ms = unix_now_ms();
+
+    let get = call_tool(
+        &server,
+        "memory.get",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunk_id": chunk_id
+        }),
+    )
+    .await;
+    let body = parse_result_text(&get);
+    let tags = body["chunk"]["tags"].as_array().unwrap();
+    assert!(
+        tags.iter()
+            .any(|tag| tag.as_str() == Some("ingestion_mode:conversation")),
+        "{body}"
+    );
+
+    let review_after_ms = body["lifecycle"]["review_after_ms"].as_i64().unwrap();
+    let fourteen_days_ms = 14 * 24 * 60 * 60 * 1_000;
+    assert!(
+        review_after_ms >= before_ms + fourteen_days_ms
+            && review_after_ms <= after_ms + fourteen_days_ms,
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn memory_add_document_mode_labels_without_review_default() {
+    let (server, _tmp) = test_server().await;
+
+    let add = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "text": "document mode has no review default",
+            "type": "doc",
+            "mode": "document"
+        }),
+    )
+    .await;
+    let body = parse_result_text(&add);
+    let chunk_id = body["chunk_id"].as_str().unwrap();
+
+    let get = call_tool(
+        &server,
+        "memory.get",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunk_id": chunk_id
+        }),
+    )
+    .await;
+    let body = parse_result_text(&get);
+    let tags = body["chunk"]["tags"].as_array().unwrap();
+    assert!(
+        tags.iter()
+            .any(|tag| tag.as_str() == Some("ingestion_mode:document")),
+        "{body}"
+    );
+    assert!(body["lifecycle"]["review_after_ms"].is_null(), "{body}");
+}
+
+#[tokio::test]
+async fn memory_add_batch_applies_ingestion_mode_per_chunk() {
+    let (server, _tmp) = test_server().await;
+
+    let batch = call_tool(
+        &server,
+        "memory.add_batch",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunks": [
+                {
+                    "text": "batch conversation mode",
+                    "type": "message",
+                    "mode": "conversation"
+                },
+                {
+                    "text": "batch document mode",
+                    "type": "doc",
+                    "mode": "document"
+                }
+            ]
+        }),
+    )
+    .await;
+    let body = parse_result_text(&batch);
+    let ids = body["chunk_ids"].as_array().unwrap();
+
+    let conversation = call_tool(
+        &server,
+        "memory.get",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunk_id": ids[0].as_str().unwrap()
+        }),
+    )
+    .await;
+    let conversation = parse_result_text(&conversation);
+    assert!(
+        conversation["chunk"]["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tag| tag.as_str() == Some("ingestion_mode:conversation")),
+        "{conversation}"
+    );
+    assert!(
+        conversation["lifecycle"]["review_after_ms"].is_i64(),
+        "{conversation}"
+    );
+
+    let document = call_tool(
+        &server,
+        "memory.get",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunk_id": ids[1].as_str().unwrap()
+        }),
+    )
+    .await;
+    let document = parse_result_text(&document);
+    assert!(
+        document["chunk"]["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tag| tag.as_str() == Some("ingestion_mode:document")),
+        "{document}"
+    );
+    assert!(
+        document["lifecycle"]["review_after_ms"].is_null(),
+        "{document}"
+    );
+}
+
+#[tokio::test]
+async fn memory_add_conversation_mode_respects_explicit_review_after_ms() {
+    let (server, _tmp) = test_server().await;
+
+    let add = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "text": "conversation mode caller review timestamp",
+            "type": "message",
+            "mode": "conversation",
+            "review_after_ms": 123_456i64
+        }),
+    )
+    .await;
+    let body = parse_result_text(&add);
+    let chunk_id = body["chunk_id"].as_str().unwrap();
+
+    let get = call_tool(
+        &server,
+        "memory.get",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunk_id": chunk_id
+        }),
+    )
+    .await;
+    let body = parse_result_text(&get);
+    assert_eq!(
+        body["lifecycle"]["review_after_ms"].as_i64(),
+        Some(123_456),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn memory_add_rejects_invalid_ingestion_mode() {
+    let (server, _tmp) = test_server().await;
+
+    let add = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "text": "invalid mode payload",
+            "type": "doc",
+            "mode": "unknown"
+        }),
+    )
+    .await;
+    let (_code, message) = parse_error(&add).expect("error response");
+    assert!(message.contains("mode:"), "{message}");
+}
+
+#[tokio::test]
+async fn memory_add_normalizes_user_supplied_ingestion_mode_tag() {
+    let (server, _tmp) = test_server().await;
+
+    let add = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "text": "document mode duplicate tag",
+            "type": "doc",
+            "mode": "document",
+            "tags": ["ingestion_mode:conversation", "user:tag"]
+        }),
+    )
+    .await;
+    let body = parse_result_text(&add);
+    let chunk_id = body["chunk_id"].as_str().unwrap();
+
+    let get = call_tool(
+        &server,
+        "memory.get",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunk_id": chunk_id
+        }),
+    )
+    .await;
+    let body = parse_result_text(&get);
+    let tags = body["chunk"]["tags"].as_array().unwrap();
+    assert_eq!(
+        tags.iter()
+            .filter(|tag| tag
+                .as_str()
+                .is_some_and(|s| s.starts_with("ingestion_mode:")))
+            .count(),
+        1,
+        "{body}"
+    );
+    assert!(
+        tags.iter()
+            .any(|tag| tag.as_str() == Some("ingestion_mode:document")),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn memory_add_supersede_duplicate_preserves_conversation_mode_lifecycle() {
+    let (server, _tmp) = test_server().await;
+    let old_id = add_chunk(&server, "t", "Supersedemode conversation payload").await;
+
+    let add = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "text": "supersedemode conversation payload",
+            "type": "doc",
+            "mode": "conversation",
+            "supersede_near_duplicates": true
+        }),
+    )
+    .await;
+    let body = parse_result_text(&add);
+    let new_id = body["chunk_id"].as_str().unwrap();
+    assert_eq!(
+        body["superseded_chunk_id"].as_str(),
+        Some(old_id.to_string().as_str())
+    );
+
+    let get = call_tool(
+        &server,
+        "memory.get",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunk_id": new_id
+        }),
+    )
+    .await;
+    let body = parse_result_text(&get);
+    assert!(
+        body["chunk"]["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tag| tag.as_str() == Some("ingestion_mode:conversation")),
+        "{body}"
+    );
+    assert!(body["lifecycle"]["review_after_ms"].is_i64(), "{body}");
 }
