@@ -25,7 +25,7 @@ pub struct Config {
     #[serde(default = "default_log_format")]
     pub log_format: String,
 
-    /// Server configuration
+    /// Compatibility routing configuration.
     #[serde(default)]
     pub server: ServerConfig,
 }
@@ -42,18 +42,12 @@ fn default_log_format() -> String {
     "json".to_string()
 }
 
-/// Server-specific configuration
+/// Compatibility routing configuration.
+///
+/// The TOML table name remains `[server]` for existing config files, but the
+/// executable no longer exposes a network or stdio server mode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
-    /// Transport type: stdio or http
-    #[serde(default = "default_transport")]
-    pub transport: String,
-    /// Bind address for the HTTP MCP server
-    #[serde(default = "default_bind")]
-    pub bind: String,
-    /// Endpoint path for the HTTP MCP server
-    #[serde(default = "default_path")]
-    pub path: String,
     /// Opt-in to the legacy cross-tenant `project_id` fallback.
     ///
     /// When true, any retrieval that carries a `project_id` widens its
@@ -92,18 +86,6 @@ pub struct ProjectAliasScopeConfig {
     pub reason: Option<String>,
 }
 
-fn default_transport() -> String {
-    "stdio".to_string()
-}
-
-fn default_bind() -> String {
-    "127.0.0.1:8787".to_string()
-}
-
-fn default_path() -> String {
-    "/mcp".to_string()
-}
-
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -118,9 +100,6 @@ impl Default for Config {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            transport: default_transport(),
-            bind: default_bind(),
-            path: default_path(),
             allow_cross_tenant_project_fallback: false,
             project_aliases: Vec::new(),
         }
@@ -159,28 +138,6 @@ impl Config {
                 self.log_format,
                 valid_formats.join(", ")
             )));
-        }
-
-        // Validate transport
-        let valid_transports = ["stdio", "http"];
-        if !valid_transports.contains(&self.server.transport.to_lowercase().as_str()) {
-            return Err(MemdError::ConfigError(format!(
-                "invalid server.transport '{}', must be one of: {}",
-                self.server.transport,
-                valid_transports.join(", ")
-            )));
-        }
-
-        if self.server.bind.trim().is_empty() {
-            return Err(MemdError::ConfigError(
-                "server.bind must not be empty".to_string(),
-            ));
-        }
-
-        if !self.server.path.starts_with('/') {
-            return Err(MemdError::ConfigError(
-                "server.path must start with '/'".to_string(),
-            ));
         }
 
         for rule in &self.server.project_aliases {
@@ -301,18 +258,14 @@ mod tests {
             log_format = "pretty"
 
             [server]
-            transport = "stdio"
-            bind = "127.0.0.1:9999"
-            path = "/shared"
+            allow_cross_tenant_project_fallback = true
         "#;
 
         let config = load_from_str(toml).unwrap();
         assert_eq!(config.data_dir, PathBuf::from("/custom/path"));
         assert_eq!(config.log_level, "debug");
         assert_eq!(config.log_format, "pretty");
-        assert_eq!(config.server.transport, "stdio");
-        assert_eq!(config.server.bind, "127.0.0.1:9999");
-        assert_eq!(config.server.path, "/shared");
+        assert!(config.server.allow_cross_tenant_project_fallback);
     }
 
     #[test]
@@ -325,9 +278,7 @@ mod tests {
         assert_eq!(config.log_level, "warn");
         // Other fields should use defaults
         assert_eq!(config.log_format, "json");
-        assert_eq!(config.server.transport, "stdio");
-        assert_eq!(config.server.bind, "127.0.0.1:8787");
-        assert_eq!(config.server.path, "/mcp");
+        assert!(!config.server.allow_cross_tenant_project_fallback);
     }
 
     #[test]
@@ -391,16 +342,16 @@ mod tests {
     }
 
     #[test]
-    fn http_transport_is_valid() {
+    fn legacy_transport_keys_are_ignored() {
         let toml = r#"
             [server]
             transport = "http"
             bind = "127.0.0.1:8787"
-            path = "/mcp"
+            path = "/legacy"
         "#;
 
         let config = load_from_str(toml).unwrap();
-        assert_eq!(config.server.transport, "http");
+        assert!(!config.server.allow_cross_tenant_project_fallback);
     }
 
     #[test]
@@ -451,17 +402,13 @@ mod tests {
     }
 
     #[test]
-    fn invalid_server_path_rejected() {
+    fn legacy_server_path_is_ignored() {
         let toml = r#"
             [server]
-            path = "mcp"
+            path = "legacy"
         "#;
 
-        let result = load_from_str(toml);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("server.path must start with '/'"));
+        let config = load_from_str(toml).unwrap();
+        assert!(config.server.project_aliases.is_empty());
     }
 }

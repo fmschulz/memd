@@ -8,7 +8,7 @@ cd "$PROJECT_ROOT"
 
 echo "== Phase 5 Task Memory Benchmark =="
 echo "Building memd..."
-cargo build -p memd >/dev/null
+cargo build --release -p memd >/dev/null
 
 echo "Running task-memory benchmark..."
-python3 evals/bench/tools/task_memory_benchmark.py "$@"
+python3 evals/bench/tools/task_memory_benchmark.py --memd-path target/release/memd "$@"

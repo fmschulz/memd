@@ -1,37 +1,15 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use clap::{Parser, ValueEnum};
 use tracing::info;
 
-use memd::cli::{run_cli, CliCommand};
+use memd::cli::{run_cli, run_warm_admin, try_run_warm_client, CliCommand, WarmProcessConfig};
 use memd::embeddings::EmbeddingModel;
 use memd::store::HybridConfig;
-use memd::structural::{
-    CallGraphIndexer, StructuralStore, SymbolIndexer, SymbolQueryService, TraceQueryService,
-};
 use memd::{
-    init_logging, load_config, MemoryStore, PersistentStore, PersistentStoreConfig, RerankerMode,
-    TenantManager,
+    configure_operation_routing, init_logging, load_config, MemoryStore, PersistentStore,
+    PersistentStoreConfig, RerankerMode, TenantManager,
 };
-
-/// Run mode for memd
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum Mode {
-    /// MCP server mode (JSON-RPC over stdio)
-    Mcp,
-    /// CLI mode for direct commands
-    Cli,
-}
-
-/// Server transport for MCP mode.
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum TransportChoice {
-    /// JSON-RPC over stdio (client launches subprocess)
-    Stdio,
-    /// Streamable HTTP on a long-lived local daemon
-    Http,
-}
 
 /// Embedding model choice
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -51,6 +29,15 @@ impl From<ModelChoice> for EmbeddingModel {
     }
 }
 
+impl ModelChoice {
+    fn cli_value(self) -> &'static str {
+        match self {
+            ModelChoice::AllMinilm => "all-minilm",
+            ModelChoice::Qwen3 => "qwen3",
+        }
+    }
+}
+
 /// Retrieval strategy for persistent mode.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum SearchVariant {
@@ -64,9 +51,20 @@ enum SearchVariant {
     Bm25Only,
 }
 
-/// memd - Local memory daemon for AI agents
+impl SearchVariant {
+    fn cli_value(self) -> &'static str {
+        match self {
+            SearchVariant::HybridFeature => "hybrid-feature",
+            SearchVariant::HybridCrossEncoder => "hybrid-cross-encoder",
+            SearchVariant::DenseOnly => "dense-only",
+            SearchVariant::Bm25Only => "bm25-only",
+        }
+    }
+}
+
+/// memd - Local memory CLI for AI agents
 ///
-/// Provides MCP server interface for memory operations.
+/// Provides executable memory operations for skill-driven agent workflows.
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 struct Args {
@@ -74,25 +72,9 @@ struct Args {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
-    /// Run mode
-    #[arg(short, long, value_enum, default_value = "mcp")]
-    mode: Mode,
-
     /// Data directory for persistent storage
     #[arg(long)]
     data_dir: Option<PathBuf>,
-
-    /// Override the MCP server transport
-    #[arg(long, value_enum)]
-    transport: Option<TransportChoice>,
-
-    /// Bind address for HTTP transport, e.g. 127.0.0.1:8787
-    #[arg(long)]
-    http_bind: Option<String>,
-
-    /// HTTP endpoint path for streamable HTTP transport
-    #[arg(long)]
-    http_path: Option<String>,
 
     /// Use in-memory storage instead of persistent storage (for testing)
     #[arg(long, default_value = "false")]
@@ -110,24 +92,9 @@ struct Args {
     #[arg(long, value_enum, default_value = "hybrid-feature")]
     search_variant: SearchVariant,
 
-    /// CLI subcommand (only used in cli mode)
+    /// CLI subcommand
     #[command(subcommand)]
     command: Option<CliCommand>,
-}
-
-fn attach_structural_runtime<S: memd::store::Store>(
-    server: memd::mcp::McpServer<S>,
-    structural_store: Arc<StructuralStore>,
-) -> memd::mcp::McpServer<S> {
-    let symbol_query_service = Arc::new(SymbolQueryService::new(structural_store.clone()));
-    let trace_query_service = Arc::new(TraceQueryService::new(structural_store.clone()));
-    let symbol_indexer = Arc::new(SymbolIndexer::new(structural_store.clone()));
-    let call_graph_indexer = Arc::new(CallGraphIndexer::new(structural_store.clone()));
-
-    server
-        .with_symbol_query_service(symbol_query_service)
-        .with_trace_query_service(trace_query_service)
-        .with_structural_indexers(structural_store, symbol_indexer, call_graph_indexer)
 }
 
 #[tokio::main]
@@ -147,32 +114,16 @@ async fn main() {
         .or_else(|| config.data_dir_expanded().ok())
         .unwrap_or_else(|| PathBuf::from("data"));
 
-    // If a subcommand is provided, treat it as CLI mode even when mode flag is omitted.
-    let mode = if args.command.is_some() {
-        Mode::Cli
-    } else {
-        args.mode
-    };
-
-    // Apply server overrides after loading config and resolving data_dir.
     let mut config = config;
-    if let Some(transport) = args.transport {
-        config.server.transport = match transport {
-            TransportChoice::Stdio => "stdio".to_string(),
-            TransportChoice::Http => "http".to_string(),
-        };
-    }
-    if let Some(bind) = args.http_bind.clone() {
-        config.server.bind = bind;
-    }
-    if let Some(path) = args.http_path.clone() {
-        config.server.path = path;
-    }
     config.data_dir = data_dir.clone();
     if let Err(e) = config.validate() {
         eprintln!("error: invalid configuration: {}", e);
         std::process::exit(1);
     }
+    configure_operation_routing(
+        config.server.allow_cross_tenant_project_fallback,
+        config.server.project_aliases.clone(),
+    );
 
     // Initialize logging
     let log_level = if args.verbose {
@@ -180,166 +131,100 @@ async fn main() {
     } else {
         &config.log_level
     };
-    let log_format = match mode {
-        Mode::Mcp => "json",
-        Mode::Cli => "pretty",
+    init_logging("pretty", log_level);
+
+    let Some(cmd) = args.command else {
+        eprintln!("error: memd requires a CLI subcommand. Use --help for usage.");
+        std::process::exit(1);
     };
-    init_logging(log_format, log_level);
 
-    match mode {
-        Mode::Mcp => {
-            let server_transport = config.server.transport.clone();
-            let http_bind = config.server.bind.clone();
-            let http_path = config.server.path.clone();
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        config_path = ?args.config,
+        data_dir = %data_dir.display(),
+        in_memory = args.in_memory,
+        "memd CLI starting"
+    );
 
-            info!(
-                version = env!("CARGO_PKG_VERSION"),
-                config_path = ?args.config,
-                data_dir = %data_dir.display(),
-                transport = %server_transport,
-                http_bind = %http_bind,
-                http_path = %http_path,
-                in_memory = args.in_memory,
-                "memd starting"
-            );
+    let warm_config = WarmProcessConfig {
+        data_dir: data_dir.clone(),
+        config_path: args.config.clone(),
+        embedding_model: args.embedding_model.cli_value().to_string(),
+        search_variant: args.search_variant.cli_value().to_string(),
+    };
 
-            // Run server with appropriate store type
-            if args.in_memory {
-                info!("using in-memory store");
-                let store = Arc::new(MemoryStore::new());
-                let structural_store = Arc::new(StructuralStore::in_memory().unwrap_or_else(|e| {
-                    eprintln!("error: failed to create in-memory structural store: {}", e);
+    if let CliCommand::Warm { command } = &cmd {
+        if args.in_memory {
+            eprintln!("error: warm workers require persistent storage");
+            std::process::exit(1);
+        }
+        if let Err(e) = run_warm_admin(&warm_config, command.clone()).await {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    if matches!(cmd, CliCommand::WarmWorker { .. }) && args.in_memory {
+        eprintln!("error: warm-worker requires persistent storage");
+        std::process::exit(1);
+    }
+
+    if let Some(mode) = cmd.warm_mode() {
+        if args.in_memory {
+            if mode == memd::cli::WarmMode::Required {
+                eprintln!("error: --warm required is not supported with --in-memory");
+                std::process::exit(1);
+            }
+        } else {
+            match try_run_warm_client(&warm_config, &cmd).await {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("error: {}", e);
                     std::process::exit(1);
-                }));
-                match server_transport.as_str() {
-                    "http" => {
-                        let server = attach_structural_runtime(
-                            memd::mcp::McpServer::new(config.clone(), store),
-                            structural_store.clone(),
-                        );
-                        if let Err(e) =
-                            memd::mcp::run_http_server(server, &http_bind, &http_path).await
-                        {
-                            eprintln!("error: HTTP MCP server error: {}", e);
-                            std::process::exit(1);
-                        }
-                    }
-                    _ => {
-                        let mut server = attach_structural_runtime(
-                            memd::mcp::McpServer::new(config.clone(), store),
-                            structural_store,
-                        );
-                        if let Err(e) = server.run().await {
-                            eprintln!("error: MCP server error: {}", e);
-                            std::process::exit(1);
-                        }
-                    }
-                }
-            } else {
-                info!(data_dir = %data_dir.display(), embedding_model = ?args.embedding_model, "using persistent store");
-                let mut store_config = PersistentStoreConfig {
-                    data_dir: data_dir.clone(),
-                    embedding_model: args.embedding_model.into(),
-                    ..Default::default()
-                };
-                apply_search_variant(args.search_variant, &mut store_config);
-                match PersistentStore::open(store_config) {
-                    Ok(store) => {
-                        let metrics = store.metrics_arc();
-                        let store = Arc::new(store);
-                        let structural_store = Arc::new(
-                            StructuralStore::open(&data_dir.join("structural.db")).unwrap_or_else(
-                                |e| {
-                                    eprintln!("error: failed to create structural store: {}", e);
-                                    std::process::exit(1);
-                                },
-                            ),
-                        );
-                        match server_transport.as_str() {
-                            "http" => {
-                                let server = attach_structural_runtime(
-                                    memd::mcp::McpServer::with_metrics(
-                                        config.clone(),
-                                        store,
-                                        metrics,
-                                    ),
-                                    structural_store.clone(),
-                                );
-                                if let Err(e) =
-                                    memd::mcp::run_http_server(server, &http_bind, &http_path).await
-                                {
-                                    eprintln!("error: HTTP MCP server error: {}", e);
-                                    std::process::exit(1);
-                                }
-                            }
-                            _ => {
-                                let mut server = attach_structural_runtime(
-                                    memd::mcp::McpServer::with_metrics(
-                                        config.clone(),
-                                        store,
-                                        metrics,
-                                    ),
-                                    structural_store,
-                                );
-                                if let Err(e) = server.run().await {
-                                    eprintln!("error: MCP server error: {}", e);
-                                    std::process::exit(1);
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("error: failed to create persistent store: {}", e);
-                        std::process::exit(1);
-                    }
                 }
             }
         }
-        Mode::Cli => {
-            if let Some(cmd) = args.command {
-                // Create tenant manager
-                let tenant_manager = Some(TenantManager::new(data_dir.clone()));
+    }
 
-                if !cmd.requires_store() {
-                    let store = MemoryStore::new();
-                    if let Err(e) = run_cli(&store, tenant_manager.as_ref(), cmd).await {
-                        eprintln!("error: {}", e);
-                        std::process::exit(1);
-                    }
-                    return;
-                }
+    // Create tenant manager
+    let tenant_manager = Some(TenantManager::new(data_dir.clone()));
 
-                // Run CLI with appropriate store type
-                if args.in_memory {
-                    info!("using in-memory store");
-                    let store = MemoryStore::new();
-                    if let Err(e) = run_cli(&store, tenant_manager.as_ref(), cmd).await {
-                        eprintln!("error: {}", e);
-                        std::process::exit(1);
-                    }
-                } else {
-                    info!(data_dir = %data_dir.display(), embedding_model = ?args.embedding_model, "using persistent store");
-                    let mut store_config = PersistentStoreConfig {
-                        data_dir: data_dir.clone(),
-                        embedding_model: args.embedding_model.into(),
-                        ..Default::default()
-                    };
-                    apply_search_variant(args.search_variant, &mut store_config);
-                    match PersistentStore::open(store_config) {
-                        Ok(store) => {
-                            if let Err(e) = run_cli(&store, tenant_manager.as_ref(), cmd).await {
-                                eprintln!("error: {}", e);
-                                std::process::exit(1);
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("error: failed to create persistent store: {}", e);
-                            std::process::exit(1);
-                        }
-                    }
+    if !cmd.requires_store() {
+        let store = MemoryStore::new();
+        if let Err(e) = run_cli(&store, tenant_manager.as_ref(), cmd).await {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // Run CLI with appropriate store type
+    if args.in_memory {
+        info!("using in-memory store");
+        let store = MemoryStore::new();
+        if let Err(e) = run_cli(&store, tenant_manager.as_ref(), cmd).await {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    } else {
+        info!(data_dir = %data_dir.display(), embedding_model = ?args.embedding_model, "using persistent store");
+        let mut store_config = PersistentStoreConfig {
+            data_dir: data_dir.clone(),
+            embedding_model: args.embedding_model.into(),
+            ..Default::default()
+        };
+        apply_search_variant(args.search_variant, &mut store_config);
+        match PersistentStore::open(store_config) {
+            Ok(store) => {
+                if let Err(e) = run_cli(&store, tenant_manager.as_ref(), cmd).await {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
                 }
-            } else {
-                eprintln!("error: CLI mode requires a subcommand. Use --help for usage.");
+            }
+            Err(e) => {
+                eprintln!("error: failed to create persistent store: {}", e);
                 std::process::exit(1);
             }
         }

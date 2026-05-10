@@ -42,6 +42,36 @@ def _seed_manifest(outdir: Path, *, project_id: str = "memd", task_ids: list[str
     )
 
 
+def _seed_manifest_with_project_page_path(
+    outdir: Path,
+    *,
+    project_id: str,
+    project_page_path: str,
+) -> None:
+    (outdir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "compiler_owned_prefixes": [
+                    "index.md",
+                    "log.md",
+                    "manifest.json",
+                    "projects/",
+                    "tasks/",
+                    "libraries/",
+                ],
+                "project_id": project_id,
+                "project_page_path": project_page_path,
+                "task_ids": [],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def _seed_base_tree(outdir: Path, *, task_ids: list[str]) -> None:
     """Minimal tree that passes every check if grounded + non-stale."""
     (outdir / "projects").mkdir(parents=True, exist_ok=True)
@@ -73,6 +103,27 @@ class CleanTreeTests(unittest.TestCase):
             self.assertEqual(report.findings, ())
             self.assertEqual(report.exit_code(), 0)
 
+    def test_manifest_project_page_path_overrides_raw_project_id_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            outdir = Path(tmp) / "compiled_wiki"
+            outdir.mkdir()
+            _seed_base_tree(outdir, task_ids=[])
+            _seed_manifest_with_project_page_path(
+                outdir,
+                project_id="/workspace/projects/csag_test",
+                project_page_path="projects/workspace-projects-csag_test.md",
+            )
+            (outdir / "projects" / "memd.md").unlink()
+            (outdir / "projects" / "workspace-projects-csag_test.md").write_text(
+                "# project\n",
+                encoding="utf-8",
+            )
+            report = lint_output_dir(outdir)
+            self.assertEqual(
+                [f for f in report.errors if f.check == "manifest-drift"],
+                [],
+            )
+
 
 class LibraryGroundingTests(unittest.TestCase):
     def test_digest_library_without_grounding_is_error(self) -> None:
@@ -82,13 +133,32 @@ class LibraryGroundingTests(unittest.TestCase):
             _seed_base_tree(outdir, task_ids=[])
             # Rewrite failures library to digest-backed without grounding
             (outdir / "libraries" / "failures.md").write_text(
-                "# failures\n- Trust tier: `compiled_digest_hint`\n",
+                "# failures\n"
+                "- Trust tier: `compiled_digest_hint`\n"
+                "## Items\n\n"
+                "- [../tasks/task-x.md](../tasks/task-x.md) - x\n",
                 encoding="utf-8",
             )
+            (outdir / "tasks" / "task-x.md").write_text("# t\n", encoding="utf-8")
             report = lint_output_dir(outdir)
             checks = {f.check for f in report.errors}
             self.assertIn("library-missing-grounding", checks)
             self.assertEqual(report.exit_code(), 2)
+
+    def test_empty_digest_library_without_grounding_is_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            outdir = Path(tmp) / "compiled_wiki"
+            outdir.mkdir()
+            _seed_base_tree(outdir, task_ids=[])
+            (outdir / "libraries" / "failures.md").write_text(
+                "# failures\n"
+                "- Trust tier: `compiled_digest_hint`\n"
+                "## Items\n\n",
+                encoding="utf-8",
+            )
+            report = lint_output_dir(outdir)
+            checks = {f.check for f in report.errors}
+            self.assertNotIn("library-missing-grounding", checks)
 
     def test_digest_library_with_grounding_is_clean(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

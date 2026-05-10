@@ -1,7 +1,7 @@
 """Precedence tests for CLI flag > config file > hardcoded defaults.
 
 Exercises ``compiled_wiki.cli.resolve_build_config`` directly, without
-actually running the compiler (which needs a live memd server).
+actually running the compiler.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from compiled_wiki.cli import (  # noqa: E402
     DEFAULT_LIBRARY_K,
     DEFAULT_MAX_TASKS,
-    DEFAULT_MEMD_URL,
+    DEFAULT_MEMD_BIN,
     DEFAULT_OUTPUT_SUBDIR,
     DEFAULT_TIMEOUT,
     resolve_build_config,
@@ -27,7 +27,7 @@ from compiled_wiki.config_loader import DiscoveredConfig  # noqa: E402
 
 def _args(**overrides: object) -> argparse.Namespace:
     base = dict(
-        memd_url=None,
+        memd_bin=None,
         tenant_id=None,
         project_id=None,
         output_dir=None,
@@ -49,6 +49,7 @@ def _discovered(**overrides: object) -> DiscoveredConfig:
         outdir=None,
         max_tasks=None,
         library_k=None,
+        memd_bin=None,
         memd_url=None,
     )
     base.update(overrides)
@@ -70,12 +71,12 @@ class CliWinsOverConfigTests(unittest.TestCase):
         )
         self.assertEqual(cfg.project_id, "cli")
 
-    def test_cli_memd_url_beats_config_memd_url(self) -> None:
+    def test_cli_memd_bin_beats_config_memd_bin(self) -> None:
         cfg = resolve_build_config(
-            _args(tenant_id="t", project_id="p", memd_url="http://x/mcp"),
-            _discovered(tenant_id="t", project_id="p", memd_url="http://y/mcp"),
+            _args(tenant_id="t", project_id="p", memd_bin="/tmp/memd-cli"),
+            _discovered(tenant_id="t", project_id="p", memd_bin="/cfg/memd"),
         )
-        self.assertEqual(cfg.memd_url, "http://x/mcp")
+        self.assertEqual(cfg.memd_bin, "/tmp/memd-cli")
 
     def test_cli_max_tasks_beats_config_max_tasks(self) -> None:
         cfg = resolve_build_config(
@@ -107,12 +108,12 @@ class CliWinsOverConfigTests(unittest.TestCase):
 
 
 class ConfigWinsOverDefaultsTests(unittest.TestCase):
-    def test_config_memd_url_used_when_cli_missing(self) -> None:
+    def test_config_memd_bin_used_when_cli_missing(self) -> None:
         cfg = resolve_build_config(
             _args(tenant_id="t", project_id="p"),
-            _discovered(tenant_id="t", project_id="p", memd_url="http://cfg/mcp"),
+            _discovered(tenant_id="t", project_id="p", memd_bin="/cfg/memd"),
         )
-        self.assertEqual(cfg.memd_url, "http://cfg/mcp")
+        self.assertEqual(cfg.memd_bin, "/cfg/memd")
 
     def test_config_max_tasks_used_when_cli_missing(self) -> None:
         cfg = resolve_build_config(
@@ -135,7 +136,7 @@ class DefaultsWhenNothingSetTests(unittest.TestCase):
             _args(tenant_id="t", project_id="p"),
             _discovered(tenant_id="t", project_id="p"),
         )
-        self.assertEqual(cfg.memd_url, DEFAULT_MEMD_URL)
+        self.assertEqual(cfg.memd_bin, DEFAULT_MEMD_BIN)
         self.assertEqual(cfg.max_tasks, DEFAULT_MAX_TASKS)
         self.assertEqual(cfg.library_k, DEFAULT_LIBRARY_K)
         self.assertEqual(cfg.output_dir, Path.cwd() / DEFAULT_OUTPUT_SUBDIR)

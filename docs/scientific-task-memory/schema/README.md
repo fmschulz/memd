@@ -169,7 +169,7 @@ The current implementation also tracks:
 
 ## Trust Boundary
 
-`memd` now exposes an explicit trust vocabulary at the MCP boundary:
+`memd` exposes an explicit trust vocabulary in local operation results:
 
 - `semantic_candidate`: retrieved by similarity without canonical artifact grounding
 - `canonical_record`: linked to a non-digest canonical artifact
@@ -179,8 +179,9 @@ The current implementation also tracks:
 The intended workflow is:
 
 1. use semantic search or digest helpers to generate candidates
-2. use `artifact.verify` to ground a claim against canonical artifacts
-3. trust the supporting canonical artifact IDs, not digest text on its own
+2. use `artifact.find_related` to surface overlapping canonical artifacts
+3. use `artifact.verification` when a distinct agent needs to countersign a claim
+4. trust the supporting canonical artifact IDs, not digest text on its own
 
 ## Exact Filters
 
@@ -217,7 +218,7 @@ These filters are resolved first, then the candidate set is reranked for retriev
 
 `memory.stats` uses aggregate counts and reports `active_chunks`, `deleted_chunks`, `total_chunks`, and active/deleted/all chunk-type maps. `memory.health` adds a read-only tenant/project report for duplicate canonical text, index coverage, payload-size percentiles, recent latency tails, and explicit alias scope information. `include_examples` controls whether duplicate previews are returned; `duplicate_limit` limits only those previews, not the aggregate duplicate group, row, or byte counts.
 
-`memory.metrics` reports latency, index, tiered-cache, rejection, and estimated token-usage metrics. The `token_usage` block counts MCP tool request/response bytes and estimates tokens as `ceil(serialized_mcp_payload_bytes / 4)` by tool and in recent calls. This is the part `memd` can observe directly; full agent token deltas still require paired agent runs that capture provider/API usage or CLI token footers.
+`memory.metrics` reports latency, index, tiered-cache, rejection, and estimated payload-size metrics. The `token_usage` block counts serialized operation request/response bytes and estimates tokens as `ceil(serialized_payload_bytes / 4)` by operation and in recent calls. This is the part `memd` can observe directly; full agent token deltas still require paired agent runs that capture provider/API usage or CLI token footers.
 
 `context.find_relevant_context` can prepend hot-context chunks, but the hot pre-scan is wall-clock bounded so broad lookups on large tenants still continue through normal retrieval. List-style retrieval scans skip stale unreadable segment rows with a warning; strict point reads through `memory.get` still surface storage errors.
 
@@ -262,7 +263,7 @@ Agents should follow this contract:
 9. Use `memory.dream` in dry-run mode before applying retention or compaction actions.
 10. Use `artifact.search` / `artifact.list_thread` when the artifact itself is the unit of exchange.
 
-This is how `memd` enforces consistent reporting across agents in the same tenant. For one trusted machine or trust domain, agents should prefer a stable shared `tenant_id` and use `project_id`, `thread_id`, and `task_id` for narrower scopes. Cross-tenant project recovery is explicit: configure same-project `server.project_aliases` for known historical scopes and inspect `scope_expansion` plus per-hit `origin` metadata in search responses.
+This is how `memd` enforces consistent reporting across agents in the same tenant. For one trusted machine or trust domain, agents should prefer a stable shared `tenant_id` and use `project_id`, `thread_id`, and `task_id` for narrower scopes. Cross-tenant project recovery is explicit: configure same-project compatibility aliases for known historical scopes and inspect `scope_expansion` plus per-hit `origin` metadata in search responses.
 
 ## Documentation Status
 

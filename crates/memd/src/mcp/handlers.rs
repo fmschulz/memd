@@ -1,7 +1,7 @@
-//! Tool call handlers for MCP
+//! Local operation handlers.
 //!
-//! Bridges MCP tool calls to store operations.
-//! Each handler validates parameters, calls the store, and formats the response.
+//! Each handler validates parameters, calls the store, and formats the response
+//! consumed by direct CLI commands, `memd call`, and `memd batch`.
 
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
@@ -17,15 +17,23 @@ use tracing::{debug, info, warn};
 /// tenant on this daemon that contains the same project string.
 ///
 /// Off by default: tenant isolation is the expected behavior, the
-/// fallback is a migration shim only. `McpServer::new` sets this from
-/// `ServerConfig.allow_cross_tenant_project_fallback`.
+/// fallback is a migration shim only. CLI startup sets this from the
+/// compatibility routing config.
 static ALLOW_CROSS_TENANT_PROJECT_FALLBACK: AtomicBool = AtomicBool::new(false);
 static PROJECT_ALIASES: OnceLock<std::sync::RwLock<Vec<ProjectAliasConfig>>> = OnceLock::new();
 const HOT_CONTEXT_SCAN_TIMEOUT_MS: u64 = 2_000;
 
-/// Enable or disable the cross-tenant project fallback. Called from
-/// `McpServer::new` / `McpServer::with_metrics` to honour the server
-/// config. Exposed as `pub(crate)` so integration tests can flip it.
+/// Apply process-wide compatibility routing for operation handlers.
+pub fn configure_operation_routing(
+    allow_cross_tenant_project_fallback: bool,
+    project_aliases: Vec<ProjectAliasConfig>,
+) {
+    set_cross_tenant_project_fallback(allow_cross_tenant_project_fallback);
+    set_project_aliases(project_aliases);
+}
+
+/// Enable or disable the cross-tenant project fallback. Exposed as
+/// `pub(crate)` so unit tests can flip it.
 pub(crate) fn set_cross_tenant_project_fallback(enabled: bool) {
     ALLOW_CROSS_TENANT_PROJECT_FALLBACK.store(enabled, Ordering::Relaxed);
 }
@@ -75,13 +83,9 @@ fn configured_project_aliases(primary_tenant: &TenantId, project_id: &str) -> Ve
 /// Resolve an `agent_id` for an artifact write from an explicit param.
 ///
 /// Rationale — the v0.3.0 prototype maintained a process-global default
-/// derived from `initialize.clientInfo` in a `static RwLock<Option<String>>`.
-/// That was unsound: `McpServer` is shared across every HTTP client
-/// behind `Arc<AsyncMutex<_>>`, and `handle_initialize` rewrote the
-/// default on each call. One session could overwrite another's
-/// identity and bypass the distinct-writer countersignature rule, or a
-/// single client could reinitialize as a different persona between
-/// writes and forge a false countersignature.
+/// derived from an implicit client handshake in a `static RwLock<Option<String>>`.
+/// That was unsound because one caller could overwrite another's identity and
+/// bypass the distinct-writer countersignature rule.
 ///
 /// v0.3.1 therefore keeps agent identity **explicit**: callers supply
 /// `agent_id` on artifact writes when they want countersignature
@@ -102,10 +106,10 @@ pub(crate) fn resolved_agent_id(explicit: Option<&str>) -> Option<String> {
 use super::error::McpError;
 // `pub use` (not plain `use`) so the legacy public path
 // `memd::mcp::handlers::PostWriteEvent` keeps resolving for downstream
-// code that named it directly before the Item 6 relocation. The
-// canonical home is now `memd::mcp::post_write_hooks::PostWriteEvent`
-// (re-exported at `memd::mcp::PostWriteEvent`), but dropping the
-// nested path would be a silent semver shrink.
+// code that named it directly before the Item 6 relocation. The canonical
+// home is now `memd::mcp::post_write_hooks::PostWriteEvent` (re-exported at
+// `memd::mcp::PostWriteEvent`), but dropping the nested path would be a
+// silent semver shrink.
 pub use super::post_write_hooks::PostWriteEvent;
 use crate::config::ProjectAliasConfig;
 use crate::maintenance::{

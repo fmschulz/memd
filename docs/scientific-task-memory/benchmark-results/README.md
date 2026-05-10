@@ -31,15 +31,29 @@ To regenerate the omitted large artifacts locally:
 
 ## What The Benchmark Measures
 
-The benchmark compares two memd-native modes on the same knowledge:
+The benchmark compares two memd-native schema modes on the same knowledge:
 
-1. `memd_chunk_baseline`
+1. `chunk_baseline`
    - each case is flattened into generic memory chunks
    - retrieval uses `memory.search`
 
-2. `memd_task_memory`
+2. `task_memory`
    - each case is seeded through the real `task.*` lifecycle
    - retrieval uses `task.search`
+
+It now runs those modes across three local CLI execution lanes:
+
+- `cli_cold`
+  - one executable process per operation
+- `cli_warm`
+  - `memd warm start` plus `--warm required` so calls reuse the private CLI
+    worker
+- `cli_batch`
+  - `memd batch --jsonl - --stream` so scripted calls run inside one loaded
+    process
+
+The warm worker is a private Unix-socket CLI acceleration layer. It is not HTTP
+and is not an agent-visible integration surface.
 
 It can also run live external comparisons when compatible checkouts are available:
 
@@ -110,7 +124,11 @@ For external systems with flatter schemas, the benchmark currently scores task-l
 
 ## memd-native Modes
 
-`memd_chunk_baseline` and `memd_task_memory` use the same underlying task knowledge, but they seed and query it differently.
+The generated system names combine an execution lane with a schema mode, for
+example `memd_cli_warm_task_memory` or `memd_cli_batch_chunk_baseline`.
+
+The chunk-baseline and task-memory modes use the same underlying task knowledge,
+but they seed and query it differently.
 
 ### `memd_chunk_baseline`
 
@@ -126,7 +144,7 @@ For external systems with flatter schemas, the benchmark currently scores task-l
 - queries with `task.search`
 - uses task-aware exact filters plus candidate reranking
 
-That is why the task-memory mode takes longer to seed, but is both more accurate and faster to query on the hardened corpus.
+The relative quality and latency should be read from the current generated report. The task-memory mode usually writes more projections and is expected to cost more at seed time, while current retrieval quality depends on both the structured `task.search` filters and the strength of the generic `memory.search` baseline.
 
 ## How To Run
 
@@ -138,8 +156,9 @@ You can also run the Python tool directly:
 
 ```bash
 python3 evals/bench/tools/task_memory_benchmark.py \
-  --memd-path target/debug/memd \
+  --memd-path target/release/memd \
   --corpus docs/scientific-task-memory/benchmark-results/task_memory_benchmark_corpus.json \
+  --memd-lanes cli_cold cli_warm cli_batch \
   --workers 1 \
   --ops-per-worker 1
 ```

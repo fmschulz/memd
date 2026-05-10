@@ -2,6 +2,11 @@
 
 This directory contains the benchmark entrypoints that still matter in this repo.
 
+For a map of completed runs and where their result artifacts live, see
+[`../BENCHMARK_INVENTORY.md`](../BENCHMARK_INVENTORY.md). For the next proposed
+agent benchmark, see
+[`../memd-multiturn-token-savings/README.md`](../memd-multiturn-token-savings/README.md).
+
 ## Keep
 
 - `run_offline_retrieval_benchmark.sh`
@@ -62,8 +67,13 @@ Useful options:
   --workers 1 \
   --ops-per-worker 1 \
   --top-k 3 \
+  --memd-lanes cli_cold cli_warm cli_batch \
   --genesism-root ../../genesisM
 ```
+
+`--memd-lanes` accepts `cli_cold`, `cli_warm`, and `cli_batch`. The warm lane
+uses the private `memd warm` CLI worker, and the batch lane uses
+`memd batch --jsonl`; neither lane registers external client tools.
 
 Outputs:
 
