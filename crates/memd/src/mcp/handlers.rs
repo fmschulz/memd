@@ -59,6 +59,11 @@ pub(crate) fn resolved_agent_id(explicit: Option<&str>) -> Option<String> {
 
 use super::error::McpError;
 use crate::metrics::{IndexStats, MetricsCollector};
+use crate::omf::{
+    ingestion_mode_from_tags, normalize_ingestion_mode_tag, OmfChunk, OmfEnvelope, OMF_FORMAT,
+    OMF_VERSION,
+};
+use crate::store::metadata::MetadataStore;
 use crate::store::{FeedbackEntry, RelevanceLabel, Store, StoreStats, TenantManager};
 use crate::task_memory::{
     build_library_digest_artifact, build_project_brief_digest_artifact, build_project_brief_view,
@@ -73,8 +78,8 @@ use crate::task_memory::{
 };
 use crate::tiered::TieredTiming;
 use crate::types::{
-    ChunkId, ChunkType, IngestionMode, LifecycleDelta, MemoryChunk, ProjectId, Source, TenantId,
-    VisibilityPolicy,
+    ChunkId, ChunkType, IngestionMode, LifecycleDelta, LifecycleMetadata, MemoryChunk, ProjectId,
+    Source, TenantId, VisibilityPolicy,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -731,6 +736,31 @@ pub struct GetParams {
     pub include_history: Option<bool>,
 }
 
+/// Parameters for memory.export_omf
+#[derive(Debug, Deserialize)]
+pub struct OmfExportParams {
+    #[serde(default)]
+    pub tenant_id: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub include_history: bool,
+}
+
+/// Parameters for memory.import_omf
+#[derive(Debug, Deserialize)]
+pub struct OmfImportParams {
+    #[serde(default)]
+    pub tenant_id: String,
+    pub omf: OmfEnvelope,
+    #[serde(default)]
+    pub merge_strategy: Option<String>,
+    #[serde(default)]
+    pub fuzzy: bool,
+    #[serde(default)]
+    pub dedupe_threshold: Option<f32>,
+}
+
 /// Parameters for memory.find_near_duplicates
 #[derive(Debug, Deserialize)]
 pub struct FindNearDuplicatesParams {
@@ -1173,6 +1203,22 @@ pub struct AddResult {
 /// Result of a batch add operation
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AddBatchResult {
+    pub chunk_ids: Vec<String>,
+}
+
+/// Result of memory.export_omf
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OmfExportResult {
+    pub omf: OmfEnvelope,
+    pub chunk_count: usize,
+}
+
+/// Result of memory.import_omf
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OmfImportResult {
+    pub imported_count: usize,
+    pub merged_count: usize,
+    pub skipped_count: usize,
     pub chunk_ids: Vec<String>,
 }
 
@@ -1757,7 +1803,6 @@ fn make_episode_tag(episode_id: &str) -> String {
     format!("episode:{}", episode_id)
 }
 
-const INGESTION_MODE_TAG_PREFIX: &str = "ingestion_mode:";
 const CONVERSATION_REVIEW_WINDOW_MS: i64 = 14 * 24 * 60 * 60 * 1_000;
 
 fn parse_ingestion_mode(mode: Option<&str>) -> Result<IngestionMode, McpError> {
@@ -1773,8 +1818,7 @@ fn apply_ingestion_mode_tag(tags: &mut Vec<String>, mode: IngestionMode) {
     // The parsed `mode` parameter is authoritative. Normalize any
     // caller-supplied ingestion_mode labels to one stable tag so OMF
     // export/import can round-trip the mode without ambiguous duplicates.
-    tags.retain(|tag| !tag.starts_with(INGESTION_MODE_TAG_PREFIX));
-    tags.push(format!("{INGESTION_MODE_TAG_PREFIX}{mode}"));
+    normalize_ingestion_mode_tag(tags, mode);
 }
 
 fn review_after_for_ingestion_mode(mode: IngestionMode, explicit: Option<i64>) -> Option<i64> {
@@ -5996,6 +6040,276 @@ pub async fn handle_memory_get<S: Store>(store: &S, params: GetParams) -> Result
         "lifecycle": resolved.lifecycle,
         "status": resolved.status.to_string(),
     }))
+}
+
+/// Handle memory.export_omf tool call.
+pub async fn handle_memory_export_omf<S: Store>(
+    store: &S,
+    params: OmfExportParams,
+) -> Result<Value, McpError> {
+    let ps = store.as_persistent().ok_or_else(|| {
+        McpError::ToolError("memory.export_omf requires a persistent store".into())
+    })?;
+    let tenant_id = resolve_tenant_id(&params.tenant_id)?;
+    if let Some(project_id) = params.project_id.as_deref() {
+        validate_identifier("project_id", project_id)?;
+    }
+
+    let rows = ps
+        .metadata()
+        .list_for_export(
+            &tenant_id,
+            params.project_id.as_deref(),
+            params.include_history,
+        )
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let mut chunks = Vec::with_capacity(rows.len());
+
+    for meta in rows {
+        let Some(chunk) = ps
+            .get(&tenant_id, &meta.chunk_id)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?
+        else {
+            continue;
+        };
+        chunks.push(OmfChunk {
+            chunk_id: meta.chunk_id.clone(),
+            tenant_id: tenant_id.to_string(),
+            project_id: meta.project_id.clone(),
+            text: chunk.text.clone(),
+            chunk_type: meta.chunk_type.to_string(),
+            timestamp_created: meta.timestamp_created,
+            status: meta.status,
+            lifecycle: meta.lifecycle.clone(),
+            ingestion_mode: ingestion_mode_from_tags(&chunk.tags),
+            chunk,
+            canonical_text: meta.canonical_text.clone(),
+        });
+    }
+
+    let omf = OmfEnvelope {
+        format: OMF_FORMAT.to_string(),
+        version: OMF_VERSION,
+        tenant_id: tenant_id.to_string(),
+        project_id: params.project_id,
+        exported_at_ms: current_time_ms(),
+        chunks,
+    };
+    format_mcp_response(&OmfExportResult {
+        chunk_count: omf.chunks.len(),
+        omf,
+    })
+}
+
+/// Handle memory.import_omf tool call.
+pub async fn handle_memory_import_omf<S: Store>(
+    store: &S,
+    params: OmfImportParams,
+) -> Result<Value, McpError> {
+    let ps = store.as_persistent().ok_or_else(|| {
+        McpError::ToolError("memory.import_omf requires a persistent store".into())
+    })?;
+    if params.omf.format != OMF_FORMAT {
+        return Err(McpError::InvalidParams(format!(
+            "omf.format must be {OMF_FORMAT}"
+        )));
+    }
+    if params.omf.version != OMF_VERSION {
+        return Err(McpError::InvalidParams(format!(
+            "unsupported omf.version {}; expected {OMF_VERSION}",
+            params.omf.version
+        )));
+    }
+    let tenant_raw = if params.tenant_id.trim().is_empty() {
+        params.omf.tenant_id.as_str()
+    } else {
+        params.tenant_id.as_str()
+    };
+    let tenant_id = resolve_tenant_id(tenant_raw)?;
+    if let Some(project_id) = params.omf.project_id.as_deref() {
+        validate_identifier("omf.project_id", project_id)?;
+    }
+    let semantic_merge = match params.merge_strategy.as_deref().unwrap_or("semantic") {
+        "semantic" => true,
+        "append" => false,
+        other => {
+            return Err(McpError::InvalidParams(format!(
+                "merge_strategy must be 'semantic' or 'append', got {other}"
+            )));
+        }
+    };
+    let threshold = resolve_similarity_threshold("dedupe_threshold", params.dedupe_threshold)?;
+
+    let mut imported_count = 0usize;
+    let mut merged_count = 0usize;
+    let skipped_count = 0usize;
+    let mut chunk_ids = Vec::with_capacity(params.omf.chunks.len());
+
+    for entry in params.omf.chunks {
+        let chunk_type = parse_chunk_type(&entry.chunk_type)?;
+        if let Some(project_id) = entry.project_id.as_deref() {
+            validate_identifier("omf.chunks[].project_id", project_id)?;
+        }
+        let project_id = entry.project_id.as_deref();
+
+        if semantic_merge {
+            if let Some(existing) = ps
+                .get_with_lifecycle(&tenant_id, &entry.chunk_id)
+                .await
+                .map_err(|e| McpError::ToolError(e.to_string()))?
+            {
+                if let Some(delta) = lifecycle_merge_delta_from_omf(&entry, &existing.lifecycle) {
+                    ps.update_lifecycle(&tenant_id, &entry.chunk_id, &delta)
+                        .await
+                        .map_err(|e| McpError::ToolError(e.to_string()))?;
+                }
+                merged_count += 1;
+                chunk_ids.push(entry.chunk_id.to_string());
+                continue;
+            }
+
+            let mut matches = ps
+                .find_near_duplicates(
+                    &tenant_id,
+                    project_id,
+                    &entry.text,
+                    chunk_type,
+                    params.fuzzy,
+                    threshold,
+                    1,
+                )
+                .await
+                .map_err(|e| McpError::ToolError(e.to_string()))?;
+            if matches.is_empty() && project_id.is_some() {
+                matches = ps
+                    .find_near_duplicates(
+                        &tenant_id,
+                        None,
+                        &entry.text,
+                        chunk_type,
+                        params.fuzzy,
+                        threshold,
+                        1,
+                    )
+                    .await
+                    .map_err(|e| McpError::ToolError(e.to_string()))?;
+            }
+            if let Some(candidate) = matches.first() {
+                if candidate.exact {
+                    if let Some(existing) = ps
+                        .get_with_lifecycle(&tenant_id, &candidate.chunk_id)
+                        .await
+                        .map_err(|e| McpError::ToolError(e.to_string()))?
+                    {
+                        if let Some(delta) =
+                            lifecycle_merge_delta_from_omf(&entry, &existing.lifecycle)
+                        {
+                            ps.update_lifecycle(&tenant_id, &candidate.chunk_id, &delta)
+                                .await
+                                .map_err(|e| McpError::ToolError(e.to_string()))?;
+                        }
+                    }
+                    merged_count += 1;
+                    chunk_ids.push(candidate.chunk_id.to_string());
+                    continue;
+                }
+
+                let mut chunk = omf_entry_to_chunk(&entry, &tenant_id)?;
+                ensure_import_chunk_id_available(ps.metadata(), &mut chunk)?;
+                let mut lifecycle_delta = lifecycle_initial_delta_from_omf(&entry);
+                lifecycle_delta.supersedes = None;
+                lifecycle_delta.superseded_by = None;
+                let new_id = ps
+                    .supersede_chunk(&tenant_id, &candidate.chunk_id, chunk)
+                    .await
+                    .map_err(|e| McpError::ToolError(e.to_string()))?;
+                ps.update_lifecycle(&tenant_id, &new_id, &lifecycle_delta)
+                    .await
+                    .map_err(|e| McpError::ToolError(e.to_string()))?;
+                imported_count += 1;
+                chunk_ids.push(new_id.to_string());
+                continue;
+            }
+        }
+
+        let mut chunk = omf_entry_to_chunk(&entry, &tenant_id)?;
+        ensure_import_chunk_id_available(ps.metadata(), &mut chunk)?;
+        let lifecycle_delta = lifecycle_initial_delta_from_omf(&entry);
+        let chunk_id = ps
+            .add_chunk_with_lifecycle(chunk, lifecycle_delta)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        imported_count += 1;
+        chunk_ids.push(chunk_id.to_string());
+    }
+
+    format_mcp_response(&OmfImportResult {
+        imported_count,
+        merged_count,
+        skipped_count,
+        chunk_ids,
+    })
+}
+
+fn lifecycle_initial_delta_from_omf(entry: &OmfChunk) -> LifecycleDelta {
+    LifecycleDelta {
+        status: Some(entry.status),
+        tier: Some(entry.lifecycle.tier),
+        supersedes: entry.lifecycle.supersedes.clone(),
+        superseded_by: entry.lifecycle.superseded_by.clone(),
+        expires_at_ms: Some(entry.lifecycle.expires_at_ms),
+        review_after_ms: Some(entry.lifecycle.review_after_ms),
+        lifecycle_updated_at_ms: Some(entry.lifecycle.lifecycle_updated_at_ms),
+    }
+}
+
+fn lifecycle_merge_delta_from_omf(
+    entry: &OmfChunk,
+    existing: &LifecycleMetadata,
+) -> Option<LifecycleDelta> {
+    if entry.lifecycle.lifecycle_updated_at_ms <= existing.lifecycle_updated_at_ms {
+        return None;
+    }
+
+    Some(LifecycleDelta {
+        status: Some(entry.status),
+        tier: Some(entry.lifecycle.tier),
+        supersedes: entry.lifecycle.supersedes.clone(),
+        superseded_by: entry.lifecycle.superseded_by.clone(),
+        expires_at_ms: entry.lifecycle.expires_at_ms.map(Some),
+        review_after_ms: entry.lifecycle.review_after_ms.map(Some),
+        lifecycle_updated_at_ms: Some(entry.lifecycle.lifecycle_updated_at_ms),
+    })
+}
+
+fn ensure_import_chunk_id_available<M: MetadataStore>(
+    metadata: &M,
+    chunk: &mut MemoryChunk,
+) -> Result<(), McpError> {
+    if metadata
+        .chunk_id_exists(&chunk.chunk_id)
+        .map_err(|e| McpError::ToolError(e.to_string()))?
+    {
+        chunk.chunk_id = ChunkId::new();
+    }
+    Ok(())
+}
+
+fn omf_entry_to_chunk(entry: &OmfChunk, tenant_id: &TenantId) -> Result<MemoryChunk, McpError> {
+    let chunk_type = parse_chunk_type(&entry.chunk_type)?;
+    let mut chunk = MemoryChunk::new(tenant_id.clone(), entry.text.clone(), chunk_type);
+    chunk.chunk_id = entry.chunk_id.clone();
+    chunk.project_id = ProjectId::new(entry.project_id.clone());
+    chunk.agent_id = entry.chunk.agent_id.clone();
+    chunk.timestamp_created = entry.timestamp_created;
+    chunk.timestamp_observed = entry.chunk.timestamp_observed;
+    chunk.status = entry.status;
+    chunk.promotion_state = entry.chunk.promotion_state;
+    chunk.source = entry.chunk.source.clone();
+    chunk.tags = entry.chunk.tags.clone();
+    normalize_ingestion_mode_tag(&mut chunk.tags, entry.ingestion_mode);
+    Ok(chunk)
 }
 
 /// Current wall-clock time in milliseconds since UNIX_EPOCH.

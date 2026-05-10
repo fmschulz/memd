@@ -1450,3 +1450,266 @@ async fn memory_add_supersede_duplicate_preserves_conversation_mode_lifecycle() 
     );
     assert!(body["lifecycle"]["review_after_ms"].is_i64(), "{body}");
 }
+
+#[tokio::test]
+async fn memory_export_import_omf_round_trips_lifecycle_and_ingestion_mode() {
+    let (server, _tmp) = test_server().await;
+
+    let add = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "source",
+            "project_id": "omf_project",
+            "text": "omf conversation payload",
+            "type": "message",
+            "mode": "conversation",
+            "expires_at_ms": 4_000_000_000_000i64
+        }),
+    )
+    .await;
+    let add_body = parse_result_text(&add);
+    let original_id = add_body["chunk_id"].as_str().unwrap();
+
+    let export = call_tool(
+        &server,
+        "memory.export_omf",
+        serde_json::json!({
+            "tenant_id": "source",
+            "project_id": "omf_project"
+        }),
+    )
+    .await;
+    let export_body = parse_result_text(&export);
+    assert_eq!(
+        export_body["chunk_count"].as_u64(),
+        Some(1),
+        "{export_body}"
+    );
+    let omf = export_body["omf"].clone();
+    assert_eq!(omf["format"].as_str(), Some("memd.omf"));
+    assert_eq!(omf["chunks"][0]["chunk_id"].as_str(), Some(original_id));
+    assert_eq!(
+        omf["chunks"][0]["ingestion_mode"].as_str(),
+        Some("conversation")
+    );
+
+    let import = call_tool(
+        &server,
+        "memory.import_omf",
+        serde_json::json!({
+            "tenant_id": "target",
+            "omf": omf
+        }),
+    )
+    .await;
+    let import_body = parse_result_text(&import);
+    assert_eq!(
+        import_body["imported_count"].as_u64(),
+        Some(1),
+        "{import_body}"
+    );
+    assert_eq!(
+        import_body["merged_count"].as_u64(),
+        Some(0),
+        "{import_body}"
+    );
+    let imported_id = import_body["chunk_ids"][0].as_str().unwrap();
+    assert_ne!(imported_id, original_id);
+
+    let get = call_tool(
+        &server,
+        "memory.get",
+        serde_json::json!({
+            "tenant_id": "target",
+            "chunk_id": imported_id,
+            "include_expired": true
+        }),
+    )
+    .await;
+    let body = parse_result_text(&get);
+    assert_eq!(
+        body["chunk"]["text"].as_str(),
+        Some("omf conversation payload")
+    );
+    assert!(
+        body["chunk"]["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tag| tag.as_str() == Some("ingestion_mode:conversation")),
+        "{body}"
+    );
+    assert_eq!(
+        body["lifecycle"]["expires_at_ms"].as_i64(),
+        Some(4_000_000_000_000),
+        "{body}"
+    );
+    assert!(body["lifecycle"]["review_after_ms"].is_i64(), "{body}");
+
+    let source_get = call_tool(
+        &server,
+        "memory.get",
+        serde_json::json!({
+            "tenant_id": "source",
+            "chunk_id": original_id,
+            "include_expired": true
+        }),
+    )
+    .await;
+    let body = parse_result_text(&source_get);
+    assert_eq!(body["found"].as_bool(), Some(true), "{body}");
+    assert_eq!(
+        body["chunk"]["text"].as_str(),
+        Some("omf conversation payload"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn memory_import_omf_semantic_merge_skips_exact_duplicate() {
+    let (server, _tmp) = test_server().await;
+    let target = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "target",
+            "text": "omf duplicate payload",
+            "type": "doc",
+            "expires_at_ms": 4_100_000_000_000i64
+        }),
+    )
+    .await;
+    let target_body = parse_result_text(&target);
+    let target_id = ChunkId::parse(target_body["chunk_id"].as_str().unwrap()).unwrap();
+
+    let export_source = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "source",
+            "text": "OMF duplicate   payload",
+            "type": "doc",
+            "mode": "document"
+        }),
+    )
+    .await;
+    parse_result_text(&export_source);
+
+    let export = call_tool(
+        &server,
+        "memory.export_omf",
+        serde_json::json!({
+            "tenant_id": "source"
+        }),
+    )
+    .await;
+    let omf = parse_result_text(&export)["omf"].clone();
+
+    let preview = call_tool(
+        &server,
+        "memory.find_near_duplicates",
+        serde_json::json!({
+            "tenant_id": "target",
+            "text": "OMF duplicate   payload",
+            "type": "doc"
+        }),
+    )
+    .await;
+    let preview_body = parse_result_text(&preview);
+    assert_eq!(
+        preview_body["matches"].as_array().unwrap().len(),
+        1,
+        "{preview_body}"
+    );
+    assert_eq!(
+        preview_body["matches"][0]["chunk_id"].as_str(),
+        Some(target_id.to_string().as_str())
+    );
+
+    let import = call_tool(
+        &server,
+        "memory.import_omf",
+        serde_json::json!({
+            "tenant_id": "target",
+            "omf": omf
+        }),
+    )
+    .await;
+    let body = parse_result_text(&import);
+    assert_eq!(body["imported_count"].as_u64(), Some(0), "{body}");
+    assert_eq!(body["merged_count"].as_u64(), Some(1), "{body}");
+
+    let search = call_tool(
+        &server,
+        "memory.search",
+        serde_json::json!({
+            "tenant_id": "target",
+            "query": "duplicate payload",
+            "k": 10
+        }),
+    )
+    .await;
+    let body = parse_result_text(&search);
+    assert_eq!(body["results"].as_array().unwrap().len(), 1, "{body}");
+
+    let get = call_tool(
+        &server,
+        "memory.get",
+        serde_json::json!({
+            "tenant_id": "target",
+            "chunk_id": target_id.to_string(),
+            "include_expired": true
+        }),
+    )
+    .await;
+    let body = parse_result_text(&get);
+    assert_eq!(
+        body["lifecycle"]["expires_at_ms"].as_i64(),
+        Some(4_100_000_000_000),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn memory_import_omf_rejects_invalid_chunk_project_id() {
+    let (server, _tmp) = test_server().await;
+
+    let add = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "source",
+            "text": "omf bad project",
+            "type": "doc"
+        }),
+    )
+    .await;
+    parse_result_text(&add);
+
+    let export = call_tool(
+        &server,
+        "memory.export_omf",
+        serde_json::json!({
+            "tenant_id": "source"
+        }),
+    )
+    .await;
+    let mut omf = parse_result_text(&export)["omf"].clone();
+    omf["chunks"][0]["project_id"] = serde_json::json!("");
+
+    let import = call_tool(
+        &server,
+        "memory.import_omf",
+        serde_json::json!({
+            "tenant_id": "target",
+            "omf": omf
+        }),
+    )
+    .await;
+    let err = parse_error(&import).expect("import should reject invalid project id");
+    assert!(
+        err.1.contains("project_id"),
+        "expected project_id validation error, got {err:?}"
+    );
+}
