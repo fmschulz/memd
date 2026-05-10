@@ -1,84 +1,53 @@
 # memd Example Index
 
-These examples show how to use `memd` as a shared knowledge-artifact memory system.
+These examples use the skill + CLI workflow.
 
-## Example 1: Task Lifecycle Across Sessions
+## Task Lifecycle Across Sessions
 
 File: [session_tracking.md](session_tracking.md)
 
-Use this when:
+Use this when one agent starts work and another resumes later.
 
-- one agent starts work and another agent resumes it later
-- you want consistent reporting of motivation, runs, failures, and outcomes
-- you need `task.get` and `task.search` to reconstruct prior work
+Key commands:
 
-Key tools:
+- `memd agent-context`
+- `memd search`
+- `memd add --chunk-type summary --tags kind:progress`
+- `memd add --chunk-type trace --tags kind:run`
+- `memd add --chunk-type research --tags kind:evidence`
+- `memd add --chunk-type summary --tags kind:finish`
 
-- `task.start`
-- `task.progress`
-- `task.run_start`
-- `task.run_finish`
-- `task.add_evidence`
-- `task.finish`
-- `task.get`
-- `task.search`
-
-## Example 2: Cross-Agent Experiment and Decision Tracking
+## Cross-Agent Experiment and Decision Tracking
 
 File: [decision_tracking.md](decision_tracking.md)
 
-Use this when:
+Use this when multiple agents compare what worked, what failed, and why.
 
-- multiple agents are iterating on the same scientific or engineering question
-- you need to compare what worked and what failed
-- you want evidence and rationale to survive handoffs
+Key commands:
 
-Key tools:
+- `memd search --mode find-decisions`
+- `memd search --mode find-evidence`
+- `memd add --chunk-type decision --tags kind:decision`
+- `memd add --chunk-type research --tags kind:evidence`
 
-- `task.search` with exact filters
-- `task.add_evidence`
-- `task.finish`
-- `memory.search` for broader context
-
-## Example 3: Codebase Indexing with Task Tracking
+## Codebase Indexing with Task Tracking
 
 File: [codebase_indexing.md](codebase_indexing.md)
 
-Use this when:
+Use this when you are storing source or documentation chunks and still want the
+indexing job itself to be recoverable later.
 
-- you are indexing a repository into raw `memory.*` chunks
-- you still want the indexing job itself tracked as a task artifact
-- later agents need to know what was indexed, with which parameters, and what coverage gaps remain
+Key commands:
 
-Key tools:
+- `memd add --chunk-type code`
+- `memd add --chunk-type doc`
+- `memd add --chunk-type summary --tags kind:progress`
+- `memd search`
 
-- `task.start`
-- `task.run_start`
-- `memory.add_batch`
-- `task.run_finish`
-- `task.finish`
+## Choosing Chunk Types
 
-## Choosing Between `task.*` and `memory.*`
-
-Use `task.*` when the work has:
-
-- a goal
-- motivation
-- a hypothesis or question
-- runs and parameters
-- evidence
-- outcomes
-
-Use `memory.*` when the content is a raw chunk such as:
-
-- source code
-- documentation
-- codified context
-- ad hoc notes
-
-In practice, many workflows use both:
-
-1. record the task lifecycle with `task.*`
-2. store raw source artifacts with `memory.add` / `memory.add_batch`
-3. query structured history with `task.search`
-4. query broad context with `memory.search`
+Use `summary` for task progress and finishes.
+Use `trace` for commands, runs, logs, and tool outputs.
+Use `research` for evidence and analysis.
+Use `decision` for explicit choices and rationale.
+Use `code` or `doc` for raw indexed source material.

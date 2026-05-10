@@ -1,136 +1,135 @@
 # memd
 
-[![Version](https://img.shields.io/badge/version-0.12.0-blue)](https://github.com/fmschulz/memd/releases/tag/v0.12.0)
+[![Version](https://img.shields.io/badge/version-0.13.0-blue)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-`memd` is a local MCP daemon that gives coding agents and AI scientists a single
-shared, persistent memory: raw searchable content, structured task history, and
-canonical collaboration artifacts — indexed by a hybrid dense + sparse retrieval
-stack and gated by an explicit trust boundary.
+`memd` is a local memory CLI that gives coding agents and AI scientists a
+single shared, persistent memory: raw searchable content, structured task
+history, and canonical collaboration artifacts, indexed by a hybrid dense +
+sparse retrieval stack and gated by an explicit trust boundary.
 
-Every session on the same machine talks to one `memd` over HTTP, so task
-context, evidence, decisions, and digests carry across agents, models, and
-restarts without copy-paste.
+The main workflow is skill + CLI. Agents retrieve bounded context with
+`memd agent-context` or `memd search`, read the generated context file, and
+record durable progress with `memd add`. Former tool-style operations remain
+available through `memd call <operation> --json ...`; they no longer require an
+agent-visible integration layer. For low-latency local use, `memd` can keep the
+store and indexes hot through a private CLI-managed warm worker; this is a
+background process driven through ordinary CLI commands.
 
 ## Contents
 
 - [What it does](#what-it-does)
 - [Architecture](#architecture)
 - [Quick start](#quick-start)
-- [Tool surface](#tool-surface)
+- [CLI surface](#cli-surface)
+- [Local operation surface](#local-operation-surface)
 - [Trust boundary](#trust-boundary)
 - [Shared topology](#shared-topology)
 - [Data layout](#data-layout)
 - [Configuration](#configuration)
 - [Observability](#observability)
-- [Benchmarks](#benchmarks)
+- [Benchmarking Overview](#benchmarking-overview)
 - [Optional ONNX cross-encoder](#optional-onnx-cross-encoder)
+- [Optional MemReranker-4B](#optional-memreranker-4b)
 - [Compiled Wiki](#compiled-wiki)
 - [Agent skill](#agent-skill)
 - [More](#more)
 
 ## What it does
 
-| Surface | Purpose | Primary tools |
+| Surface | Purpose | Primary CLI commands |
 | --- | --- | --- |
-| `memory.*` | Raw searchable chunks (code, docs, notes, indexed files) | `memory.add`, `memory.add_batch`, `memory.search`, `memory.compact`, `memory.dream` |
-| `task.*` | Structured work history: goal, runs, evidence, outcomes | `task.start`, `task.progress`, `task.run_start`, `task.run_finish`, `task.add_evidence`, `task.finish`, `task.resume` |
-| `artifact.*` | Canonical collaboration: reviews, revisions, decisions, verifications, threads | `artifact.review`, `artifact.revision`, `artifact.decision`, `artifact.verification`, `artifact.list_thread`, `artifact.find_related` |
-| `code.*` | Structural navigation over indexed source | `code.find_definition`, `code.find_references`, `code.find_callers`, `code.find_imports` |
-| `context.*` | Summary-first briefing and retrieval | `context.brief_project`, `context.find_relevant_context`, `context.get_hot_context` |
-| `debug.*` | Post-hoc session introspection | `debug.find_tool_calls`, `debug.find_errors` |
+| Raw memory | Store and search chunks such as code, docs, notes, traces, and decisions | `memd add`, `memd search`, `memd get`, `memd delete`, `memd stats` |
+| Agent context | Build bounded pre-work context and JSON audit logs | `memd agent-context --output .memd/context.md --log-dir .memd/search-logs` |
+| Warm CLI | Keep persistent store/index state hot for repeated local calls | `memd warm start`, `memd warm status`, `--warm required` |
+| Batch CLI | Run many structured operations in one loaded process | `memd batch --jsonl requests.jsonl`, `memd batch --jsonl - --stream` |
+| Export/import | Move local memory to portable formats | `memd export`, `memd export-markdown`, `memd export-omf`, `memd import-omf` |
+| Operation parity | Invoke structured memory/task/artifact/context/code/debug operations locally | `memd call task.start --json '{"tenant_id":"t","goal":"..."}'` |
+| Guardrails | Pin tenant/project scope and CLI-first agent rules | `memd init` |
 
-Use `memory.search`, `task.search`, or `artifact.search` with `mode` set to
-`brief_project`, `resume_task`, `find_failures`, `find_decisions`,
-`find_evidence`, or `find_highlights` to bias retrieval toward persisted
-digests and canonical summaries.
-
-For lower agent context cost, `memory.search` and `artifact.search` accept
-`compact: true` and `token_budget`. Compact responses keep stable IDs, scores,
-trust tier, verification hints, and grounding refs while omitting full text,
-matched text, or full artifact JSON unless requested.
+Use `memd search --mode brief-project|resume-task|find-failures|find-decisions|find-evidence|find-highlights`
+when retrieval should bias toward persisted digests and canonical summaries.
+Use `--compact` and `--token-budget` to keep agent context small.
 
 ## Architecture
 
 ```mermaid
 flowchart TB
-  subgraph Clients
+  subgraph clients["Clients"]
     direction LR
-    CA[Coding agent]
-    SA[AI scientist]
-    HU[Human via CLI]
+    ca["Coding agent"]
+    sci["AI scientist"]
+    human["Human or controller"]
   end
 
-  subgraph Transport
+  subgraph cli_flow["Skill and CLI workflow"]
     direction LR
-    HTTP[HTTP /mcp<br/>JSON-RPC 2.0]
-    STDIO[stdio JSON-RPC]
+    agent_context["memd agent-context"]
+    search_add["memd search / memd add"]
   end
 
-  subgraph Server[memd daemon]
+  subgraph core["memd core"]
     direction TB
-    DISP[McpServer dispatcher<br/>Arc&lt;McpServer&gt;, &self handlers]
-    HND[Tool handlers<br/>memory / task / artifact / code / context / debug]
-    MET[MetricsCollector<br/>rejection + cache stats]
-    SWP[Background digest sweeper<br/>tokio::interval]
+    cli_call["memd call"]
+    handlers["Memory, task, artifact, code, context, and debug operations"]
+    metrics["Metrics and cache statistics"]
   end
 
-  subgraph Retrieval[Hybrid retrieval]
+  subgraph retrieval["Hybrid retrieval"]
     direction LR
-    HYB[HybridSearcher]
-    DEN[DenseSearcher<br/>HNSW + ArcSwap rebuild]
-    SPR[Bm25Index<br/>tantivy, open_or_create]
-    TIE[TieredSearcher<br/>hot + semantic cache]
-    XE[Optional ONNX<br/>cross-encoder reranker]
+    hybrid["Hybrid searcher"]
+    dense["Dense HNSW search"]
+    sparse["BM25 sparse search"]
+    tiered["Hot tier and semantic cache"]
+    rerank["Optional rerankers"]
   end
 
-  subgraph Storage[Persistent store]
+  subgraph storage["Persistent store"]
     direction LR
-    POOL[SqliteConnectionPool<br/>bounded, WAL mode]
-    SEG[Segment writer<br/>flush_payload + fsync]
-    WAL[WAL<br/>checkpoint + replay]
-    STRUCT[Structural index<br/>tree-sitter symbols + edges]
+    sqlite["SQLite metadata"]
+    segments["Segment files"]
+    wal["Write-ahead log"]
+    structural["Structural code index"]
   end
 
-  subgraph Disk[On-disk layout]
+  subgraph disk["On-disk layout"]
     direction LR
-    DB[(metadata.db)]
-    SEGS[(tenants/&lt;t&gt;/segments/)]
-    WALF[(tenants/&lt;t&gt;/wal.log)]
-    SPI[(sparse_index/)]
-    WI[(warm_index/)]
+    db[("metadata.db")]
+    segment_files[("tenant segments")]
+    wal_file[("tenant WAL")]
+    sparse_index[("sparse index")]
+    warm_index[("warm index")]
   end
 
-  CA --> HTTP
-  SA --> HTTP
-  HU --> STDIO
-  HTTP --> DISP
-  STDIO --> DISP
-  DISP --> HND
-  DISP --> MET
-  DISP --> SWP
-  HND --> HYB
-  HND --> POOL
-  HND --> STRUCT
-  HYB --> DEN
-  HYB --> SPR
-  HYB --> TIE
-  HYB --> XE
-  DEN --> WI
-  SPR --> SPI
-  POOL --> DB
-  HND --> SEG
-  SEG --> SEGS
-  SEG --> WAL
-  WAL --> WALF
-  STRUCT --> DB
-  SWP --> HND
+  ca --> agent_context
+  sci --> agent_context
+  human --> search_add
+  human --> cli_call
+  agent_context --> handlers
+  search_add --> handlers
+  cli_call --> handlers
+  cli_call --> metrics
+  handlers --> hybrid
+  handlers --> sqlite
+  handlers --> structural
+  hybrid --> dense
+  hybrid --> sparse
+  hybrid --> tiered
+  hybrid --> rerank
+  dense --> warm_index
+  sparse --> sparse_index
+  sqlite --> db
+  handlers --> segments
+  segments --> segment_files
+  segments --> wal
+  wal --> wal_file
+  structural --> db
 ```
 
-The runtime stack is designed so concurrent MCP requests are not serialized on
-a global mutex: handlers dispatch through `Arc<McpServer>` with `&self`, SQLite
-is accessed through a bounded connection pool under WAL-mode locking, and HNSW
-rebuilds swap atomically without blocking readers.
+The runtime stack is designed so direct CLI commands and local operation calls
+share the same storage, retrieval, and artifact machinery. SQLite is accessed
+through a bounded connection pool under WAL-mode locking, and HNSW rebuilds
+swap atomically without blocking readers.
 
 ## Quick start
 
@@ -139,66 +138,98 @@ cargo build --release
 ./target/release/memd --version
 ```
 
-Start the shared local daemon:
+Add and search memory from the CLI:
 
 ```bash
-./target/release/memd --mode mcp --transport http --http-bind 127.0.0.1:8787
+./target/release/memd add \
+  --tenant-id quickstart \
+  --project-id auth \
+  --chunk-type summary \
+  --tags kind:note,source:quickstart \
+  --text "parseConfig reads TOML and validates required auth fields"
+
+./target/release/memd search \
+  --tenant-id quickstart \
+  --project-id auth \
+  --query "auth config validation" \
+  --compact \
+  --token-budget 2000 \
+  --format markdown
 ```
 
-Legacy stdio subprocess mode:
+Build bounded context for an agent:
 
 ```bash
-./target/release/memd --mode mcp
+./target/release/memd agent-context \
+  --tenant-id quickstart \
+  --project-id auth \
+  --query "auth config validation prior work" \
+  --k 2 \
+  --token-budget 700 \
+  --format markdown \
+  --output .memd/context.md \
+  --log-dir .memd/search-logs
 ```
 
-Ephemeral run (no persistence):
+Keep the same CLI path hot for repeated calls:
 
 ```bash
-./target/release/memd --mode mcp --transport http \
-  --http-bind 127.0.0.1:8787 --in-memory --data-dir /tmp/memd-demo
+./target/release/memd warm start
+./target/release/memd agent-context --warm required \
+  --tenant-id quickstart \
+  --project-id auth \
+  --query "auth config validation prior work" \
+  --output .memd/context.md
+./target/release/memd warm stop
 ```
 
-Start a task — in v0.4+ only `goal` is required; `tenant_id` falls through
-`$MEMD_DEFAULT_TENANT` → `~/.memd/default_tenant` → `"default"`:
+Run structured operations in one process from JSONL:
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "tools/call",
-  "params": {
-    "name": "task.start",
-    "arguments": {
-      "goal": "Diagnose token validation failures",
-      "project_id": "auth"
-    }
-  }
-}
+```bash
+printf '%s\n' \
+  '{"tool":"task.start","arguments":{"tenant_id":"quickstart","project_id":"auth","goal":"capture auth validation evidence"}}' \
+  | ./target/release/memd batch --jsonl -
 ```
 
-A focused artifact tool — `agent_id` is required for distinct-writer
-countersignatures:
+Initialize CLI guardrails in a repository:
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "tools/call",
-  "params": {
-    "name": "artifact.verification",
-    "arguments": {
-      "reply_to_artifact_id": "01JABCXYZ...",
-      "agent_id": "reviewer-1",
-      "summary": "Reproduced the fix; token skew resolved",
-      "supports_claim": true
-    }
-  }
-}
+```bash
+./target/release/memd init --tenant-id quickstart --project-id auth
 ```
 
-See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough.
+Invoke structured task/artifact operations locally when a first-class CLI
+command would be too narrow:
 
-## Tool surface
+```bash
+./target/release/memd call task.start \
+  --json '{"tenant_id":"quickstart","project_id":"auth","goal":"capture auth validation evidence"}'
+```
+
+See [QUICKSTART.md](QUICKSTART.md) for the full CLI walkthrough.
+
+## CLI Surface
+
+The default agent-facing commands are:
+
+- `memd agent-context` — prefetch bounded context to a file with audit logs.
+- `memd search` — direct compact search.
+- `memd add` — store summaries, traces, evidence, and decisions.
+- `memd warm start|status|stop` — manage the private local warm worker used by
+  `--warm auto|required`.
+- `memd batch --jsonl` — run structured operation calls from JSONL in one
+  loaded process; `--stream` keeps stdin/stdout open for benchmark clients.
+- `memd get`, `memd delete`, `memd stats` — inspect and maintain chunks.
+- `memd export`, `memd export-markdown`, `memd export-omf`, `memd import-omf`
+  — portable local memory operations.
+- `memd init` — write `.memd/` scope files and CLI guardrail blocks.
+
+## Local Operation Surface
+
+`memd call <operation> --json ...` exposes the historical operation surface
+through the executable, without starting a separate integration process. This is the
+compatibility path for advanced scripts that need structured task, artifact,
+context, code, or debug operations before every operation gets a dedicated
+first-class subcommand.
 
 ### `memory.*` — raw searchable content
 
@@ -249,8 +280,8 @@ Inspection and retrieval:
 - `artifact.find_failures`, `artifact.find_decisions`, `artifact.find_evidence`,
   `artifact.find_highlights`
 
-`artifact.create` remains registered for backwards compatibility with a
-deprecation warning. Digest artifacts are server-generated and cannot be forged
+`artifact.create` remains available for backwards compatibility with a
+deprecation warning. Digest artifacts are system-generated and cannot be forged
 through `artifact.create`.
 
 `artifact.search` defaults to the full legacy response. Passing `compact: true`
@@ -279,9 +310,9 @@ instead of blocking the whole lookup on a full payload scan.
 
 ```mermaid
 flowchart LR
-  S[Candidate generation<br/>memory.search / task.search / artifact.search /<br/>digest helpers / artifact.find_related] --> R[Canonical artifacts<br/>Review / Revision / Decision / Verification]
-  R -->|distinct agent_id<br/>supports_claim = true| V[VerifiedRecord<br/>trust tier]
-  R -.single writer.-> C[CanonicalRecord<br/>trust tier]
+  candidates["Candidate retrieval surfaces"] --> artifacts["Canonical artifacts"]
+  artifacts -->|independent reviewer supports claim| verified["VerifiedRecord trust tier"]
+  artifacts -.single writer.-> canonical["CanonicalRecord trust tier"]
 ```
 
 - `memory.search`, `task.search`, `artifact.search`, and digest helpers are
@@ -296,47 +327,43 @@ flowchart LR
 
 ## Shared topology
 
-The recommended deployment is one local `memd` per machine, with multiple
-coding-agent and AI-scientist sessions connecting to the same `/mcp` endpoint.
+The recommended deployment is one shared local data directory per trusted
+machine or trust domain, with multiple coding-agent and AI-scientist sessions
+using the same `memd` CLI binary and tenant/project conventions.
 
 ```mermaid
 flowchart LR
-  subgraph MA[Machine A: memd host]
-    C1[Coding agent]
-    A1[AI scientist]
-    M[(memd HTTP MCP<br/>127.0.0.1:8787/mcp)]
-    D[(metadata.db +<br/>tenant WAL + segments)]
-    C1 -->|HTTP MCP| M
-    A1 -->|HTTP MCP| M
-    M --> D
+  subgraph machine["Shared local machine"]
+    coding_agent["Coding agent"]
+    ai_scientist["AI scientist"]
+    cli["memd CLI"]
+    data[("metadata, WAL, and segments")]
+    coding_agent --> cli
+    ai_scientist --> cli
+    cli --> data
   end
 
-  subgraph MB[Machine B: optional remote clients]
-    C2[Coding agent]
-    A2[AI scientist]
+  subgraph files["Workspace files"]
+    context_file[".memd/context.md"]
+    search_logs[".memd/search-logs"]
   end
 
-  C2 -->|private network / tunnel| M
-  A2 -->|private network / tunnel| M
+  cli --> context_file
+  cli --> search_logs
 ```
 
 Boundary conditions:
 
-- Same-machine shared sessions are the primary supported path.
-- Cross-machine access is possible by exposing the HTTP endpoint over a
-  private network or tunnel.
+- Same-machine shared sessions through the CLI are the primary supported path.
 - `memd` does **not** provide built-in multi-user authentication or
-  server-enforced account isolation.
+  account isolation.
 - `tenant_id` is caller-supplied logical partitioning, **not an authentication
-  boundary**. To serve multiple trust domains from one daemon, put the HTTP
-  endpoint behind a reverse proxy with real auth (mTLS, OAuth, basic auth) and
-  keep one `tenant_id` per trust domain.
+  boundary**. Keep separate trust domains in separate data directories or under
+  explicit tenant conventions.
 - Prefer one stable shared `tenant_id` per trust domain; use `project_id`,
   `thread_id`, and `task_id` for narrower retrieval scopes.
-- The legacy cross-tenant `project_id` fallback is **off by default** in
-  v0.3.1+. Enable it only when consolidating mis-routed history by setting
-  `server.allow_cross_tenant_project_fallback = true`. Every widened hit
-  produces a warning log.
+- Cross-tenant project aliasing is **off by default**. Enable it only when
+  consolidating mis-routed history; every widened hit produces a warning log.
 
 ## Data layout
 
@@ -372,30 +399,15 @@ Common environment variables:
 | `MEMD_CROSS_ENCODER_DISABLE` | unset | When `1`, skip ONNX cross-encoder init |
 | `ORT_DYLIB_PATH` | unset | Override ONNX Runtime shared library location |
 
-Config file: `~/.config/memd/config.toml`. Notable keys:
+Config file: `~/.config/memd/config.toml`. Common retrieval settings:
 
 ```toml
-[server]
-allow_cross_tenant_project_fallback = false   # off by default in v0.3.1+
-
-[[server.project_aliases]]
-tenant_id = "memd"
-project_id = "memd"
-
-[[server.project_aliases.aliases]]
-tenant_id = "default"
-reason = "historical project_id=memd writes"
-
-[[server.project_aliases.aliases]]
-tenant_id = "fschulz"
-reason = "historical project_id=memd writes"
-
 [retrieval]
 search_variant = "hybrid"                     # or "hybrid-cross-encoder"
 ```
 
-Project aliases currently expand same-project scopes only: omit
-`aliases.project_id` or set it to the parent `project_id`.
+Project alias compatibility settings are available for migrations from older
+tenant conventions, but same-tenant project scoping is the recommended default.
 
 ## Observability
 
@@ -412,32 +424,79 @@ Project aliases currently expand same-project scopes only: omit
   index pruning for duplicate digest projection chunks, while append-only
   segment rewrite remains explicitly blocked until recovery-safe rewrite
   support exists. Non-digest exact duplicates remain report-only.
-- `memory.metrics` surfaces per-tool, per-reason rejection counts, cache hit
-  rates, HNSW state snapshots, and estimated MCP payload token usage by tool.
+- `memory.metrics` surfaces per-operation, per-reason rejection counts, cache
+  hit rates, HNSW state snapshots, and estimated serialized payload size by
+  operation.
   Token usage is estimated from serialized request/response bytes; exact
   whole-agent or provider billing tokens still require agent/API usage capture.
   See
   [`token_overhead.md`](docs/scientific-task-memory/benchmark-results/token_overhead.md)
   for the benchmark parser and pilot measurement protocol.
-- Every rejected tool call increments `MetricsCollector::record_rejection`.
+- Every rejected operation increments `MetricsCollector::record_rejection`.
 - `tracing` subscriber emits structured JSON logs when `RUST_LOG` is set.
 - Deprecation warnings for `artifact.create` (mega-schema),
   `context.search_context_documents`, and the `artifact.verify` alias log at
   `warn!` level so migration can be tracked.
 
-## Benchmarks
+## Benchmarking Overview
 
-Offline retrieval benchmark:
+`memd` has three checked-in benchmark families. They exercise different parts
+of the system, so their numbers should not be mixed without the workload
+context.
+
+Run the task-memory benchmark:
+
+```bash
+./evals/bench/scripts/run_task_memory_benchmark.sh
+```
+
+Run the offline retrieval benchmark:
 
 ```bash
 ./evals/bench/scripts/run_offline_retrieval_benchmark.sh
 ```
 
-Task-memory benchmark (projection write-amplification, retrieval latency):
+Task-memory benchmark, recommended local execution modes:
 
-```bash
-./evals/bench/scripts/run_task_memory_benchmark.sh
-```
+| Lane | Retrieval setup | Hit@3 | MRR | Avg search latency |
+| --- | --- | ---: | ---: | ---: |
+| `cli_warm` | private warm worker | 1.00 | 0.87 | 9.7 ms |
+| `cli_batch` | streaming JSONL in one loaded process | 1.00 | 0.87 | 0.6 ms |
+
+The same report includes a flattened chunk baseline with `hit@3 = 1.00`,
+`MRR = 0.98`. The structured mode writes more retrieval projections, but warm
+and batch execution keep interactive retrieval latency low. The raw benchmark
+artifact also retains a startup-overhead diagnostic lane for reproducibility;
+the public summary focuses on the two modes agents should normally use.
+
+Bright-Pro scoped adapter, biology q5/d141:
+
+| Method | alpha-nDCG@25 | Recall@25 | Search time |
+| --- | ---: | ---: | ---: |
+| BM25 subset | 0.77393 | 0.81111 | not separately timed |
+| SuperLocalMemory Mode A | 0.78406 | 0.85333 | 31.713 s total, 6.343 s/query |
+| `memd` first search | 0.87035 | 0.98000 | 42.521 s total, 8.504 s/query |
+| `memd` repeat search | 0.87035 | 0.98000 | 33.260 s total, 6.652 s/query |
+| `memd` + MemReranker-4B | 0.90409 | 1.00000 | +92.987 s rerank |
+
+The Bright-Pro result is a scoped gold-plus-decoy adapter check, not a
+full-corpus benchmark. It uses 5 biology queries, 41 gold documents, and 100
+decoys. Repeat search is the fairer retrieval-speed number because it excludes
+fresh indexing and reuses the already-built store.
+
+Multi-turn agent benchmark:
+
+| Interface | Main purpose | Result summary |
+| --- | --- | --- |
+| `agent-context` prefetch | bounded context before the agent starts | retrieved 10/10 expected priors in the full suite5 CLI-prefetch run |
+| CLI search | retrieval by shell command during the solve | strongest token condition in the interface comparison, but slower for agents |
+| Warm and batch execution | reduce local retrieval overhead | preserve retrieval quality while avoiding repeated startup costs |
+
+Benchmark details and raw artifacts:
+
+- [Task-memory report](docs/scientific-task-memory/benchmark-results/README.md)
+- [Bright-Pro adapter](evals/bench/bright-pro-memd/README.md)
+- [Multi-turn token benchmark](evals/bench/memd-multiturn-token-savings/README.md)
 
 ## Optional ONNX cross-encoder
 
@@ -446,7 +505,9 @@ default embedding path is Candle; a normal `cargo build` does not enable ONNX.
 
 ```bash
 cargo build --release --features cross-encoder-reranker
-./target/release/memd --mode mcp --search-variant hybrid-cross-encoder
+./target/release/memd --search-variant hybrid-cross-encoder search \
+  --tenant-id quickstart \
+  --query "auth config validation"
 ```
 
 Runtime behaviour:
@@ -473,11 +534,45 @@ cargo test -p memd --features cross-encoder-reranker \
   smoke_real_onnx_scores_relevant_pair_higher -- --ignored --nocapture
 ```
 
+## Optional MemReranker-4B
+
+MemReranker-4B is available only as an explicit post-retrieval search option.
+It is not compiled into the Rust binary, not enabled by default, and not part
+of the rapid setup path. The normal search command still uses the built-in
+hybrid ranking stack.
+
+```bash
+./target/release/memd search \
+  --tenant-id quickstart \
+  --project-id auth \
+  --query "auth config validation" \
+  --k 50 \
+  --reranker auto \
+  --format markdown
+```
+
+Runtime behaviour:
+
+- `--reranker none` is the default.
+- `--reranker auto` uses MemReranker-4B only when CUDA, Python, PyTorch,
+  `sentence-transformers`, and the model runtime are available; otherwise the
+  output falls back to the built-in search order and records the fallback
+  reason in JSON output.
+- `--reranker memreranker-4b` requires the model path and fails if the optional
+  runtime is unavailable.
+- `--reranker-device cpu` is allowed for experiments, but it is not recommended
+  for interactive agent use.
+
+The optional path loads `IAAR-Shanghai/MemReranker-4B` through
+`sentence_transformers.CrossEncoder` with `trust_remote_code=True`. Pin the
+model revision in controlled benchmark environments if exact reproducibility is
+required.
+
 ## Compiled Wiki
 
 [`tools/wiki/`](tools/wiki) ships `memd-wiki`, a Python console script
 that compiles a Karpathy-style markdown wiki from live `memd` project
-state through the MCP HTTP API. Pages include `index.md`, `log.md`,
+state. Pages include `index.md`, `log.md`,
 `projects/<project_id>.md`, `tasks/<task_id>.md`, and
 `libraries/{failures,decisions,evidence,highlights}.md`, each
 trust-aware (displays `trust_tier`, `requires_verification`, and
@@ -507,30 +602,16 @@ Start here to have agents use `memd` correctly:
 - [memd-skill/SKILL.md](memd-skill/SKILL.md)
 - [memd-skill/INSTALL.md](memd-skill/INSTALL.md)
 
-For shared local sessions with current client CLIs:
+For a stronger default that makes CLI retrieval and CLI writes mandatory for
+substantive multi-step technical and scientific work:
 
 ```bash
-codex mcp add memd --url http://127.0.0.1:8787/mcp
-claude mcp add --transport http --scope user memd http://127.0.0.1:8787/mcp
-```
-
-Add the instruction snippet from `INSTALL.md` to `~/.codex/AGENTS.md` and
-`~/.claude/CLAUDE.md` so agents consistently consult and record into `memd`
-during substantive work.
-
-For a stronger default that makes `memd` mandatory for substantive multi-step
-technical and scientific work:
-
-```bash
-./memd-skill/install_memd_enforcement.sh
+./memd-skill/install_memd_enforcement.sh --install-binary
 ```
 
 This also injects a pre-refusal rule: agents must check `memd` before
-declaring a task impossible, blocked, or unknowable. For one-shot runs you can
-install runtime refusal guards — `codex-memd-guard` (for `codex exec`-style
-runs) and `claude-memd-guard` (for `claude -p` / `--print` runs). Set
-`MEMD_URL` and `MEMD_GUARD_TENANT_ID` when the audited endpoint or tenant is
-not the default local setup.
+declaring a task impossible, blocked, or unknowable. The installer updates
+instruction files only; it does not register external client tools.
 
 ## More
 

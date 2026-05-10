@@ -1,7 +1,6 @@
 //! Structured logging setup for memd
 //!
 //! Provides JSON or pretty-formatted logging output.
-//! In MCP mode, logs go to stderr to avoid interfering with JSON-RPC on stdout.
 
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -11,8 +10,8 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 /// * `format` - Output format: "json" for structured JSON, "pretty" for human-readable
 /// * `level` - Log level: "trace", "debug", "info", "warn", "error"
 ///
-/// Logs are written to stderr so they don't interfere with MCP protocol
-/// messages on stdout.
+/// Logs are written to stderr so stdout remains machine-readable for CLI
+/// commands.
 pub fn init_logging(format: &str, level: &str) {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         // Keep memd logs at requested level while suppressing noisy third-party info logs

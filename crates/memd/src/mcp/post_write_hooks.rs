@@ -1,34 +1,30 @@
-//! Post-write hooks fired by MCP handlers after store writes succeed.
+//! Post-write hooks fired by operation handlers after store writes succeed.
 //!
-//! The MCP dispatch arm in [`crate::mcp::server`] runs structural
-//! indexing — and any future server-owned side effects — for every
-//! newly-written chunk. Handlers never call structural indexing
-//! directly; the dispatch arm is the single place that owns
-//! post-write side effects.
+//! The CLI operation dispatcher runs structural indexing for newly-written
+//! file-backed chunks. Handlers return events instead of calling structural
+//! indexing directly.
 //!
 //! Today there are two distinct shapes for how that contract is
 //! honoured:
 //!
 //! - `memory.supersede` and `memory.import_omf` build a
-//!   [`PostWriteEvent`] (single or vector) and return it to the
-//!   dispatch arm alongside the MCP response.
-//! - `memory.add` and `memory.add_batch` bypass the struct and hand
-//!   the same fields to `maybe_index_structural_chunk` directly,
-//!   because their dispatch arms already hold every field before
-//!   consuming the `AddParams` / `AddBatchParams`.
+//!   [`PostWriteEvent`] (single or vector) and return it alongside the
+//!   operation response.
+//! - `memory.add` and `memory.add_batch` pass the same fields directly
+//!   because their caller already holds every field before consuming the
+//!   `AddParams` / `AddBatchParams`.
 //!
 //! Both shapes are valid and the hook side effects are identical; the
 //! struct's job is to carry the fields across the handler/server
 //! boundary when the handler has already moved them out of the
-//! incoming params. Widening `memory.add` / `memory.add_batch` to use
-//! the struct would be a consistency improvement only — and is
-//! deliberately out of scope for this module's introduction.
+//! incoming params. Widening `memory.add` / `memory.add_batch` to use the
+//! struct would be a consistency improvement only.
 //!
 //! The struct was originally inlined in [`crate::mcp::handlers`].
 //! Once `memory.supersede` and `memory.import_omf` both returned the
 //! type, the inline placement became the wrong default home. Moved
-//! here with the [`ImportedChunk`] adapter so OMF-specific code stays
-//! in [`crate::omf::import`] and MCP-specific code stays under
+//! here with the [`ImportedChunk`] adapter so OMF-specific code stays in
+//! [`crate::omf::import`] and operation-dispatch code stays under
 //! [`crate::mcp`].
 //!
 //! [`ImportedChunk`]: crate::omf::import::ImportedChunk
@@ -37,8 +33,8 @@ use crate::omf::import::ImportedChunk;
 use crate::types::ChunkId;
 
 /// Per-write event emitted by any handler that creates or updates a
-/// chunk payload. The MCP server dispatch arm consumes these to run
-/// structural indexing for the new chunk (mirroring `memory.add`).
+/// chunk payload. The operation dispatcher consumes these to run structural
+/// indexing for the new chunk.
 ///
 /// Keep this type small and field-public; adding new consumers is
 /// cheap and layering handlers through a single event shape is the

@@ -1,7 +1,7 @@
 # memd-wiki
 
 Deterministic compiler that builds a Karpathy-style compiled markdown wiki from
-live `memd` project state, read through the MCP HTTP API.
+live `memd` project state through the local `memd` CLI.
 
 > **Status:** v0.11.0 adds a read-only HTTP runtime
 > (`memd-wiki serve`) on top of the v0.10.0 compiler output.
@@ -35,7 +35,7 @@ Pages built (LLM-authoring lane, only when WikiPage artifacts exist):
 - `concepts/<artifact_id>.md` — `artifact_role = concept`
 - `entities/<artifact_id>.md` — `artifact_role = entity`
 
-`memd` tools called:
+`memd call` operations used:
 
 - `context.brief_project`, `task.resume`, `artifact.list_thread`
 - `artifact.find_failures`, `artifact.find_decisions`,
@@ -48,7 +48,7 @@ Pages built (LLM-authoring lane, only when WikiPage artifacts exist):
 
 The compiler is trust-aware:
 
-- digest-backed pages display the MCP `trust_tier`
+- digest-backed pages display the `trust_tier`
 - pages show whether the source payload still requires verification
 - digest-backed pages render `grounding_refs` as links back to canonical
   task pages
@@ -105,9 +105,9 @@ search (`/search?q=`).
 
 ## Authoring concept / entity pages
 
-A WikiPage is a regular memd artifact created via the existing
-`artifact.create` MCP tool. The four required boundary rules
-(enforced server-side):
+A WikiPage is a regular memd artifact created through
+`memd call artifact.create`. The four required boundary rules are
+enforced by the operation handler:
 
 ```jsonc
 {
@@ -200,9 +200,8 @@ Either path exposes the `memd-wiki` console script.
 
 ## Version compatibility
 
-`memd-wiki` is version-aligned with the `memd` server it talks to. On
-startup it parses its own `__version__` and the server's
-`serverInfo.version` (from the MCP `initialize` response) as
+`memd-wiki` is version-aligned with the `memd` executable it calls. On
+startup it parses its own `__version__` and `memd --version` as
 `MAJOR.MINOR.PATCH` and compares them:
 
 | Situation | Behavior |
@@ -210,10 +209,10 @@ startup it parses its own `__version__` and the server's
 | exact match | OK — silent |
 | patch-only skew (e.g. `0.9.0` vs `0.9.3`) | WARN on stderr, proceed |
 | MAJOR or MINOR mismatch (e.g. `0.9.x` vs `0.8.x` or `0.10.x`) | hard fail with `ServerIncompatibleError` |
-| server did not report version / unparseable | WARN on stderr, proceed |
+| executable did not report version / unparseable | WARN on stderr, proceed |
 
 Releases of `memd-wiki` and `memd` are tagged in lockstep. To override
-the gate (not recommended), construct `McpHttpClient(..., check_compat=False)`
+the gate (not recommended), construct `MemdCliClient(..., check_compat=False)`
 from Python — the CLI keeps the gate on.
 
 ## Determinism contract (v1)
@@ -227,9 +226,9 @@ determinism contract on unchanged memd state:
 2. `manifest.json` is byte-identical between consecutive runs on
    unchanged state.
 
-The prototype already behaves this way; step 5 of the Item 7 plan
-pins it with a unit test (`tests/test_determinism.py`) using a mocked
-MCP transport so the invariant survives future refactors.
+The prototype already behaves this way; `tests/test_determinism.py`
+pins the invariant using mocked CLI responses so future refactors do
+not weaken it.
 
 **What the contract does NOT claim in v1:** that a single new memd
 artifact changes only one page. The compiler derives a global
@@ -291,7 +290,7 @@ Example `.memd/config.json`:
     "outdir": "docs/compiled_wiki",
     "max_tasks": 25,
     "library_k": 20,
-    "memd_url": "http://127.0.0.1:8787/mcp"
+    "memd_bin": "memd"
   }
 }
 ```
@@ -299,11 +298,10 @@ Example `.memd/config.json`:
 Precedence (highest first):
 
 1. CLI flags (`--tenant-id`, `--project-id`, `--output-dir`,
-   `--max-tasks`, `--library-k`, `--memd-url`)
+   `--max-tasks`, `--library-k`, `--memd-bin`)
 2. `wiki.<field>` in the nearest `.memd/config.json`
 3. Top-level `tenant_id` / `project_id` in the same file
-4. Built-in defaults (`http://127.0.0.1:8787/mcp`, 25, 20,
-   `./compiled_wiki/` relative to CWD)
+4. Built-in defaults (`memd`, 25, 20, `./compiled_wiki/` relative to CWD)
 
 Relative `wiki.outdir` resolves against the project root that owns
 the config file (the directory that contains `.memd/`), not the CWD.
@@ -333,7 +331,7 @@ Or override individual fields from the CLI:
 memd-wiki build \
   --tenant-id memd \
   --project-id memd \
-  --memd-url http://127.0.0.1:8787/mcp
+  --memd-bin memd
 ```
 
 From a source checkout without install:

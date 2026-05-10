@@ -147,9 +147,9 @@ pub struct RejectionStats {
     pub by_reason: HashMap<String, u64>,
 }
 
-/// Per-call MCP payload token estimate.
+/// Per-call operation payload token estimate.
 ///
-/// These counters estimate tokens added by the MCP tool request params and
+/// These counters estimate tokens added by operation request params and
 /// handler response payloads that `memd` can observe. They do not include the
 /// agent's hidden reasoning, system prompt, repo/tool transcripts outside
 /// `memd`, or provider-side cache accounting.
@@ -157,11 +157,11 @@ pub struct RejectionStats {
 pub struct ToolTokenUsage {
     /// Timestamp (Unix ms)
     pub timestamp: i64,
-    /// MCP tool name, e.g. `"memory.search"`.
+    /// Operation name, e.g. `"memory.search"`.
     pub tool: String,
-    /// Serialized MCP request params size.
+    /// Serialized operation request params size.
     pub request_bytes: u64,
-    /// Serialized MCP response or error size.
+    /// Serialized operation response or error size.
     pub response_bytes: u64,
     /// Estimated request tokens.
     pub estimated_request_tokens: u64,
@@ -199,7 +199,7 @@ impl ToolTokenUsage {
     }
 }
 
-/// Aggregated token estimate for one MCP tool.
+/// Aggregated token estimate for one operation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolTokenAggregate {
     /// Tool calls observed.
@@ -232,16 +232,16 @@ impl ToolTokenAggregate {
     }
 }
 
-/// Aggregated MCP payload token estimates.
+/// Aggregated operation payload token estimates.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TokenUsageStats {
     /// Estimator used for all token fields.
     pub estimator: String,
-    /// Aggregate over all MCP tool calls.
+    /// Aggregate over all operation calls.
     pub total: ToolTokenAggregate,
-    /// Aggregate per MCP tool.
+    /// Aggregate per operation.
     pub by_tool: HashMap<String, ToolTokenAggregate>,
-    /// Recent MCP tool payload estimates.
+    /// Recent operation payload estimates.
     pub recent_tool_calls: Vec<ToolTokenUsage>,
 }
 
@@ -261,7 +261,7 @@ pub struct MetricsSnapshot {
     /// Phase 4.4: per-tool / per-reason rejection counts.
     #[serde(default)]
     pub rejections: RejectionStats,
-    /// Estimated MCP payload token usage by tool.
+    /// Estimated operation payload token usage by operation.
     #[serde(default)]
     pub token_usage: TokenUsageStats,
 }
@@ -291,7 +291,7 @@ pub struct MetricsCollector {
     rejections_total: AtomicU64,
     rejections_by_tool: RwLock<HashMap<String, u64>>,
     rejections_by_reason: RwLock<HashMap<String, u64>>,
-    /// MCP payload token estimates.
+    /// Operation payload token estimates.
     tool_token_calls: AtomicU64,
     tool_token_errors: AtomicU64,
     tool_token_request_bytes: AtomicU64,
@@ -380,7 +380,7 @@ impl MetricsCollector {
 
     /// Phase 4.4: record a rejected tool call.
     ///
-    /// `tool` is the MCP tool name (e.g. `"memory.search"`). `reason`
+    /// `tool` is the operation name (e.g. `"memory.search"`). `reason`
     /// is a short kebab-case label like `"invalid-params"` or
     /// `"method-not-found"` — typically derived from the `McpError`
     /// variant. Cheap path: three atomic/lock ops, no allocation
@@ -408,7 +408,7 @@ impl MetricsCollector {
         }
     }
 
-    /// Record estimated MCP request/response tokens for one tool call.
+    /// Record estimated operation request/response tokens for one call.
     pub fn record_tool_token_usage(&self, usage: ToolTokenUsage) {
         self.tool_token_calls.fetch_add(1, Ordering::Relaxed);
         if !usage.success {
@@ -436,13 +436,13 @@ impl MetricsCollector {
         recent.push(usage);
     }
 
-    /// Get recent MCP tool token estimates.
+    /// Get recent operation token estimates.
     pub fn get_recent_tool_token_usage(&self, limit: usize) -> Vec<ToolTokenUsage> {
         let recent = self.tool_token_recent.read();
         recent.iter().rev().take(limit).cloned().collect()
     }
 
-    /// Get aggregated MCP payload token estimates.
+    /// Get aggregated operation payload token estimates.
     pub fn get_token_usage_stats(&self) -> TokenUsageStats {
         let request_tokens = self.tool_token_request_tokens.load(Ordering::Relaxed);
         let response_tokens = self.tool_token_response_tokens.load(Ordering::Relaxed);

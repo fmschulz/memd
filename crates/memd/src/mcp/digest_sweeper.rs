@@ -12,10 +12,8 @@
 //! re-marked by the sweeper so transient errors do not silently drop
 //! invalidations.
 //!
-//! The task is created when the HTTP server starts (see
-//! `serve_http_server`). Stdio mode is single-client and typically
-//! short-lived; we keep it simple there and only run the sweeper on
-//! the persistent HTTP path.
+//! The task is created by long-lived local worker paths. One-shot CLI calls
+//! keep freshness explicit through write hooks and `memory.compact`.
 //!
 //! Configuration:
 //!   - `MEMD_DIGEST_SWEEP_INTERVAL_SEC` — how often to drain (default 10s).
@@ -137,8 +135,8 @@ where
 }
 
 /// Resolve the sweep interval from the env variable, falling back to
-/// the default. Exposed so `serve_http_server` and tests can agree
-/// on the resolution logic.
+/// the default. Exposed so workers and tests can agree on the resolution
+/// logic.
 pub fn resolve_sweep_interval_from_env() -> Duration {
     let secs = std::env::var("MEMD_DIGEST_SWEEP_INTERVAL_SEC")
         .ok()

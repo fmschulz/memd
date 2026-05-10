@@ -97,14 +97,16 @@ def render_index(
     project_id: str,
     snapshot_at_ms: int,
     tasks: list[dict[str, Any]],
+    project_page_path: str | None = None,
 ) -> str:
+    project_page_path = project_page_path or f"projects/{project_id}.md"
     lines = [
         f"# Compiled Wiki: {project_id}",
         "",
         f"- Tenant: `{tenant_id}`",
         f"- Project: `{project_id}`",
         f"- Source snapshot at: `{iso_timestamp(snapshot_at_ms)}`",
-        f"- Project page: [projects/{project_id}.md](projects/{project_id}.md)",
+        f"- Project page: [{project_page_path}]({project_page_path})",
         "",
         "## Trust Model",
         "",
@@ -243,7 +245,9 @@ def render_task_page(
     project_id: str,
     snapshot_at_ms: int,
     task_payload: dict[str, Any],
+    project_page_path: str | None = None,
 ) -> str:
+    project_page_path = project_page_path or f"projects/{project_id}.md"
     resume = task_payload["resume"]
     resume_payload = task_payload["resume_payload"]
     thread = task_payload["thread"]
@@ -256,7 +260,7 @@ def render_task_page(
         "",
         f"- Task ID: `{task.get('task_id')}`",
         f"- Tenant: `{tenant_id}`",
-        f"- Project: [`{project_id}`](../projects/{project_id}.md)",
+        f"- Project: [`{project_id}`](../{project_page_path})",
         f"- Status: `{task.get('status', 'unknown')}`",
         f"- Source snapshot at: `{iso_timestamp(snapshot_at_ms)}`",
         f"- Source digest artifact: `{task_payload['resume_artifact'].get('artifact_id', 'unknown')}`",
@@ -314,13 +318,15 @@ def render_library_page(
     project_id: str,
     snapshot_at_ms: int,
     payload: dict[str, Any],
+    project_page_path: str | None = None,
 ) -> str:
+    project_page_path = project_page_path or f"projects/{project_id}.md"
     artifact = payload["artifact"]
     results = payload.get("results", [])
     lines = [
         f"# {library_name.title()} Library",
         "",
-        f"- Project: [`{project_id}`](../projects/{project_id}.md)",
+        f"- Project: [`{project_id}`](../{project_page_path})",
         f"- Source snapshot at: `{iso_timestamp(snapshot_at_ms)}`",
         f"- Source digest artifact: `{artifact.get('artifact_id', 'unknown')}`",
         f"- Source updated at: `{iso_timestamp(artifact.get('source_updated_at_ms'))}`",
@@ -484,12 +490,14 @@ def render_log_page(
     project_id: str,
     snapshot_at_ms: int,
     entries: list[dict[str, Any]],
+    project_page_path: str | None = None,
 ) -> str:
+    project_page_path = project_page_path or f"projects/{project_id}.md"
     lines = [
         f"# Project Log: {project_id}",
         "",
         f"- Tenant: `{tenant_id}`",
-        f"- Project: [`{project_id}`](projects/{project_id}.md)",
+        f"- Project: [`{project_id}`]({project_page_path})",
         f"- Source snapshot at: `{iso_timestamp(snapshot_at_ms)}`",
         "",
     ]

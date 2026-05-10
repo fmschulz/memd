@@ -19,7 +19,6 @@ import argparse
 import json
 import os
 import re
-import select
 import shutil
 import socket
 import statistics
@@ -99,101 +98,164 @@ def benchmark_log(message: str) -> None:
     print(f"[phase5 {timestamp}] {message}", flush=True)
 
 
-class McpStdioClient:
+class MemdCliClient:
     def __init__(
         self,
         cmd: list[str],
         env: dict[str, str],
-        startup_timeout_s: float = 30.0,
+        timeout_s: float = 120.0,
         stderr_file: Any | None = None,
+        warm_mode: str = "off",
+        manage_warm: bool = True,
     ) -> None:
         self.cmd = cmd
         self.env = env
-        self.startup_timeout_s = startup_timeout_s
+        self.timeout_s = timeout_s
         self.stderr_file = stderr_file
+        self.warm_mode = warm_mode
+        self.manage_warm = manage_warm
+
+    def start(self) -> None:
+        if self.warm_mode != "required" or not self.manage_warm:
+            return None
+        proc = subprocess.run(
+            [*self.cmd, "warm", "start"],
+            cwd=REPO_ROOT,
+            env=self.env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=self.stderr_file or subprocess.PIPE,
+            timeout=self.timeout_s,
+            check=False,
+        )
+        if proc.returncode != 0:
+            stderr = "" if self.stderr_file else proc.stderr.strip()
+            raise RuntimeError(stderr or proc.stdout.strip() or "memd warm start failed")
+
+    def stop(self) -> None:
+        if self.warm_mode != "required" or not self.manage_warm:
+            return None
+        subprocess.run(
+            [*self.cmd, "warm", "stop"],
+            cwd=REPO_ROOT,
+            env=self.env,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=self.stderr_file or subprocess.DEVNULL,
+            timeout=self.timeout_s,
+            check=False,
+        )
+
+    def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        proc = subprocess.run(
+            [
+                *self.cmd,
+                "call",
+                tool_name,
+                "--json",
+                json.dumps(arguments, sort_keys=True),
+                "--warm",
+                self.warm_mode,
+            ],
+            cwd=REPO_ROOT,
+            env=self.env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=self.stderr_file or subprocess.PIPE,
+            timeout=self.timeout_s,
+            check=False,
+        )
+        if proc.returncode != 0:
+            stderr = "" if self.stderr_file else proc.stderr.strip()
+            raise RuntimeError(stderr or proc.stdout.strip() or f"memd call failed: {tool_name}")
+        if not proc.stdout.strip():
+            return {}
+        return json.loads(proc.stdout)
+
+
+class MemdBatchClient(MemdCliClient):
+    def __init__(
+        self,
+        cmd: list[str],
+        env: dict[str, str],
+        timeout_s: float = 120.0,
+        stderr_file: Any | None = None,
+    ) -> None:
+        super().__init__(cmd, env, timeout_s=timeout_s, stderr_file=stderr_file, warm_mode="off")
         self.proc: subprocess.Popen[str] | None = None
-        self.request_id = 0
 
     def start(self) -> None:
         self.proc = subprocess.Popen(
-            self.cmd,
+            [*self.cmd, "batch", "--jsonl", "-", "--stream"],
+            cwd=REPO_ROOT,
+            env=self.env,
+            text=True,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=self.stderr_file or subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
-            env=self.env,
-        )
-        self.request(
-            "initialize",
-            {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "task-memory-benchmark", "version": "0.1.0"},
-            },
+            stderr=self.stderr_file or subprocess.PIPE,
         )
 
     def stop(self) -> None:
-        if self.proc is None or self.proc.poll() is not None:
+        if self.proc is None:
             return
-        if self.proc.stdin is not None:
-            self.proc.stdin.close()
+        proc = self.proc
+        self.proc = None
+        if proc.stdin:
+            proc.stdin.close()
         try:
-            self.proc.wait(timeout=10)
-            return
+            proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            pass
-        self.proc.terminate()
-        try:
-            self.proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-            self.proc.wait(timeout=5)
-
-    def request(self, method: str, params: dict[str, Any] | None) -> dict[str, Any]:
-        if self.proc is None or self.proc.stdin is None or self.proc.stdout is None:
-            raise RuntimeError("MCP process is not started")
-        self.request_id += 1
-        payload = {"jsonrpc": "2.0", "id": self.request_id, "method": method, "params": params}
-        self.proc.stdin.write(json.dumps(payload) + "\n")
-        self.proc.stdin.flush()
-        return self._read_response(self.request_id)
+            proc.kill()
+            proc.wait(timeout=10)
 
     def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        response = self.request("tools/call", {"name": tool_name, "arguments": arguments})
-        if "error" in response:
-            raise RuntimeError(str(response["error"]))
-        result = response.get("result", {})
-        content = result.get("content", [])
-        if not content:
-            return {}
-        text = content[0].get("text", "{}")
-        if not isinstance(text, str):
-            return {}
-        return json.loads(text)
-
-    def _read_response(self, request_id: int) -> dict[str, Any]:
-        assert self.proc is not None and self.proc.stdout is not None
-        start = time.perf_counter()
-        while True:
-            timeout_left = self.startup_timeout_s - (time.perf_counter() - start)
-            if timeout_left <= 0:
-                raise TimeoutError(f"timeout waiting for MCP response id={request_id}")
-            ready, _, _ = select.select([self.proc.stdout], [], [], timeout_left)
-            if not ready:
-                continue
-            line = self.proc.stdout.readline()
-            if not line:
-                raise RuntimeError("MCP process closed stdout")
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if payload.get("id") == request_id:
-                return payload
+        if self.proc is None or self.proc.stdin is None or self.proc.stdout is None:
+            raise RuntimeError("memd batch client is not started")
+        request = {"tool": tool_name, "arguments": arguments}
+        self.proc.stdin.write(json.dumps(request, sort_keys=True) + "\n")
+        self.proc.stdin.flush()
+        line = self.proc.stdout.readline()
+        if not line:
+            stderr = ""
+            if self.proc.stderr and self.stderr_file is None:
+                stderr = self.proc.stderr.read()
+            raise RuntimeError(stderr.strip() or f"memd batch ended while calling {tool_name}")
+        payload = json.loads(line)
+        if not payload.get("ok"):
+            raise RuntimeError(payload.get("error") or f"memd batch failed: {tool_name}")
+        result = payload.get("result")
+        return result if isinstance(result, dict) else {}
 
 
-def read_chunks_indexed(client: McpStdioClient, tenant_id: str) -> int:
+def make_memd_client(
+    lane: str,
+    memd_cmd: list[str],
+    env: dict[str, str],
+    timeout_s: float = 60.0,
+    stderr_file: Any | None = None,
+    manage_warm: bool = True,
+) -> MemdCliClient:
+    if lane == "cli_batch":
+        return MemdBatchClient(memd_cmd, env, timeout_s=timeout_s, stderr_file=stderr_file)
+    if lane == "cli_warm":
+        return MemdCliClient(
+            memd_cmd,
+            env,
+            timeout_s=timeout_s,
+            stderr_file=stderr_file,
+            warm_mode="required",
+            manage_warm=manage_warm,
+        )
+    return MemdCliClient(
+        memd_cmd,
+        env,
+        timeout_s=timeout_s,
+        stderr_file=stderr_file,
+        warm_mode="off",
+    )
+
+
+def read_chunks_indexed(client: MemdCliClient, tenant_id: str) -> int:
     payload = client.call_tool(
         "memory.metrics",
         {"tenant_id": tenant_id, "include_recent": False, "include_tiered": False},
@@ -208,7 +270,7 @@ def read_chunks_indexed(client: McpStdioClient, tenant_id: str) -> int:
 
 
 def wait_for_index_ready(
-    client: McpStdioClient,
+    client: MemdCliClient,
     tenant_id: str,
     target_chunks: int,
     timeout_s: float = 120.0,
@@ -358,7 +420,7 @@ def flatten_case_chunks(case: dict[str, Any]) -> list[dict[str, Any]]:
     return chunks
 
 
-def seed_chunk_baseline_case(client: McpStdioClient, tenant_id: str, case: dict[str, Any]) -> int:
+def seed_chunk_baseline_case(client: MemdCliClient, tenant_id: str, case: dict[str, Any]) -> int:
     payload = client.call_tool(
         "memory.add_batch",
         {"tenant_id": tenant_id, "chunks": flatten_case_chunks(case)},
@@ -367,7 +429,7 @@ def seed_chunk_baseline_case(client: McpStdioClient, tenant_id: str, case: dict[
     return len(chunk_ids) if isinstance(chunk_ids, list) else 0
 
 
-def seed_task_case(client: McpStdioClient, tenant_id: str, case: dict[str, Any]) -> dict[str, Any]:
+def seed_task_case(client: MemdCliClient, tenant_id: str, case: dict[str, Any]) -> dict[str, Any]:
     project_id = case["project_id"]
     start_payload = client.call_tool(
         "task.start",
@@ -553,7 +615,7 @@ def summarize_query_results(rows: list[QueryResult]) -> dict[str, Any]:
 
 
 def run_baseline_queries(
-    client: McpStdioClient,
+    client: MemdCliClient,
     corpus: dict[str, Any],
     tenant_id: str,
     top_k: int,
@@ -596,7 +658,7 @@ def run_baseline_queries(
 
 
 def run_task_queries(
-    client: McpStdioClient,
+    client: MemdCliClient,
     corpus: dict[str, Any],
     task_ids: dict[str, str],
     tenant_id: str,
@@ -608,6 +670,7 @@ def run_task_queries(
     for query in corpus["queries"]:
         case = cases[query["case_id"]]
         task_filters = dict(query.get("task_filters", {}))
+        task_filters.setdefault("project_id", case["project_id"])
         started = time.perf_counter()
         payload = client.call_tool(
             "task.search",
@@ -641,7 +704,7 @@ def run_task_queries(
     return summarize_query_results(rows)
 
 
-def run_baseline_freshness(client: McpStdioClient, tenant_id: str) -> dict[str, Any]:
+def run_baseline_freshness(client: MemdCliClient, tenant_id: str) -> dict[str, Any]:
     project_id = "phase5_freshness_baseline"
     client.call_tool(
         "memory.add",
@@ -672,7 +735,7 @@ def run_baseline_freshness(client: McpStdioClient, tenant_id: str) -> dict[str, 
     return {"found": rank is not None, "rank": rank, "search_ms": latency_ms}
 
 
-def run_task_freshness(client: McpStdioClient, tenant_id: str) -> dict[str, Any]:
+def run_task_freshness(client: MemdCliClient, tenant_id: str) -> dict[str, Any]:
     start = client.call_tool(
         "task.start",
         {
@@ -730,6 +793,7 @@ def run_concurrency(
     writer,
     workers: int,
     ops_per_worker: int,
+    client_factory=None,
 ) -> dict[str, Any]:
     successes = 0
     errors: list[str] = []
@@ -737,10 +801,13 @@ def run_concurrency(
 
     def worker_fn(worker_idx: int) -> None:
         nonlocal successes
-        client: McpStdioClient | None = None
+        client: MemdCliClient | None = None
         try:
-            if memd_cmd:
-                client = McpStdioClient(memd_cmd, env or {}, startup_timeout_s=60.0)
+            if client_factory is not None:
+                client = client_factory()
+                client.start()
+            elif memd_cmd:
+                client = MemdCliClient(memd_cmd, env or {}, timeout_s=60.0, warm_mode="off")
                 client.start()
             for op_idx in range(ops_per_worker):
                 try:
@@ -1320,7 +1387,7 @@ def run_gpt54_concurrency(gpt54_root: Path, db_path: Path, workers: int, ops_per
     )
     task_id = seeded["task_id"]
 
-    def writer(_client: McpStdioClient, worker_idx: int, op_idx: int) -> None:
+    def writer(_client: MemdCliClient, worker_idx: int, op_idx: int) -> None:
         run_gpt54_cli(
             gpt54_root,
             db_path,
@@ -1618,7 +1685,7 @@ def run_gpt54_concurrency_with(call_fn, workers: int, ops_per_worker: int) -> di
     )
     task_id = seeded["task_id"]
 
-    def writer(_client: McpStdioClient | None, worker_idx: int, op_idx: int) -> None:
+    def writer(_client: MemdCliClient | None, worker_idx: int, op_idx: int) -> None:
         call_fn(
             "progress",
             "--task-id",
@@ -1900,97 +1967,102 @@ def summarize_corpus_projects(corpus: dict[str, Any]) -> list[dict[str, Any]]:
     return list(projects.values())
 
 
-def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
-    corpus = json.loads(args.corpus.read_text(encoding="utf-8"))
-    benchmark_log(
-        f"Loaded corpus {args.corpus.name} with {len(corpus['cases'])} cases and {len(corpus['queries'])} queries"
-    )
-    work_dir = args.data_root
-    if work_dir.exists():
-        shutil.rmtree(work_dir)
-    work_dir.mkdir(parents=True, exist_ok=True)
-
-    memd_cmd = [
+def build_memd_cmd(args: argparse.Namespace, data_dir: Path) -> list[str]:
+    return [
         str(args.memd_path),
-        "--mode",
-        "mcp",
         "--data-dir",
-        os.path.relpath(work_dir, REPO_ROOT),
+        os.path.relpath(data_dir, REPO_ROOT),
         "--embedding-model",
         args.embedding_model,
         "--search-variant",
         args.system_variant,
     ]
-    env = os.environ.copy()
-    task_tenant = "phase5_task_memory"
-    baseline_tenant = "phase5_chunk_baseline"
 
-    with (args.json_out.parent / "task_memory_benchmark.log").open("w", encoding="utf-8") as log_file:
-        benchmark_log("Running memd-native benchmark")
-        client = McpStdioClient(memd_cmd, env, startup_timeout_s=60.0, stderr_file=log_file)
-        client.start()
-        try:
-            initial_task_chunks = read_chunks_indexed(client, task_tenant)
-            initial_baseline_chunks = read_chunks_indexed(client, baseline_tenant)
 
-            baseline_seed_start = time.perf_counter()
-            baseline_chunk_count = 0
-            for case in corpus["cases"]:
-                benchmark_log(f"memd chunk seed {case['case_id']}")
-                baseline_chunk_count += seed_chunk_baseline_case(client, baseline_tenant, case)
-            baseline_seed_ms = (time.perf_counter() - baseline_seed_start) * 1000.0
-            baseline_wait_ms = wait_for_index_ready(
-                client,
-                baseline_tenant,
-                initial_baseline_chunks + baseline_chunk_count,
-            )
+def run_memd_native_lane(
+    args: argparse.Namespace,
+    corpus: dict[str, Any],
+    env: dict[str, str],
+    lane: str,
+    data_dir: Path,
+    log_file: Any,
+) -> dict[str, Any]:
+    memd_cmd = build_memd_cmd(args, data_dir)
+    task_tenant = f"phase5_task_memory_{lane}"
+    baseline_tenant = f"phase5_chunk_baseline_{lane}"
 
-            task_seed_start = time.perf_counter()
-            task_ids: dict[str, str] = {}
-            task_projection_count = 0
-            for case in corpus["cases"]:
-                benchmark_log(f"memd task seed {case['case_id']}")
-                seeded = seed_task_case(client, task_tenant, case)
-                task_ids[case["case_id"]] = seeded["task_id"]
-                task_projection_count += seeded["projection_count"]
-            task_seed_ms = (time.perf_counter() - task_seed_start) * 1000.0
-            task_wait_ms = wait_for_index_ready(
-                client,
-                task_tenant,
-                initial_task_chunks + task_projection_count,
-            )
+    benchmark_log(f"Running memd-native benchmark lane {lane}")
+    client = make_memd_client(lane, memd_cmd, env, timeout_s=60.0, stderr_file=log_file)
+    client.start()
+    try:
+        baseline_seed_start = time.perf_counter()
+        baseline_chunk_count = 0
+        for case in corpus["cases"]:
+            benchmark_log(f"{lane} memd chunk seed {case['case_id']}")
+            baseline_chunk_count += seed_chunk_baseline_case(client, baseline_tenant, case)
+        baseline_seed_ms = (time.perf_counter() - baseline_seed_start) * 1000.0
+        baseline_wait_ms = 0.0
 
-            baseline_summary = run_baseline_queries(
-                client, corpus, baseline_tenant, args.top_k, score_mode="task_level"
-            )
-            task_summary = run_task_queries(
-                client, corpus, task_ids, task_tenant, args.top_k, score_mode="task_level"
-            )
-            baseline_freshness = run_baseline_freshness(client, baseline_tenant)
-            task_freshness = run_task_freshness(client, task_tenant)
-        finally:
-            client.stop()
-    benchmark_log("memd-native benchmark complete")
+        task_seed_start = time.perf_counter()
+        task_ids: dict[str, str] = {}
+        task_projection_count = 0
+        for case in corpus["cases"]:
+            benchmark_log(f"{lane} memd task seed {case['case_id']}")
+            seeded = seed_task_case(client, task_tenant, case)
+            task_ids[case["case_id"]] = seeded["task_id"]
+            task_projection_count += seeded["projection_count"]
+        task_seed_ms = (time.perf_counter() - task_seed_start) * 1000.0
+        task_wait_ms = 0.0
 
-    # Concurrency uses separate processes against the same data dir.
-    baseline_concurrency = run_concurrency(
+        baseline_summary = run_baseline_queries(
+            client, corpus, baseline_tenant, args.top_k, score_mode="task_level"
+        )
+        task_summary = run_task_queries(
+            client, corpus, task_ids, task_tenant, args.top_k, score_mode="task_level"
+        )
+        baseline_freshness = run_baseline_freshness(client, baseline_tenant)
+        task_freshness = run_task_freshness(client, task_tenant)
+    finally:
+        client.stop()
+
+    client_factory = lambda: make_memd_client(
+        lane,
         memd_cmd,
         env,
-        writer=lambda client, worker_idx, op_idx: client.call_tool(
-            "memory.add",
-            {
-                "tenant_id": baseline_tenant,
-                "project_id": "phase5_concurrency_baseline",
-                "text": f"baseline concurrency write worker={worker_idx} op={op_idx}",
-                "type": "doc",
-                "tags": [f"phase5:case:concurrency_{worker_idx}_{op_idx}", "phase5:facet:task_summary"],
-            },
-        ),
-        workers=args.workers,
-        ops_per_worker=args.ops_per_worker,
+        timeout_s=60.0,
+        manage_warm=False,
     )
 
-    seed_client = McpStdioClient(memd_cmd, env, startup_timeout_s=60.0)
+    warm_manager = None
+    if lane == "cli_warm":
+        warm_manager = make_memd_client(lane, memd_cmd, env, timeout_s=60.0)
+        warm_manager.start()
+    try:
+        baseline_concurrency = run_concurrency(
+            memd_cmd,
+            env,
+            writer=lambda client, worker_idx, op_idx: client.call_tool(
+                "memory.add",
+                {
+                    "tenant_id": baseline_tenant,
+                    "project_id": "phase5_concurrency_baseline",
+                    "text": f"baseline concurrency write worker={worker_idx} op={op_idx}",
+                    "type": "doc",
+                    "tags": [
+                        f"phase5:case:concurrency_{worker_idx}_{op_idx}",
+                        "phase5:facet:task_summary",
+                    ],
+                },
+            ),
+            workers=args.workers,
+            ops_per_worker=args.ops_per_worker,
+            client_factory=client_factory,
+        )
+    finally:
+        if warm_manager is not None:
+            warm_manager.stop()
+
+    seed_client = make_memd_client(lane, memd_cmd, env, timeout_s=60.0)
     seed_client.start()
     try:
         seeded_task = seed_client.call_tool(
@@ -2010,24 +2082,80 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     finally:
         seed_client.stop()
 
-    task_concurrency = run_concurrency(
-        memd_cmd,
-        env,
-        writer=lambda client, worker_idx, op_idx: client.call_tool(
-            "task.progress",
-            {
-                "tenant_id": task_tenant,
-                "task_id": concurrency_task_id,
-                "project_id": "phase5_concurrency_task",
-                "summary": f"benchmark progress note worker={worker_idx} op={op_idx}",
-                "blockers": [],
-                "failed_attempts": [],
-                "next_step": "continue benchmark",
-            },
-        ),
-        workers=args.workers,
-        ops_per_worker=args.ops_per_worker,
+    warm_manager = None
+    if lane == "cli_warm":
+        warm_manager = make_memd_client(lane, memd_cmd, env, timeout_s=60.0)
+        warm_manager.start()
+    try:
+        task_concurrency = run_concurrency(
+            memd_cmd,
+            env,
+            writer=lambda client, worker_idx, op_idx: client.call_tool(
+                "task.progress",
+                {
+                    "tenant_id": task_tenant,
+                    "task_id": concurrency_task_id,
+                    "project_id": "phase5_concurrency_task",
+                    "summary": f"benchmark progress note worker={worker_idx} op={op_idx}",
+                    "blockers": [],
+                    "failed_attempts": [],
+                    "next_step": "continue benchmark",
+                },
+            ),
+            workers=args.workers,
+            ops_per_worker=args.ops_per_worker,
+            client_factory=client_factory,
+        )
+    finally:
+        if warm_manager is not None:
+            warm_manager.stop()
+
+    benchmark_log(f"memd-native benchmark lane {lane} complete")
+    return {
+        f"memd_{lane}_chunk_baseline": {
+            "lane": lane,
+            "mode": f"{lane}: memory.search over flattened chunk-native benchmark artifacts",
+            "seed_total_ms": baseline_seed_ms,
+            "index_ready_wait_ms": baseline_wait_ms,
+            "documents_seeded": baseline_chunk_count,
+            "search_quality": baseline_summary,
+            "freshness": baseline_freshness,
+            "concurrency": baseline_concurrency,
+        },
+        f"memd_{lane}_task_memory": {
+            "lane": lane,
+            "mode": f"{lane}: task.* lifecycle writes plus task.search over exact-filtered task artifacts",
+            "seed_total_ms": task_seed_ms,
+            "index_ready_wait_ms": task_wait_ms,
+            "documents_seeded": task_projection_count,
+            "task_ids": task_ids,
+            "search_quality": task_summary,
+            "freshness": task_freshness,
+            "concurrency": task_concurrency,
+        },
+    }
+
+
+def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
+    corpus = json.loads(args.corpus.read_text(encoding="utf-8"))
+    benchmark_log(
+        f"Loaded corpus {args.corpus.name} with {len(corpus['cases'])} cases and {len(corpus['queries'])} queries"
     )
+    work_dir = args.data_root
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    env = os.environ.copy()
+
+    memd_systems: dict[str, Any] = {}
+    with (args.json_out.parent / "task_memory_benchmark.log").open("w", encoding="utf-8") as log_file:
+        for lane in args.memd_lanes:
+            lane_data_dir = work_dir / lane
+            lane_data_dir.mkdir(parents=True, exist_ok=True)
+            memd_systems.update(
+                run_memd_native_lane(args, corpus, env, lane, lane_data_dir, log_file)
+            )
 
     gpt54_live = None
     gpt54_root = args.gpt54_root.resolve() if args.gpt54_root else discover_gpt54_root()
@@ -2427,29 +2555,10 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "top_k": args.top_k,
         "workers": args.workers,
         "ops_per_worker": args.ops_per_worker,
+        "memd_lanes": args.memd_lanes,
         "embedding_model": args.embedding_model,
         "system_variant": args.system_variant,
-        "systems": {
-            "memd_chunk_baseline": {
-                "mode": "memory.search over flattened chunk-native benchmark artifacts",
-                "seed_total_ms": baseline_seed_ms,
-                "index_ready_wait_ms": baseline_wait_ms,
-                "documents_seeded": baseline_chunk_count,
-                "search_quality": baseline_summary,
-                "freshness": baseline_freshness,
-                "concurrency": baseline_concurrency,
-            },
-            "memd_task_memory": {
-                "mode": "task.* lifecycle writes plus task.search over exact-filtered task artifacts",
-                "seed_total_ms": task_seed_ms,
-                "index_ready_wait_ms": task_wait_ms,
-                "documents_seeded": task_projection_count,
-                "task_ids": task_ids,
-                "search_quality": task_summary,
-                "freshness": task_freshness,
-                "concurrency": task_concurrency,
-            },
-        },
+        "systems": memd_systems,
         "external_live": external_live_systems,
         "external_reference": {
             "genesism_unified_benchmark": load_genesism_reference(args.genesism_reference_json)
@@ -2458,8 +2567,9 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "notes": [
                 "The chunk baseline flattens each task case into plain memory chunks and uses memory.search.",
                 "The task-memory mode seeds the real task lifecycle and queries task.search with task-aware filters.",
+                "memd lanes compare cold executable-per-call CLI, CLI-managed warm worker IPC, and streaming JSONL batch CLI.",
                 "Freshness measures immediate retrievability after a new write.",
-                "Concurrency launches separate memd stdio processes against the same data dir to approximate concurrent CLI usage.",
+                "Concurrency launches separate memd CLI processes against the same data dir to approximate concurrent CLI usage.",
                 "Quality scoring is task-level across all systems so flatter schemas can participate correctly.",
                 "The gpt54 Tantivy variant applies DuckDB-side task filters and then times direct HTTP requests against a warmed Tantivy service."
             ]
@@ -2480,6 +2590,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Generated at: `{report['generated_at']}`",
         f"- Embedding model: `{report['embedding_model']}`",
         f"- Search variant: `{report['system_variant']}`",
+        f"- memd lanes: `{', '.join(report.get('memd_lanes', []))}`",
         "",
         "## Corpus Design",
         "",
@@ -2537,27 +2648,40 @@ def render_markdown(report: dict[str, Any]) -> str:
             )
         )
 
-    baseline = systems["memd_chunk_baseline"]
-    task_memory = systems["memd_task_memory"]
-    lines.extend(
-        [
-            "",
-            "## Why memd-native Modes Differ",
-            "",
-            (
-                f"- `memd_chunk_baseline` flattened the corpus into `{baseline['documents_seeded']}` generic chunks and searched them with "
-                f"`memory.search`. On the hardened sibling-task corpus, that representation did not recover the correct task in the top 3 results."
-            ),
-            (
-                f"- `memd_task_memory` wrote `{task_memory['documents_seeded']}` lifecycle projections and searched them with `task.search`, "
-                f"exact artifact filters, and candidate reranking. That increased seed time from `{baseline['seed_total_ms'] / 1000.0:.1f}s` to "
-                f"`{task_memory['seed_total_ms'] / 1000.0:.1f}s`, but improved retrieval from `hit@3={baseline['search_quality']['hit3']:.2f}` / "
-                f"`MRR={baseline['search_quality']['mrr']:.2f}` to `hit@3={task_memory['search_quality']['hit3']:.2f}` / "
-                f"`MRR={task_memory['search_quality']['mrr']:.2f}` and reduced average search latency from "
-                f"`{baseline['search_quality']['avg_search_ms']:.1f}ms` to `{task_memory['search_quality']['avg_search_ms']:.1f}ms`."
-            ),
-        ]
-    )
+    comparison_lane = "cli_warm" if f"memd_cli_warm_task_memory" in systems else None
+    if comparison_lane is None:
+        for name in systems:
+            if name.endswith("_task_memory"):
+                comparison_lane = name.removeprefix("memd_").removesuffix("_task_memory")
+                break
+    if comparison_lane:
+        baseline = systems[f"memd_{comparison_lane}_chunk_baseline"]
+        task_memory = systems[f"memd_{comparison_lane}_task_memory"]
+        baseline_search = baseline["search_quality"]
+        task_search = task_memory["search_quality"]
+        baseline_seed_s = baseline["seed_total_ms"] / 1000.0
+        task_seed_s = task_memory["seed_total_ms"] / 1000.0
+        seed_delta_s = task_seed_s - baseline_seed_s
+        search_delta_ms = task_search["avg_search_ms"] - baseline_search["avg_search_ms"]
+        lines.extend(
+            [
+                "",
+                "## Why memd-native Modes Differ",
+                "",
+                (
+                    f"- `{comparison_lane}` chunk baseline flattened the corpus into `{baseline['documents_seeded']}` generic chunks and searched them with "
+                    f"`memory.search`. In this task-level run it reached `hit@3={baseline_search['hit3']:.2f}` / "
+                    f"`MRR={baseline_search['mrr']:.2f}` with average search latency `{baseline_search['avg_search_ms']:.1f}ms`."
+                ),
+                (
+                    f"- `{comparison_lane}` task memory wrote `{task_memory['documents_seeded']}` lifecycle projections and searched them with `task.search`, "
+                    f"exact artifact filters, and candidate reranking. In this run it reached `hit@3={task_search['hit3']:.2f}` / "
+                    f"`MRR={task_search['mrr']:.2f}` with average search latency `{task_search['avg_search_ms']:.1f}ms`; "
+                    f"seed time changed from `{baseline_seed_s:.1f}s` to `{task_seed_s:.1f}s` (`{seed_delta_s:+.1f}s`) and "
+                    f"average search latency changed by `{search_delta_ms:+.1f}ms` versus the chunk baseline."
+                ),
+            ]
+        )
 
     external_live = report.get("external_live", {})
     if external_live:
@@ -2630,8 +2754,8 @@ def render_markdown(report: dict[str, Any]) -> str:
             "",
             "## Interpretation",
             "",
-            "- `memd_chunk_baseline` shows how well plain chunk retrieval works when the same knowledge is flattened into generic memory chunks.",
-            "- `memd_task_memory` shows how much the structured task lifecycle plus exact filters improve retrieval of failures, parameters, evidence, and why-chosen rationale.",
+            "- Chunk-baseline rows show how well plain chunk retrieval works when the same knowledge is flattened into generic memory chunks.",
+            "- Task-memory rows show the latency and filtering behavior of the structured task lifecycle path. In the current run they matched the chunk baseline on hit@3, had lower MRR, and searched much faster because exact task filters narrowed the candidate set.",
             "- The GenesisM reference section is included to preserve continuity with the prior cross-system benchmark work.",
         ]
     )
@@ -2688,6 +2812,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=5, help="Top-k depth for searches")
     parser.add_argument("--workers", type=int, default=4, help="Concurrency workers")
     parser.add_argument("--ops-per-worker", type=int, default=2, help="Concurrency ops per worker")
+    parser.add_argument(
+        "--memd-lanes",
+        nargs="+",
+        default=["cli_cold", "cli_warm", "cli_batch"],
+        choices=["cli_cold", "cli_warm", "cli_batch"],
+        help="memd CLI execution lanes to benchmark",
+    )
     parser.add_argument(
         "--embedding-model",
         default="all-minilm",

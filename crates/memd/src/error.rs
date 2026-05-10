@@ -20,7 +20,7 @@ pub enum MemdError {
     #[error("storage error: {0}")]
     StorageError(String),
 
-    /// MCP protocol errors
+    /// Operation protocol errors.
     #[error("protocol error: {0}")]
     ProtocolError(String),
 

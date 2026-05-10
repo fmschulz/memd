@@ -40,6 +40,10 @@ from .compat import WikiManifestTooNewError, check_manifest_version
 
 _TASK_LINK_RE = re.compile(r"\(\.\./tasks/(?P<task_id>[^)\s]+)\.md\)")
 _TOP_LEVEL_TASK_LINK_RE = re.compile(r"\(tasks/(?P<task_id>[^)\s]+)\.md\)")
+_LIBRARY_ITEM_TASK_LINK_RE = re.compile(
+    r"^- \[\.\./tasks/[^]\n]+\]\(\.\./tasks/[^)\s]+\.md\)",
+    re.MULTILINE,
+)
 _ISO_FMT = "%Y-%m-%d %H:%M:%SZ"
 
 
@@ -156,6 +160,8 @@ def _check_library_grounding_refs(outdir: Path) -> Iterable[LintFinding]:
     for page in sorted(library_dir.glob("*.md")):
         text = _read(page)
         if "Trust tier: `compiled_digest_hint`" not in text:
+            continue
+        if _LIBRARY_ITEM_TASK_LINK_RE.search(text) is None:
             continue
         if "### Grounded By" not in text:
             yield LintFinding(
@@ -359,9 +365,13 @@ def _check_manifest_drift(outdir: Path) -> Iterable[LintFinding]:
         "index.md",
         "log.md",
     }
-    project_id = manifest.get("project_id")
-    if isinstance(project_id, str):
-        implied.add(f"projects/{project_id}.md")
+    project_page_path = manifest.get("project_page_path")
+    if isinstance(project_page_path, str) and project_page_path:
+        implied.add(project_page_path)
+    else:
+        project_id = manifest.get("project_id")
+        if isinstance(project_id, str):
+            implied.add(f"projects/{project_id}.md")
     for library in ("failures", "decisions", "evidence", "highlights"):
         implied.add(f"libraries/{library}.md")
     for task_id in declared_task_ids:

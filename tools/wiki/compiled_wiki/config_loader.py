@@ -57,6 +57,7 @@ class DiscoveredConfig:
     outdir: Path | None
     max_tasks: int | None
     library_k: int | None
+    memd_bin: str | None
     memd_url: str | None
 
     @classmethod
@@ -68,6 +69,7 @@ class DiscoveredConfig:
             outdir=None,
             max_tasks=None,
             library_k=None,
+            memd_bin=None,
             memd_url=None,
         )
 
@@ -139,6 +141,7 @@ def _from_parsed_document(source_path: Path, parsed: dict[str, Any]) -> Discover
 
     max_tasks = _opt_positive_int(source_path, "max_tasks", wiki_section.get("max_tasks"))
     library_k = _opt_positive_int(source_path, "library_k", wiki_section.get("library_k"))
+    memd_bin = _opt_str(wiki_section.get("memd_bin"))
     memd_url = _opt_str(wiki_section.get("memd_url"))
 
     return DiscoveredConfig(
@@ -148,6 +151,7 @@ def _from_parsed_document(source_path: Path, parsed: dict[str, Any]) -> Discover
         outdir=outdir,
         max_tasks=max_tasks,
         library_k=library_k,
+        memd_bin=memd_bin,
         memd_url=memd_url,
     )
 

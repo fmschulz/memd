@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memd-wiki"
-version = "0.12.0"
-description = "Deterministic compiled markdown wiki over memd project state (MCP HTTP)."
+version = "0.13.0"
+description = "Deterministic compiled markdown wiki over memd project state."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "memd maintainers" }]
-keywords = ["memd", "mcp", "wiki", "markdown", "knowledge-base"]
+keywords = ["memd", "wiki", "markdown", "knowledge-base"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",

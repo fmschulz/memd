@@ -23,6 +23,11 @@ Thumbs.db
 
 # Local development and data
 /.memd/
+/.bench/
+/.codex
+/.claude_resources.json
+/.github/copilot-instructions.md
+/structmem.txt
 test_chunk
 test_chunk.rs
 
@@ -71,6 +76,13 @@ TESTING.md
 /evals/bench/results/
 /evals/bench/memd-xproject-pilot/runs/
 /evals/bench/memd-xproject-pilot/final_answers/
+/evals/bench/memd-xproject-pilot/
+/evals/bench/memd-cost-v3/
+/evals/bench/memd-stress-v4/
+/evals/bench/BENCHMARK_INVENTORY.md
+/evals/bench/bright-pro-memd/results/*
+!/evals/bench/bright-pro-memd/results/
+!/evals/bench/bright-pro-memd/results/biology_q5_d141_comparison.json
 /evals/datasets/beir/
 /evals/datasets/codesearchnet/
 /evals/bench/datasets/retrieval/beir_fiqa.json

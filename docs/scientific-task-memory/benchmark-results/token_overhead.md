@@ -2,15 +2,15 @@
 
 ## Measurement boundary
 
-`memd` can directly observe MCP tool-call payloads. It cannot directly observe
+`memd` can directly observe serialized local operation payloads. It cannot directly observe
 the agent's full prompt, hidden reasoning, provider cache accounting, or
 non-`memd` tool transcripts. Therefore token monitoring has two layers:
 
-1. Server-side MCP payload estimates from `memory.metrics.token_usage`.
+1. `memd` payload estimates from `memory.metrics.token_usage`.
 2. Whole-agent token deltas from paired with/without runs that capture provider
    API usage or an agent CLI `tokens used` footer.
 
-The server-side estimator is `ceil(serialized_mcp_payload_bytes / 4)`. It is
+The estimator is `ceil(serialized_payload_bytes / 4)`. It is
 useful for comparing tools, compact modes, tenants, and response sizes, but it
 is not provider billing data.
 
@@ -20,7 +20,7 @@ is not provider billing data.
 
 - `estimator`
 - `total.calls`, `total.errors`, byte totals, and estimated token totals
-- `by_tool` aggregates keyed by MCP tool name
+- `by_tool` aggregates keyed by operation name
 - `recent_tool_calls` when `include_recent` is true
 
 Set `include_recent: false` to keep the output compact while retaining aggregate
@@ -55,12 +55,12 @@ Mean exact delta in this small checked-in set is `+24503` tokens; median is
 data only has exact paired Codex footer rows for `alpha_gateway`, and the older
 pilot has known filesystem-contamination issues.
 
-## Live MCP payload probe
+## Historical payload probe
 
 Compact `memory.search` probes were run on three existing `memd` projects with
-`limit: 3`, `compact: true`, and `token_budget: 1000`. These client-side probe
-numbers include the JSON-RPC wrapper bytes; `memory.metrics.token_usage` records
-the server-visible tool params and result payload bytes.
+`limit: 3`, `compact: true`, and `token_budget: 1000`. These historical
+client-side probe numbers included the old wrapper bytes; current CLI-only runs
+should be remeasured through `memd call`.
 
 | project | elapsed_ms | request_bytes | response_bytes | estimated_mcp_tokens |
 |---|---:|---:|---:|---:|
@@ -68,8 +68,8 @@ the server-visible tool params and result payload bytes.
 | memd/memd | 223 | 243 | 11518 | 2941 |
 | default/bester-hosting | 2724 | 257 | 13567 | 3456 |
 
-For these compact lookups, using `memd` added about `2160-3456` observable MCP
-payload tokens per lookup versus `0` MCP payload tokens without `memd`. Whole
+For these compact lookups, using `memd` added about `2160-3456` observable
+payload tokens per lookup versus `0` `memd` payload tokens without `memd`. Whole
 agent deltas can still be lower or negative when `memd` prevents broad
 filesystem scans, and higher when the agent records many task/evidence calls.
 
@@ -78,8 +78,8 @@ filesystem scans, and higher when the agent records many task/evidence calls.
 For publishable overhead numbers:
 
 1. Use fixed prompts, agent, model, reasoning effort, cwd, and timeout.
-2. Run paired with/without conditions; disable `memd` with an empty MCP config
-   for the without condition.
+2. Run paired with/without conditions; omit `memd` CLI retrieval from the
+   without condition.
 3. Capture exact provider usage or CLI `tokens used` footer.
 4. Query `memory.metrics` before and after the with run and subtract
    `token_usage` counters to get the `memd`-observable component.

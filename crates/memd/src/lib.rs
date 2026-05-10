@@ -30,7 +30,7 @@ pub use embeddings::{CandleEmbedder, Embedder, EmbeddingConfig, EmbeddingResult,
 pub use error::{MemdError, Result};
 pub use index::{HnswConfig, HnswIndex, SearchResult};
 pub use logging::init_logging;
-pub use mcp::{run_http_server, run_server, McpServer};
+pub use mcp::handlers::configure_operation_routing;
 pub use metrics::{
     IndexStats, LatencyStats, MetricsCollector, MetricsSnapshot, QueryMetrics, Timer,
     TokenUsageStats, ToolTokenAggregate, ToolTokenUsage,

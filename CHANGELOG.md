@@ -6,8 +6,55 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-05-10
+
+### Added
+
+- CLI-first agent workflow: `memd agent-context`, expanded `memd search`,
+  `memd add`, and `memd call <operation> --json ...` now cover the ordinary
+  agent workflow without external client-tool registration.
+- Private warm-worker commands (`memd warm start/status/stop`) and
+  `--warm auto|off|required` for `search`, `agent-context`, and `call`, giving
+  repeated local retrieval a low-latency path while keeping the public
+  interface as shell commands.
+- `memd batch --jsonl` for benchmark and script workloads that need many
+  structured operations in one loaded process.
+- Optional MemReranker-4B post-retrieval reranking for `memd search` through
+  explicit `--reranker auto|memreranker-4b` flags. The default search path
+  stays slim and does not load Python, PyTorch, Hugging Face models, or GPU
+  runtimes.
+- Bright-Pro adapter code for scoped static-retrieval checks against the
+  Bright-Pro framework, including `memd`, SuperLocalMemory, and optional
+  MemReranker comparison lanes.
+
+### Changed
+
+- Root documentation, quickstart, skill docs, installer scripts, and verifier
+  scripts now document skill + CLI as the main workflow.
+- The compiled JSON-RPC/HTTP transport code was removed from the Rust crate;
+  reusable operation handlers remain available through `memd call` and
+  `memd batch`.
+- The bundled `memd` skill binary was refreshed to the current release build.
+- README benchmarking now highlights the recommended warm-worker and batch
+  execution modes. Startup-overhead diagnostics remain in raw benchmark
+  artifacts for reproducibility, but are not presented as the recommended agent
+  workflow.
+- Task-memory benchmark scripts now run against the release binary by default
+  and can report `cli_cold`, `cli_warm`, and `cli_batch` lanes.
+- `memd-wiki` compiler code now handles path-shaped project identifiers with a
+  safe page stem, prunes missing referenced tasks instead of failing a build,
+  and backfills digest-library grounding refs from concrete result rows when
+  available.
+- `memd-wiki` now reads project state through the local `memd` executable
+  instead of a network endpoint.
+
 ### Fixed
 
+- README Mermaid diagrams were simplified so GitHub renders them reliably.
+- CLI workflow docs no longer point to stale client-registration files or
+  wrapper guard paths that are not part of the shipped workflow.
+- Release-facing ignore rules now keep local caches, draft paper files, raw
+  benchmark payloads, and local agent configuration out of normal commits.
 - `memory.health` now computes duplicate aggregate counts and ratios over the
   full requested tenant/project scope even when `include_examples=true`.
   `duplicate_limit` limits only the returned example groups, so
