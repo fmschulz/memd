@@ -5,6 +5,7 @@
 //! through `memd call`.
 
 use serde_json::{json, Value};
+use std::path::Path;
 use thiserror::Error;
 
 use crate::cli_client::{CliClient, CliClientError};
@@ -33,10 +34,7 @@ pub struct McpClient {
 
 impl McpClient {
     /// Start a compatibility client with additional global CLI arguments.
-    pub fn start_with_args(
-        memd_path: &std::path::PathBuf,
-        extra_args: &[&str],
-    ) -> Result<Self, McpClientError> {
+    pub fn start_with_args(memd_path: &Path, extra_args: &[&str]) -> Result<Self, McpClientError> {
         Ok(Self {
             client: CliClient::start_with_args(memd_path, extra_args),
             request_id: 0,

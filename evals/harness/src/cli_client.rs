@@ -3,7 +3,7 @@
 //! The released executable no longer starts an MCP stdio server. Evaluation
 //! suites exercise the same operation surface through `memd call`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::Value;
@@ -29,9 +29,9 @@ pub struct CliClient {
 }
 
 impl CliClient {
-    pub fn start_with_args(memd_path: &PathBuf, extra_args: &[&str]) -> Self {
+    pub fn start_with_args(memd_path: &Path, extra_args: &[&str]) -> Self {
         Self {
-            memd_path: memd_path.clone(),
+            memd_path: memd_path.to_path_buf(),
             global_args: extra_args.iter().map(|arg| arg.to_string()).collect(),
             _temp_dir_guard: None,
         }

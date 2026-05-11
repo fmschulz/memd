@@ -194,7 +194,7 @@ pub fn run_benchmark_protocol(
 fn run_single_dataset(
     memd_path: &PathBuf,
     embedding_model: &str,
-    dataset_path: &PathBuf,
+    dataset_path: &Path,
     dataset_label: &str,
     multi_dataset: bool,
     system_variant: SystemVariant,
