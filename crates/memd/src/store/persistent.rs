@@ -3385,7 +3385,10 @@ mod tests {
         // finalizes the first chunk's segment and registers its reader in
         // `tenant.segments`.
         let finalized_id = store
-            .add(make_chunk(&tenant, "finalized bytes that must survive cache drift"))
+            .add(make_chunk(
+                &tenant,
+                "finalized bytes that must survive cache drift",
+            ))
             .await
             .unwrap();
         let _ = store

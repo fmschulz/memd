@@ -346,7 +346,11 @@ impl DenseSearcher {
         let indices = self.indices.read();
         let tenant_str = tenant_id.to_string();
         match indices.get(&tenant_str) {
-            Some(index) => index.get_mapping().read().get_internal_id(chunk_id).is_some(),
+            Some(index) => index
+                .get_mapping()
+                .read()
+                .get_internal_id(chunk_id)
+                .is_some(),
             None => false,
         }
     }

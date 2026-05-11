@@ -126,12 +126,13 @@ async fn expired_chunks_are_hidden_at_retrieval_before_sweep_runs() {
         .clone();
     let ids: Vec<String> = results
         .iter()
-        .filter_map(|r| r.get("chunk_id").and_then(|v| v.as_str()).map(str::to_string))
+        .filter_map(|r| {
+            r.get("chunk_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
         .collect();
-    assert!(
-        ids.contains(&fresh_id),
-        "fresh note must surface: {ids:?}"
-    );
+    assert!(ids.contains(&fresh_id), "fresh note must surface: {ids:?}");
     for r in &results {
         let txt = r.get("text").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
@@ -198,7 +199,11 @@ async fn future_expiry_does_not_hide_chunk_before_the_deadline() {
         .clone();
     let ids: Vec<String> = results
         .iter()
-        .filter_map(|r| r.get("chunk_id").and_then(|v| v.as_str()).map(str::to_string))
+        .filter_map(|r| {
+            r.get("chunk_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
         .collect();
     assert!(
         ids.contains(&id),
@@ -253,11 +258,7 @@ async fn expiry_sweep_marks_rows_expired() {
 
     let sweep = ExpirySweep::new();
     let result = sweep
-        .run(
-            server.store().metadata(),
-            server.store().hybrid(),
-            &tenant,
-        )
+        .run(server.store().metadata(), server.store().hybrid(), &tenant)
         .expect("sweep ok");
     assert_eq!(result.expired_count, 1);
 
@@ -477,20 +478,12 @@ async fn expiry_sweep_is_idempotent_across_consecutive_runs() {
 
     let sweep = ExpirySweep::new();
     let r1 = sweep
-        .run(
-            server.store().metadata(),
-            server.store().hybrid(),
-            &tenant,
-        )
+        .run(server.store().metadata(), server.store().hybrid(), &tenant)
         .expect("first sweep ok");
     assert_eq!(r1.expired_count, 2);
 
     let r2 = sweep
-        .run(
-            server.store().metadata(),
-            server.store().hybrid(),
-            &tenant,
-        )
+        .run(server.store().metadata(), server.store().hybrid(), &tenant)
         .expect("second sweep ok");
     assert_eq!(
         r2.expired_count, 0,
@@ -539,11 +532,7 @@ async fn history_promotion_uses_lifecycle_updated_clock_not_created() {
 
     let promo = HistoryPromotion::new(30 * 86_400_000);
     let r1 = promo
-        .run(
-            server.store().metadata(),
-            server.store().hybrid(),
-            &tenant,
-        )
+        .run(server.store().metadata(), server.store().hybrid(), &tenant)
         .expect("run ok");
     assert_eq!(
         r1.promoted_count, 0,
@@ -568,11 +557,7 @@ async fn history_promotion_uses_lifecycle_updated_clock_not_created() {
         .expect("backdate ok");
 
     let r2 = promo
-        .run(
-            server.store().metadata(),
-            server.store().hybrid(),
-            &tenant,
-        )
+        .run(server.store().metadata(), server.store().hybrid(), &tenant)
         .expect("run ok");
     assert_eq!(
         r2.promoted_count, 1,
@@ -628,20 +613,12 @@ async fn history_promotion_is_idempotent_across_consecutive_runs() {
 
     let promo = HistoryPromotion::new(30 * 86_400_000);
     let r1 = promo
-        .run(
-            server.store().metadata(),
-            server.store().hybrid(),
-            &tenant,
-        )
+        .run(server.store().metadata(), server.store().hybrid(), &tenant)
         .expect("run ok");
     assert_eq!(r1.promoted_count, 1);
 
     let r2 = promo
-        .run(
-            server.store().metadata(),
-            server.store().hybrid(),
-            &tenant,
-        )
+        .run(server.store().metadata(), server.store().hybrid(), &tenant)
         .expect("run ok");
     assert_eq!(
         r2.promoted_count, 0,
@@ -823,11 +800,7 @@ async fn history_promotion_also_demotes_long_stale_expired_rows() {
 
     let promo = HistoryPromotion::new(30 * 86_400_000);
     let result = promo
-        .run(
-            server.store().metadata(),
-            server.store().hybrid(),
-            &tenant,
-        )
+        .run(server.store().metadata(), server.store().hybrid(), &tenant)
         .expect("run ok");
     assert_eq!(result.promoted_count, 1);
 
@@ -855,7 +828,7 @@ async fn compaction_runs_expiry_sweep_and_history_promotion() {
     use memd::store::dense::{DenseSearchConfig, DenseSearcher};
     use memd::store::metadata::MetadataStore;
     use memd::store::persistent::{PersistentStore, PersistentStoreConfig};
-    use memd::types::{ChunkStatus, LifecycleDelta, MemoryChunk, MemoryTier, ChunkType};
+    use memd::types::{ChunkStatus, ChunkType, LifecycleDelta, MemoryChunk, MemoryTier};
     use std::sync::Arc;
 
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -888,7 +861,11 @@ async fn compaction_runs_expiry_sweep_and_history_promotion() {
         .expect("overlay ok");
 
     let old_superseded = store
-        .add(MemoryChunk::new(tenant.clone(), "old superseded", ChunkType::Doc))
+        .add(MemoryChunk::new(
+            tenant.clone(),
+            "old superseded",
+            ChunkType::Doc,
+        ))
         .await
         .expect("add ok");
     let long_ago = current_time_ms() - 365 * 86_400_000;
@@ -923,10 +900,7 @@ async fn compaction_runs_expiry_sweep_and_history_promotion() {
         .expect("run_compaction ok");
 
     assert_eq!(result.expired_count, 1, "ExpirySweep must have fired");
-    assert_eq!(
-        result.promoted_count, 1,
-        "HistoryPromotion must have fired"
-    );
+    assert_eq!(result.promoted_count, 1, "HistoryPromotion must have fired");
 
     // Verify the two rows now reflect the expected overlay state.
     let r_expired = store
@@ -952,7 +926,7 @@ async fn compaction_skips_sweeps_when_disabled_via_config() {
     use memd::store::dense::{DenseSearchConfig, DenseSearcher};
     use memd::store::metadata::MetadataStore;
     use memd::store::persistent::{PersistentStore, PersistentStoreConfig};
-    use memd::types::{ChunkStatus, LifecycleDelta, MemoryChunk, ChunkType};
+    use memd::types::{ChunkStatus, ChunkType, LifecycleDelta, MemoryChunk};
     use std::sync::Arc;
 
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -1024,7 +998,11 @@ async fn compaction_skips_sweeps_when_disabled_via_config() {
         "promotion must not run when disabled"
     );
     // The rows must still be in their original (non-terminal) state.
-    let r1 = store.get_with_lifecycle(&tenant, &expiring).await.unwrap().unwrap();
+    let r1 = store
+        .get_with_lifecycle(&tenant, &expiring)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(r1.status, ChunkStatus::Final);
 }
 

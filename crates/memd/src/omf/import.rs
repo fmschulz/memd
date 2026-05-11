@@ -43,7 +43,9 @@ use crate::store::metadata::MetadataStore;
 use crate::store::persistent::PersistentStore;
 use crate::store::supersession::{canonicalize_for_type, is_near_duplicate};
 use crate::types::lifecycle::{LifecycleDelta, MemoryTier};
-use crate::types::{ChunkId, ChunkStatus, ChunkType, IngestionMode, MemoryChunk, ProjectId, TenantId};
+use crate::types::{
+    ChunkId, ChunkStatus, ChunkType, IngestionMode, MemoryChunk, ProjectId, TenantId,
+};
 
 use super::time::now_utc_ms;
 
@@ -210,13 +212,7 @@ pub async fn import_omf_with_events(
         }
 
         if let Some(thr) = opts.fuzzy_threshold {
-            if is_fuzzy_duplicate(
-                store,
-                tenant_id,
-                project_id.as_deref(),
-                &canonical,
-                thr,
-            )? {
+            if is_fuzzy_duplicate(store, tenant_id, project_id.as_deref(), &canonical, thr)? {
                 result.duplicates += 1;
                 continue;
             }
@@ -247,8 +243,7 @@ pub async fn import_omf_with_events(
             if let Some(src_id) = extract_source_chunk_id(&item.extensions)? {
                 source_to_target.insert(src_id, chunk_id.clone());
             }
-            if let Some(supersedes_src) =
-                extract_supersession_ref(&item.extensions, "supersedes")?
+            if let Some(supersedes_src) = extract_supersession_ref(&item.extensions, "supersedes")?
             {
                 pending_edges.push(PendingSupersede {
                     old_source_id: supersedes_src,
@@ -416,13 +411,7 @@ pub async fn preview_omf_import(
         }
 
         if let Some(thr) = opts.fuzzy_threshold {
-            if is_fuzzy_duplicate(
-                store,
-                tenant_id,
-                project_id.as_deref(),
-                &canonical,
-                thr,
-            )? {
+            if is_fuzzy_duplicate(store, tenant_id, project_id.as_deref(), &canonical, thr)? {
                 result.duplicates += 1;
                 continue;
             }
@@ -493,11 +482,11 @@ fn is_fuzzy_duplicate(
     // project_id=None we use `list_recent_with_null_project` which
     // filters BEFORE LIMIT — same reasoning as D3/D4.
     let recent = match project_id {
-        Some(p) => store.metadata().list_recent_for_project(
-            tenant_id,
-            Some(p),
-            FUZZY_RECENT_POOL_SIZE,
-        )?,
+        Some(p) => {
+            store
+                .metadata()
+                .list_recent_for_project(tenant_id, Some(p), FUZZY_RECENT_POOL_SIZE)?
+        }
         None => store
             .metadata()
             .list_recent_with_null_project(tenant_id, FUZZY_RECENT_POOL_SIZE)?,
@@ -529,7 +518,10 @@ fn extract_ingestion_mode(ext: &Value) -> Option<IngestionMode> {
 }
 
 fn ext_version_supported(ext: &Value) -> bool {
-    ext.get("memd").and_then(|m| m.get("v")).and_then(|v| v.as_u64()) == Some(MEMD_EXT_VERSION as u64)
+    ext.get("memd")
+        .and_then(|m| m.get("v"))
+        .and_then(|v| v.as_u64())
+        == Some(MEMD_EXT_VERSION as u64)
 }
 
 /// Parse `extensions.memd.chunk_id` as a source-side `ChunkId`.
@@ -745,7 +737,10 @@ mod tests {
         });
         assert_eq!(extract_project_id(&ext), Some("p1".to_string()));
         assert_eq!(extract_chunk_type(&ext), Some(ChunkType::Decision));
-        assert_eq!(extract_ingestion_mode(&ext), Some(IngestionMode::Conversation));
+        assert_eq!(
+            extract_ingestion_mode(&ext),
+            Some(IngestionMode::Conversation)
+        );
     }
 
     /// Guard: `OmfItem` must use an untagged `OmfSource` so this

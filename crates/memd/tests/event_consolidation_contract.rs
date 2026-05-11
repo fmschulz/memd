@@ -9,7 +9,7 @@
 mod common;
 use common::*;
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 fn result_has_tags(result: &Value, required: &[&str]) -> bool {
     let Some(observed) = result["tags"].as_array() else {

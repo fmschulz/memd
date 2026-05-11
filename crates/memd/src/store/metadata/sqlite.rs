@@ -1663,11 +1663,7 @@ impl SqliteMetadataStore {
     /// integration tests reach it.
     #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
-    pub fn force_timestamp_created(
-        &self,
-        chunk_id: &ChunkId,
-        ts_ms: i64,
-    ) -> Result<()> {
+    pub fn force_timestamp_created(&self, chunk_id: &ChunkId, ts_ms: i64) -> Result<()> {
         let conn = self.pool.get();
         conn.execute(
             "UPDATE chunks SET timestamp_created = ?1 WHERE chunk_id = ?2",
@@ -1861,9 +1857,7 @@ fn detect_chunks_unique_shape(conn: &Connection) -> Result<ChunksUniqueShape> {
             .query_map([name.as_str()], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, rusqlite::Error>>()?;
         match cols.as_slice() {
-            [a, b, c]
-                if a == "tenant_id" && b == "segment_id" && c == "ordinal" =>
-            {
+            [a, b, c] if a == "tenant_id" && b == "segment_id" && c == "ordinal" => {
                 has_tenant_scoped = true;
             }
             [a, b] if a == "segment_id" && b == "ordinal" => {
@@ -1996,11 +1990,7 @@ impl MetadataStore for SqliteMetadataStore {
         Ok(rows_affected > 0)
     }
 
-    fn get_by_segment(
-        &self,
-        tenant_id: &TenantId,
-        segment_id: u64,
-    ) -> Result<Vec<ChunkMetadata>> {
+    fn get_by_segment(&self, tenant_id: &TenantId, segment_id: u64) -> Result<Vec<ChunkMetadata>> {
         let conn = self.pool.get();
 
         // Tenant-scoped because (segment_id, ordinal) is no longer
