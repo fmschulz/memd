@@ -19,6 +19,7 @@ use crate::types::{ChunkId, MemoryChunk, ProjectId, Source, TenantId};
 mod args;
 mod batch;
 mod call;
+mod ops_bridge;
 mod paths;
 mod render;
 mod search;
@@ -34,7 +35,8 @@ pub use args::{
 };
 use args::{ProjectScopeConfig, SearchRerankerOptions};
 use batch::{read_batch_input, run_batch_jsonl, stream_batch_jsonl};
-use call::{cli_call_tool, parse_call_arguments};
+use call::parse_call_arguments;
+use ops_bridge::cli_call_tool;
 use paths::{
     absolutize_project_dir, build_tenant_scope_config, normalize_absolute, path_is_inside,
     read_omf_input, read_stdin_to_string, reject_if_any_symlink_inside_outdir, resolve_data_dir,
