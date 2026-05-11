@@ -6,6 +6,33 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-05-11
+
+### Changed
+
+- Split the main CLI implementation into focused modules for arguments,
+  search/context payloads, rendering, batch JSONL, warm-worker control, call
+  parsing, path handling, and the operation bridge while preserving the
+  existing public `memd::cli::*` compatibility paths.
+- Replaced wildcard MCP handler exports/imports with explicit public exports
+  so future operation-layer moves are reviewable and do not silently shrink
+  the Rust API surface.
+- Migrated the eval harness away from the removed `memd --mode mcp` process
+  startup path. The harness now has a current CLI contract suite, a `CliClient`
+  for `memd call`, and a temporary MCP-shaped compatibility wrapper for older
+  behavior suites.
+- Archived the retired protocol-only MCP conformance suite in
+  `evals/legacy_mcp_conformance.md`.
+- Refreshed repo-wide rustfmt output in a dedicated style commit so future
+  formatter checks are meaningful.
+
+### Fixed
+
+- Eval-harness help and package metadata now describe the CLI-first executable
+  instead of MCP conformance.
+- Release metadata and `memd-wiki` lockstep package versions now align with the
+  `0.20.0` binary release.
+
 ## [0.13.0] - 2026-05-10
 
 ### Added

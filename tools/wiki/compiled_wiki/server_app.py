@@ -208,7 +208,7 @@ def make_handler(outdir: Path, *, quiet: bool = False) -> type:
     project_slugs = discover_project_slugs(outdir_abs)
 
     class WikiRequestHandler(BaseHTTPRequestHandler):
-        server_version = "memd-wiki-serve/0.12.0"
+        server_version = "memd-wiki-serve/0.20.0"
 
         def do_GET(self) -> None:  # noqa: N802 — http.server API.
             url_path = self.path.split("?", 1)[0]

@@ -124,9 +124,12 @@ pub fn run_tiered_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestR
     let mut results = Vec::new();
 
     // Load dataset
-    let mut config = TieredEvalConfig::default();
-    config.dataset_path =
-        crate::resolve_dataset_path("evals/bench/datasets/retrieval/tiered_eval.json");
+    let config = TieredEvalConfig {
+        dataset_path: crate::resolve_dataset_path(
+            "evals/bench/datasets/retrieval/tiered_eval.json",
+        ),
+        ..Default::default()
+    };
     let dataset = match load_dataset(&config.dataset_path) {
         Ok(d) => d,
         Err(e) => {

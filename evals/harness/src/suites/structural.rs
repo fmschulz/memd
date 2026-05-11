@@ -768,12 +768,11 @@ fn evaluate_references_result(
     let actual = format!("count={}, files={:?}", actual_count, actual_files);
 
     // Check count (allow some flexibility)
-    let count_ok = expected_count.map_or(true, |c| {
-        actual_count >= c.saturating_sub(1) && actual_count <= c + 1
-    });
+    let count_ok =
+        expected_count.is_none_or(|c| actual_count >= c.saturating_sub(1) && actual_count <= c + 1);
 
     // Check files
-    let files_ok = expected_files.as_ref().map_or(true, |expected| {
+    let files_ok = expected_files.as_ref().is_none_or(|expected| {
         expected
             .iter()
             .all(|f| actual_files.iter().any(|af| af.ends_with(f)))
