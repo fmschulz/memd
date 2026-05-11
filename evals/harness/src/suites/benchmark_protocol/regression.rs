@@ -306,10 +306,8 @@ fn align_queries_by_id(
     baseline: &[QueryMetrics],
     candidate: &[QueryMetrics],
 ) -> Vec<(QueryMetrics, QueryMetrics)> {
-    let baseline_by_id: HashMap<&str, &QueryMetrics> = baseline
-        .iter()
-        .map(|m| (m.query_id.as_str(), m))
-        .collect();
+    let baseline_by_id: HashMap<&str, &QueryMetrics> =
+        baseline.iter().map(|m| (m.query_id.as_str(), m)).collect();
     let mut aligned = Vec::new();
     for m in candidate {
         if let Some(base) = baseline_by_id.get(m.query_id.as_str()) {
@@ -361,8 +359,9 @@ fn evaluate_metric(
     let paired = paired_test(&value_pairs);
     let effect_size = effect_size_cohens_d(&value_pairs);
 
-    let significant_degradation =
-        paired.mean_difference < 0.0 && paired.p_value <= alpha && effect_size.abs() >= min_effect_size;
+    let significant_degradation = paired.mean_difference < 0.0
+        && paired.p_value <= alpha
+        && effect_size.abs() >= min_effect_size;
 
     let gate_passed = !significant_degradation;
     let gate_reason = if gate_passed {
@@ -540,14 +539,8 @@ mod tests {
 
     #[test]
     fn align_queries_pairs_only_shared_ids() {
-        let baseline = vec![
-            ndcg_metric("q1", 0.5, 0.7),
-            ndcg_metric("q2", 0.5, 0.7),
-        ];
-        let candidate = vec![
-            ndcg_metric("q2", 0.4, 0.6),
-            ndcg_metric("q3", 0.4, 0.6),
-        ];
+        let baseline = vec![ndcg_metric("q1", 0.5, 0.7), ndcg_metric("q2", 0.5, 0.7)];
+        let candidate = vec![ndcg_metric("q2", 0.4, 0.6), ndcg_metric("q3", 0.4, 0.6)];
         let aligned = align_queries_by_id(&baseline, &candidate);
         assert_eq!(aligned.len(), 1);
         assert_eq!(aligned[0].0.query_id, "q2");

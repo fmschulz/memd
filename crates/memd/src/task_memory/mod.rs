@@ -1205,7 +1205,8 @@ mod tests {
         page.artifact_role = Some("concept".to_string());
         page.summary = Some("Explains the verification boundary.".to_string());
         page.content = Some(
-            "# Verification boundary\n\nClaims require distinct-writer countersignatures.".to_string(),
+            "# Verification boundary\n\nClaims require distinct-writer countersignatures."
+                .to_string(),
         );
         page.related_artifact_ids = vec!["0199...".to_string()];
 
@@ -1213,7 +1214,8 @@ mod tests {
         assert!(json.contains("\"artifact_kind\":\"wiki_page\""));
         assert!(json.contains("\"content\":"));
 
-        let parsed: TaskArtifact = serde_json::from_str(&json).expect("wiki_page should round-trip");
+        let parsed: TaskArtifact =
+            serde_json::from_str(&json).expect("wiki_page should round-trip");
         assert_eq!(parsed.artifact_kind, ArtifactKind::WikiPage);
         assert_eq!(parsed.content, page.content);
         assert_eq!(parsed.artifact_role, Some("concept".to_string()));

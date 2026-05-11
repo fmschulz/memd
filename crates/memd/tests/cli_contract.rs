@@ -30,7 +30,10 @@ fn supported_cli_help_surfaces_resolve() {
             String::from_utf8_lossy(&output.stderr)
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Usage:"), "missing usage in {args:?}: {stdout}");
+        assert!(
+            stdout.contains("Usage:"),
+            "missing usage in {args:?}: {stdout}"
+        );
         if args.as_slice() == ["--help"] {
             assert!(
                 !stdout.contains("--mode"),
@@ -51,7 +54,10 @@ fn mode_mcp_is_rejected_by_current_cli() {
         .output()
         .expect("run memd --mode mcp");
 
-    assert!(!output.status.success(), "--mode mcp unexpectedly succeeded");
+    assert!(
+        !output.status.success(),
+        "--mode mcp unexpectedly succeeded"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("--mode") || stderr.contains("unexpected argument"),
@@ -69,7 +75,13 @@ not-json
 "#;
 
     let mut child = Command::new(memd_bin())
-        .args(["--in-memory", "batch", "--jsonl", "-", "--continue-on-error"])
+        .args([
+            "--in-memory",
+            "batch",
+            "--jsonl",
+            "-",
+            "--continue-on-error",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -173,7 +173,8 @@ mod tests {
         // `memories` is a required envelope field. Missing the key entirely
         // (as opposed to an explicit empty array) must fail deserialization
         // so downstream validators never see a false-empty document.
-        let no_memories = r#"{"omf":"1.0","exported_at":"2026-04-18T00:00:00Z","source":{"app":"memd"}}"#;
+        let no_memories =
+            r#"{"omf":"1.0","exported_at":"2026-04-18T00:00:00Z","source":{"app":"memd"}}"#;
         let err = serde_json::from_str::<OmfDocument>(no_memories).unwrap_err();
         assert!(
             err.to_string().contains("memories"),

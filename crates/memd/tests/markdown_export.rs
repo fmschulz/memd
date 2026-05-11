@@ -19,9 +19,7 @@ async fn export_markdown_returns_files_without_writing() {
     )
     .await;
     let body = parse_result_text(&r);
-    let files = body["files"]
-        .as_array()
-        .expect("files array");
+    let files = body["files"].as_array().expect("files array");
     assert!(!files.is_empty(), "expected at least one file");
     for f in files {
         assert!(f["path"].as_str().is_some(), "file.path must be a string");
@@ -85,7 +83,11 @@ async fn export_markdown_groups_chunks_by_project_and_type() {
         .iter()
         .map(|f| f["path"].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(paths.len(), 3, "expected one file per (project, type) bucket");
+    assert_eq!(
+        paths.len(),
+        3,
+        "expected one file per (project, type) bucket"
+    );
     assert!(
         paths.iter().any(|p| p.contains("p1/doc")),
         "p1/doc bucket missing: {paths:?}"

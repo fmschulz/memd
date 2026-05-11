@@ -43,11 +43,7 @@ pub(super) fn calculate_precision(retrieved: &[String], relevant: &HashSet<Strin
 /// Returns `0.0` when `iDCG@k == 0` (no relevant documents known for this
 /// query or `k == 0`). Callers decide whether such queries are dropped from
 /// the dataset average.
-pub(super) fn calculate_ndcg(
-    retrieved: &[String],
-    grades: &HashMap<String, u8>,
-    k: usize,
-) -> f64 {
+pub(super) fn calculate_ndcg(retrieved: &[String], grades: &HashMap<String, u8>, k: usize) -> f64 {
     if k == 0 {
         return 0.0;
     }

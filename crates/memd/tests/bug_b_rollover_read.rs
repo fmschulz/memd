@@ -118,10 +118,7 @@ async fn get_chunk_works_after_separate_add_calls_span_rollover() {
 
     // Separate add calls — mirrors MCP clients adding chunks one at a time.
     let first_id = store.add(make_chunk(&tenant, "first post")).await.unwrap();
-    let second_id = store
-        .add(make_chunk(&tenant, "second post"))
-        .await
-        .unwrap();
+    let second_id = store.add(make_chunk(&tenant, "second post")).await.unwrap();
     let third_id = store.add(make_chunk(&tenant, "third post")).await.unwrap();
 
     // Active segment: third's. Finalized: first's, second's. All must read.

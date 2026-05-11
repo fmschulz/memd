@@ -16,9 +16,7 @@ pub fn init_logging(format: &str, level: &str) {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         // Keep memd logs at requested level while suppressing noisy third-party info logs
         // that significantly slow benchmark runs.
-        EnvFilter::new(format!(
-            "{level},tantivy=warn,hnsw_rs=warn,tokenizers=warn"
-        ))
+        EnvFilter::new(format!("{level},tantivy=warn,hnsw_rs=warn,tokenizers=warn"))
     });
 
     match format {

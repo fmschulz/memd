@@ -18,20 +18,8 @@ use tracing::{info, warn};
 
 use crate::error::{MemdError, Result};
 use crate::maintenance::DreamParams;
-use crate::mcp::McpError;
 use crate::mcp::handlers::{
-    AddBatchParams, AddParams, ArtifactCreateParams, ArtifactGetParams, ArtifactLibraryParams,
-    ArtifactListThreadParams, ArtifactVerifyParams, CompactParams, ConsolidateEpisodeParams,
-    ContextFindRelevantContextParams, ContextGetFilesForSubsystemParams,
-    ContextGetHotContextParams, ContextListSubsystemsParams, ContextSearchDocumentsParams,
-    ContextSuggestAgentParams, DeleteParams, ExportMarkdownParams, ExportOmfParams,
-    FeedbackParams, FindCallersParams, FindDefinitionParams, FindErrorsParams, FindImportsParams,
-    FindNearDuplicatesParams, FindReferencesParams, FindToolCallsParams, GetParams, HealthParams,
-    ImportOmfParams, MetricsParams, PreviewOmfImportParams, ProjectBriefParams, QueryMode,
-    SearchParams, SetExpiryParams, StatsParams, SupersedeParams, TaskAddEvidenceParams,
-    TaskFinishParams, TaskGetParams, TaskProgressParams, TaskResumeParams, TaskRunFinishParams,
-    TaskRunStartParams, TaskSearchParams, TaskStartParams, handle_artifact_create,
-    handle_artifact_find_decisions, handle_artifact_find_evidence,
+    handle_artifact_create, handle_artifact_find_decisions, handle_artifact_find_evidence,
     handle_artifact_find_failures, handle_artifact_find_highlights, handle_artifact_get,
     handle_artifact_list_thread, handle_artifact_search, handle_artifact_verify,
     handle_context_brief_project, handle_context_find_relevant_context,
@@ -46,15 +34,27 @@ use crate::mcp::handlers::{
     handle_memory_preview_omf_import, handle_memory_search, handle_memory_set_expiry,
     handle_memory_stats, handle_memory_supersede, handle_task_add_evidence, handle_task_finish,
     handle_task_get, handle_task_progress, handle_task_resume, handle_task_run_finish,
-    handle_task_run_start, handle_task_search, handle_task_start,
+    handle_task_run_start, handle_task_search, handle_task_start, AddBatchParams, AddParams,
+    ArtifactCreateParams, ArtifactGetParams, ArtifactLibraryParams, ArtifactListThreadParams,
+    ArtifactVerifyParams, CompactParams, ConsolidateEpisodeParams,
+    ContextFindRelevantContextParams, ContextGetFilesForSubsystemParams,
+    ContextGetHotContextParams, ContextListSubsystemsParams, ContextSearchDocumentsParams,
+    ContextSuggestAgentParams, DeleteParams, ExportMarkdownParams, ExportOmfParams, FeedbackParams,
+    FindCallersParams, FindDefinitionParams, FindErrorsParams, FindImportsParams,
+    FindNearDuplicatesParams, FindReferencesParams, FindToolCallsParams, GetParams, HealthParams,
+    ImportOmfParams, MetricsParams, PreviewOmfImportParams, ProjectBriefParams, QueryMode,
+    SearchParams, SetExpiryParams, StatsParams, SupersedeParams, TaskAddEvidenceParams,
+    TaskFinishParams, TaskGetParams, TaskProgressParams, TaskResumeParams, TaskRunFinishParams,
+    TaskRunStartParams, TaskSearchParams, TaskStartParams,
 };
+use crate::mcp::McpError;
 use crate::metrics::MetricsCollector;
+use crate::store::metadata::MetadataStore;
+use crate::store::{Store, TenantManager};
 use crate::structural::{
     CallGraphIndexer, CallGraphSymbolRecord, StructuralStore, SymbolIndexer, SymbolQueryService,
     TraceQueryService,
 };
-use crate::store::metadata::MetadataStore;
-use crate::store::{Store, TenantManager};
 use crate::types::{ChunkId, ChunkType, MemoryChunk, ProjectId, Source, TenantId};
 
 /// Export output format.
@@ -923,8 +923,7 @@ pub async fn run_cli<S: Store>(
             // fallback, it doesn't replace it, so an untrusted
             // ancestor config can't turn off the guard for the
             // default-install data directory (Codex Item 4 HIGH).
-            let effective_data_dirs =
-                resolve_export_markdown_data_dirs(data_dir.as_deref())?;
+            let effective_data_dirs = resolve_export_markdown_data_dirs(data_dir.as_deref())?;
             let outdir_abs = normalize_absolute(&outdir);
             for candidate in &effective_data_dirs {
                 let data_dir_abs = normalize_absolute(candidate);
@@ -989,7 +988,9 @@ pub async fn run_cli<S: Store>(
                     }
                 }
                 if let Some(chunk) = <crate::store::persistent::PersistentStore as Store>::get(
-                    ps, &tenant, &meta.chunk_id,
+                    ps,
+                    &tenant,
+                    &meta.chunk_id,
                 )
                 .await?
                 {
@@ -2012,10 +2013,7 @@ fn read_omf_input(path: Option<&Path>) -> Result<String> {
         None => read_stdin_to_string()?,
         Some(p) if p.as_os_str() == std::ffi::OsStr::new("-") => read_stdin_to_string()?,
         Some(p) => std::fs::read_to_string(p).map_err(|e| {
-            crate::error::MemdError::ValidationError(format!(
-                "failed to read {}: {e}",
-                p.display()
-            ))
+            crate::error::MemdError::ValidationError(format!("failed to read {}: {e}", p.display()))
         })?,
     };
     if raw.trim().is_empty() {
@@ -2107,10 +2105,7 @@ fn path_is_inside(child: &Path, parent: &Path) -> bool {
 /// which is Unix-only; memd's CLI is already a user-trusted surface
 /// (the caller picks outdir), so narrowing the pre-planted-symlink
 /// window is the practical fix.
-fn reject_if_any_symlink_inside_outdir(
-    full_target: &Path,
-    outdir_abs: &Path,
-) -> Result<()> {
+fn reject_if_any_symlink_inside_outdir(full_target: &Path, outdir_abs: &Path) -> Result<()> {
     let rel = full_target.strip_prefix(outdir_abs).map_err(|_| {
         crate::error::MemdError::ValidationError(format!(
             "internal: target {} not inside outdir {}",
@@ -3262,7 +3257,8 @@ async fn cli_call_tool<S: Store>(
         }
         "memory.import_omf" => {
             let params: ImportOmfParams = parse_tool_params(tool, arguments)?;
-            let (response, events) = handle_memory_import_omf(store, tenant_manager, params).await?;
+            let (response, events) =
+                handle_memory_import_omf(store, tenant_manager, params).await?;
             for event in &events {
                 maybe_index_structural_chunk(
                     &mut structural_runtime,
@@ -3845,9 +3841,7 @@ mod tests {
 {"tool":"memory.stats","arguments":{"tenant_id":"batch_tenant"}}
 "#;
 
-        let rendered = run_batch_jsonl(&store, None, input, false)
-            .await
-            .unwrap();
+        let rendered = run_batch_jsonl(&store, None, input, false).await.unwrap();
         let rows = rendered
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
@@ -4093,11 +4087,7 @@ mod tests {
     fn discover_project_data_dir_returns_none_on_malformed_json() {
         let dir = tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".memd")).unwrap();
-        std::fs::write(
-            dir.path().join(".memd/tenant_scope.json"),
-            "{not json",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join(".memd/tenant_scope.json"), "{not json").unwrap();
         assert!(discover_project_data_dir_from(dir.path()).is_none());
     }
 
@@ -4158,8 +4148,7 @@ mod tests {
             r#"{"primary_tenant":"t","write_tenant":"t","scope":"local","read_tenants":["t"],"data_dir":"/discovered/data"}"#,
         )
         .unwrap();
-        let resolved =
-            resolve_export_markdown_data_dirs_from(None, Some(dir.path())).unwrap();
+        let resolved = resolve_export_markdown_data_dirs_from(None, Some(dir.path())).unwrap();
         let home_default = dirs::home_dir().unwrap().join(".memd").join("data");
         assert!(
             resolved.contains(&PathBuf::from("/discovered/data")),
@@ -4187,16 +4176,14 @@ mod tests {
         .unwrap();
         let explicit = PathBuf::from("/explicit/wins");
         let resolved =
-            resolve_export_markdown_data_dirs_from(Some(&explicit), Some(dir.path()))
-                .unwrap();
+            resolve_export_markdown_data_dirs_from(Some(&explicit), Some(dir.path())).unwrap();
         assert_eq!(resolved, vec![explicit]);
     }
 
     #[test]
     fn resolve_export_markdown_data_dirs_from_falls_back_to_home_when_no_project() {
         let dir = tempdir().unwrap();
-        let resolved =
-            resolve_export_markdown_data_dirs_from(None, Some(dir.path())).unwrap();
+        let resolved = resolve_export_markdown_data_dirs_from(None, Some(dir.path())).unwrap();
         let home_default = dirs::home_dir().unwrap().join(".memd").join("data");
         assert_eq!(resolved, vec![home_default]);
     }

@@ -804,12 +804,18 @@ pub mod lifecycle {
             assert_eq!(MemoryTier::Working.to_string(), "working");
             assert_eq!(MemoryTier::LongTerm.to_string(), "long_term");
             assert_eq!(MemoryTier::History.to_string(), "history");
-            assert_eq!(MemoryTier::from_str("working").unwrap(), MemoryTier::Working);
+            assert_eq!(
+                MemoryTier::from_str("working").unwrap(),
+                MemoryTier::Working
+            );
             assert_eq!(
                 MemoryTier::from_str("long_term").unwrap(),
                 MemoryTier::LongTerm
             );
-            assert_eq!(MemoryTier::from_str("history").unwrap(), MemoryTier::History);
+            assert_eq!(
+                MemoryTier::from_str("history").unwrap(),
+                MemoryTier::History
+            );
             assert!(MemoryTier::from_str("bogus").is_err());
         }
 

@@ -325,7 +325,12 @@ async fn memory_supersede_handler_matches_store_op() {
         .unwrap();
     assert_eq!(resolved.status, ChunkStatus::Superseded);
     assert_eq!(
-        resolved.lifecycle.superseded_by.as_ref().unwrap().to_string(),
+        resolved
+            .lifecycle
+            .superseded_by
+            .as_ref()
+            .unwrap()
+            .to_string(),
         new_id
     );
 }
@@ -532,7 +537,11 @@ async fn supersede_chunk_rejects_double_supersede_on_same_old_id() {
 
     // Second supersede on the same old_id must fail.
     let err = store
-        .supersede_chunk(&t, &a, MemoryChunk::new(t.clone(), "B-prime", ChunkType::Doc))
+        .supersede_chunk(
+            &t,
+            &a,
+            MemoryChunk::new(t.clone(), "B-prime", ChunkType::Doc),
+        )
         .await
         .expect_err("second supersede on same old_id must fail");
     let msg = format!("{err}");

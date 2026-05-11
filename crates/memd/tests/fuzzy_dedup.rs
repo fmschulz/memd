@@ -5,8 +5,8 @@
 mod common;
 use common::*;
 
-use memd::store::Store;
 use memd::store::metadata::MetadataStore;
+use memd::store::Store;
 
 #[tokio::test]
 async fn add_writes_canonical_text_and_find_by_canonical_returns_match() {
@@ -214,7 +214,10 @@ async fn backfill_canonical_text_repopulates_legacy_null_rows() {
 
     // Run backfill — the same call that startup schedules.
     let stats = ps.backfill_canonical_text_for_legacy_chunks();
-    assert_eq!(stats.rows_backfilled, 1, "exactly one legacy row backfilled");
+    assert_eq!(
+        stats.rows_backfilled, 1,
+        "exactly one legacy row backfilled"
+    );
     assert_eq!(stats.rows_skipped, 0);
 
     let meta_after = ps
@@ -348,8 +351,7 @@ async fn add_with_exact_dedup_supersedes_canonical_match() {
     )
     .await;
     let body1 = parse_result_text(&r1);
-    let id1 = ChunkId::parse(body1["chunk_id"].as_str().expect("chunk_id"))
-        .expect("valid id");
+    let id1 = ChunkId::parse(body1["chunk_id"].as_str().expect("chunk_id")).expect("valid id");
 
     let r2 = call_tool(
         &server,
@@ -364,8 +366,7 @@ async fn add_with_exact_dedup_supersedes_canonical_match() {
     )
     .await;
     let body2 = parse_result_text(&r2);
-    let id2 = ChunkId::parse(body2["chunk_id"].as_str().expect("chunk_id"))
-        .expect("valid id");
+    let id2 = ChunkId::parse(body2["chunk_id"].as_str().expect("chunk_id")).expect("valid id");
     let supersedes: Vec<String> = body2["superseded_ids"]
         .as_array()
         .expect("superseded_ids array")
@@ -385,7 +386,11 @@ async fn add_with_exact_dedup_supersedes_canonical_match() {
         .expect("old chunk still resolvable");
     assert_eq!(resolved.status, ChunkStatus::Superseded);
     assert_eq!(
-        resolved.lifecycle.superseded_by.as_ref().map(|c| c.to_string()),
+        resolved
+            .lifecycle
+            .superseded_by
+            .as_ref()
+            .map(|c| c.to_string()),
         Some(id2.to_string())
     );
 }
@@ -422,8 +427,7 @@ async fn add_with_fuzzy_dedup_supersedes_paraphrase() {
     )
     .await;
     let body = parse_result_text(&r);
-    let _id = ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id"))
-        .expect("valid id");
+    let _id = ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id")).expect("valid id");
     let supersedes: Vec<String> = body["superseded_ids"]
         .as_array()
         .expect("superseded_ids array")
@@ -464,8 +468,7 @@ async fn add_without_dedup_flag_does_not_supersede_anything() {
     )
     .await;
     let body = parse_result_text(&r);
-    let _id = ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id"))
-        .expect("valid id");
+    let _id = ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id")).expect("valid id");
     // The default add path must NOT include superseded_ids in its
     // response (backwards-compatible shape).
     assert!(
@@ -514,8 +517,7 @@ async fn add_with_dedup_preserves_lifecycle_overlay_on_match() {
     )
     .await;
     let body = parse_result_text(&r);
-    let new_id =
-        ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id")).expect("valid id");
+    let new_id = ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id")).expect("valid id");
 
     let ps = server.store().as_persistent().expect("persistent");
     let resolved = ps
@@ -552,8 +554,7 @@ async fn add_with_exact_dedup_skips_already_superseded_candidate() {
     )
     .await;
     let id_a =
-        ChunkId::parse(parse_result_text(&r1)["chunk_id"].as_str().expect("a"))
-            .expect("valid");
+        ChunkId::parse(parse_result_text(&r1)["chunk_id"].as_str().expect("a")).expect("valid");
 
     // Build a 2-deep chain: B supersedes A.
     let r2 = call_tool(
@@ -569,8 +570,7 @@ async fn add_with_exact_dedup_skips_already_superseded_candidate() {
     )
     .await;
     let body2 = parse_result_text(&r2);
-    let id_b = ChunkId::parse(body2["chunk_id"].as_str().expect("b"))
-        .expect("valid");
+    let id_b = ChunkId::parse(body2["chunk_id"].as_str().expect("b")).expect("valid");
 
     // Third dedup add — must find ONLY B (head), not A (already
     // superseded). New chunk C supersedes B. A's superseded_by edge
@@ -588,8 +588,7 @@ async fn add_with_exact_dedup_skips_already_superseded_candidate() {
     )
     .await;
     let body3 = parse_result_text(&r3);
-    let id_c = ChunkId::parse(body3["chunk_id"].as_str().expect("c"))
-        .expect("valid");
+    let id_c = ChunkId::parse(body3["chunk_id"].as_str().expect("c")).expect("valid");
     let supersedes: Vec<String> = body3["superseded_ids"]
         .as_array()
         .expect("array")
@@ -612,7 +611,11 @@ async fn add_with_exact_dedup_skips_already_superseded_candidate() {
         .expect("a");
     assert_eq!(resolved_a.status, ChunkStatus::Superseded);
     assert_eq!(
-        resolved_a.lifecycle.superseded_by.as_ref().map(|c| c.to_string()),
+        resolved_a
+            .lifecycle
+            .superseded_by
+            .as_ref()
+            .map(|c| c.to_string()),
         Some(id_b.to_string()),
         "A's edge to B must be preserved — not overwritten by the C dedup"
     );
@@ -625,7 +628,11 @@ async fn add_with_exact_dedup_skips_already_superseded_candidate() {
         .expect("b");
     assert_eq!(resolved_b.status, ChunkStatus::Superseded);
     assert_eq!(
-        resolved_b.lifecycle.superseded_by.as_ref().map(|c| c.to_string()),
+        resolved_b
+            .lifecycle
+            .superseded_by
+            .as_ref()
+            .map(|c| c.to_string()),
         Some(id_c.to_string())
     );
 }
@@ -748,8 +755,7 @@ async fn add_with_dedup_bool_true_uses_exact_mode_default() {
     )
     .await;
     let body = parse_result_text(&r);
-    let _id = ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id"))
-        .expect("valid id");
+    let _id = ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id")).expect("valid id");
     let supersedes = body["superseded_ids"].as_array().expect("array");
     assert_eq!(
         supersedes.len(),
@@ -791,8 +797,13 @@ async fn find_near_duplicates_returns_exact_match_without_mutating() {
     assert_eq!(exact, vec![id_a.to_string()], "exact canonical hit");
 
     // Fuzzy not requested → empty.
-    let fuzzy = body["fuzzy_matches"].as_array().expect("fuzzy_matches array");
-    assert!(fuzzy.is_empty(), "fuzzy_matches must be empty when no threshold");
+    let fuzzy = body["fuzzy_matches"]
+        .as_array()
+        .expect("fuzzy_matches array");
+    assert!(
+        fuzzy.is_empty(),
+        "fuzzy_matches must be empty when no threshold"
+    );
 
     // No mutation: original chunk still Final, no superseded_by.
     let ps = server.store().as_persistent().expect("persistent");
@@ -822,13 +833,12 @@ async fn find_near_duplicates_returns_fuzzy_with_similarity_score() {
     )
     .await;
     let body = parse_result_text(&r);
-    let fuzzy = body["fuzzy_matches"].as_array().expect("fuzzy_matches array");
+    let fuzzy = body["fuzzy_matches"]
+        .as_array()
+        .expect("fuzzy_matches array");
     assert_eq!(fuzzy.len(), 1, "single fuzzy match expected");
     let entry = &fuzzy[0];
-    assert_eq!(
-        entry["chunk_id"].as_str().unwrap(),
-        id.to_string()
-    );
+    assert_eq!(entry["chunk_id"].as_str().unwrap(), id.to_string());
     let sim = entry["similarity"].as_f64().expect("similarity number");
     assert!(
         (0.80..=1.0).contains(&sim),
@@ -988,8 +998,8 @@ async fn add_with_fuzzy_dedup_null_project_not_evicted_by_other_projects() {
         }),
     )
     .await;
-    let id_old = ChunkId::parse(parse_result_text(&r0)["chunk_id"].as_str().unwrap())
-        .expect("valid id");
+    let id_old =
+        ChunkId::parse(parse_result_text(&r0)["chunk_id"].as_str().unwrap()).expect("valid id");
 
     // Seed 2: dump enough recent project-scoped rows to bury the
     // NULL-project candidate under FUZZY_RECENT_POOL_SIZE if the

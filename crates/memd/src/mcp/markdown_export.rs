@@ -8,8 +8,8 @@
 //! No IO is performed here.
 
 use crate::types::MemoryChunk;
-use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 
 /// One rendered file in the export tree.
@@ -147,8 +147,8 @@ fn sanitize_path_segment(segment: &str) -> String {
 /// disambiguate any segment that would equal one (case-insensitive).
 fn is_reserved_basename(s: &str) -> bool {
     const RESERVED: &[&str] = &[
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
-        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
     let upper = s.to_ascii_uppercase();
     RESERVED.iter().any(|r| *r == upper)
@@ -215,10 +215,7 @@ mod tests {
         );
         let segments: Vec<&str> = path.split('/').collect();
         assert_eq!(segments[0], "by_project", "first segment fixed");
-        assert!(
-            segments.len() == 3,
-            "exactly two slashes, no extra: {path}"
-        );
+        assert!(segments.len() == 3, "exactly two slashes, no extra: {path}");
     }
 
     // Codex round-1 G1 HIGH regression: distinct raw project_ids that

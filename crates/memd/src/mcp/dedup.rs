@@ -108,11 +108,7 @@ pub fn compute_dedup_candidates(
     // scope means "filter to this project_id" — but the SQL helpers
     // can only filter when project_id is Some. The Rust scope filter
     // below covers the project_id-is-None case.
-    let sql_project = if cfg.scope_project {
-        project_id
-    } else {
-        None
-    };
+    let sql_project = if cfg.scope_project { project_id } else { None };
 
     let candidates = match cfg.mode {
         DedupMode::Exact => ps
