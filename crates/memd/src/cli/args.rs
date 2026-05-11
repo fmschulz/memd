@@ -1,0 +1,581 @@
+use std::path::PathBuf;
+
+use clap::{ArgAction, Subcommand};
+use serde::{Deserialize, Serialize};
+
+use crate::mcp::handlers::QueryMode;
+use crate::types::ChunkType;
+
+/// Export output format.
+#[derive(Debug, Clone, Copy, clap::ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportFormat {
+    /// Human-readable Markdown.
+    Markdown,
+    /// Pretty JSON array of chunks.
+    Json,
+    /// JSON lines (one chunk per line).
+    Jsonl,
+}
+
+/// Read-scope mode for tenant memory access guardrails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TenantScopeMode {
+    /// Only read from the current tenant.
+    Local,
+    /// Read from all discovered tenants in the configured data directory.
+    Global,
+    /// Read only from explicitly allowed tenants.
+    Allowlist,
+}
+
+/// Retrieval intent for CLI search/orchestration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[value(rename_all = "snake_case")]
+pub enum CliQueryMode {
+    Generic,
+    BriefProject,
+    ResumeTask,
+    FindFailures,
+    FindDecisions,
+    FindEvidence,
+    FindHighlights,
+}
+
+/// Warm-worker behavior for agent-facing CLI retrieval and local tool calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarmMode {
+    /// Use the local warm worker, starting it if needed; fall back to cold CLI if startup fails.
+    Auto,
+    /// Always run in the current CLI process.
+    Off,
+    /// Require a local warm worker; fail if it cannot be started or reached.
+    Required,
+}
+
+/// Optional post-retrieval reranker for CLI search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchReranker {
+    /// Keep the built-in retrieval order.
+    None,
+    /// Use MemReranker-4B only when the optional runtime is available.
+    Auto,
+    /// Require MemReranker-4B; fail instead of falling back.
+    #[value(name = "memreranker-4b")]
+    #[serde(rename = "memreranker-4b")]
+    MemReranker4B,
+}
+
+/// Administrative warm-worker commands.
+#[derive(Debug, Clone, Subcommand)]
+pub enum WarmCommand {
+    /// Start the local warm worker if it is not already running.
+    Start,
+    /// Report whether the local warm worker is reachable.
+    Status,
+    /// Ask the local warm worker to stop.
+    Stop,
+}
+
+/// Process identity for a local warm worker.
+#[derive(Debug, Clone)]
+pub struct WarmProcessConfig {
+    pub data_dir: PathBuf,
+    pub config_path: Option<PathBuf>,
+    pub embedding_model: String,
+    pub search_variant: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct SearchRerankerOptions {
+    pub(super) reranker: SearchReranker,
+    pub(super) model: String,
+    pub(super) device: String,
+    pub(super) batch_size: usize,
+    pub(super) timeout_seconds: u64,
+    pub(super) python: String,
+}
+
+impl From<CliQueryMode> for QueryMode {
+    fn from(value: CliQueryMode) -> Self {
+        match value {
+            CliQueryMode::Generic => QueryMode::Generic,
+            CliQueryMode::BriefProject => QueryMode::BriefProject,
+            CliQueryMode::ResumeTask => QueryMode::ResumeTask,
+            CliQueryMode::FindFailures => QueryMode::FindFailures,
+            CliQueryMode::FindDecisions => QueryMode::FindDecisions,
+            CliQueryMode::FindEvidence => QueryMode::FindEvidence,
+            CliQueryMode::FindHighlights => QueryMode::FindHighlights,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct TenantScopeConfig {
+    pub(super) primary_tenant: String,
+    pub(super) write_tenant: String,
+    pub(super) scope: TenantScopeMode,
+    /// Optional explicit allowlist (used when scope=allowlist)
+    #[serde(default)]
+    pub(super) allow_tenants: Vec<String>,
+    /// Effective read tenants for retrieval
+    #[serde(default)]
+    pub(super) read_tenants: Vec<String>,
+    /// Data directory used for global tenant discovery
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) data_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct ProjectScopeConfig {
+    pub(super) tenant_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) project_id: Option<String>,
+    #[serde(default)]
+    pub(super) read_tenants: Vec<String>,
+    pub(super) interface: String,
+    pub(super) cli_command: String,
+    pub(super) agent_context_output: String,
+    pub(super) project_dir: String,
+}
+
+/// CLI subcommands for memory operations
+#[derive(Debug, Clone, Subcommand)]
+pub enum CliCommand {
+    /// Add a memory chunk
+    Add {
+        /// Tenant identifier
+        #[arg(long)]
+        tenant_id: String,
+
+        /// Text content of the chunk
+        #[arg(long)]
+        text: String,
+
+        /// Type of chunk (code, doc, trace, decision, plan, research, message, summary, other)
+        #[arg(long, value_parser = parse_chunk_type)]
+        chunk_type: ChunkType,
+
+        /// Optional project identifier
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Optional tags (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        tags: Option<Vec<String>>,
+
+        /// Optional source URI
+        #[arg(long)]
+        source_uri: Option<String>,
+
+        /// Optional source path
+        #[arg(long)]
+        source_path: Option<String>,
+    },
+
+    /// Search memory chunks
+    Search {
+        /// Tenant identifier
+        #[arg(long)]
+        tenant_id: String,
+
+        /// Search query
+        #[arg(long)]
+        query: String,
+
+        /// Maximum number of results
+        #[arg(long, default_value = "10")]
+        k: usize,
+
+        /// Optional project identifier
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Use memory.search compact shaping instead of the legacy raw chunk array
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        compact: bool,
+
+        /// Approximate result token budget; also enables compact shaping
+        #[arg(long)]
+        token_budget: Option<usize>,
+
+        /// Retrieval intent for digest-biased searches
+        #[arg(long, value_enum, default_value = "generic")]
+        mode: CliQueryMode,
+
+        /// Omit chunk text from compact output
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        no_text: bool,
+
+        /// Include linked canonical artifacts in compact output
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        include_artifact: bool,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "json")]
+        format: ExportFormat,
+
+        /// Output file path (defaults to stdout)
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Optional high-quality post-retrieval reranker
+        #[arg(long, value_enum, default_value = "none")]
+        reranker: SearchReranker,
+
+        /// Hugging Face model id for the optional MemReranker path
+        #[arg(long, default_value = "IAAR-Shanghai/MemReranker-4B")]
+        reranker_model: String,
+
+        /// Device for the optional MemReranker path: auto, cuda, cuda:0, or cpu
+        #[arg(long, default_value = "auto")]
+        reranker_device: String,
+
+        /// Batch size for optional MemReranker inference
+        #[arg(long, default_value = "1")]
+        reranker_batch_size: usize,
+
+        /// Timeout in seconds for optional MemReranker model load and inference
+        #[arg(long, default_value = "120")]
+        reranker_timeout_seconds: u64,
+
+        /// Python executable used by the optional MemReranker path
+        #[arg(long, default_value = "python3")]
+        reranker_python: String,
+
+        /// Use the local warm worker for this operation
+        #[arg(long, value_enum, default_value = "auto")]
+        warm: WarmMode,
+    },
+
+    /// Build a bounded local context file for agents using CLI-only retrieval.
+    ///
+    /// This is the preferred CLI-only orchestration path: a controller runs
+    /// retrieval before launching the agent, writes a compact context file
+    /// into the workspace, and the agent reads that file during the solve.
+    AgentContext {
+        /// Tenant identifier
+        #[arg(long)]
+        tenant_id: String,
+
+        /// Optional project identifier
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Search query. May be repeated; results are merged and deduplicated.
+        #[arg(long, required = true, action = ArgAction::Append)]
+        query: Vec<String>,
+
+        /// Maximum results per query before deduplication
+        #[arg(long, default_value = "2")]
+        k: usize,
+
+        /// Approximate token budget per query
+        #[arg(long, default_value = "700")]
+        token_budget: usize,
+
+        /// Retrieval intent for digest-biased searches
+        #[arg(long, value_enum, default_value = "generic")]
+        mode: CliQueryMode,
+
+        /// Omit chunk text from compact output
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        no_text: bool,
+
+        /// Include linked canonical artifacts in compact output
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        include_artifact: bool,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: ExportFormat,
+
+        /// Output file path (defaults to stdout)
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Optional directory for benchmark/audit JSON logs
+        #[arg(long)]
+        log_dir: Option<PathBuf>,
+
+        /// Use the local warm worker for this operation
+        #[arg(long, value_enum, default_value = "auto")]
+        warm: WarmMode,
+    },
+
+    /// Invoke a local memd operation by its historical tool name.
+    ///
+    /// This preserves the former structured operation surface without starting
+    /// an external service. Pass a JSON object with `--json` or `--input`; omit both for
+    /// `{}`. The result is unwrapped to the operation payload when possible.
+    Call {
+        /// Operation name, for example `memory.search` or `task.start`
+        tool: String,
+
+        /// JSON object containing operation arguments
+        #[arg(long, conflicts_with = "input")]
+        json: Option<String>,
+
+        /// File containing a JSON object with operation arguments
+        #[arg(long, conflicts_with = "json")]
+        input: Option<PathBuf>,
+
+        /// Output file path (defaults to stdout)
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Use the local warm worker for this operation
+        #[arg(long, value_enum, default_value = "auto")]
+        warm: WarmMode,
+    },
+
+    /// Run local operation calls from JSONL in one process.
+    ///
+    /// Each non-empty input line must be a JSON object with `tool` and
+    /// optional `arguments`. Results are emitted as JSONL with one row
+    /// per input line.
+    Batch {
+        /// JSONL input file. Omit or pass `-` to read stdin.
+        #[arg(long)]
+        jsonl: Option<PathBuf>,
+
+        /// Keep stdin/stdout open and process one JSONL request per line.
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        stream: bool,
+
+        /// Keep processing after a failed input line or operation.
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        continue_on_error: bool,
+
+        /// Output file path (defaults to stdout)
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    /// Manage the local warm worker used by `--warm auto|required`.
+    Warm {
+        #[command(subcommand)]
+        command: WarmCommand,
+    },
+
+    /// Internal warm worker entrypoint. Not an agent-facing interface.
+    #[command(hide = true)]
+    WarmWorker {
+        /// Unix socket path to listen on.
+        #[arg(long)]
+        socket: PathBuf,
+    },
+
+    /// Get a chunk by ID
+    Get {
+        /// Tenant identifier
+        #[arg(long)]
+        tenant_id: String,
+
+        /// Chunk identifier (UUID)
+        #[arg(long)]
+        chunk_id: String,
+    },
+
+    /// Delete a chunk (soft delete)
+    Delete {
+        /// Tenant identifier
+        #[arg(long)]
+        tenant_id: String,
+
+        /// Chunk identifier (UUID)
+        #[arg(long)]
+        chunk_id: String,
+    },
+
+    /// Show statistics for a tenant
+    Stats {
+        /// Tenant identifier
+        #[arg(long)]
+        tenant_id: String,
+    },
+
+    /// Export all tenant chunks in a human-readable or machine-readable format
+    Export {
+        /// Tenant identifier
+        #[arg(long)]
+        tenant_id: String,
+
+        /// Export format
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: ExportFormat,
+
+        /// Output file path (defaults to stdout when omitted)
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Pagination size for chunk collection
+        #[arg(long, default_value_t = 500)]
+        page_size: usize,
+    },
+
+    /// Export tenant chunks as a tree of markdown files.
+    ///
+    /// Uses G1's `render_markdown_tree` (one file per `(project, chunk_type)`
+    /// bucket) and writes each `(path, content)` under `<outdir>` on the
+    /// user's machine. Refuses to write if the normalised `<outdir>` is a
+    /// descendant of memd's data directory, because writing a markdown tree
+    /// into `$MEMD_DATA_DIR` would silently corrupt segment / SQLite layouts.
+    ExportMarkdown {
+        /// Tenant identifier
+        #[arg(long)]
+        tenant_id: String,
+
+        /// Output directory. Created if missing. Must not be inside memd's
+        /// data directory.
+        #[arg(long)]
+        outdir: PathBuf,
+
+        /// Optional project filter
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Include history-tier rows (default: live-only)
+        #[arg(long, default_value_t = false, action = ArgAction::Set)]
+        include_history: bool,
+
+        /// Data directory used for the containment guard. Defaults to
+        /// `~/.memd/data`; typically set by a wrapper when the daemon's
+        /// data dir lives elsewhere.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Export tenant memory as an OMF 1.0 JSON document.
+    ///
+    /// Writes to `--output` if provided, else stdout. The opened path is
+    /// honoured as-is; CLI callers are already on the writer side, so there
+    /// is no data-dir containment guard.
+    ExportOmf {
+        /// Tenant identifier
+        #[arg(long)]
+        tenant_id: String,
+
+        /// Optional project filter
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Output file path (defaults to stdout when omitted)
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Include history-tier rows (default: live-only)
+        #[arg(long, default_value_t = false, action = ArgAction::Set)]
+        include_history: bool,
+
+        /// Include rows whose status is Superseded
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        include_superseded: bool,
+
+        /// Include rows whose status is Expired (or whose expires_at_ms has passed)
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        include_expired: bool,
+    },
+
+    /// Import an OMF 1.0 JSON document into a tenant.
+    ///
+    /// Reads the document from `--input` (or stdin if `-` / omitted).
+    /// Use `--dry-run` for a read-only preview that reports counts
+    /// without writing.
+    ImportOmf {
+        /// Tenant identifier
+        #[arg(long)]
+        tenant_id: String,
+
+        /// Input file path. `-` or omitted reads from stdin.
+        #[arg(long)]
+        input: Option<PathBuf>,
+
+        /// Include items whose top-level status is "archived" or "expired"
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        include_archived: bool,
+
+        /// Optional trigram Jaccard threshold. Absent = exact-canonical only.
+        #[arg(long)]
+        fuzzy_threshold: Option<f32>,
+
+        /// Preview only — compute counts without writing.
+        #[arg(long, default_value_t = false, action = ArgAction::Set)]
+        dry_run: bool,
+    },
+
+    /// Initialize memd CLI guardrails for agent workflows
+    Init {
+        /// Tenant identifier to enforce in generated policies
+        #[arg(long)]
+        tenant_id: String,
+
+        /// Tenant read scope mode
+        #[arg(long, value_enum, default_value = "local")]
+        scope: TenantScopeMode,
+
+        /// Comma-separated tenant allowlist (required with --scope allowlist)
+        #[arg(long, value_delimiter = ',')]
+        allow_tenants: Option<Vec<String>>,
+
+        /// Project directory where guardrail files will be written
+        #[arg(long, default_value = ".")]
+        project_dir: PathBuf,
+
+        /// Explicit project identifier to pin for this repository
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// memd CLI command used in generated guardrails
+        #[arg(long, default_value = "memd")]
+        memd_command: String,
+
+        /// Optional data directory used for tenant scope discovery and docs
+        #[arg(long)]
+        memd_data_dir: Option<PathBuf>,
+
+        /// Write/refresh AGENTS.md and CLAUDE.md guardrail sections
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        write_agent_files: bool,
+    },
+}
+
+impl CliCommand {
+    /// Whether this command needs an initialized backing store.
+    pub fn requires_store(&self) -> bool {
+        !matches!(self, CliCommand::Init { .. } | CliCommand::Warm { .. })
+    }
+
+    /// Warm mode for commands that can be served by the local warm worker.
+    pub fn warm_mode(&self) -> Option<WarmMode> {
+        match self {
+            CliCommand::Search { warm, .. }
+            | CliCommand::AgentContext { warm, .. }
+            | CliCommand::Call { warm, .. } => Some(*warm),
+            _ => None,
+        }
+    }
+}
+
+/// Parse chunk type from string
+pub(super) fn parse_chunk_type(s: &str) -> std::result::Result<ChunkType, String> {
+    match s.to_lowercase().as_str() {
+        "code" => Ok(ChunkType::Code),
+        "doc" => Ok(ChunkType::Doc),
+        "trace" => Ok(ChunkType::Trace),
+        "decision" => Ok(ChunkType::Decision),
+        "plan" => Ok(ChunkType::Plan),
+        "research" => Ok(ChunkType::Research),
+        "message" => Ok(ChunkType::Message),
+        "summary" => Ok(ChunkType::Summary),
+        "other" => Ok(ChunkType::Other),
+        _ => Err(format!(
+            "invalid chunk type '{}', must be one of: code, doc, trace, decision, plan, research, message, summary, other",
+            s
+        )),
+    }
+}
