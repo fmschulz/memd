@@ -18,9 +18,37 @@ use tracing::{info, warn};
 
 use crate::error::{MemdError, Result};
 use crate::maintenance::DreamParams;
-use crate::metrics::MetricsCollector;
-use crate::mcp::handlers::*;
 use crate::mcp::McpError;
+use crate::mcp::handlers::{
+    AddBatchParams, AddParams, ArtifactCreateParams, ArtifactGetParams, ArtifactLibraryParams,
+    ArtifactListThreadParams, ArtifactVerifyParams, CompactParams, ConsolidateEpisodeParams,
+    ContextFindRelevantContextParams, ContextGetFilesForSubsystemParams,
+    ContextGetHotContextParams, ContextListSubsystemsParams, ContextSearchDocumentsParams,
+    ContextSuggestAgentParams, DeleteParams, ExportMarkdownParams, ExportOmfParams,
+    FeedbackParams, FindCallersParams, FindDefinitionParams, FindErrorsParams, FindImportsParams,
+    FindNearDuplicatesParams, FindReferencesParams, FindToolCallsParams, GetParams, HealthParams,
+    ImportOmfParams, MetricsParams, PreviewOmfImportParams, ProjectBriefParams, QueryMode,
+    SearchParams, SetExpiryParams, StatsParams, SupersedeParams, TaskAddEvidenceParams,
+    TaskFinishParams, TaskGetParams, TaskProgressParams, TaskResumeParams, TaskRunFinishParams,
+    TaskRunStartParams, TaskSearchParams, TaskStartParams, handle_artifact_create,
+    handle_artifact_find_decisions, handle_artifact_find_evidence,
+    handle_artifact_find_failures, handle_artifact_find_highlights, handle_artifact_get,
+    handle_artifact_list_thread, handle_artifact_search, handle_artifact_verify,
+    handle_context_brief_project, handle_context_find_relevant_context,
+    handle_context_get_files_for_subsystem, handle_context_get_hot_context,
+    handle_context_list_subsystems, handle_context_search_documents, handle_context_suggest_agent,
+    handle_find_callers, handle_find_definition, handle_find_errors, handle_find_imports,
+    handle_find_references, handle_find_tool_calls, handle_memory_add, handle_memory_add_batch,
+    handle_memory_compact, handle_memory_consolidate_episode, handle_memory_delete,
+    handle_memory_dream, handle_memory_export_markdown, handle_memory_export_omf,
+    handle_memory_feedback, handle_memory_find_near_duplicates, handle_memory_get,
+    handle_memory_health, handle_memory_import_omf, handle_memory_metrics,
+    handle_memory_preview_omf_import, handle_memory_search, handle_memory_set_expiry,
+    handle_memory_stats, handle_memory_supersede, handle_task_add_evidence, handle_task_finish,
+    handle_task_get, handle_task_progress, handle_task_resume, handle_task_run_finish,
+    handle_task_run_start, handle_task_search, handle_task_start,
+};
+use crate::metrics::MetricsCollector;
 use crate::structural::{
     CallGraphIndexer, CallGraphSymbolRecord, StructuralStore, SymbolIndexer, SymbolQueryService,
     TraceQueryService,
