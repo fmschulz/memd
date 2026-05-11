@@ -175,18 +175,23 @@ async fn search_hides_history_tier_by_default() {
         data_dir: tmp.path().to_path_buf(),
         ..Default::default()
     };
-    let server = std::sync::Arc::new(memd::mcp::server::McpServer::new(
-        server_cfg,
-        store.clone(),
-    ));
+    let server = std::sync::Arc::new(TestServer::new(server_cfg, store.clone()));
 
     let t = tenant("t");
     let visible = store
-        .add(MemoryChunk::new(t.clone(), "visible payload", ChunkType::Doc))
+        .add(MemoryChunk::new(
+            t.clone(),
+            "visible payload",
+            ChunkType::Doc,
+        ))
         .await
         .unwrap();
     let buried = store
-        .add(MemoryChunk::new(t.clone(), "buried payload", ChunkType::Doc))
+        .add(MemoryChunk::new(
+            t.clone(),
+            "buried payload",
+            ChunkType::Doc,
+        ))
         .await
         .unwrap();
     store
@@ -331,18 +336,23 @@ async fn search_hides_chunk_expired_by_wall_clock() {
         data_dir: tmp.path().to_path_buf(),
         ..Default::default()
     };
-    let server = std::sync::Arc::new(memd::mcp::server::McpServer::new(
-        server_cfg,
-        store.clone(),
-    ));
+    let server = std::sync::Arc::new(TestServer::new(server_cfg, store.clone()));
 
     let t = tenant("t");
     let _visible = store
-        .add(MemoryChunk::new(t.clone(), "visible payload", ChunkType::Doc))
+        .add(MemoryChunk::new(
+            t.clone(),
+            "visible payload",
+            ChunkType::Doc,
+        ))
         .await
         .unwrap();
     let expired = store
-        .add(MemoryChunk::new(t.clone(), "expiring payload", ChunkType::Doc))
+        .add(MemoryChunk::new(
+            t.clone(),
+            "expiring payload",
+            ChunkType::Doc,
+        ))
         .await
         .unwrap();
     // Set expires_at_ms to the epoch so it is unambiguously in the past.
@@ -430,7 +440,11 @@ async fn list_lifecycle_hidden_returns_superseded_expired_and_history() {
 
     // (a) status = Superseded via atomic supersede.
     let _ = store
-        .supersede_chunk(&t, &ids[0], MemoryChunk::new(t.clone(), "v2", ChunkType::Doc))
+        .supersede_chunk(
+            &t,
+            &ids[0],
+            MemoryChunk::new(t.clone(), "v2", ChunkType::Doc),
+        )
         .await
         .unwrap();
     // (b) status = Expired via direct overlay write — mimics what

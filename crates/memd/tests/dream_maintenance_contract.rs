@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
 async fn add_digest_projection_on<S: memd::store::Store>(
-    server: &std::sync::Arc<memd::mcp::server::McpServer<S>>,
+    server: &std::sync::Arc<TestServer<S>>,
     tenant: &str,
     project: &str,
     text: &str,
@@ -31,7 +31,7 @@ async fn add_digest_projection_on<S: memd::store::Store>(
 }
 
 async fn dream_on<S: memd::store::Store>(
-    server: &std::sync::Arc<memd::mcp::server::McpServer<S>>,
+    server: &std::sync::Arc<TestServer<S>>,
     tenant: &str,
     project: &str,
     dry_run: bool,
@@ -54,7 +54,7 @@ async fn dream_on<S: memd::store::Store>(
 }
 
 async fn dream_with_physical_on<S: memd::store::Store>(
-    server: &std::sync::Arc<memd::mcp::server::McpServer<S>>,
+    server: &std::sync::Arc<TestServer<S>>,
     tenant: &str,
     project: &str,
     physical: Value,
@@ -74,7 +74,7 @@ async fn dream_with_physical_on<S: memd::store::Store>(
 }
 
 async fn search_ids_on<S: memd::store::Store>(
-    server: &std::sync::Arc<memd::mcp::server::McpServer<S>>,
+    server: &std::sync::Arc<TestServer<S>>,
     tenant: &str,
     project: &str,
     query: &str,
@@ -166,7 +166,7 @@ async fn dream_skips_unreadable_projection_payloads() {
             data_dir: tmp.path().to_path_buf(),
             ..Default::default()
         };
-        let server = std::sync::Arc::new(memd::mcp::server::McpServer::new(cfg, store));
+        let server = std::sync::Arc::new(TestServer::new(cfg, store));
         first_chunk_id = add_digest_projection_on(&server, tenant, project, text).await;
         add_digest_projection_on(&server, tenant, project, text).await;
     }
@@ -180,7 +180,7 @@ async fn dream_skips_unreadable_projection_payloads() {
             data_dir: tmp.path().to_path_buf(),
             ..Default::default()
         };
-        let _server = std::sync::Arc::new(memd::mcp::server::McpServer::new(cfg, store.clone()));
+        let _server = std::sync::Arc::new(TestServer::new(cfg, store.clone()));
         let tenant_id = common::tenant(tenant);
         let chunk_id = memd::types::ChunkId::parse(&first_chunk_id).unwrap();
         store
@@ -205,7 +205,7 @@ async fn dream_skips_unreadable_projection_payloads() {
         data_dir: tmp.path().to_path_buf(),
         ..Default::default()
     };
-    let server = std::sync::Arc::new(memd::mcp::server::McpServer::new(cfg, store));
+    let server = std::sync::Arc::new(TestServer::new(cfg, store));
     let report = dream_on(&server, tenant, project, true).await;
 
     assert_eq!(report["status"], "dry_run");
@@ -409,7 +409,7 @@ async fn dream_physical_compaction_prunes_sparse_index_after_retirement() {
         data_dir: tmp.path().to_path_buf(),
         ..Default::default()
     };
-    let server = std::sync::Arc::new(memd::mcp::server::McpServer::new(cfg, store));
+    let server = std::sync::Arc::new(TestServer::new(cfg, store));
     let tenant = "dream_sparse_t";
     let project = "dream_sparse_p";
     let text = "duplicate digest sparseprune sentinel";
