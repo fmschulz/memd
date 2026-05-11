@@ -2,7 +2,7 @@
 name = "memd-evals"
 version = "0.1.0"
 edition = "2021"
-description = "Evaluation harness for memd MCP conformance tests"
+description = "Evaluation harness for memd CLI contract and retrieval tests"
 
 [dependencies]
 tokio = { workspace = true }
