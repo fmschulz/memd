@@ -1,6 +1,6 @@
 //! memd evaluation harness
 //!
-//! Runs MCP conformance tests against memd.
+//! Runs CLI contract and retrieval-quality tests against memd.
 
 use clap::Parser;
 use serde::Deserialize;
@@ -73,7 +73,7 @@ struct Args {
     #[arg(long, default_value = "target/debug/memd")]
     memd_path: String,
 
-    /// Suite to run (all, sanity, mcp, persistence, retrieval, hybrid, scifact, true-semantic, nfcorpus, codesearchnet, tiered, structural, compaction, benchmark, benchmark-regression)
+    /// Suite to run (all, sanity, cli-contract, persistence, retrieval, hybrid, scifact, true-semantic, nfcorpus, codesearchnet, tiered, structural, compaction, benchmark, benchmark-regression)
     #[arg(long, default_value = "all")]
     suite: String,
 
@@ -263,7 +263,7 @@ fn main() -> ExitCode {
             println!("\n[OK] Sanity checks PASSED - proceeding with benchmarks\n");
 
             all.extend(sanity_results);
-            all.extend(suites::mcp_conformance::run(&args.memd_path));
+            all.extend(suites::cli_contract::run(&args.memd_path));
             all.extend(suites::persistence::run_all(&memd_binary));
             all.extend(suites::retrieval::run_retrieval_tests(
                 &memd_binary,
@@ -304,7 +304,7 @@ fn main() -> ExitCode {
             all
         }
         "sanity" => suites::sanity::run_sanity_tests(&memd_binary, embedding_model),
-        "mcp" => suites::mcp_conformance::run(&args.memd_path),
+        "cli" | "cli-contract" => suites::cli_contract::run(&args.memd_path),
         "persistence" => suites::persistence::run_all(&memd_binary),
         "retrieval" => suites::retrieval::run_retrieval_tests(&memd_binary, embedding_model),
         "hybrid" => suites::hybrid::run_hybrid_tests(&memd_binary, embedding_model),
@@ -371,7 +371,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "Unknown suite: {}. Available: all, sanity, mcp, persistence, retrieval, hybrid, true-semantic, scifact, nfcorpus, codesearchnet, tiered, structural, compaction, benchmark, benchmark-regression",
+                "Unknown suite: {}. Available: all, sanity, cli-contract, persistence, retrieval, hybrid, true-semantic, scifact, nfcorpus, codesearchnet, tiered, structural, compaction, benchmark, benchmark-regression",
                 args.suite
             );
             return ExitCode::FAILURE;

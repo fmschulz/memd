@@ -1,17 +1,19 @@
 //! memd evaluation harness
 //!
-//! Provides test infrastructure for MCP conformance testing.
-//! The harness starts memd as a subprocess and communicates via MCP protocol.
+//! Provides test infrastructure for the current memd CLI executable.
+//! Historical MCP-shaped behavior suites use a compatibility client that routes
+//! operation calls through `memd call`.
 //!
 //! ## Suites
 //!
-//! - **Suite A**: MCP conformance (mcp_conformance)
+//! - **Suite A**: CLI contract (cli_contract)
 //! - **Suite B**: Retrieval quality (retrieval)
 //! - **Suite C**: Hybrid retrieval (hybrid)
 //! - **Suite D**: Tiered search (tiered)
 //! - **Suite E**: Structural queries (structural)
 //! - **Suite P6**: Offline benchmark protocol (benchmark)
 
+pub mod cli_client;
 pub mod mcp_client;
 pub mod metrics;
 pub mod statistics;

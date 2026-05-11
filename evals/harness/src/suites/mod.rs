@@ -1,10 +1,10 @@
 //! Test suites for memd evaluation
 //!
-//! Each suite tests a specific aspect of MCP conformance.
+//! Each suite tests a specific aspect of CLI behavior or retrieval quality.
 //!
 //! ## Suites
 //!
-//! - **Suite A**: MCP conformance (mcp_conformance)
+//! - **Suite A**: CLI contract (cli_contract)
 //! - **Suite B**: Retrieval quality (retrieval)
 //! - **Suite C**: Hybrid retrieval (hybrid)
 //! - **Suite D**: Tiered search (tiered)
@@ -14,10 +14,10 @@
 //! - **Suite P6R**: Benchmark regression significance gate (benchmark-regression)
 
 pub mod benchmark_protocol;
+pub mod cli_contract;
 pub mod codesearchnet;
 pub mod compaction;
 pub mod hybrid;
-pub mod mcp_conformance;
 pub mod nfcorpus;
 pub mod persistence;
 pub mod retrieval;
