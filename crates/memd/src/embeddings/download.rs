@@ -350,25 +350,23 @@ fn download_file(url: &str, path: &PathBuf, name: &str) -> Result<()> {
         AcquireLockOutcome::Acquired(guard) => {
             _lock_guard = Some(guard);
         }
-        AcquireLockOutcome::Contended => match wait_for_publish_or_release(
-            path,
-            &lock_path,
-            advisory_lock_wait_timeout(),
-        ) {
-            WaitOutcome::Published => {
-                tracing::info!("{} published by concurrent writer; reusing", name);
-                return Ok(());
-            }
-            WaitOutcome::LockReleased | WaitOutcome::Timeout => {
-                // Fall through to race-safe download. Either the prior
-                // writer crashed before publishing, or we waited too
-                // long. The hard_link check below still prevents corruption.
-                tracing::debug!(
+        AcquireLockOutcome::Contended => {
+            match wait_for_publish_or_release(path, &lock_path, advisory_lock_wait_timeout()) {
+                WaitOutcome::Published => {
+                    tracing::info!("{} published by concurrent writer; reusing", name);
+                    return Ok(());
+                }
+                WaitOutcome::LockReleased | WaitOutcome::Timeout => {
+                    // Fall through to race-safe download. Either the prior
+                    // writer crashed before publishing, or we waited too
+                    // long. The hard_link check below still prevents corruption.
+                    tracing::debug!(
                     "advisory lock wait fell through for {}; proceeding with race-safe download",
                     name
                 );
+                }
             }
-        },
+        }
         AcquireLockOutcome::Skipped => {
             tracing::debug!(
                 "advisory lock unavailable for {} (non-fatal); proceeding with race-safe download",
@@ -390,8 +388,8 @@ fn download_file(url: &str, path: &PathBuf, name: &str) -> Result<()> {
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
     let mut file = std::fs::File::create(&tmp_path)?;
-    let copy_result = std::io::copy(&mut response.into_reader(), &mut file)
-        .and_then(|_| file.sync_all());
+    let copy_result =
+        std::io::copy(&mut response.into_reader(), &mut file).and_then(|_| file.sync_all());
     if let Err(e) = copy_result {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(MemdError::StorageError(format!(
@@ -499,8 +497,7 @@ const WAIT_POLL_MAX: Duration = Duration::from_secs(2);
 /// test doesn't have to block for 10 minutes. Production code reads
 /// ADVISORY_LOCK_WAIT.
 #[cfg(test)]
-static TEST_WAIT_OVERRIDE_MS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static TEST_WAIT_OVERRIDE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(test)]
 fn advisory_lock_wait_timeout() -> Duration {
@@ -623,11 +620,7 @@ fn lock_is_stale(lock_path: &Path) -> bool {
     }
 }
 
-fn wait_for_publish_or_release(
-    target: &Path,
-    lock_path: &Path,
-    timeout: Duration,
-) -> WaitOutcome {
+fn wait_for_publish_or_release(target: &Path, lock_path: &Path, timeout: Duration) -> WaitOutcome {
     let start = Instant::now();
     let mut delay = WAIT_POLL_INITIAL;
     loop {
@@ -685,11 +678,7 @@ pub fn get_candle_bert_paths() -> Result<(PathBuf, PathBuf, PathBuf)> {
 
     let tokenizer_path = cache_dir.join(CANDLE_BERT_TOKENIZER_FILENAME);
     if !tokenizer_path.exists() {
-        download_file(
-            CANDLE_BERT_TOKENIZER_URL,
-            &tokenizer_path,
-            "BERT tokenizer",
-        )?;
+        download_file(CANDLE_BERT_TOKENIZER_URL, &tokenizer_path, "BERT tokenizer")?;
     }
     verify_file_size(
         &tokenizer_path,
@@ -701,11 +690,7 @@ pub fn get_candle_bert_paths() -> Result<(PathBuf, PathBuf, PathBuf)> {
     if !weights_path.exists() {
         download_file(CANDLE_BERT_WEIGHTS_URL, &weights_path, "BERT weights")?;
     }
-    verify_file_size(
-        &weights_path,
-        MIN_CANDLE_BERT_WEIGHTS_SIZE,
-        "BERT weights",
-    )?;
+    verify_file_size(&weights_path, MIN_CANDLE_BERT_WEIGHTS_SIZE, "BERT weights")?;
 
     Ok((config_path, tokenizer_path, weights_path))
 }
@@ -961,9 +946,7 @@ mod tests {
     #[test]
     fn test_download_file_hf_config_integration() {
         if std::env::var("MEMD_NETWORK_TESTS").ok().as_deref() != Some("1") {
-            eprintln!(
-                "skipping HF network test; set MEMD_NETWORK_TESTS=1 to run"
-            );
+            eprintln!("skipping HF network test; set MEMD_NETWORK_TESTS=1 to run");
             return;
         }
 
@@ -1225,8 +1208,7 @@ mod tests {
             std::fs::remove_file(&lock_clone).ok();
         });
 
-        let outcome =
-            wait_for_publish_or_release(&target, &lock, Duration::from_secs(5));
+        let outcome = wait_for_publish_or_release(&target, &lock, Duration::from_secs(5));
         t.join().unwrap();
         assert!(matches!(outcome, WaitOutcome::Published));
 
@@ -1249,8 +1231,7 @@ mod tests {
 
         std::fs::write(&target, b"already-published").unwrap();
         // Lock intentionally absent.
-        let outcome =
-            wait_for_publish_or_release(&target, &lock, Duration::from_millis(200));
+        let outcome = wait_for_publish_or_release(&target, &lock, Duration::from_millis(200));
         assert!(
             matches!(outcome, WaitOutcome::Published),
             "target present + lock absent must yield Published, got non-Published"
@@ -1274,8 +1255,7 @@ mod tests {
             std::fs::remove_file(&lock_clone).ok();
         });
 
-        let outcome =
-            wait_for_publish_or_release(&target, &lock, Duration::from_secs(5));
+        let outcome = wait_for_publish_or_release(&target, &lock, Duration::from_secs(5));
         t.join().unwrap();
         assert!(
             matches!(outcome, WaitOutcome::LockReleased),
@@ -1294,8 +1274,7 @@ mod tests {
 
         std::fs::write(&lock, b"pid=1 created_ms=0").unwrap();
 
-        let outcome =
-            wait_for_publish_or_release(&target, &lock, Duration::from_millis(200));
+        let outcome = wait_for_publish_or_release(&target, &lock, Duration::from_millis(200));
         assert!(matches!(outcome, WaitOutcome::Timeout));
 
         std::fs::remove_file(&lock).ok();

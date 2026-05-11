@@ -11,7 +11,9 @@ mod common;
 use common::*;
 
 use memd::omf::export::{export_omf, ExportOptions};
-use memd::omf::import::{import_omf, preview_omf_import, ImportOptions, ImportResult, PreviewResult};
+use memd::omf::import::{
+    import_omf, preview_omf_import, ImportOptions, ImportResult, PreviewResult,
+};
 use memd::omf::{OmfDocument, OmfItem, OmfSource, MEMD_EXT_VERSION, OMF_VERSION};
 use memd::store::metadata::MetadataStore;
 use memd::store::persistent::PersistentStore;
@@ -268,7 +270,10 @@ async fn import_omf_is_semantic_merge_not_append() {
 
     let doc = make_doc(
         "nanomem",
-        vec![make_item("FACT A", Some("p1")), make_item("fact B", Some("p1"))],
+        vec![
+            make_item("FACT A", Some("p1")),
+            make_item("fact B", Some("p1")),
+        ],
     );
     let ps = server.store().as_persistent().unwrap();
     let res = import_omf(ps, &tenant("t"), &doc, ImportOptions::default())
@@ -541,7 +546,10 @@ async fn preview_omf_returns_counts_without_writing() {
 
     let doc = make_doc(
         "nanomem",
-        vec![make_item("fact A", Some("p1")), make_item("fact B", Some("p1"))],
+        vec![
+            make_item("fact A", Some("p1")),
+            make_item("fact B", Some("p1")),
+        ],
     );
     let ps = server.store().as_persistent().unwrap();
 
@@ -1228,7 +1236,10 @@ async fn mcp_export_then_import_roundtrip_preserves_content_and_lifecycle() {
             json!({"tenant_id": "t", "text": proj.0, "type": "doc", "project_id": proj.1}),
         )
         .await;
-        let id_str = parse_result_text(&r)["chunk_id"].as_str().unwrap().to_string();
+        let id_str = parse_result_text(&r)["chunk_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
         ids.push(memd::types::ChunkId::parse(&id_str).unwrap());
     }
     // Flip the first chunk to Working tier so the trusted import must honour it.
@@ -1344,7 +1355,10 @@ async fn mcp_preview_omf_import_does_not_write() {
             {"content": "second", "extensions": {"memd": {"project_id": "p1"}}},
         ]
     });
-    let pre = server.store().as_persistent().unwrap()
+    let pre = server
+        .store()
+        .as_persistent()
+        .unwrap()
         .metadata()
         .list_for_export(&tenant("t"), None, false)
         .unwrap()
@@ -1357,7 +1371,10 @@ async fn mcp_preview_omf_import_does_not_write() {
     .await;
     let body = parse_result_text(&preview);
     assert_eq!(body["to_import"].as_u64().unwrap(), 2);
-    let post = server.store().as_persistent().unwrap()
+    let post = server
+        .store()
+        .as_persistent()
+        .unwrap()
         .metadata()
         .list_for_export(&tenant("t"), None, false)
         .unwrap()
@@ -1426,8 +1443,8 @@ async fn export_omf_respects_include_flags_for_superseded() {
     let ps = server.store().as_persistent().unwrap();
 
     use memd::types::{ChunkType, MemoryChunk};
-    let replacement =
-        MemoryChunk::new(tenant("t"), "superseding fact", ChunkType::Doc).with_project(ProjectId::none());
+    let replacement = MemoryChunk::new(tenant("t"), "superseding fact", ChunkType::Doc)
+        .with_project(ProjectId::none());
     let _new_id: memd::types::ChunkId = ps
         .supersede_chunk(&tenant("t"), &first, replacement)
         .await
@@ -1658,8 +1675,8 @@ async fn import_omf_does_not_reconstruct_supersession_for_untrusted_source() {
     let a_src_id = ChunkId::new().to_string();
     let b_src_id = ChunkId::new().to_string();
 
-    let mk_item = |text: &str, src_id: &str, supersedes: Option<&str>, superseded_by: Option<&str>| {
-        OmfItem {
+    let mk_item =
+        |text: &str, src_id: &str, supersedes: Option<&str>, superseded_by: Option<&str>| OmfItem {
             content: text.to_string(),
             extensions: json!({
                 "memd": {
@@ -1677,13 +1694,14 @@ async fn import_omf_does_not_reconstruct_supersession_for_untrusted_source() {
                 },
             }),
             ..Default::default()
-        }
-    };
+        };
 
     let doc = OmfDocument {
         omf: OMF_VERSION.to_string(),
         exported_at: "2026-04-20T00:00:00Z".to_string(),
-        source: Some(OmfSource { app: "nanomem".to_string() }),
+        source: Some(OmfSource {
+            app: "nanomem".to_string(),
+        }),
         memories: vec![
             mk_item("older", &a_src_id, None, Some(&b_src_id)),
             mk_item("newer", &b_src_id, Some(&a_src_id), None),
@@ -1705,9 +1723,19 @@ async fn import_omf_does_not_reconstruct_supersession_for_untrusted_source() {
         .expect("dst list");
     assert_eq!(rows.len(), 2);
     for r in &rows {
-        assert!(r.lifecycle.supersedes.is_none(), "untrusted: no reconstructed back-edge");
-        assert!(r.lifecycle.superseded_by.is_none(), "untrusted: no reconstructed forward-edge");
-        assert_eq!(r.status.to_string(), "final", "untrusted imports default to Final");
+        assert!(
+            r.lifecycle.supersedes.is_none(),
+            "untrusted: no reconstructed back-edge"
+        );
+        assert!(
+            r.lifecycle.superseded_by.is_none(),
+            "untrusted: no reconstructed forward-edge"
+        );
+        assert_eq!(
+            r.status.to_string(),
+            "final",
+            "untrusted imports default to Final"
+        );
     }
 }
 
@@ -1747,7 +1775,9 @@ async fn import_omf_rejects_forked_supersession_graph_before_any_write() {
     let doc = OmfDocument {
         omf: OMF_VERSION.to_string(),
         exported_at: "2026-04-20T00:00:00Z".to_string(),
-        source: Some(OmfSource { app: "memd".to_string() }),
+        source: Some(OmfSource {
+            app: "memd".to_string(),
+        }),
         memories: vec![
             mk_item("A", &a_src, None),
             mk_item("B", &b_src, Some(&a_src)),
@@ -1801,7 +1831,9 @@ async fn import_omf_rejects_duplicate_source_chunk_ids_before_any_write() {
     let doc = OmfDocument {
         omf: OMF_VERSION.to_string(),
         exported_at: "2026-04-20T00:00:00Z".to_string(),
-        source: Some(OmfSource { app: "memd".to_string() }),
+        source: Some(OmfSource {
+            app: "memd".to_string(),
+        }),
         memories: vec![mk_item("first"), mk_item("second")],
     };
 
@@ -1810,7 +1842,10 @@ async fn import_omf_rejects_duplicate_source_chunk_ids_before_any_write() {
     let err = import_omf(dst_ps, &tenant("dst"), &doc, ImportOptions::default())
         .await
         .expect_err("duplicate source chunk_ids must fail-closed");
-    assert!(err.to_string().contains("duplicates"), "error should name the duplicate: {err}");
+    assert!(
+        err.to_string().contains("duplicates"),
+        "error should name the duplicate: {err}"
+    );
 
     let rows = dst_ps
         .metadata()
@@ -1828,7 +1863,9 @@ async fn preview_omf_import_matches_real_import_on_malformed_supersession_refs()
     let doc = OmfDocument {
         omf: OMF_VERSION.to_string(),
         exported_at: "2026-04-20T00:00:00Z".to_string(),
-        source: Some(OmfSource { app: "memd".to_string() }),
+        source: Some(OmfSource {
+            app: "memd".to_string(),
+        }),
         memories: vec![OmfItem {
             content: "bad".to_string(),
             extensions: json!({
@@ -1934,10 +1971,8 @@ fn fail_closed_parity_cases() -> Vec<(&'static str, OmfDocument)> {
     vec![
         // -- validate_omf envelope
         ("unsupported_omf_envelope_version", {
-            let mut doc = trusted_doc_with(vec![trusted_item_with(
-                "x",
-                json!({"v": MEMD_EXT_VERSION}),
-            )]);
+            let mut doc =
+                trusted_doc_with(vec![trusted_item_with("x", json!({"v": MEMD_EXT_VERSION}))]);
             doc.omf = "9.9".to_string();
             doc
         }),
@@ -2118,8 +2153,7 @@ async fn preview_and_import_fail_closed_in_lockstep_on_all_malformed_inputs() {
 
         let preview_res =
             preview_omf_import(dst_ps, &tenant("dst"), &doc, ImportOptions::default()).await;
-        let import_res =
-            import_omf(dst_ps, &tenant("dst"), &doc, ImportOptions::default()).await;
+        let import_res = import_omf(dst_ps, &tenant("dst"), &doc, ImportOptions::default()).await;
 
         let preview_err = preview_res.as_ref().err().unwrap_or_else(|| {
             panic!(

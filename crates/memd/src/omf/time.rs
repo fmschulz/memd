@@ -109,10 +109,7 @@ mod tests {
 
     #[test]
     fn epoch_formats_to_unix_midnight() {
-        assert_eq!(
-            format_rfc3339_ms(0).unwrap(),
-            "1970-01-01T00:00:00Z"
-        );
+        assert_eq!(format_rfc3339_ms(0).unwrap(), "1970-01-01T00:00:00Z");
     }
 
     #[test]

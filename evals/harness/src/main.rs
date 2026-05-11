@@ -220,8 +220,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    if dataset_paths.len() > 1
-        && !matches!(args.suite.as_str(), "benchmark" | "benchmark-protocol")
+    if dataset_paths.len() > 1 && !matches!(args.suite.as_str(), "benchmark" | "benchmark-protocol")
     {
         eprintln!(
             "Multiple dataset paths (from --dataset-path / --dataset-manifest) are only supported with --suite benchmark"
@@ -324,16 +323,11 @@ fn main() -> ExitCode {
         }
         "benchmark" | "benchmark-protocol" => {
             if dataset_paths.is_empty() {
-                eprintln!(
-                    "--dataset-path or --dataset-manifest is required for --suite benchmark"
-                );
+                eprintln!("--dataset-path or --dataset-manifest is required for --suite benchmark");
                 return ExitCode::FAILURE;
             }
             let config = suites::benchmark_protocol::BenchmarkConfig {
-                dataset_paths: dataset_paths
-                    .iter()
-                    .map(std::path::PathBuf::from)
-                    .collect(),
+                dataset_paths: dataset_paths.iter().map(std::path::PathBuf::from).collect(),
                 system_variant: args.system_variant,
                 bootstrap_iterations: args.bootstrap_iterations,
                 seed: args.seed,

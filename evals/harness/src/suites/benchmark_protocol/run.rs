@@ -687,9 +687,8 @@ fn evaluate_queries(
 /// both are present, including the case where a graded 0 wants to mark an
 /// entry in `relevant` as explicitly irrelevant).
 fn build_query_grades(query: &Query) -> HashMap<String, u8> {
-    let mut grades: HashMap<String, u8> = HashMap::with_capacity(
-        query.relevant.len() + query.relevance_grades.len(),
-    );
+    let mut grades: HashMap<String, u8> =
+        HashMap::with_capacity(query.relevant.len() + query.relevance_grades.len());
     for doc_id in &query.relevant {
         grades.insert(doc_id.clone(), 1);
     }

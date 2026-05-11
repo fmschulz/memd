@@ -23,8 +23,7 @@ async fn add_with_mode_conversation_persists_label_to_metadata() {
     )
     .await;
     let body = parse_result_text(&r);
-    let id =
-        ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id")).expect("valid id");
+    let id = ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id")).expect("valid id");
 
     let ps = server.store().as_persistent().expect("persistent");
     let meta = ps
@@ -50,8 +49,7 @@ async fn add_with_mode_document_default_persists_document() {
     )
     .await;
     let body = parse_result_text(&r);
-    let id =
-        ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id")).expect("valid id");
+    let id = ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id")).expect("valid id");
 
     let ps = server.store().as_persistent().expect("persistent");
     let meta = ps
@@ -78,8 +76,7 @@ async fn add_with_mode_invalid_value_rejected() {
     .await;
     let err = parse_error(&r).expect("error envelope");
     assert!(
-        err.1.to_lowercase().contains("ingestion mode")
-            || err.1.to_lowercase().contains("mode"),
+        err.1.to_lowercase().contains("ingestion mode") || err.1.to_lowercase().contains("mode"),
         "expected 'mode'-related error message, got: {}",
         err.1
     );
@@ -108,8 +105,7 @@ async fn add_with_mode_conversation_applies_default_14d_review_window() {
     )
     .await;
     let body = parse_result_text(&r);
-    let id = ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id"))
-        .expect("valid id");
+    let id = ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id")).expect("valid id");
 
     let ps = server.store().as_persistent().expect("persistent");
     let resolved = ps
@@ -145,8 +141,7 @@ async fn add_with_mode_document_does_not_set_default_review_window() {
     )
     .await;
     let body = parse_result_text(&r);
-    let id = ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id"))
-        .expect("valid id");
+    let id = ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id")).expect("valid id");
     let ps = server.store().as_persistent().expect("persistent");
     let resolved = ps
         .get_with_lifecycle(&tenant("t"), &id)
@@ -235,8 +230,7 @@ async fn add_with_mode_conversation_explicit_review_after_ms_wins() {
     )
     .await;
     let body = parse_result_text(&r);
-    let id = ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id"))
-        .expect("valid id");
+    let id = ChunkId::parse(body["chunk_id"].as_str().expect("chunk_id")).expect("valid id");
     let ps = server.store().as_persistent().expect("persistent");
     let resolved = ps
         .get_with_lifecycle(&tenant("t"), &id)
