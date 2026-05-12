@@ -6,7 +6,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
-## [0.20.0] - 2026-05-11
+## [0.30.0] - 2026-05-12
 
 ### Changed
 
@@ -17,6 +17,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Replaced wildcard MCP handler exports/imports with explicit public exports
   so future operation-layer moves are reviewable and do not silently shrink
   the Rust API surface.
+- Moved the shared operation handler implementation out of
+  `mcp/handlers.rs` into the protocol-neutral `ops` module, leaving the
+  historical `memd::mcp::handlers::*` path as a compatibility re-export.
 - Migrated the eval harness away from the removed `memd --mode mcp` process
   startup path. The harness now has a current CLI contract suite, a `CliClient`
   for `memd call`, and a temporary MCP-shaped compatibility wrapper for older
@@ -30,8 +33,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 - Eval-harness help and package metadata now describe the CLI-first executable
   instead of MCP conformance.
+- Warm-worker sockets now fall back to a short temp-directory path when the
+  configured data directory would exceed Unix socket path length limits.
 - Release metadata and `memd-wiki` lockstep package versions now align with the
-  `0.20.0` binary release.
+  `0.30.0` binary release.
 
 ## [0.13.0] - 2026-05-10
 

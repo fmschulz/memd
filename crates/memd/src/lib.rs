@@ -12,6 +12,7 @@ pub mod maintenance;
 pub mod mcp;
 pub mod metrics;
 pub mod omf;
+pub mod ops;
 pub mod retrieval;
 pub mod store;
 pub mod structural;
@@ -30,11 +31,11 @@ pub use embeddings::{CandleEmbedder, Embedder, EmbeddingConfig, EmbeddingResult,
 pub use error::{MemdError, Result};
 pub use index::{HnswConfig, HnswIndex, SearchResult};
 pub use logging::init_logging;
-pub use mcp::handlers::configure_operation_routing;
 pub use metrics::{
     IndexStats, LatencyStats, MetricsCollector, MetricsSnapshot, QueryMetrics, Timer,
     TokenUsageStats, ToolTokenAggregate, ToolTokenUsage,
 };
+pub use ops::configure_operation_routing;
 pub use retrieval::{
     ChunkWithMeta, CrossEncoderReranker, FeatureReranker, FusedResult, FusionCandidate,
     FusionSource, RankedResult, RerankerConfig, RerankerContext, RerankerEngine, RerankerMode,
