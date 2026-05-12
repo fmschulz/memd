@@ -868,6 +868,20 @@ mod tests {
         assert_ne!(same, warm_socket_path(&dense));
     }
 
+    #[test]
+    fn warm_socket_path_uses_short_temp_path_for_long_data_dirs() {
+        let config = WarmProcessConfig {
+            data_dir: PathBuf::from("/tmp").join("a".repeat(180)),
+            config_path: None,
+            embedding_model: "all-minilm".to_string(),
+            search_variant: "hybrid-feature".to_string(),
+        };
+
+        let socket = warm_socket_path(&config);
+        assert!(socket.to_string_lossy().len() < 100);
+        assert!(socket.starts_with(std::env::temp_dir().join("memd-warm")));
+    }
+
     #[tokio::test]
     async fn batch_jsonl_runs_multiple_calls_through_one_store() {
         let store = MemoryStore::new();

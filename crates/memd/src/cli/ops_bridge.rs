@@ -6,7 +6,9 @@ use serde_json::Value;
 use tracing::warn;
 
 use crate::maintenance::DreamParams;
-use crate::mcp::handlers::{
+use crate::mcp::McpError;
+use crate::metrics::MetricsCollector;
+use crate::ops::{
     handle_artifact_create, handle_artifact_find_decisions, handle_artifact_find_evidence,
     handle_artifact_find_failures, handle_artifact_find_highlights, handle_artifact_get,
     handle_artifact_list_thread, handle_artifact_search, handle_artifact_verify,
@@ -35,8 +37,6 @@ use crate::mcp::handlers::{
     TaskGetParams, TaskProgressParams, TaskResumeParams, TaskRunFinishParams, TaskRunStartParams,
     TaskSearchParams, TaskStartParams,
 };
-use crate::mcp::McpError;
-use crate::metrics::MetricsCollector;
 use crate::store::{Store, TenantManager};
 use crate::structural::{
     CallGraphIndexer, CallGraphSymbolRecord, StructuralStore, SymbolIndexer, SymbolQueryService,

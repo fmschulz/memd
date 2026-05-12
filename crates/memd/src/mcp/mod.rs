@@ -11,9 +11,7 @@ pub mod handlers;
 pub mod markdown_export;
 pub mod post_write_hooks;
 
-pub use digest_sweeper::{spawn_digest_sweeper, DigestSweeperHandle};
-pub use error::McpError;
-pub use handlers::{
+pub use crate::ops::{
     configure_operation_routing, handle_artifact_create, handle_artifact_find_decisions,
     handle_artifact_find_evidence, handle_artifact_find_failures, handle_artifact_find_highlights,
     handle_artifact_get, handle_artifact_list_thread, handle_artifact_search,
@@ -57,4 +55,6 @@ pub use handlers::{
     TaskSearchFiltersParams, TaskSearchParams, TaskStartParams, TierDebugInfo, TieredMetricsResult,
     TieredStatsResult, TimeRange, VerificationHint,
 };
+pub use digest_sweeper::{spawn_digest_sweeper, DigestSweeperHandle};
+pub use error::McpError;
 pub use post_write_hooks::PostWriteEvent;

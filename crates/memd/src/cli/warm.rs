@@ -121,11 +121,19 @@ pub fn warm_socket_path(config: &WarmProcessConfig) -> PathBuf {
     hasher.update(config.search_variant.as_bytes());
     let digest = hasher.finalize();
     let hex = format!("{digest:x}");
-    config
+    let data_dir_socket = config
         .data_dir
         .join("warm")
         .join(&hex[..16])
-        .join("memd.sock")
+        .join("memd.sock");
+    if data_dir_socket.to_string_lossy().len() < 100 {
+        data_dir_socket
+    } else {
+        std::env::temp_dir()
+            .join("memd-warm")
+            .join(&hex[..16])
+            .join("memd.sock")
+    }
 }
 
 fn warm_pid_path(config: &WarmProcessConfig) -> PathBuf {

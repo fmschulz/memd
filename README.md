@@ -1,6 +1,6 @@
 # memd
 
-[![Version](https://img.shields.io/badge/version-0.20.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.30.0-blue)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 `memd` is a local memory CLI that gives coding agents and AI scientists a

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-10T05:01:41Z",
+  "generated_at": "2026-05-12T01:15:51Z",
   "corpus_path": "docs/scientific-task-memory/benchmark-results/task_memory_benchmark_corpus.json",
   "corpus_description": "Phase 5 benchmark corpus for memd task-oriented knowledge artifacts with confusable sibling tasks",
   "corpus_version": "2026-03-21.v2",
@@ -67,8 +67,8 @@
       ]
     }
   ],
-  "top_k": 5,
-  "workers": 2,
+  "top_k": 3,
+  "workers": 1,
   "ops_per_worker": 1,
   "memd_lanes": [
     "cli_cold",
@@ -81,17 +81,17 @@
     "memd_cli_cold_chunk_baseline": {
       "lane": "cli_cold",
       "mode": "cli_cold: memory.search over flattened chunk-native benchmark artifacts",
-      "seed_total_ms": 21138.13796598697,
+      "seed_total_ms": 21744.17524295859,
       "index_ready_wait_ms": 0.0,
       "documents_seeded": 56,
       "search_quality": {
         "queries": 23,
-        "hit1": 0.9565217391304348,
+        "hit1": 0.8260869565217391,
         "hit3": 1.0,
-        "mrr": 0.9782608695652174,
-        "avg_search_ms": 4211.620978515029,
-        "p50_search_ms": 3945.900962979067,
-        "p95_search_ms": 4987.959701044019,
+        "mrr": 0.9130434782608695,
+        "avg_search_ms": 3465.5276597477496,
+        "p50_search_ms": 3110.209721024148,
+        "p95_search_ms": 4519.756380002946,
         "details": [
           {
             "query_id": "q_task_goal_jwt",
@@ -99,8 +99,8 @@
             "query_text": "why were token validation failures being investigated",
             "expected_case_id": "jwt_timezone_fix",
             "expected_facet": "task_goal",
-            "rank": 2,
-            "latency_ms": 3839.2457049922086
+            "rank": 1,
+            "latency_ms": 4381.526987999678
           },
           {
             "query_id": "q_failed_jwt",
@@ -109,7 +109,7 @@
             "expected_case_id": "jwt_timezone_fix",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 3793.096755980514
+            "latency_ms": 3081.2837349949405
           },
           {
             "query_id": "q_paraphrase_jwt_skew",
@@ -118,7 +118,7 @@
             "expected_case_id": "jwt_timezone_fix",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 3945.900962979067
+            "latency_ms": 4316.236059996299
           },
           {
             "query_id": "q_failed_refresh_window",
@@ -127,7 +127,7 @@
             "expected_case_id": "jwt_refresh_grace_window",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 3880.7537449756637
+            "latency_ms": 3125.3208650741726
           },
           {
             "query_id": "q_why_refresh_runner",
@@ -135,8 +135,8 @@
             "query_text": "why were cargo tests used for the refresh grace window probe",
             "expected_case_id": "jwt_refresh_grace_window",
             "expected_facet": "run",
-            "rank": 1,
-            "latency_ms": 3672.406677971594
+            "rank": 2,
+            "latency_ms": 3090.610046987422
           },
           {
             "query_id": "q_evidence_refresh",
@@ -145,7 +145,7 @@
             "expected_case_id": "jwt_refresh_grace_window",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 4987.959701044019
+            "latency_ms": 3159.9598560715094
           },
           {
             "query_id": "q_params_mmseqs",
@@ -154,7 +154,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 3900.954245997127
+            "latency_ms": 4303.320945939049
           },
           {
             "query_id": "q_why_mmseqs",
@@ -163,7 +163,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 3793.5666340054013
+            "latency_ms": 4367.302760947496
           },
           {
             "query_id": "q_evidence_mmseqs",
@@ -172,7 +172,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 4896.899841027334
+            "latency_ms": 3110.209721024148
           },
           {
             "query_id": "q_paraphrase_mmseqs",
@@ -181,7 +181,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 4075.047289021313
+            "latency_ms": 4794.47463399265
           },
           {
             "query_id": "q_params_sigma",
@@ -190,7 +190,7 @@
             "expected_case_id": "mmseqs_sigma_factor_search",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 4847.652896947693
+            "latency_ms": 3290.2228510938585
           },
           {
             "query_id": "q_evidence_sigma",
@@ -199,7 +199,7 @@
             "expected_case_id": "mmseqs_sigma_factor_search",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 4768.3899169787765
+            "latency_ms": 3013.6701909359545
           },
           {
             "query_id": "q_failed_kafka",
@@ -207,8 +207,8 @@
             "query_text": "what failed in the Kafka evaluation prototype",
             "expected_case_id": "kafka_queue_selection",
             "expected_facet": "failed",
-            "rank": 1,
-            "latency_ms": 4919.438979006372
+            "rank": 2,
+            "latency_ms": 4519.756380002946
           },
           {
             "query_id": "q_why_kafka_runner",
@@ -217,7 +217,7 @@
             "expected_case_id": "kafka_queue_selection",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 3872.189563990105
+            "latency_ms": 2868.9997360343114
           },
           {
             "query_id": "q_evidence_kafka",
@@ -226,7 +226,7 @@
             "expected_case_id": "kafka_queue_selection",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 3703.3280250034295
+            "latency_ms": 2903.58037292026
           },
           {
             "query_id": "q_decision_nats",
@@ -235,7 +235,7 @@
             "expected_case_id": "nats_jetstream_selection",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 3848.9742369856685
+            "latency_ms": 3112.4289199942723
           },
           {
             "query_id": "q_failed_nats_proto",
@@ -244,7 +244,7 @@
             "expected_case_id": "nats_jetstream_selection",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 3985.938565048855
+            "latency_ms": 3099.618619075045
           },
           {
             "query_id": "q_why_nats_runner",
@@ -253,7 +253,7 @@
             "expected_case_id": "nats_jetstream_selection",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 3951.1089239967987
+            "latency_ms": 3067.97323806677
           },
           {
             "query_id": "q_progress_indexing",
@@ -262,7 +262,7 @@
             "expected_case_id": "codebase_indexing",
             "expected_facet": "task_summary",
             "rank": 1,
-            "latency_ms": 3650.8148899883963
+            "latency_ms": 2977.6642749784514
           },
           {
             "query_id": "q_validation_indexing",
@@ -270,8 +270,8 @@
             "query_text": "what validated the code indexing workflow",
             "expected_case_id": "codebase_indexing",
             "expected_facet": "validation",
-            "rank": 1,
-            "latency_ms": 4997.687049966771
+            "rank": 2,
+            "latency_ms": 3023.60400010366
           },
           {
             "query_id": "q_paraphrase_indexing",
@@ -280,7 +280,7 @@
             "expected_case_id": "codebase_indexing",
             "expected_facet": "task_summary",
             "rank": 1,
-            "latency_ms": 4955.724210012704
+            "latency_ms": 2918.9303800230846
           },
           {
             "query_id": "q_progress_frontend",
@@ -289,7 +289,7 @@
             "expected_case_id": "frontend_route_indexing",
             "expected_facet": "task_summary",
             "rank": 1,
-            "latency_ms": 4769.865124952048
+            "latency_ms": 2878.8919129874557
           },
           {
             "query_id": "q_validation_frontend",
@@ -297,30 +297,30 @@
             "query_text": "what validated the frontend route indexing workflow",
             "expected_case_id": "frontend_route_indexing",
             "expected_facet": "validation",
-            "rank": 1,
-            "latency_ms": 3810.33856497379
+            "rank": 2,
+            "latency_ms": 4301.549684954807
           }
         ],
         "per_type": {
           "task_lifecycle": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          },
+          "failed_attempt": {
+            "hit1": 0.8,
+            "hit3": 1.0,
+            "mrr": 0.9
+          },
+          "why_chosen": {
             "hit1": 0.75,
             "hit3": 1.0,
             "mrr": 0.875
           },
-          "failed_attempt": {
-            "hit1": 1.0,
-            "hit3": 1.0,
-            "mrr": 1.0
-          },
-          "why_chosen": {
-            "hit1": 1.0,
-            "hit3": 1.0,
-            "mrr": 1.0
-          },
           "evidence_lookup": {
-            "hit1": 1.0,
+            "hit1": 0.6666666666666666,
             "hit3": 1.0,
-            "mrr": 1.0
+            "mrr": 0.8333333333333334
           },
           "parameter_lookup": {
             "hit1": 1.0,
@@ -337,41 +337,41 @@
       "freshness": {
         "found": true,
         "rank": 3,
-        "search_ms": 6297.257494006772
+        "search_ms": 5037.349738995545
       },
       "concurrency": {
-        "total_ops": 2,
-        "successes": 2,
+        "total_ops": 1,
+        "successes": 1,
         "errors": [],
         "success_rate": 1.0,
-        "ops_per_sec": 0.3386133104806387,
-        "total_ms": 5906.442357983906
+        "ops_per_sec": 0.32080675230233563,
+        "total_ms": 3117.1413719421253
       }
     },
     "memd_cli_cold_task_memory": {
       "lane": "cli_cold",
       "mode": "cli_cold: task.* lifecycle writes plus task.search over exact-filtered task artifacts",
-      "seed_total_ms": 179484.26323197782,
+      "seed_total_ms": 166098.2758019818,
       "index_ready_wait_ms": 0.0,
       "documents_seeded": 112,
       "task_ids": {
-        "jwt_timezone_fix": "019e103d-8618-7901-b6ac-59bd3fc80bd3",
-        "jwt_refresh_grace_window": "019e103d-e8bb-7442-8598-793d15d53152",
-        "mmseqs_marker_search": "019e103e-2caf-70e0-99da-dee3feadbb69",
-        "mmseqs_sigma_factor_search": "019e103e-699b-77c0-9bdd-c4d67f6ea340",
-        "kafka_queue_selection": "019e103e-b972-7d93-a3ad-78f9974fe87e",
-        "nats_jetstream_selection": "019e103f-24f2-73b1-a321-97224b808c34",
-        "codebase_indexing": "019e103f-84fb-7f40-b613-985ed68c50e4",
-        "frontend_route_indexing": "019e103f-dea0-78d3-8dd4-f45155cdf46d"
+        "jwt_timezone_fix": "019e19b0-28ad-7ea2-ad3f-4567c340f0ad",
+        "jwt_refresh_grace_window": "019e19b0-8456-72b0-b31d-db374609bec1",
+        "mmseqs_marker_search": "019e19b0-b694-76b0-85ef-9b6fe2f45e03",
+        "mmseqs_sigma_factor_search": "019e19b1-000e-7062-8acd-18a31c00dae6",
+        "kafka_queue_selection": "019e19b1-4ec8-7b52-b423-c5821dff6d21",
+        "nats_jetstream_selection": "019e19b1-a1d5-7af0-82bb-827c02f79e01",
+        "codebase_indexing": "019e19b1-f460-79d0-832b-718f08e71942",
+        "frontend_route_indexing": "019e19b2-5230-7ab1-8436-6ee3fd8ad7da"
       },
       "search_quality": {
         "queries": 23,
         "hit1": 0.7391304347826086,
         "hit3": 1.0,
         "mrr": 0.8695652173913043,
-        "avg_search_ms": 524.2016975611003,
-        "p50_search_ms": 317.3126000328921,
-        "p95_search_ms": 378.4369060304016,
+        "avg_search_ms": 318.17287831749445,
+        "p50_search_ms": 317.71454599220306,
+        "p95_search_ms": 330.04237501882017,
         "details": [
           {
             "query_id": "q_task_goal_jwt",
@@ -380,7 +380,7 @@
             "expected_case_id": "jwt_timezone_fix",
             "expected_facet": "task_goal",
             "rank": 2,
-            "latency_ms": 356.22289299499243
+            "latency_ms": 323.70105502195656
           },
           {
             "query_id": "q_failed_jwt",
@@ -389,7 +389,7 @@
             "expected_case_id": "jwt_timezone_fix",
             "expected_facet": "failed",
             "rank": 2,
-            "latency_ms": 308.27706796117127
+            "latency_ms": 317.71454599220306
           },
           {
             "query_id": "q_paraphrase_jwt_skew",
@@ -398,7 +398,7 @@
             "expected_case_id": "jwt_timezone_fix",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 317.88428098661825
+            "latency_ms": 329.40037304069847
           },
           {
             "query_id": "q_failed_refresh_window",
@@ -407,7 +407,7 @@
             "expected_case_id": "jwt_refresh_grace_window",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 4995.475100993644
+            "latency_ms": 324.38125007320195
           },
           {
             "query_id": "q_why_refresh_runner",
@@ -416,7 +416,7 @@
             "expected_case_id": "jwt_refresh_grace_window",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 300.4614899982698
+            "latency_ms": 322.2149780485779
           },
           {
             "query_id": "q_evidence_refresh",
@@ -425,7 +425,7 @@
             "expected_case_id": "jwt_refresh_grace_window",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 343.86284794891253
+            "latency_ms": 322.10354798007756
           },
           {
             "query_id": "q_params_mmseqs",
@@ -434,7 +434,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "run",
             "rank": 2,
-            "latency_ms": 320.9843179793097
+            "latency_ms": 326.07135304715484
           },
           {
             "query_id": "q_why_mmseqs",
@@ -443,7 +443,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 319.3092430010438
+            "latency_ms": 326.783487922512
           },
           {
             "query_id": "q_evidence_mmseqs",
@@ -452,7 +452,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 298.1907789944671
+            "latency_ms": 334.1979749966413
           },
           {
             "query_id": "q_paraphrase_mmseqs",
@@ -461,7 +461,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "run",
             "rank": 2,
-            "latency_ms": 317.3126000328921
+            "latency_ms": 316.0198660334572
           },
           {
             "query_id": "q_params_sigma",
@@ -470,7 +470,7 @@
             "expected_case_id": "mmseqs_sigma_factor_search",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 318.5945329605602
+            "latency_ms": 316.7610849486664
           },
           {
             "query_id": "q_evidence_sigma",
@@ -479,7 +479,7 @@
             "expected_case_id": "mmseqs_sigma_factor_search",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 367.1049539698288
+            "latency_ms": 315.39298000279814
           },
           {
             "query_id": "q_failed_kafka",
@@ -488,7 +488,7 @@
             "expected_case_id": "kafka_queue_selection",
             "expected_facet": "failed",
             "rank": 2,
-            "latency_ms": 314.5495100179687
+            "latency_ms": 310.79035601578653
           },
           {
             "query_id": "q_why_kafka_runner",
@@ -497,7 +497,7 @@
             "expected_case_id": "kafka_queue_selection",
             "expected_facet": "run",
             "rank": 2,
-            "latency_ms": 317.1959100291133
+            "latency_ms": 301.18975893128663
           },
           {
             "query_id": "q_evidence_kafka",
@@ -506,7 +506,7 @@
             "expected_case_id": "kafka_queue_selection",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 313.6714100255631
+            "latency_ms": 299.8580039711669
           },
           {
             "query_id": "q_decision_nats",
@@ -515,7 +515,7 @@
             "expected_case_id": "nats_jetstream_selection",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 309.9317639716901
+            "latency_ms": 310.26677694171667
           },
           {
             "query_id": "q_failed_nats_proto",
@@ -524,7 +524,7 @@
             "expected_case_id": "nats_jetstream_selection",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 292.9714869824238
+            "latency_ms": 316.9869619887322
           },
           {
             "query_id": "q_why_nats_runner",
@@ -533,7 +533,7 @@
             "expected_case_id": "nats_jetstream_selection",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 378.4369060304016
+            "latency_ms": 311.5131410304457
           },
           {
             "query_id": "q_progress_indexing",
@@ -542,7 +542,7 @@
             "expected_case_id": "codebase_indexing",
             "expected_facet": "task_summary",
             "rank": 1,
-            "latency_ms": 324.97830502688885
+            "latency_ms": 304.9039060715586
           },
           {
             "query_id": "q_validation_indexing",
@@ -551,7 +551,7 @@
             "expected_case_id": "codebase_indexing",
             "expected_facet": "validation",
             "rank": 1,
-            "latency_ms": 292.79279900947586
+            "latency_ms": 322.5885240826756
           },
           {
             "query_id": "q_paraphrase_indexing",
@@ -560,7 +560,7 @@
             "expected_case_id": "codebase_indexing",
             "expected_facet": "task_summary",
             "rank": 1,
-            "latency_ms": 307.62124800821766
+            "latency_ms": 316.3806770462543
           },
           {
             "query_id": "q_progress_frontend",
@@ -569,7 +569,7 @@
             "expected_case_id": "frontend_route_indexing",
             "expected_facet": "task_summary",
             "rank": 1,
-            "latency_ms": 344.05772597528994
+            "latency_ms": 330.04237501882017
           },
           {
             "query_id": "q_validation_frontend",
@@ -578,7 +578,7 @@
             "expected_case_id": "frontend_route_indexing",
             "expected_facet": "validation",
             "rank": 1,
-            "latency_ms": 296.7518710065633
+            "latency_ms": 318.71322309598327
           }
         ],
         "per_type": {
@@ -617,21 +617,21 @@
       "freshness": {
         "found": true,
         "rank": 1,
-        "search_ms": 333.54792796308175
+        "search_ms": 334.4764920184389
       },
       "concurrency": {
-        "total_ops": 2,
-        "successes": 2,
+        "total_ops": 1,
+        "successes": 1,
         "errors": [],
         "success_rate": 1.0,
-        "ops_per_sec": 0.34420748485188457,
-        "total_ms": 5810.448894975707
+        "ops_per_sec": 0.32535300657351107,
+        "total_ms": 3073.58462898992
       }
     },
     "memd_cli_warm_chunk_baseline": {
       "lane": "cli_warm",
       "mode": "cli_warm: memory.search over flattened chunk-native benchmark artifacts",
-      "seed_total_ms": 4813.8729489874095,
+      "seed_total_ms": 4571.670651901513,
       "index_ready_wait_ms": 0.0,
       "documents_seeded": 56,
       "search_quality": {
@@ -639,9 +639,9 @@
         "hit1": 0.9565217391304348,
         "hit3": 1.0,
         "mrr": 0.9782608695652174,
-        "avg_search_ms": 39.02062473808537,
-        "p50_search_ms": 37.08828898379579,
-        "p95_search_ms": 55.33570802072063,
+        "avg_search_ms": 28.854393825420868,
+        "p50_search_ms": 26.946624973788857,
+        "p95_search_ms": 30.621927930042148,
         "details": [
           {
             "query_id": "q_task_goal_jwt",
@@ -650,7 +650,7 @@
             "expected_case_id": "jwt_timezone_fix",
             "expected_facet": "task_goal",
             "rank": 2,
-            "latency_ms": 78.36996205151081
+            "latency_ms": 71.24793506227434
           },
           {
             "query_id": "q_failed_jwt",
@@ -659,7 +659,7 @@
             "expected_case_id": "jwt_timezone_fix",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 32.262651016935706
+            "latency_ms": 30.054847011342645
           },
           {
             "query_id": "q_paraphrase_jwt_skew",
@@ -668,7 +668,7 @@
             "expected_case_id": "jwt_timezone_fix",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 32.75507199577987
+            "latency_ms": 30.621927930042148
           },
           {
             "query_id": "q_failed_refresh_window",
@@ -677,7 +677,7 @@
             "expected_case_id": "jwt_refresh_grace_window",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 29.954540019389242
+            "latency_ms": 28.126914985477924
           },
           {
             "query_id": "q_why_refresh_runner",
@@ -686,7 +686,7 @@
             "expected_case_id": "jwt_refresh_grace_window",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 48.43151202658191
+            "latency_ms": 26.406344026327133
           },
           {
             "query_id": "q_evidence_refresh",
@@ -695,7 +695,7 @@
             "expected_case_id": "jwt_refresh_grace_window",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 47.27641004137695
+            "latency_ms": 25.54257307201624
           },
           {
             "query_id": "q_params_mmseqs",
@@ -704,7 +704,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 55.33570802072063
+            "latency_ms": 27.858837973326445
           },
           {
             "query_id": "q_why_mmseqs",
@@ -713,7 +713,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 48.7531500402838
+            "latency_ms": 24.15133500471711
           },
           {
             "query_id": "q_evidence_mmseqs",
@@ -722,7 +722,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 45.87144497781992
+            "latency_ms": 23.82515906356275
           },
           {
             "query_id": "q_paraphrase_mmseqs",
@@ -731,7 +731,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 47.872005961835384
+            "latency_ms": 26.890809065662324
           },
           {
             "query_id": "q_params_sigma",
@@ -740,7 +740,7 @@
             "expected_case_id": "mmseqs_sigma_factor_search",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 42.39331296412274
+            "latency_ms": 30.15065798535943
           },
           {
             "query_id": "q_evidence_sigma",
@@ -749,7 +749,7 @@
             "expected_case_id": "mmseqs_sigma_factor_search",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 37.08828898379579
+            "latency_ms": 26.204032939858735
           },
           {
             "query_id": "q_failed_kafka",
@@ -758,7 +758,7 @@
             "expected_case_id": "kafka_queue_selection",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 38.26715698232874
+            "latency_ms": 26.946624973788857
           },
           {
             "query_id": "q_why_kafka_runner",
@@ -767,7 +767,7 @@
             "expected_case_id": "kafka_queue_selection",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 38.044414948672056
+            "latency_ms": 25.862897979095578
           },
           {
             "query_id": "q_evidence_kafka",
@@ -776,7 +776,7 @@
             "expected_case_id": "kafka_queue_selection",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 33.61205098917708
+            "latency_ms": 23.79726606886834
           },
           {
             "query_id": "q_decision_nats",
@@ -785,7 +785,7 @@
             "expected_case_id": "nats_jetstream_selection",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 38.414976035710424
+            "latency_ms": 27.570893988013268
           },
           {
             "query_id": "q_failed_nats_proto",
@@ -794,7 +794,7 @@
             "expected_case_id": "nats_jetstream_selection",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 31.576845969539136
+            "latency_ms": 28.695889050140977
           },
           {
             "query_id": "q_why_nats_runner",
@@ -803,7 +803,7 @@
             "expected_case_id": "nats_jetstream_selection",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 32.335227995645255
+            "latency_ms": 28.933127992786467
           },
           {
             "query_id": "q_progress_indexing",
@@ -812,7 +812,7 @@
             "expected_case_id": "codebase_indexing",
             "expected_facet": "task_summary",
             "rank": 1,
-            "latency_ms": 29.00108799804002
+            "latency_ms": 24.608216946944594
           },
           {
             "query_id": "q_validation_indexing",
@@ -821,7 +821,7 @@
             "expected_case_id": "codebase_indexing",
             "expected_facet": "validation",
             "rank": 1,
-            "latency_ms": 25.861305999569595
+            "latency_ms": 24.586285930126905
           },
           {
             "query_id": "q_paraphrase_indexing",
@@ -830,7 +830,7 @@
             "expected_case_id": "codebase_indexing",
             "expected_facet": "task_summary",
             "rank": 1,
-            "latency_ms": 27.04653498949483
+            "latency_ms": 27.117006946355104
           },
           {
             "query_id": "q_progress_frontend",
@@ -839,7 +839,7 @@
             "expected_case_id": "frontend_route_indexing",
             "expected_facet": "task_summary",
             "rank": 1,
-            "latency_ms": 28.85654498822987
+            "latency_ms": 27.56365097593516
           },
           {
             "query_id": "q_validation_frontend",
@@ -848,7 +848,7 @@
             "expected_case_id": "frontend_route_indexing",
             "expected_facet": "validation",
             "rank": 1,
-            "latency_ms": 28.094163979403675
+            "latency_ms": 26.887823012657464
           }
         ],
         "per_type": {
@@ -887,41 +887,41 @@
       "freshness": {
         "found": true,
         "rank": 3,
-        "search_ms": 302.54161002812907
+        "search_ms": 313.05367196910083
       },
       "concurrency": {
-        "total_ops": 2,
-        "successes": 2,
+        "total_ops": 1,
+        "successes": 1,
         "errors": [],
         "success_rate": 1.0,
-        "ops_per_sec": 27.889002984585158,
-        "total_ms": 71.71285402728245
+        "ops_per_sec": 14.451541603273434,
+        "total_ms": 69.19676996767521
       }
     },
     "memd_cli_warm_task_memory": {
       "lane": "cli_warm",
       "mode": "cli_warm: task.* lifecycle writes plus task.search over exact-filtered task artifacts",
-      "seed_total_ms": 8973.763019952457,
+      "seed_total_ms": 8447.845970047638,
       "index_ready_wait_ms": 0.0,
       "documents_seeded": 112,
       "task_ids": {
-        "jwt_timezone_fix": "019e1042-8831-79e2-a524-03e9fa8746a5",
-        "jwt_refresh_grace_window": "019e1042-8c84-77b0-a5a5-cfa6534be658",
-        "mmseqs_marker_search": "019e1042-90f5-7902-bf66-198217853f31",
-        "mmseqs_sigma_factor_search": "019e1042-9501-7323-bb30-d973b3461703",
-        "kafka_queue_selection": "019e1042-9947-7fd1-8d1b-51fb9a098736",
-        "nats_jetstream_selection": "019e1042-9dec-78b3-8bf9-1f6d501ab1f6",
-        "codebase_indexing": "019e1042-a279-78f3-b469-22ef41341ba6",
-        "frontend_route_indexing": "019e1042-a6a5-76e0-9e4d-e17ccdf008b4"
+        "jwt_timezone_fix": "019e19b4-752c-79c3-ba97-f0b5aeb9d979",
+        "jwt_refresh_grace_window": "019e19b4-7970-7c81-98bb-6e0dea02692e",
+        "mmseqs_marker_search": "019e19b4-7dbb-7312-b4e0-26683568b46c",
+        "mmseqs_sigma_factor_search": "019e19b4-8199-78e1-b68b-51db72e30959",
+        "kafka_queue_selection": "019e19b4-85a3-7782-8139-2fbda1eef1aa",
+        "nats_jetstream_selection": "019e19b4-89a0-7fc1-9bb4-85784b76f11a",
+        "codebase_indexing": "019e19b4-8e02-7a40-8233-de5a22b3d8b6",
+        "frontend_route_indexing": "019e19b4-91f3-7e52-86b1-b4f7e2969c69"
       },
       "search_quality": {
         "queries": 23,
         "hit1": 0.7391304347826086,
         "hit3": 1.0,
         "mrr": 0.8695652173913043,
-        "avg_search_ms": 9.744318381822465,
-        "p50_search_ms": 9.696611959952861,
-        "p95_search_ms": 11.350907967425883,
+        "avg_search_ms": 9.617235754495082,
+        "p50_search_ms": 9.643626981414855,
+        "p95_search_ms": 10.140717029571533,
         "details": [
           {
             "query_id": "q_task_goal_jwt",
@@ -930,7 +930,7 @@
             "expected_case_id": "jwt_timezone_fix",
             "expected_facet": "task_goal",
             "rank": 2,
-            "latency_ms": 9.696611959952861
+            "latency_ms": 8.872271049767733
           },
           {
             "query_id": "q_failed_jwt",
@@ -939,7 +939,7 @@
             "expected_case_id": "jwt_timezone_fix",
             "expected_facet": "failed",
             "rank": 2,
-            "latency_ms": 11.350907967425883
+            "latency_ms": 8.721446036361158
           },
           {
             "query_id": "q_paraphrase_jwt_skew",
@@ -948,7 +948,7 @@
             "expected_case_id": "jwt_timezone_fix",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 11.651495995465666
+            "latency_ms": 10.140717029571533
           },
           {
             "query_id": "q_failed_refresh_window",
@@ -957,7 +957,7 @@
             "expected_case_id": "jwt_refresh_grace_window",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 9.871172020211816
+            "latency_ms": 9.531807038001716
           },
           {
             "query_id": "q_why_refresh_runner",
@@ -966,7 +966,7 @@
             "expected_case_id": "jwt_refresh_grace_window",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 9.49595298152417
+            "latency_ms": 9.733567014336586
           },
           {
             "query_id": "q_evidence_refresh",
@@ -975,7 +975,7 @@
             "expected_case_id": "jwt_refresh_grace_window",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 9.784849011339247
+            "latency_ms": 9.44732700008899
           },
           {
             "query_id": "q_params_mmseqs",
@@ -984,7 +984,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "run",
             "rank": 2,
-            "latency_ms": 9.775702026672661
+            "latency_ms": 9.704071911983192
           },
           {
             "query_id": "q_why_mmseqs",
@@ -993,7 +993,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 8.9663119870238
+            "latency_ms": 9.618861018680036
           },
           {
             "query_id": "q_evidence_mmseqs",
@@ -1002,7 +1002,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 9.101586998440325
+            "latency_ms": 9.693561936728656
           },
           {
             "query_id": "q_paraphrase_mmseqs",
@@ -1011,7 +1011,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "run",
             "rank": 2,
-            "latency_ms": 9.647178987506777
+            "latency_ms": 9.997215936891735
           },
           {
             "query_id": "q_params_sigma",
@@ -1020,7 +1020,7 @@
             "expected_case_id": "mmseqs_sigma_factor_search",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 10.32030105125159
+            "latency_ms": 9.708981029689312
           },
           {
             "query_id": "q_evidence_sigma",
@@ -1029,7 +1029,7 @@
             "expected_case_id": "mmseqs_sigma_factor_search",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 9.233065997250378
+            "latency_ms": 9.560841019265354
           },
           {
             "query_id": "q_failed_kafka",
@@ -1038,7 +1038,7 @@
             "expected_case_id": "kafka_queue_selection",
             "expected_facet": "failed",
             "rank": 2,
-            "latency_ms": 10.557789995800704
+            "latency_ms": 9.643626981414855
           },
           {
             "query_id": "q_why_kafka_runner",
@@ -1047,7 +1047,7 @@
             "expected_case_id": "kafka_queue_selection",
             "expected_facet": "run",
             "rank": 2,
-            "latency_ms": 8.973144984338433
+            "latency_ms": 9.226861060597003
           },
           {
             "query_id": "q_evidence_kafka",
@@ -1056,7 +1056,7 @@
             "expected_case_id": "kafka_queue_selection",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 9.027037012856454
+            "latency_ms": 9.101153002120554
           },
           {
             "query_id": "q_decision_nats",
@@ -1065,7 +1065,7 @@
             "expected_case_id": "nats_jetstream_selection",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 9.429106954485178
+            "latency_ms": 9.701587026938796
           },
           {
             "query_id": "q_failed_nats_proto",
@@ -1074,7 +1074,7 @@
             "expected_case_id": "nats_jetstream_selection",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 9.541317995171994
+            "latency_ms": 9.783221990801394
           },
           {
             "query_id": "q_why_nats_runner",
@@ -1083,7 +1083,7 @@
             "expected_case_id": "nats_jetstream_selection",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 8.942757965996861
+            "latency_ms": 10.017064050771296
           },
           {
             "query_id": "q_progress_indexing",
@@ -1092,7 +1092,7 @@
             "expected_case_id": "codebase_indexing",
             "expected_facet": "task_summary",
             "rank": 1,
-            "latency_ms": 8.696121978573501
+            "latency_ms": 9.324324084445834
           },
           {
             "query_id": "q_validation_indexing",
@@ -1101,7 +1101,7 @@
             "expected_case_id": "codebase_indexing",
             "expected_facet": "validation",
             "rank": 1,
-            "latency_ms": 10.378940962255001
+            "latency_ms": 9.897688054479659
           },
           {
             "query_id": "q_paraphrase_indexing",
@@ -1110,7 +1110,7 @@
             "expected_case_id": "codebase_indexing",
             "expected_facet": "task_summary",
             "rank": 1,
-            "latency_ms": 9.723082010168582
+            "latency_ms": 9.516006102785468
           },
           {
             "query_id": "q_progress_frontend",
@@ -1119,7 +1119,7 @@
             "expected_case_id": "frontend_route_indexing",
             "expected_facet": "task_summary",
             "rank": 1,
-            "latency_ms": 10.198660951573402
+            "latency_ms": 9.434652980417013
           },
           {
             "query_id": "q_validation_frontend",
@@ -1128,7 +1128,7 @@
             "expected_case_id": "frontend_route_indexing",
             "expected_facet": "validation",
             "rank": 1,
-            "latency_ms": 9.756224986631423
+            "latency_ms": 10.819568997249007
           }
         ],
         "per_type": {
@@ -1167,21 +1167,21 @@
       "freshness": {
         "found": true,
         "rank": 1,
-        "search_ms": 8.99344403296709
+        "search_ms": 10.748153901658952
       },
       "concurrency": {
-        "total_ops": 2,
-        "successes": 2,
+        "total_ops": 1,
+        "successes": 1,
         "errors": [],
         "success_rate": 1.0,
-        "ops_per_sec": 8.028139720635602,
-        "total_ms": 249.12371602840722
+        "ops_per_sec": 9.26362285642826,
+        "total_ms": 107.9491269774735
       }
     },
     "memd_cli_batch_chunk_baseline": {
       "lane": "cli_batch",
       "mode": "cli_batch: memory.search over flattened chunk-native benchmark artifacts",
-      "seed_total_ms": 6898.015560989734,
+      "seed_total_ms": 5221.725546056405,
       "index_ready_wait_ms": 0.0,
       "documents_seeded": 56,
       "search_quality": {
@@ -1189,9 +1189,9 @@
         "hit1": 0.9565217391304348,
         "hit3": 1.0,
         "mrr": 0.9782608695652174,
-        "avg_search_ms": 22.390497041076582,
-        "p50_search_ms": 20.168568997178227,
-        "p95_search_ms": 30.62388498801738,
+        "avg_search_ms": 24.982284607730158,
+        "p50_search_ms": 15.194855048321187,
+        "p95_search_ms": 19.7519640205428,
         "details": [
           {
             "query_id": "q_task_goal_jwt",
@@ -1200,7 +1200,7 @@
             "expected_case_id": "jwt_timezone_fix",
             "expected_facet": "task_goal",
             "rank": 2,
-            "latency_ms": 58.87372302822769
+            "latency_ms": 247.42818798404187
           },
           {
             "query_id": "q_failed_jwt",
@@ -1209,7 +1209,7 @@
             "expected_case_id": "jwt_timezone_fix",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 16.679296037182212
+            "latency_ms": 19.7519640205428
           },
           {
             "query_id": "q_paraphrase_jwt_skew",
@@ -1218,7 +1218,7 @@
             "expected_case_id": "jwt_timezone_fix",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 16.221892030443996
+            "latency_ms": 16.659080050885677
           },
           {
             "query_id": "q_failed_refresh_window",
@@ -1227,7 +1227,7 @@
             "expected_case_id": "jwt_refresh_grace_window",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 15.038706013001502
+            "latency_ms": 14.825265971012414
           },
           {
             "query_id": "q_why_refresh_runner",
@@ -1236,7 +1236,7 @@
             "expected_case_id": "jwt_refresh_grace_window",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 14.877411013003439
+            "latency_ms": 15.210393932648003
           },
           {
             "query_id": "q_evidence_refresh",
@@ -1245,7 +1245,7 @@
             "expected_case_id": "jwt_refresh_grace_window",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 25.85486398311332
+            "latency_ms": 14.850524021312594
           },
           {
             "query_id": "q_params_mmseqs",
@@ -1254,7 +1254,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 30.62388498801738
+            "latency_ms": 16.14366692956537
           },
           {
             "query_id": "q_why_mmseqs",
@@ -1263,7 +1263,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 25.938021019101143
+            "latency_ms": 13.126006931997836
           },
           {
             "query_id": "q_evidence_mmseqs",
@@ -1272,7 +1272,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 17.508562945295125
+            "latency_ms": 11.216699029318988
           },
           {
             "query_id": "q_paraphrase_mmseqs",
@@ -1281,7 +1281,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 22.75692898547277
+            "latency_ms": 15.194855048321187
           },
           {
             "query_id": "q_params_sigma",
@@ -1290,7 +1290,7 @@
             "expected_case_id": "mmseqs_sigma_factor_search",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 23.711071989964694
+            "latency_ms": 14.202760998159647
           },
           {
             "query_id": "q_evidence_sigma",
@@ -1299,7 +1299,7 @@
             "expected_case_id": "mmseqs_sigma_factor_search",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 20.168568997178227
+            "latency_ms": 12.385147041641176
           },
           {
             "query_id": "q_failed_kafka",
@@ -1308,7 +1308,7 @@
             "expected_case_id": "kafka_queue_selection",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 18.882158969063312
+            "latency_ms": 13.063107035122812
           },
           {
             "query_id": "q_why_kafka_runner",
@@ -1317,7 +1317,7 @@
             "expected_case_id": "kafka_queue_selection",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 20.241275953594595
+            "latency_ms": 12.494272901676595
           },
           {
             "query_id": "q_evidence_kafka",
@@ -1326,7 +1326,7 @@
             "expected_case_id": "kafka_queue_selection",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 19.47945699794218
+            "latency_ms": 11.276582954451442
           },
           {
             "query_id": "q_decision_nats",
@@ -1335,7 +1335,7 @@
             "expected_case_id": "nats_jetstream_selection",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 19.91701399674639
+            "latency_ms": 15.473510953597724
           },
           {
             "query_id": "q_failed_nats_proto",
@@ -1344,7 +1344,7 @@
             "expected_case_id": "nats_jetstream_selection",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 16.616887995041907
+            "latency_ms": 16.737699043005705
           },
           {
             "query_id": "q_why_nats_runner",
@@ -1353,7 +1353,7 @@
             "expected_case_id": "nats_jetstream_selection",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 19.900242041330785
+            "latency_ms": 16.681944020092487
           },
           {
             "query_id": "q_progress_indexing",
@@ -1362,7 +1362,7 @@
             "expected_case_id": "codebase_indexing",
             "expected_facet": "task_summary",
             "rank": 1,
-            "latency_ms": 21.40558703104034
+            "latency_ms": 13.054652023129165
           },
           {
             "query_id": "q_validation_indexing",
@@ -1371,7 +1371,7 @@
             "expected_case_id": "codebase_indexing",
             "expected_facet": "validation",
             "rank": 1,
-            "latency_ms": 20.680455956608057
+            "latency_ms": 14.69015097245574
           },
           {
             "query_id": "q_paraphrase_indexing",
@@ -1380,7 +1380,7 @@
             "expected_case_id": "codebase_indexing",
             "expected_facet": "task_summary",
             "rank": 1,
-            "latency_ms": 26.39560599345714
+            "latency_ms": 19.528421107679605
           },
           {
             "query_id": "q_progress_frontend",
@@ -1389,7 +1389,7 @@
             "expected_case_id": "frontend_route_indexing",
             "expected_facet": "task_summary",
             "rank": 1,
-            "latency_ms": 23.248768993653357
+            "latency_ms": 15.370948007330298
           },
           {
             "query_id": "q_validation_frontend",
@@ -1398,7 +1398,7 @@
             "expected_case_id": "frontend_route_indexing",
             "expected_facet": "validation",
             "rank": 1,
-            "latency_ms": 19.961046986281872
+            "latency_ms": 15.226704999804497
           }
         ],
         "per_type": {
@@ -1437,41 +1437,41 @@
       "freshness": {
         "found": true,
         "rank": 3,
-        "search_ms": 337.0525389909744
+        "search_ms": 770.1370810391381
       },
       "concurrency": {
-        "total_ops": 2,
-        "successes": 2,
+        "total_ops": 1,
+        "successes": 1,
         "errors": [],
         "success_rate": 1.0,
-        "ops_per_sec": 0.3381000057201308,
-        "total_ms": 5915.409542038105
+        "ops_per_sec": 0.21905210910602732,
+        "total_ms": 4565.123814973049
       }
     },
     "memd_cli_batch_task_memory": {
       "lane": "cli_batch",
       "mode": "cli_batch: task.* lifecycle writes plus task.search over exact-filtered task artifacts",
-      "seed_total_ms": 8763.494042039383,
+      "seed_total_ms": 8995.007649064064,
       "index_ready_wait_ms": 0.0,
       "documents_seeded": 112,
       "task_ids": {
-        "jwt_timezone_fix": "019e1042-d4b2-7411-b3b6-e22573282c47",
-        "jwt_refresh_grace_window": "019e1042-d93e-73e0-a62d-e6b035a4fd2d",
-        "mmseqs_marker_search": "019e1042-ddeb-7d82-bafa-c42ae095a5c6",
-        "mmseqs_sigma_factor_search": "019e1042-e23b-7e32-917c-a4ea188f2400",
-        "kafka_queue_selection": "019e1042-e5fb-7582-9dfb-00c1e20d7d9b",
-        "nats_jetstream_selection": "019e1042-ea8b-7282-8deb-2965e71febfd",
-        "codebase_indexing": "019e1042-eea0-75c3-8c08-b0488f92ecba",
-        "frontend_route_indexing": "019e1042-f2cb-78d1-bc10-f6c19831caf5"
+        "jwt_timezone_fix": "019e19b4-ddf0-7992-b6c9-3ad6f6ec590a",
+        "jwt_refresh_grace_window": "019e19b4-e2b9-7a70-91f3-59b83721c294",
+        "mmseqs_marker_search": "019e19b4-e703-7590-a807-1e2349dfba58",
+        "mmseqs_sigma_factor_search": "019e19b4-eab5-7ed1-8808-f02e21ed5dde",
+        "kafka_queue_selection": "019e19b4-ef0a-7b50-9cd1-9d3449cd541f",
+        "nats_jetstream_selection": "019e19b4-f36f-75a2-b186-18557c3d6d70",
+        "codebase_indexing": "019e19b4-f7c9-76e2-b0cd-7b90e782077c",
+        "frontend_route_indexing": "019e19b4-fc2c-7b12-a006-b99d38710675"
       },
       "search_quality": {
         "queries": 23,
         "hit1": 0.7391304347826086,
         "hit3": 1.0,
         "mrr": 0.8695652173913043,
-        "avg_search_ms": 0.6263461343579643,
-        "p50_search_ms": 0.590295996516943,
-        "p95_search_ms": 0.9335239883512259,
+        "avg_search_ms": 0.5917506110247063,
+        "p50_search_ms": 0.510183977894485,
+        "p95_search_ms": 1.074860105291009,
         "details": [
           {
             "query_id": "q_task_goal_jwt",
@@ -1480,7 +1480,7 @@
             "expected_case_id": "jwt_timezone_fix",
             "expected_facet": "task_goal",
             "rank": 2,
-            "latency_ms": 0.7201210246421397
+            "latency_ms": 1.074860105291009
           },
           {
             "query_id": "q_failed_jwt",
@@ -1489,7 +1489,7 @@
             "expected_case_id": "jwt_timezone_fix",
             "expected_facet": "failed",
             "rank": 2,
-            "latency_ms": 0.8834499749355018
+            "latency_ms": 1.3368960935622454
           },
           {
             "query_id": "q_paraphrase_jwt_skew",
@@ -1498,7 +1498,7 @@
             "expected_case_id": "jwt_timezone_fix",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 0.8763460209593177
+            "latency_ms": 0.7381050381809473
           },
           {
             "query_id": "q_failed_refresh_window",
@@ -1507,7 +1507,7 @@
             "expected_case_id": "jwt_refresh_grace_window",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 0.8954419754445553
+            "latency_ms": 0.6871179211884737
           },
           {
             "query_id": "q_why_refresh_runner",
@@ -1516,7 +1516,7 @@
             "expected_case_id": "jwt_refresh_grace_window",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 0.6269739824347198
+            "latency_ms": 0.5322550423443317
           },
           {
             "query_id": "q_evidence_refresh",
@@ -1525,7 +1525,7 @@
             "expected_case_id": "jwt_refresh_grace_window",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 0.3642879892140627
+            "latency_ms": 0.35456998739391565
           },
           {
             "query_id": "q_params_mmseqs",
@@ -1534,7 +1534,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "run",
             "rank": 2,
-            "latency_ms": 0.590295996516943
+            "latency_ms": 0.5077599780634046
           },
           {
             "query_id": "q_why_mmseqs",
@@ -1543,7 +1543,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 0.5374259781092405
+            "latency_ms": 0.46833499800413847
           },
           {
             "query_id": "q_evidence_mmseqs",
@@ -1552,7 +1552,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 0.3604210214689374
+            "latency_ms": 0.3475069534033537
           },
           {
             "query_id": "q_paraphrase_mmseqs",
@@ -1561,7 +1561,7 @@
             "expected_case_id": "mmseqs_marker_search",
             "expected_facet": "run",
             "rank": 2,
-            "latency_ms": 0.48236100701615214
+            "latency_ms": 0.4693669034168124
           },
           {
             "query_id": "q_params_sigma",
@@ -1570,7 +1570,7 @@
             "expected_case_id": "mmseqs_sigma_factor_search",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 0.5762790096923709
+            "latency_ms": 0.914638047106564
           },
           {
             "query_id": "q_evidence_sigma",
@@ -1579,7 +1579,7 @@
             "expected_case_id": "mmseqs_sigma_factor_search",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 0.3501310129649937
+            "latency_ms": 0.48138899728655815
           },
           {
             "query_id": "q_failed_kafka",
@@ -1588,7 +1588,7 @@
             "expected_case_id": "kafka_queue_selection",
             "expected_facet": "failed",
             "rank": 2,
-            "latency_ms": 0.7972570019774139
+            "latency_ms": 0.8935279911383986
           },
           {
             "query_id": "q_why_kafka_runner",
@@ -1597,7 +1597,7 @@
             "expected_case_id": "kafka_queue_selection",
             "expected_facet": "run",
             "rank": 2,
-            "latency_ms": 0.5468939780257642
+            "latency_ms": 0.510183977894485
           },
           {
             "query_id": "q_evidence_kafka",
@@ -1606,7 +1606,7 @@
             "expected_case_id": "kafka_queue_selection",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 0.3339510294608772
+            "latency_ms": 0.39359298534691334
           },
           {
             "query_id": "q_decision_nats",
@@ -1615,7 +1615,7 @@
             "expected_case_id": "nats_jetstream_selection",
             "expected_facet": "evidence",
             "rank": 1,
-            "latency_ms": 0.34114503068849444
+            "latency_ms": 0.35406905226409435
           },
           {
             "query_id": "q_failed_nats_proto",
@@ -1624,7 +1624,7 @@
             "expected_case_id": "nats_jetstream_selection",
             "expected_facet": "failed",
             "rank": 1,
-            "latency_ms": 0.7880090270191431
+            "latency_ms": 0.6817069370299578
           },
           {
             "query_id": "q_why_nats_runner",
@@ -1633,7 +1633,7 @@
             "expected_case_id": "nats_jetstream_selection",
             "expected_facet": "run",
             "rank": 1,
-            "latency_ms": 0.8947509923018515
+            "latency_ms": 0.5408619763329625
           },
           {
             "query_id": "q_progress_indexing",
@@ -1642,7 +1642,7 @@
             "expected_case_id": "codebase_indexing",
             "expected_facet": "task_summary",
             "rank": 1,
-            "latency_ms": 0.6599670159630477
+            "latency_ms": 0.3507529618218541
           },
           {
             "query_id": "q_validation_indexing",
@@ -1651,7 +1651,7 @@
             "expected_case_id": "codebase_indexing",
             "expected_facet": "validation",
             "rank": 1,
-            "latency_ms": 0.9335239883512259
+            "latency_ms": 0.6517720175907016
           },
           {
             "query_id": "q_paraphrase_indexing",
@@ -1660,7 +1660,7 @@
             "expected_case_id": "codebase_indexing",
             "expected_facet": "task_summary",
             "rank": 1,
-            "latency_ms": 0.472932995762676
+            "latency_ms": 0.33974205143749714
           },
           {
             "query_id": "q_progress_frontend",
@@ -1669,7 +1669,7 @@
             "expected_case_id": "frontend_route_indexing",
             "expected_facet": "task_summary",
             "rank": 1,
-            "latency_ms": 0.4167670267634094
+            "latency_ms": 0.3176099853590131
           },
           {
             "query_id": "q_validation_frontend",
@@ -1678,7 +1678,7 @@
             "expected_case_id": "frontend_route_indexing",
             "expected_facet": "validation",
             "rank": 1,
-            "latency_ms": 0.957228010520339
+            "latency_ms": 0.6636440521106124
           }
         ],
         "per_type": {
@@ -1717,21 +1717,1684 @@
       "freshness": {
         "found": true,
         "rank": 1,
-        "search_ms": 0.7013449794612825
+        "search_ms": 0.643255072645843
       },
       "concurrency": {
-        "total_ops": 2,
-        "successes": 2,
+        "total_ops": 1,
+        "successes": 1,
         "errors": [],
         "success_rate": 1.0,
-        "ops_per_sec": 0.3493551866000317,
-        "total_ms": 5724.832710984629
+        "ops_per_sec": 0.23685092765297996,
+        "total_ms": 4222.064949921332
       }
     }
   },
-  "external_live": {},
+  "external_live": {
+    "gpt54_live_cli": {
+      "mode": "gpt54 live CLI context search over the same seeded benchmark corpus",
+      "seed_total_ms": 45711.267392965965,
+      "search_quality": {
+        "queries": 23,
+        "hit1": 0.7391304347826086,
+        "hit3": 0.9130434782608695,
+        "mrr": 0.8260869565217391,
+        "avg_search_ms": 426.1036878299859,
+        "p50_search_ms": 425.0323310261592,
+        "p95_search_ms": 446.49226090405136,
+        "details": [
+          {
+            "query_id": "q_task_goal_jwt",
+            "query_type": "task_lifecycle",
+            "query_text": "why were token validation failures being investigated",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "task_goal",
+            "rank": 2,
+            "latency_ms": 402.3272190243006
+          },
+          {
+            "query_id": "q_failed_jwt",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the JWT auth implementation",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 401.71735698822886
+          },
+          {
+            "query_id": "q_paraphrase_jwt_skew",
+            "query_type": "failed_attempt",
+            "query_text": "where in auth did local offset handling leak into UTC token claims",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 420.4814739059657
+          },
+          {
+            "query_id": "q_failed_refresh_window",
+            "query_type": "failed_attempt",
+            "query_text": "what caused freshly rotated refresh tokens to still be rejected",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "failed",
+            "rank": null,
+            "latency_ms": 446.09328801743686
+          },
+          {
+            "query_id": "q_why_refresh_runner",
+            "query_type": "why_chosen",
+            "query_text": "why were cargo tests used for the refresh grace window probe",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 428.31813800148666
+          },
+          {
+            "query_id": "q_evidence_refresh",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence showed rotated_at should drive the refresh grace period",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 415.00975808594376
+          },
+          {
+            "query_id": "q_params_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity parameter was used in the mmseqs search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 423.03877498488873
+          },
+          {
+            "query_id": "q_why_mmseqs",
+            "query_type": "why_chosen",
+            "query_text": "why was mmseqs chosen for candidate regulator search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 428.4597960067913
+          },
+          {
+            "query_id": "q_evidence_mmseqs",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence supported the top regulator hit",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 436.0850810771808
+          },
+          {
+            "query_id": "q_paraphrase_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which regulator scan used moderate mmseqs sensitivity instead of the noisy blast setup",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 455.12346690520644
+          },
+          {
+            "query_id": "q_params_sigma",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity setting was used for the secondary sigma factor search",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 432.02131404541433
+          },
+          {
+            "query_id": "q_evidence_sigma",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence kept the secondary sigma factor hit above threshold",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 425.0323310261592
+          },
+          {
+            "query_id": "q_failed_kafka",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the Kafka evaluation prototype",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "failed",
+            "rank": 2,
+            "latency_ms": 446.49226090405136
+          },
+          {
+            "query_id": "q_why_kafka_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for queue selection",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 431.3751639565453
+          },
+          {
+            "query_id": "q_evidence_kafka",
+            "query_type": "evidence_lookup",
+            "query_text": "which queue exceeded throughput requirements",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 413.68234995752573
+          },
+          {
+            "query_id": "q_decision_nats",
+            "query_type": "decision_basis",
+            "query_text": "which bus won because operator burden stayed lower and p99 latency stayed tighter",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 440.37073699291795
+          },
+          {
+            "query_id": "q_failed_nats_proto",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the first kafka-first control-plane prototype",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 439.3304620170966
+          },
+          {
+            "query_id": "q_why_nats_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for the control-plane event bus comparison",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "run",
+            "rank": 2,
+            "latency_ms": 419.7077630087733
+          },
+          {
+            "query_id": "q_progress_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for documentation",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 429.4974469812587
+          },
+          {
+            "query_id": "q_validation_indexing",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the code indexing workflow",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "validation",
+            "rank": 1,
+            "latency_ms": 419.94753608014435
+          },
+          {
+            "query_id": "q_paraphrase_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what still made architecture docs retrieval noisy after the main repo index",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": null,
+            "latency_ms": 416.4794940734282
+          },
+          {
+            "query_id": "q_progress_frontend",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for frontend route lookups",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 421.8312540324405
+          },
+          {
+            "query_id": "q_validation_frontend",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the frontend route indexing workflow",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "validation",
+            "rank": 2,
+            "latency_ms": 407.9623540164903
+          }
+        ],
+        "per_type": {
+          "task_lifecycle": {
+            "hit1": 0.5,
+            "hit3": 0.75,
+            "mrr": 0.625
+          },
+          "failed_attempt": {
+            "hit1": 0.6,
+            "hit3": 0.8,
+            "mrr": 0.7
+          },
+          "why_chosen": {
+            "hit1": 0.75,
+            "hit3": 1.0,
+            "mrr": 0.875
+          },
+          "evidence_lookup": {
+            "hit1": 0.8333333333333334,
+            "hit3": 1.0,
+            "mrr": 0.9166666666666666
+          },
+          "parameter_lookup": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          },
+          "decision_basis": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          }
+        }
+      },
+      "freshness": {
+        "found": true,
+        "rank": 1,
+        "search_ms": 415.54331593215466
+      },
+      "concurrency": {
+        "total_ops": 1,
+        "successes": 1,
+        "errors": [],
+        "success_rate": 1.0,
+        "ops_per_sec": 2.2074065360419612,
+        "total_ms": 453.02031305618584
+      },
+      "task_ids": {
+        "jwt_timezone_fix": "task_8a3715c5c7f744388e0cb9d2c218c109",
+        "jwt_refresh_grace_window": "task_241d11217c2f4ac4a8cdd694ef421c53",
+        "mmseqs_marker_search": "task_fb2439b74a604ff9b65ea48b7c0b64f2",
+        "mmseqs_sigma_factor_search": "task_8e6baa1c2d944fa186a95a734247dfc9",
+        "kafka_queue_selection": "task_de42f97ab8a54cd597927be7d1eab9e4",
+        "nats_jetstream_selection": "task_ae07298890b548c68299a73d8c06d7a6",
+        "codebase_indexing": "task_82580c110e444f9a852c94e564320b17",
+        "frontend_route_indexing": "task_9b5bcaecedc34082bb51af09cce0f3ea"
+      },
+      "root": "../../genesisM/gpt54"
+    },
+    "gpt54_live_daemon": {
+      "mode": "gpt54 live daemon context search over the same seeded benchmark corpus",
+      "seed_total_ms": 27055.042503983714,
+      "search_quality": {
+        "queries": 23,
+        "hit1": 0.7391304347826086,
+        "hit3": 0.9130434782608695,
+        "mrr": 0.8260869565217391,
+        "avg_search_ms": 141.9856245578874,
+        "p50_search_ms": 141.77866501268,
+        "p95_search_ms": 155.27527104131877,
+        "details": [
+          {
+            "query_id": "q_task_goal_jwt",
+            "query_type": "task_lifecycle",
+            "query_text": "why were token validation failures being investigated",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "task_goal",
+            "rank": 2,
+            "latency_ms": 142.2090179985389
+          },
+          {
+            "query_id": "q_failed_jwt",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the JWT auth implementation",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 140.3045100159943
+          },
+          {
+            "query_id": "q_paraphrase_jwt_skew",
+            "query_type": "failed_attempt",
+            "query_text": "where in auth did local offset handling leak into UTC token claims",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 131.9078680826351
+          },
+          {
+            "query_id": "q_failed_refresh_window",
+            "query_type": "failed_attempt",
+            "query_text": "what caused freshly rotated refresh tokens to still be rejected",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "failed",
+            "rank": null,
+            "latency_ms": 140.99978294689208
+          },
+          {
+            "query_id": "q_why_refresh_runner",
+            "query_type": "why_chosen",
+            "query_text": "why were cargo tests used for the refresh grace window probe",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 151.4610160375014
+          },
+          {
+            "query_id": "q_evidence_refresh",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence showed rotated_at should drive the refresh grace period",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 147.8011020226404
+          },
+          {
+            "query_id": "q_params_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity parameter was used in the mmseqs search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 155.27527104131877
+          },
+          {
+            "query_id": "q_why_mmseqs",
+            "query_type": "why_chosen",
+            "query_text": "why was mmseqs chosen for candidate regulator search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 142.33672991394997
+          },
+          {
+            "query_id": "q_evidence_mmseqs",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence supported the top regulator hit",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 146.8505859375
+          },
+          {
+            "query_id": "q_paraphrase_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which regulator scan used moderate mmseqs sensitivity instead of the noisy blast setup",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 158.14849897287786
+          },
+          {
+            "query_id": "q_params_sigma",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity setting was used for the secondary sigma factor search",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 153.67463696748018
+          },
+          {
+            "query_id": "q_evidence_sigma",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence kept the secondary sigma factor hit above threshold",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 147.8273420361802
+          },
+          {
+            "query_id": "q_failed_kafka",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the Kafka evaluation prototype",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "failed",
+            "rank": 2,
+            "latency_ms": 130.93271595425904
+          },
+          {
+            "query_id": "q_why_kafka_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for queue selection",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 138.68619303684682
+          },
+          {
+            "query_id": "q_evidence_kafka",
+            "query_type": "evidence_lookup",
+            "query_text": "which queue exceeded throughput requirements",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 126.35521893389523
+          },
+          {
+            "query_id": "q_decision_nats",
+            "query_type": "decision_basis",
+            "query_text": "which bus won because operator burden stayed lower and p99 latency stayed tighter",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 140.41196298785508
+          },
+          {
+            "query_id": "q_failed_nats_proto",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the first kafka-first control-plane prototype",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 137.3389270156622
+          },
+          {
+            "query_id": "q_why_nats_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for the control-plane event bus comparison",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "run",
+            "rank": 2,
+            "latency_ms": 143.36193597409874
+          },
+          {
+            "query_id": "q_progress_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for documentation",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 136.84367202222347
+          },
+          {
+            "query_id": "q_validation_indexing",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the code indexing workflow",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "validation",
+            "rank": 1,
+            "latency_ms": 147.78643392492086
+          },
+          {
+            "query_id": "q_paraphrase_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what still made architecture docs retrieval noisy after the main repo index",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": null,
+            "latency_ms": 130.98040607292205
+          },
+          {
+            "query_id": "q_progress_frontend",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for frontend route lookups",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 141.77866501268
+          },
+          {
+            "query_id": "q_validation_frontend",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the frontend route indexing workflow",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "validation",
+            "rank": 2,
+            "latency_ms": 132.39687192253768
+          }
+        ],
+        "per_type": {
+          "task_lifecycle": {
+            "hit1": 0.5,
+            "hit3": 0.75,
+            "mrr": 0.625
+          },
+          "failed_attempt": {
+            "hit1": 0.6,
+            "hit3": 0.8,
+            "mrr": 0.7
+          },
+          "why_chosen": {
+            "hit1": 0.75,
+            "hit3": 1.0,
+            "mrr": 0.875
+          },
+          "evidence_lookup": {
+            "hit1": 0.8333333333333334,
+            "hit3": 1.0,
+            "mrr": 0.9166666666666666
+          },
+          "parameter_lookup": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          },
+          "decision_basis": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          }
+        }
+      },
+      "freshness": {
+        "found": true,
+        "rank": 1,
+        "search_ms": 145.49229992553592
+      },
+      "concurrency": {
+        "total_ops": 1,
+        "successes": 1,
+        "errors": [],
+        "success_rate": 1.0,
+        "ops_per_sec": 2.008005205832641,
+        "total_ms": 498.0066770222038
+      },
+      "task_ids": {
+        "jwt_timezone_fix": "task_5e9c79da072247159fc0ecf7ca587b54",
+        "jwt_refresh_grace_window": "task_03d9e81f5aa042faa064bee002bb99a9",
+        "mmseqs_marker_search": "task_548869882c7c4ca08f36d6dab366b69a",
+        "mmseqs_sigma_factor_search": "task_c92a9cbc668b4dfe9b52c6d280036ecc",
+        "kafka_queue_selection": "task_2a7669834bcd4f1298bbcfcbc07f82d8",
+        "nats_jetstream_selection": "task_f0f768a0af864deea3e4c05b5ccf76e3",
+        "codebase_indexing": "task_636751bae8a049d3909b5ec585313fdf",
+        "frontend_route_indexing": "task_f9df861ab3b14ebd99f952876a38ef92"
+      },
+      "root": "../../genesisM/gpt54"
+    },
+    "gpt54_live_tantivy": {
+      "mode": "gpt54 live warm Tantivy service search over the same seeded benchmark corpus",
+      "seed_total_ms": 27330.579273053445,
+      "search_quality": {
+        "queries": 23,
+        "hit1": 0.7391304347826086,
+        "hit3": 0.9130434782608695,
+        "mrr": 0.8260869565217391,
+        "avg_search_ms": 19.368353795827083,
+        "p50_search_ms": 18.67959799710661,
+        "p95_search_ms": 28.52146001532674,
+        "details": [
+          {
+            "query_id": "q_task_goal_jwt",
+            "query_type": "task_lifecycle",
+            "query_text": "why were token validation failures being investigated",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "task_goal",
+            "rank": 2,
+            "latency_ms": 19.81023303233087
+          },
+          {
+            "query_id": "q_failed_jwt",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the JWT auth implementation",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 2,
+            "latency_ms": 19.181485986337066
+          },
+          {
+            "query_id": "q_paraphrase_jwt_skew",
+            "query_type": "failed_attempt",
+            "query_text": "where in auth did local offset handling leak into UTC token claims",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 15.249688061885536
+          },
+          {
+            "query_id": "q_failed_refresh_window",
+            "query_type": "failed_attempt",
+            "query_text": "what caused freshly rotated refresh tokens to still be rejected",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "failed",
+            "rank": null,
+            "latency_ms": 16.296265996061265
+          },
+          {
+            "query_id": "q_why_refresh_runner",
+            "query_type": "why_chosen",
+            "query_text": "why were cargo tests used for the refresh grace window probe",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 26.337564107961953
+          },
+          {
+            "query_id": "q_evidence_refresh",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence showed rotated_at should drive the refresh grace period",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 21.83806395623833
+          },
+          {
+            "query_id": "q_params_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity parameter was used in the mmseqs search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 25.33394901547581
+          },
+          {
+            "query_id": "q_why_mmseqs",
+            "query_type": "why_chosen",
+            "query_text": "why was mmseqs chosen for candidate regulator search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 20.99934103898704
+          },
+          {
+            "query_id": "q_evidence_mmseqs",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence supported the top regulator hit",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 17.114741960540414
+          },
+          {
+            "query_id": "q_paraphrase_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which regulator scan used moderate mmseqs sensitivity instead of the noisy blast setup",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 32.03359502367675
+          },
+          {
+            "query_id": "q_params_sigma",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity setting was used for the secondary sigma factor search",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 28.52146001532674
+          },
+          {
+            "query_id": "q_evidence_sigma",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence kept the secondary sigma factor hit above threshold",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 22.478665108792484
+          },
+          {
+            "query_id": "q_failed_kafka",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the Kafka evaluation prototype",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "failed",
+            "rank": 2,
+            "latency_ms": 14.257483999244869
+          },
+          {
+            "query_id": "q_why_kafka_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for queue selection",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 18.67959799710661
+          },
+          {
+            "query_id": "q_evidence_kafka",
+            "query_type": "evidence_lookup",
+            "query_text": "which queue exceeded throughput requirements",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 13.647360960021615
+          },
+          {
+            "query_id": "q_decision_nats",
+            "query_type": "decision_basis",
+            "query_text": "which bus won because operator burden stayed lower and p99 latency stayed tighter",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 20.220378995873034
+          },
+          {
+            "query_id": "q_failed_nats_proto",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the first kafka-first control-plane prototype",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 12.601805967278779
+          },
+          {
+            "query_id": "q_why_nats_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for the control-plane event bus comparison",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 23.397200042381883
+          },
+          {
+            "query_id": "q_progress_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for documentation",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 12.961365981027484
+          },
+          {
+            "query_id": "q_validation_indexing",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the code indexing workflow",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "validation",
+            "rank": 1,
+            "latency_ms": 15.405623009428382
+          },
+          {
+            "query_id": "q_paraphrase_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what still made architecture docs retrieval noisy after the main repo index",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": null,
+            "latency_ms": 16.37964299879968
+          },
+          {
+            "query_id": "q_progress_frontend",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for frontend route lookups",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 16.323948046192527
+          },
+          {
+            "query_id": "q_validation_frontend",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the frontend route indexing workflow",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "validation",
+            "rank": 2,
+            "latency_ms": 16.402676003053784
+          }
+        ],
+        "per_type": {
+          "task_lifecycle": {
+            "hit1": 0.5,
+            "hit3": 0.75,
+            "mrr": 0.625
+          },
+          "failed_attempt": {
+            "hit1": 0.4,
+            "hit3": 0.8,
+            "mrr": 0.6
+          },
+          "why_chosen": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          },
+          "evidence_lookup": {
+            "hit1": 0.8333333333333334,
+            "hit3": 1.0,
+            "mrr": 0.9166666666666666
+          },
+          "parameter_lookup": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          },
+          "decision_basis": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          }
+        }
+      },
+      "freshness": {
+        "found": true,
+        "rank": 1,
+        "search_ms": 16.178973950445652
+      },
+      "concurrency": {
+        "total_ops": 1,
+        "successes": 1,
+        "errors": [],
+        "success_rate": 1.0,
+        "ops_per_sec": 2.093229187826683,
+        "total_ms": 477.73077397141606
+      },
+      "task_ids": {
+        "jwt_timezone_fix": "task_d0c579ee8aaf4554b38033fd3cf223ac",
+        "jwt_refresh_grace_window": "task_55d8b811a4aa4ef9acae6238fc9b9b44",
+        "mmseqs_marker_search": "task_f29dc1bee84e4d159cd510a6b9d14ae6",
+        "mmseqs_sigma_factor_search": "task_c45cf15af1de4d53912b59f832c90fcb",
+        "kafka_queue_selection": "task_408fcc738599413088d22065384e6f99",
+        "nats_jetstream_selection": "task_3e2a833049794696bf113ce2b304e8d1",
+        "codebase_indexing": "task_a056c0046bcd471cab1d847511d2d684",
+        "frontend_route_indexing": "task_92ed5fd0cc814637848a67e894537b53"
+      },
+      "root": "../../genesisM/gpt54"
+    },
+    "claude_live": {
+      "mode": "claude ark live CLI artifact search on the same benchmark corpus",
+      "seed_total_ms": 10027.072777971625,
+      "search_quality": {
+        "queries": 23,
+        "hit1": 0.0,
+        "hit3": 0.0,
+        "mrr": 0.0,
+        "avg_search_ms": 352.5718553346055,
+        "p50_search_ms": 350.74089700356126,
+        "p95_search_ms": 366.5836459258571,
+        "details": [
+          {
+            "query_id": "q_task_goal_jwt",
+            "query_type": "task_lifecycle",
+            "query_text": "why were token validation failures being investigated",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "task_goal",
+            "rank": null,
+            "latency_ms": 343.50815403740853
+          },
+          {
+            "query_id": "q_failed_jwt",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the JWT auth implementation",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": null,
+            "latency_ms": 341.87091095373034
+          },
+          {
+            "query_id": "q_paraphrase_jwt_skew",
+            "query_type": "failed_attempt",
+            "query_text": "where in auth did local offset handling leak into UTC token claims",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": null,
+            "latency_ms": 350.74089700356126
+          },
+          {
+            "query_id": "q_failed_refresh_window",
+            "query_type": "failed_attempt",
+            "query_text": "what caused freshly rotated refresh tokens to still be rejected",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "failed",
+            "rank": null,
+            "latency_ms": 346.3345329510048
+          },
+          {
+            "query_id": "q_why_refresh_runner",
+            "query_type": "why_chosen",
+            "query_text": "why were cargo tests used for the refresh grace window probe",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 343.5377390123904
+          },
+          {
+            "query_id": "q_evidence_refresh",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence showed rotated_at should drive the refresh grace period",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "evidence",
+            "rank": null,
+            "latency_ms": 352.63113793917
+          },
+          {
+            "query_id": "q_params_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity parameter was used in the mmseqs search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 348.99667103309184
+          },
+          {
+            "query_id": "q_why_mmseqs",
+            "query_type": "why_chosen",
+            "query_text": "why was mmseqs chosen for candidate regulator search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 349.2086420301348
+          },
+          {
+            "query_id": "q_evidence_mmseqs",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence supported the top regulator hit",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "evidence",
+            "rank": null,
+            "latency_ms": 347.68954291939735
+          },
+          {
+            "query_id": "q_paraphrase_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which regulator scan used moderate mmseqs sensitivity instead of the noisy blast setup",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 344.45296810008585
+          },
+          {
+            "query_id": "q_params_sigma",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity setting was used for the secondary sigma factor search",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 353.1704869819805
+          },
+          {
+            "query_id": "q_evidence_sigma",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence kept the secondary sigma factor hit above threshold",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "evidence",
+            "rank": null,
+            "latency_ms": 353.5706930560991
+          },
+          {
+            "query_id": "q_failed_kafka",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the Kafka evaluation prototype",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "failed",
+            "rank": null,
+            "latency_ms": 351.69260401744395
+          },
+          {
+            "query_id": "q_why_kafka_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for queue selection",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 357.0490430574864
+          },
+          {
+            "query_id": "q_evidence_kafka",
+            "query_type": "evidence_lookup",
+            "query_text": "which queue exceeded throughput requirements",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "evidence",
+            "rank": null,
+            "latency_ms": 341.71620791312307
+          },
+          {
+            "query_id": "q_decision_nats",
+            "query_type": "decision_basis",
+            "query_text": "which bus won because operator burden stayed lower and p99 latency stayed tighter",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "evidence",
+            "rank": null,
+            "latency_ms": 357.96490393113345
+          },
+          {
+            "query_id": "q_failed_nats_proto",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the first kafka-first control-plane prototype",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "failed",
+            "rank": null,
+            "latency_ms": 343.5564039973542
+          },
+          {
+            "query_id": "q_why_nats_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for the control-plane event bus comparison",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 348.84536592289805
+          },
+          {
+            "query_id": "q_progress_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for documentation",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": null,
+            "latency_ms": 385.25624095927924
+          },
+          {
+            "query_id": "q_validation_indexing",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the code indexing workflow",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "validation",
+            "rank": null,
+            "latency_ms": 361.805810010992
+          },
+          {
+            "query_id": "q_paraphrase_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what still made architecture docs retrieval noisy after the main repo index",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": null,
+            "latency_ms": 355.21367599722
+          },
+          {
+            "query_id": "q_progress_frontend",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for frontend route lookups",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "task_summary",
+            "rank": null,
+            "latency_ms": 366.5836459258571
+          },
+          {
+            "query_id": "q_validation_frontend",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the frontend route indexing workflow",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "validation",
+            "rank": null,
+            "latency_ms": 363.75639494508505
+          }
+        ],
+        "per_type": {
+          "task_lifecycle": {
+            "hit1": 0.0,
+            "hit3": 0.0,
+            "mrr": 0.0
+          },
+          "failed_attempt": {
+            "hit1": 0.0,
+            "hit3": 0.0,
+            "mrr": 0.0
+          },
+          "why_chosen": {
+            "hit1": 0.0,
+            "hit3": 0.0,
+            "mrr": 0.0
+          },
+          "evidence_lookup": {
+            "hit1": 0.0,
+            "hit3": 0.0,
+            "mrr": 0.0
+          },
+          "parameter_lookup": {
+            "hit1": 0.0,
+            "hit3": 0.0,
+            "mrr": 0.0
+          },
+          "decision_basis": {
+            "hit1": 0.0,
+            "hit3": 0.0,
+            "mrr": 0.0
+          }
+        }
+      },
+      "freshness": {
+        "found": true,
+        "rank": 1,
+        "search_ms": 360.0458449218422
+      },
+      "concurrency": {
+        "total_ops": 1,
+        "successes": 1,
+        "errors": [],
+        "success_rate": 1.0,
+        "ops_per_sec": 2.337054714653302,
+        "total_ms": 427.88899794686586
+      },
+      "scoring_mode": "task_level",
+      "root": "../../genesisM/claude"
+    },
+    "geminipro_live": {
+      "mode": "geminipro live CLI search on the same benchmark corpus",
+      "seed_total_ms": 137384.4773330493,
+      "search_quality": {
+        "queries": 23,
+        "hit1": 0.7391304347826086,
+        "hit3": 0.9565217391304348,
+        "mrr": 0.8333333333333334,
+        "avg_search_ms": 6613.83730216134,
+        "p50_search_ms": 6500.550733064301,
+        "p95_search_ms": 7138.453698949888,
+        "details": [
+          {
+            "query_id": "q_task_goal_jwt",
+            "query_type": "task_lifecycle",
+            "query_text": "why were token validation failures being investigated",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "task_goal",
+            "rank": 1,
+            "latency_ms": 6957.174513023347
+          },
+          {
+            "query_id": "q_failed_jwt",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the JWT auth implementation",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 6750.925205997191
+          },
+          {
+            "query_id": "q_paraphrase_jwt_skew",
+            "query_type": "failed_attempt",
+            "query_text": "where in auth did local offset handling leak into UTC token claims",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 2,
+            "latency_ms": 6885.468241991475
+          },
+          {
+            "query_id": "q_failed_refresh_window",
+            "query_type": "failed_attempt",
+            "query_text": "what caused freshly rotated refresh tokens to still be rejected",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 6908.082113019191
+          },
+          {
+            "query_id": "q_why_refresh_runner",
+            "query_type": "why_chosen",
+            "query_text": "why were cargo tests used for the refresh grace window probe",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 7138.453698949888
+          },
+          {
+            "query_id": "q_evidence_refresh",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence showed rotated_at should drive the refresh grace period",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 7421.502246987075
+          },
+          {
+            "query_id": "q_params_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity parameter was used in the mmseqs search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": null,
+            "latency_ms": 6810.296176932752
+          },
+          {
+            "query_id": "q_why_mmseqs",
+            "query_type": "why_chosen",
+            "query_text": "why was mmseqs chosen for candidate regulator search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 6406.138828955591
+          },
+          {
+            "query_id": "q_evidence_mmseqs",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence supported the top regulator hit",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 6594.643713906407
+          },
+          {
+            "query_id": "q_paraphrase_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which regulator scan used moderate mmseqs sensitivity instead of the noisy blast setup",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 6500.550733064301
+          },
+          {
+            "query_id": "q_params_sigma",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity setting was used for the secondary sigma factor search",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 6433.561261976138
+          },
+          {
+            "query_id": "q_evidence_sigma",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence kept the secondary sigma factor hit above threshold",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 6516.243629041128
+          },
+          {
+            "query_id": "q_failed_kafka",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the Kafka evaluation prototype",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "failed",
+            "rank": 3,
+            "latency_ms": 6468.316728947684
+          },
+          {
+            "query_id": "q_why_kafka_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for queue selection",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "run",
+            "rank": 3,
+            "latency_ms": 6370.116216945462
+          },
+          {
+            "query_id": "q_evidence_kafka",
+            "query_type": "evidence_lookup",
+            "query_text": "which queue exceeded throughput requirements",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "evidence",
+            "rank": 2,
+            "latency_ms": 6437.552953022532
+          },
+          {
+            "query_id": "q_decision_nats",
+            "query_type": "decision_basis",
+            "query_text": "which bus won because operator burden stayed lower and p99 latency stayed tighter",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 6308.718540938571
+          },
+          {
+            "query_id": "q_failed_nats_proto",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the first kafka-first control-plane prototype",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 6473.792016971856
+          },
+          {
+            "query_id": "q_why_nats_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for the control-plane event bus comparison",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 6278.695208951831
+          },
+          {
+            "query_id": "q_progress_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for documentation",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": 2,
+            "latency_ms": 6472.663723048754
+          },
+          {
+            "query_id": "q_validation_indexing",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the code indexing workflow",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "validation",
+            "rank": 1,
+            "latency_ms": 6726.230400963686
+          },
+          {
+            "query_id": "q_paraphrase_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what still made architecture docs retrieval noisy after the main repo index",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 6527.0101830828935
+          },
+          {
+            "query_id": "q_progress_frontend",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for frontend route lookups",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 6380.611272994429
+          },
+          {
+            "query_id": "q_validation_frontend",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the frontend route indexing workflow",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "validation",
+            "rank": 1,
+            "latency_ms": 6351.51033999864
+          }
+        ],
+        "per_type": {
+          "task_lifecycle": {
+            "hit1": 0.75,
+            "hit3": 1.0,
+            "mrr": 0.875
+          },
+          "failed_attempt": {
+            "hit1": 0.6,
+            "hit3": 1.0,
+            "mrr": 0.7666666666666666
+          },
+          "why_chosen": {
+            "hit1": 0.75,
+            "hit3": 1.0,
+            "mrr": 0.8333333333333334
+          },
+          "evidence_lookup": {
+            "hit1": 0.8333333333333334,
+            "hit3": 1.0,
+            "mrr": 0.9166666666666666
+          },
+          "parameter_lookup": {
+            "hit1": 0.6666666666666666,
+            "hit3": 0.6666666666666666,
+            "mrr": 0.6666666666666666
+          },
+          "decision_basis": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          }
+        }
+      },
+      "freshness": {
+        "found": true,
+        "rank": 1,
+        "search_ms": 6467.454152996652
+      },
+      "concurrency": {
+        "total_ops": 1,
+        "successes": 1,
+        "errors": [],
+        "success_rate": 1.0,
+        "ops_per_sec": 0.23342566733177594,
+        "total_ms": 4284.019025973976
+      },
+      "scoring_mode": "task_level",
+      "root": "../../genesisM/geminipro"
+    },
+    "geminiultra_live": {
+      "mode": "geminiultra live CLI search on the same benchmark corpus",
+      "seed_total_ms": 137865.01312500332,
+      "search_quality": {
+        "queries": 23,
+        "hit1": 0.8695652173913043,
+        "hit3": 1.0,
+        "mrr": 0.9347826086956522,
+        "avg_search_ms": 6447.946923471097,
+        "p50_search_ms": 6445.821866043843,
+        "p95_search_ms": 6575.238593039103,
+        "details": [
+          {
+            "query_id": "q_task_goal_jwt",
+            "query_type": "task_lifecycle",
+            "query_text": "why were token validation failures being investigated",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "task_goal",
+            "rank": 1,
+            "latency_ms": 6427.195798954926
+          },
+          {
+            "query_id": "q_failed_jwt",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the JWT auth implementation",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 6483.151738066226
+          },
+          {
+            "query_id": "q_paraphrase_jwt_skew",
+            "query_type": "failed_attempt",
+            "query_text": "where in auth did local offset handling leak into UTC token claims",
+            "expected_case_id": "jwt_timezone_fix",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 6614.872456993908
+          },
+          {
+            "query_id": "q_failed_refresh_window",
+            "query_type": "failed_attempt",
+            "query_text": "what caused freshly rotated refresh tokens to still be rejected",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 6551.429242943414
+          },
+          {
+            "query_id": "q_why_refresh_runner",
+            "query_type": "why_chosen",
+            "query_text": "why were cargo tests used for the refresh grace window probe",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 6471.553076058626
+          },
+          {
+            "query_id": "q_evidence_refresh",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence showed rotated_at should drive the refresh grace period",
+            "expected_case_id": "jwt_refresh_grace_window",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 6444.8036620160565
+          },
+          {
+            "query_id": "q_params_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity parameter was used in the mmseqs search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 2,
+            "latency_ms": 6536.104841972701
+          },
+          {
+            "query_id": "q_why_mmseqs",
+            "query_type": "why_chosen",
+            "query_text": "why was mmseqs chosen for candidate regulator search",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 2,
+            "latency_ms": 6364.0670399181545
+          },
+          {
+            "query_id": "q_evidence_mmseqs",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence supported the top regulator hit",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "evidence",
+            "rank": 2,
+            "latency_ms": 6404.0096359094605
+          },
+          {
+            "query_id": "q_paraphrase_mmseqs",
+            "query_type": "parameter_lookup",
+            "query_text": "which regulator scan used moderate mmseqs sensitivity instead of the noisy blast setup",
+            "expected_case_id": "mmseqs_marker_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 6346.530391019769
+          },
+          {
+            "query_id": "q_params_sigma",
+            "query_type": "parameter_lookup",
+            "query_text": "which sensitivity setting was used for the secondary sigma factor search",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 6388.529211981222
+          },
+          {
+            "query_id": "q_evidence_sigma",
+            "query_type": "evidence_lookup",
+            "query_text": "what evidence kept the secondary sigma factor hit above threshold",
+            "expected_case_id": "mmseqs_sigma_factor_search",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 6462.8003599355
+          },
+          {
+            "query_id": "q_failed_kafka",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the Kafka evaluation prototype",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 6523.025315953419
+          },
+          {
+            "query_id": "q_why_kafka_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for queue selection",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 6484.243810060434
+          },
+          {
+            "query_id": "q_evidence_kafka",
+            "query_type": "evidence_lookup",
+            "query_text": "which queue exceeded throughput requirements",
+            "expected_case_id": "kafka_queue_selection",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 6445.821866043843
+          },
+          {
+            "query_id": "q_decision_nats",
+            "query_type": "decision_basis",
+            "query_text": "which bus won because operator burden stayed lower and p99 latency stayed tighter",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "evidence",
+            "rank": 1,
+            "latency_ms": 6321.569024003111
+          },
+          {
+            "query_id": "q_failed_nats_proto",
+            "query_type": "failed_attempt",
+            "query_text": "what failed in the first kafka-first control-plane prototype",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "failed",
+            "rank": 1,
+            "latency_ms": 6369.961644988507
+          },
+          {
+            "query_id": "q_why_nats_runner",
+            "query_type": "why_chosen",
+            "query_text": "why was benchmark-runner used for the control-plane event bus comparison",
+            "expected_case_id": "nats_jetstream_selection",
+            "expected_facet": "run",
+            "rank": 1,
+            "latency_ms": 6375.760290073231
+          },
+          {
+            "query_id": "q_progress_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for documentation",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 6380.937578971498
+          },
+          {
+            "query_id": "q_validation_indexing",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the code indexing workflow",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "validation",
+            "rank": 1,
+            "latency_ms": 6467.05092000775
+          },
+          {
+            "query_id": "q_paraphrase_indexing",
+            "query_type": "task_lifecycle",
+            "query_text": "what still made architecture docs retrieval noisy after the main repo index",
+            "expected_case_id": "codebase_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 6500.511622987688
+          },
+          {
+            "query_id": "q_progress_frontend",
+            "query_type": "task_lifecycle",
+            "query_text": "what indexing gaps remained for frontend route lookups",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "task_summary",
+            "rank": 1,
+            "latency_ms": 6575.238593039103
+          },
+          {
+            "query_id": "q_validation_frontend",
+            "query_type": "evidence_lookup",
+            "query_text": "what validated the frontend route indexing workflow",
+            "expected_case_id": "frontend_route_indexing",
+            "expected_facet": "validation",
+            "rank": 1,
+            "latency_ms": 6363.611117936671
+          }
+        ],
+        "per_type": {
+          "task_lifecycle": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          },
+          "failed_attempt": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          },
+          "why_chosen": {
+            "hit1": 0.75,
+            "hit3": 1.0,
+            "mrr": 0.875
+          },
+          "evidence_lookup": {
+            "hit1": 0.8333333333333334,
+            "hit3": 1.0,
+            "mrr": 0.9166666666666666
+          },
+          "parameter_lookup": {
+            "hit1": 0.6666666666666666,
+            "hit3": 1.0,
+            "mrr": 0.8333333333333334
+          },
+          "decision_basis": {
+            "hit1": 1.0,
+            "hit3": 1.0,
+            "mrr": 1.0
+          }
+        }
+      },
+      "freshness": {
+        "found": true,
+        "rank": 1,
+        "search_ms": 6519.308943999931
+      },
+      "concurrency": {
+        "total_ops": 1,
+        "successes": 1,
+        "errors": [],
+        "success_rate": 1.0,
+        "ops_per_sec": 0.22963157726062786,
+        "total_ms": 4354.801773908548
+      },
+      "scoring_mode": "task_level",
+      "root": "../../genesisM/geminiultra"
+    }
+  },
   "external_reference": {
-    "genesism_unified_benchmark": null
+    "genesism_unified_benchmark": {
+      "gpt54": {
+        "search_backend": "Tantivy daemon by default when configured, fallback SQLite/ DuckDB",
+        "lifecycle_ms": 1943.0677160016785,
+        "hit3": 1.0,
+        "mrr": 1.0,
+        "avg_search_ms": 42.245894062716616,
+        "fresh_rank": 1,
+        "concurrency_success_rate": 1.0,
+        "concurrency_ops_per_sec": 3.020517400585363
+      },
+      "memd": {
+        "search_backend": "Warm MCP process with hybrid dense+sparse+rereanking retrieval",
+        "lifecycle_ms": 702.2050560008211,
+        "hit3": 1.0,
+        "mrr": 0.96875,
+        "avg_search_ms": 18.525169250210638,
+        "fresh_rank": 1,
+        "concurrency_success_rate": 1.0,
+        "concurrency_ops_per_sec": 8.508212576298503
+      }
+    }
   },
   "methodology": {
     "notes": [
