@@ -1,6 +1,6 @@
 {
   "generated_unix_seconds": 1770676696,
-  "dataset_path": "evals/datasets/retrieval/code_pairs.json",
+  "dataset_path": "evals/bench/datasets/retrieval/code_pairs.json",
   "dataset_description": "Code similarity pairs for retrieval quality evaluation. Handcrafted realistic code samples covering common patterns (JSON, APIs, validation, sorting, error handling, database, auth, file I/O).",
   "dataset_version": "1.0",
   "system_variant": "hybrid-feature",
