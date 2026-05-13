@@ -20,6 +20,8 @@ use super::{
     write_cli_log, write_rendered,
 };
 
+const WARM_WIRE_PROTOCOL: &str = "2";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum WarmWireCommand {
@@ -114,6 +116,10 @@ impl WarmWireResponse {
 
 pub fn warm_socket_path(config: &WarmProcessConfig) -> PathBuf {
     let mut hasher = Sha256::new();
+    hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
+    hasher.update(b"\0");
+    hasher.update(WARM_WIRE_PROTOCOL.as_bytes());
+    hasher.update(b"\0");
     hasher.update(config.data_dir.display().to_string().as_bytes());
     hasher.update(b"\0");
     hasher.update(config.embedding_model.as_bytes());
@@ -545,7 +551,37 @@ async fn warm_ping(config: &WarmProcessConfig) -> Result<Value> {
                 .unwrap_or_else(|| "warm worker ping failed".to_string()),
         ));
     }
-    Ok(response.result.unwrap_or(Value::Null))
+    let result = response.result.unwrap_or(Value::Null);
+    validate_warm_worker_identity(&result)?;
+    Ok(result)
+}
+
+fn warm_worker_identity(socket: &Path) -> Value {
+    json!({
+        "pid": std::process::id(),
+        "socket": socket,
+        "memd_version": env!("CARGO_PKG_VERSION"),
+        "warm_wire_protocol": WARM_WIRE_PROTOCOL,
+    })
+}
+
+fn validate_warm_worker_identity(result: &Value) -> Result<()> {
+    let worker_version = result
+        .get("memd_version")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let worker_protocol = result
+        .get("warm_wire_protocol")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if worker_version != env!("CARGO_PKG_VERSION") || worker_protocol != WARM_WIRE_PROTOCOL {
+        return Err(MemdError::ProtocolError(format!(
+            "warm worker is incompatible: worker version {worker_version}, protocol {worker_protocol}; CLI version {}, protocol {}",
+            env!("CARGO_PKG_VERSION"),
+            WARM_WIRE_PROTOCOL
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -594,16 +630,10 @@ pub(super) async fn run_warm_worker<S: Store>(
         stream.read_to_end(&mut bytes).await?;
         let mut shutdown = false;
         let response = match serde_json::from_slice::<WarmWireRequest>(&bytes) {
-            Ok(WarmWireRequest::Ping) => WarmWireResponse::ok_result(json!({
-                "pid": std::process::id(),
-                "socket": socket,
-            })),
+            Ok(WarmWireRequest::Ping) => WarmWireResponse::ok_result(warm_worker_identity(socket)),
             Ok(WarmWireRequest::Shutdown) => {
                 shutdown = true;
-                WarmWireResponse::ok_result(json!({
-                    "pid": std::process::id(),
-                    "socket": socket,
-                }))
+                WarmWireResponse::ok_result(warm_worker_identity(socket))
             }
             Ok(WarmWireRequest::Command { command }) => {
                 match execute_warm_wire_command(store, tenant_manager, command).await {
@@ -623,6 +653,29 @@ pub(super) async fn run_warm_worker<S: Store>(
 
     let _ = std::fs::remove_file(socket);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn warm_worker_identity_validation_rejects_legacy_ping_payload() {
+        let legacy = json!({
+            "pid": 1234,
+            "socket": "/tmp/memd.sock",
+        });
+
+        let err = validate_warm_worker_identity(&legacy).unwrap_err();
+        assert!(err.to_string().contains("incompatible"));
+    }
+
+    #[test]
+    fn warm_worker_identity_validation_accepts_current_payload() {
+        let payload = warm_worker_identity(Path::new("/tmp/memd.sock"));
+
+        validate_warm_worker_identity(&payload).unwrap();
+    }
 }
 
 #[cfg(not(unix))]

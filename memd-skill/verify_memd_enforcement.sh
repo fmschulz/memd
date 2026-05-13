@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export RUST_LOG="${RUST_LOG:-error}"
 
 TMP_DIR="$(mktemp -d)"
+DATA_DIR="${TMP_DIR}/data"
 TENANT="memd_cli_enforcement_verify"
 PROJECT="verify"
 MARKER="verify memd cli enforcement 20260509"
 
 cleanup() {
+  if command -v memd >/dev/null 2>&1; then
+    memd --data-dir "${DATA_DIR}" warm stop >/dev/null 2>&1 || true
+  fi
   rm -rf "${TMP_DIR}"
 }
 trap cleanup EXIT
@@ -19,6 +24,17 @@ require_cmd() {
 }
 
 require_cmd memd
+
+BUNDLED_MEMD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bin/linux-x64/memd"
+if [[ -x "${BUNDLED_MEMD}" ]]; then
+  BUNDLED_VERSION="$("${BUNDLED_MEMD}" --version)"
+  PATH_VERSION="$(memd --version)"
+  if [[ "${PATH_VERSION}" != "${BUNDLED_VERSION}" ]]; then
+    echo "installed memd version mismatch: PATH has ${PATH_VERSION}, bundled skill has ${BUNDLED_VERSION}" >&2
+    echo "run memd-skill/install_memd_enforcement.sh --install-binary" >&2
+    exit 1
+  fi
+fi
 
 if ! grep -Fq "<!-- memd-enforcement:start -->" "${HOME}/.codex/AGENTS.md"; then
   echo "missing memd enforcement block in ~/.codex/AGENTS.md" >&2
@@ -40,7 +56,6 @@ if ! grep -Fq "Mandatory \`memd\` CLI contract" "${HOME}/.claude/CLAUDE.md"; the
   exit 1
 fi
 
-DATA_DIR="${TMP_DIR}/data"
 CONTEXT_FILE="${TMP_DIR}/context.md"
 LOG_DIR="${TMP_DIR}/logs"
 
@@ -62,6 +77,16 @@ memd --data-dir "${DATA_DIR}" search \
 
 grep -Fq "${MARKER}" "${TMP_DIR}/search.md"
 
+memd --data-dir "${DATA_DIR}" search \
+  --tenant-id "${TENANT}" \
+  --project-id "${PROJECT}" \
+  --query "${MARKER}" \
+  --compact \
+  --token-budget 1000 \
+  --format markdown >"${TMP_DIR}/warm-search.md"
+
+grep -Fq "${MARKER}" "${TMP_DIR}/warm-search.md"
+
 memd --data-dir "${DATA_DIR}" agent-context \
   --tenant-id "${TENANT}" \
   --project-id "${PROJECT}" \
@@ -76,5 +101,7 @@ memd --data-dir "${DATA_DIR}" agent-context \
 grep -Fq 'interface: `cli_only`' "${CONTEXT_FILE}"
 grep -Fq "${MARKER}" "${CONTEXT_FILE}"
 test -s "${LOG_DIR}/memd_search_log.jsonl"
+
+memd --data-dir "${DATA_DIR}" warm stop >/dev/null || true
 
 echo "Verified memd skill + CLI enforcement and CLI memory workflow"
