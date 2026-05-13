@@ -44,6 +44,12 @@ require_cmd() {
   fi
 }
 
+stop_existing_warm_worker() {
+  if command -v memd >/dev/null 2>&1; then
+    memd warm stop >/dev/null 2>&1 || true
+  fi
+}
+
 upsert_block() {
   local target="$1"
   local start_marker="$2"
@@ -100,6 +106,7 @@ install_binary() {
 require_cmd python
 
 if [[ "$INSTALL_BINARY" -eq 1 ]]; then
+  stop_existing_warm_worker
   install_binary
 fi
 

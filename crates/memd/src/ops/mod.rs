@@ -22,6 +22,10 @@ use tracing::{debug, info, warn};
 static ALLOW_CROSS_TENANT_PROJECT_FALLBACK: AtomicBool = AtomicBool::new(false);
 static PROJECT_ALIASES: OnceLock<std::sync::RwLock<Vec<ProjectAliasConfig>>> = OnceLock::new();
 const HOT_CONTEXT_SCAN_TIMEOUT_MS: u64 = 2_000;
+const EXACT_RESCUE_PAGE_SIZE: usize = 500;
+const EXACT_RESCUE_PROJECT_SCAN_LIMIT: usize = 50_000;
+const EXACT_RESCUE_GLOBAL_SCAN_LIMIT: usize = 10_000;
+const EXACT_RESCUE_SCORE_BOOST: f32 = 20.0;
 
 /// Apply process-wide compatibility routing for operation handlers.
 pub fn configure_operation_routing(
@@ -124,8 +128,8 @@ use crate::metrics::{IndexStats, MetricsCollector};
 use crate::retrieval::{ContextPacker, PackerConfig, PackerInput};
 use crate::store::metadata::MetadataStore;
 use crate::store::{
-    DuplicateHealth, FeedbackEntry, HealthCounts, IndexCoverageHealth, PayloadHealth,
-    RelevanceLabel, Store, StoreHealthSnapshot, StoreStats, TenantManager,
+    rank_candidate_chunks, DuplicateHealth, FeedbackEntry, HealthCounts, IndexCoverageHealth,
+    PayloadHealth, RelevanceLabel, Store, StoreHealthSnapshot, StoreStats, TenantManager,
 };
 use crate::task_memory::{
     build_library_digest_artifact, build_project_brief_digest_artifact, build_project_brief_view,
@@ -3732,6 +3736,95 @@ async fn search_with_scores_for_tenants<S: Store>(
     ))
 }
 
+fn exact_rescue_terms(query: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    query
+        .split_whitespace()
+        .filter_map(|term| {
+            let cleaned = term
+                .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+                .to_ascii_lowercase();
+            if cleaned.len() < 3 {
+                return None;
+            }
+            let code_like = cleaned.contains('_')
+                || cleaned.contains('-')
+                || cleaned.chars().any(|c| c.is_ascii_digit());
+            if code_like && seen.insert(cleaned.clone()) {
+                Some(cleaned)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn chunk_contains_exact_rescue_term(chunk: &MemoryChunk, terms: &[String]) -> bool {
+    let haystack = format!("{} {}", chunk.text, chunk.tags.join(" ")).to_ascii_lowercase();
+    terms.iter().any(|term| haystack.contains(term))
+}
+
+async fn exact_lexical_candidates_for_tenants<S: Store>(
+    store: &S,
+    tenants: &[TenantId],
+    query: &str,
+    project_id_filter: Option<&str>,
+    limit: usize,
+) -> Result<Vec<(MemoryChunk, f32)>, McpError> {
+    let terms = exact_rescue_terms(query);
+    if terms.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let scan_limit = if project_id_filter.is_some() {
+        EXACT_RESCUE_PROJECT_SCAN_LIMIT
+    } else {
+        EXACT_RESCUE_GLOBAL_SCAN_LIMIT
+    };
+    let mut candidates = Vec::new();
+
+    for tenant in tenants {
+        let mut offset = 0usize;
+        let mut scanned = 0usize;
+        loop {
+            if scanned >= scan_limit || candidates.len() >= limit {
+                break;
+            }
+            let page_limit = EXACT_RESCUE_PAGE_SIZE.min(scan_limit.saturating_sub(scanned));
+            if page_limit == 0 {
+                break;
+            }
+            let chunks = store
+                .list_chunks(tenant, page_limit, offset)
+                .await
+                .map_err(|e| McpError::ToolError(e.to_string()))?;
+            if chunks.is_empty() {
+                break;
+            }
+            scanned = scanned.saturating_add(chunks.len());
+            offset = offset.saturating_add(chunks.len());
+
+            for chunk in chunks {
+                if project_id_filter.is_some() && chunk.project_id.as_option() != project_id_filter
+                {
+                    continue;
+                }
+                if chunk_contains_exact_rescue_term(&chunk, &terms) {
+                    candidates.push(chunk);
+                    if candidates.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(rank_candidate_chunks(candidates, query, limit)
+        .into_iter()
+        .map(|(chunk, score)| (chunk, score + EXACT_RESCUE_SCORE_BOOST))
+        .collect())
+}
+
 async fn search_with_tier_info_for_tenants<S: Store>(
     store: &S,
     tenants: &[TenantId],
@@ -4796,6 +4889,14 @@ pub async fn handle_memory_search<S: Store>(
         let (scored_chunks, timing) =
             search_with_tier_info_for_tenants(store, &scoped_tenants, &params.query, fetch_k)
                 .await?;
+        let exact_candidates = exact_lexical_candidates_for_tenants(
+            store,
+            &scoped_tenants,
+            &params.query,
+            project_id_filter,
+            params.k.min(fetch_k),
+        )
+        .await?;
         let preferred = summary_preferred_results(
             store,
             &scoped_tenants,
@@ -4806,7 +4907,11 @@ pub async fn handle_memory_search<S: Store>(
         )
         .await?;
         let mut scored_chunks = apply_search_filters(
-            merge_preferred_and_raw(preferred, scored_chunks, fetch_k),
+            merge_preferred_and_raw(
+                preferred,
+                merge_scored_chunk_lists(vec![exact_candidates, scored_chunks], fetch_k),
+                fetch_k,
+            ),
             project_id_filter,
             &parsed_filters,
             pre_visibility_cap,
@@ -4909,6 +5014,14 @@ pub async fn handle_memory_search<S: Store>(
     // Standard path without tier info
     let scored_chunks =
         search_with_scores_for_tenants(store, &scoped_tenants, &params.query, fetch_k).await?;
+    let exact_candidates = exact_lexical_candidates_for_tenants(
+        store,
+        &scoped_tenants,
+        &params.query,
+        project_id_filter,
+        params.k.min(fetch_k),
+    )
+    .await?;
     let preferred = summary_preferred_results(
         store,
         &scoped_tenants,
@@ -4919,7 +5032,11 @@ pub async fn handle_memory_search<S: Store>(
     )
     .await?;
     let mut scored_chunks = apply_search_filters(
-        merge_preferred_and_raw(preferred, scored_chunks, fetch_k),
+        merge_preferred_and_raw(
+            preferred,
+            merge_scored_chunk_lists(vec![exact_candidates, scored_chunks], fetch_k),
+            fetch_k,
+        ),
         project_id_filter,
         &parsed_filters,
         pre_visibility_cap,
@@ -9333,6 +9450,102 @@ mod tests {
         MemoryStore::new()
     }
 
+    struct SearchMissStore {
+        chunks: Mutex<Vec<MemoryChunk>>,
+    }
+
+    impl SearchMissStore {
+        fn new(chunks: Vec<MemoryChunk>) -> Self {
+            Self {
+                chunks: Mutex::new(chunks),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Store for SearchMissStore {
+        async fn add(&self, chunk: MemoryChunk) -> crate::error::Result<ChunkId> {
+            let chunk_id = chunk.chunk_id.clone();
+            self.chunks.lock().unwrap().push(chunk);
+            Ok(chunk_id)
+        }
+
+        async fn add_batch(&self, chunks: Vec<MemoryChunk>) -> crate::error::Result<Vec<ChunkId>> {
+            let chunk_ids = chunks
+                .iter()
+                .map(|chunk| chunk.chunk_id.clone())
+                .collect::<Vec<_>>();
+            self.chunks.lock().unwrap().extend(chunks);
+            Ok(chunk_ids)
+        }
+
+        async fn get(
+            &self,
+            tenant_id: &TenantId,
+            chunk_id: &ChunkId,
+        ) -> crate::error::Result<Option<MemoryChunk>> {
+            Ok(self
+                .chunks
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|chunk| &chunk.tenant_id == tenant_id && &chunk.chunk_id == chunk_id)
+                .cloned())
+        }
+
+        async fn search(
+            &self,
+            _tenant_id: &TenantId,
+            query: &str,
+            _k: usize,
+        ) -> crate::error::Result<Vec<MemoryChunk>> {
+            if query.is_empty() {
+                Ok(self.chunks.lock().unwrap().clone())
+            } else {
+                Ok(Vec::new())
+            }
+        }
+
+        async fn search_with_scores(
+            &self,
+            _tenant_id: &TenantId,
+            _query: &str,
+            _k: usize,
+        ) -> crate::error::Result<Vec<(MemoryChunk, f32)>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_chunks(
+            &self,
+            tenant_id: &TenantId,
+            limit: usize,
+            offset: usize,
+        ) -> crate::error::Result<Vec<MemoryChunk>> {
+            Ok(self
+                .chunks
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|chunk| &chunk.tenant_id == tenant_id)
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+
+        async fn delete(
+            &self,
+            _tenant_id: &TenantId,
+            _chunk_id: &ChunkId,
+        ) -> crate::error::Result<bool> {
+            Ok(false)
+        }
+
+        async fn stats(&self, _tenant_id: &TenantId) -> crate::error::Result<StoreStats> {
+            Ok(StoreStats::default())
+        }
+    }
+
     fn make_persistent_store() -> (PersistentStore, TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let store = PersistentStore::open(PersistentStoreConfig {
@@ -11390,6 +11603,35 @@ mod tests {
         let payload: SearchResult = parse_tool_payload(&result);
         assert_eq!(payload.results.len(), 1);
         assert_eq!(payload.results[0].text, "tenant a private alpha");
+    }
+
+    #[tokio::test]
+    async fn memory_search_rescues_exact_code_token_when_indexes_miss() {
+        let tenant = TenantId::new("default").unwrap();
+        let chunk = MemoryChunk::new(
+            tenant.clone(),
+            "Recovered prior repeat-spike benchmark run context after chat loss.",
+            ChunkType::Summary,
+        )
+        .with_project(ProjectId::new(Some("virosync".to_string())))
+        .with_tags(vec![
+            "kind:finish".to_string(),
+            "benchmark:repeat_spike".to_string(),
+        ]);
+        let store = SearchMissStore::new(vec![chunk]);
+
+        let rescued = exact_lexical_candidates_for_tenants(
+            &store,
+            &[tenant],
+            "repeat_spike",
+            Some("virosync"),
+            5,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(rescued.len(), 1);
+        assert!(rescued[0].0.text.contains("repeat-spike benchmark"));
     }
 
     #[tokio::test]
