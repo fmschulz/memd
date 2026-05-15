@@ -109,6 +109,19 @@ memd agent-context \
   --log-dir .memd/search-logs
 ```
 
+Refresh project-root `memory.md` at session start:
+
+```bash
+memd memory-md \
+  --tenant-id quickstart \
+  --project-id auth \
+  --project-dir . \
+  --output memory.md
+```
+
+When `.memd/project_scope.json` exists, `memd memory-md --project-dir .
+--output memory.md` can infer the tenant and project scope.
+
 Keep repeated retrieval hot with the private CLI warm worker:
 
 ```bash

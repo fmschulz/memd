@@ -1978,6 +1978,47 @@ impl MetadataStore for SqliteMetadataStore {
         Ok(results)
     }
 
+    fn list_for_project(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<ChunkMetadata>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.pool.get();
+        let sql = format!(
+            "SELECT {CHUNK_COLUMNS}
+             FROM chunks
+             WHERE tenant_id = :tenant
+               AND status != 'deleted'
+               AND (:project IS NULL OR project_id = :project)
+             ORDER BY timestamp_created DESC
+             LIMIT :limit OFFSET :offset"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+
+        let rows = stmt.query_map(
+            rusqlite::named_params! {
+                ":tenant": tenant_id.as_str(),
+                ":project": project_id,
+                ":limit": limit as i64,
+                ":offset": offset as i64,
+            },
+            |row| Self::row_to_metadata(row),
+        )?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+
+        Ok(results)
+    }
+
     fn mark_deleted(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<bool> {
         let conn = self.pool.get();
 

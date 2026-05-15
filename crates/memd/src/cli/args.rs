@@ -307,6 +307,41 @@ pub enum CliCommand {
         warm: WarmMode,
     },
 
+    /// Refresh a project `memory.md` file with the highest-priority takeaways.
+    ///
+    /// This is intended for agent session startup. It distills up to 10
+    /// project-scoped takeaways and up to 10 machine-wide takeaways from memd,
+    /// writes them to `memory.md`, and prints a JSON summary.
+    MemoryMd {
+        /// Tenant identifier. Defaults to `.memd/project_scope.json` when present.
+        #[arg(long)]
+        tenant_id: Option<String>,
+
+        /// Optional project identifier. Defaults to `.memd/project_scope.json`.
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Project directory containing `.memd/project_scope.json`
+        #[arg(long, default_value = ".")]
+        project_dir: PathBuf,
+
+        /// Output path. Relative paths are resolved under `--project-dir`.
+        #[arg(long, default_value = "memory.md")]
+        output: PathBuf,
+
+        /// Maximum project-specific takeaways to keep, capped at 10
+        #[arg(long, default_value_t = 10)]
+        project_limit: usize,
+
+        /// Maximum machine-wide takeaways to keep, capped at 10
+        #[arg(long, default_value_t = 10)]
+        global_limit: usize,
+
+        /// Candidate memories to retrieve per query before scoring
+        #[arg(long, default_value_t = 40)]
+        candidate_k: usize,
+    },
+
     /// Invoke a local memd operation by its historical tool name.
     ///
     /// This preserves the former structured operation surface without starting

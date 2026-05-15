@@ -6,6 +6,21 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Added
+
+- Added `memd memory-md`, a session-start CLI command that refreshes a
+  project-root `memory.md` with up to 10 project takeaways and up to 10
+  machine-wide takeaways ranked by explicit `priority:N` / `importance:N`
+  tags, memory type, `kind:*` tags, recurrence, multi-query matches, and
+  search score.
+
+### Changed
+
+- Generated project guardrails and bundled skill docs now require agents to
+  refresh and read `memory.md` at session start before task-specific
+  `agent-context` retrieval, and recommend `priority:N` tags for durable
+  lessons.
+
 ## [0.30.0] - 2026-05-12
 
 ### Changed
@@ -702,10 +717,10 @@ before cutting.
   async method plus free-fn `run_hnsw_backfill` iterate each tenant's active metadata rows,
   filter via the new `DenseSearcher::contains_chunk` per-chunk membership test, and re-index
   the missing chunks in batches of 64 via `hybrid.index_batch` (or `dense.index_batch` when
-  hybrid is off). New `PersistentStoreConfig::backfill_hnsw_on_startup` (default `true`, env
-  override `MEMD_BACKFILL_HNSW_ON_STARTUP`) triggers a one-shot background task on the ambient
-  Tokio runtime at `open()`. Non-blocking — the daemon starts serving immediately; semantic
-  search on older chunks degrades until the task completes.
+  hybrid is off). New `PersistentStoreConfig::backfill_hnsw_on_startup` (opt-in via
+  `MEMD_BACKFILL_HNSW_ON_STARTUP`) triggers a one-shot background task on the ambient
+  Tokio runtime at `open()`. Non-blocking once scheduled; semantic search on older chunks
+  degrades until the task completes.
 - **`DenseSearcher::contains_chunk`.** Per-chunk HNSW-mapping membership check. Codex-reviewed:
   count-based heuristics (`index_len >= active_count`) silently skip stale tenants because
   HNSW's `next_id` never decrements on delete, so a tenant with delete + re-add + crash can

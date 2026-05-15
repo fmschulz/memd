@@ -113,12 +113,13 @@ fi
 read -r -d '' ENFORCEMENT_SNIPPET <<'EOF' || true
 Mandatory `memd` CLI contract for substantive technical and scientific work:
 
+- At session start for substantive work, refresh and read project-root `memory.md`: `memd memory-md --project-dir . --output memory.md` when `.memd/project_scope.json` is available, otherwise include `--tenant-id <tenant>` and `--project-id <project>`.
 - For non-trivial engineering, debugging, analysis, literature review, benchmarking, or multi-step scientific work, search `memd` first with the CLI using the current `tenant_id` and available `project_id`.
 - Preferred retrieval command: `memd agent-context --tenant-id <tenant> --project-id <project> --query "<task>" --k 2 --token-budget 700 --format markdown --output .memd/context.md --log-dir .memd/search-logs`.
 - For direct lookup, use `memd search --tenant-id <tenant> --project-id <project> --query "<query>" --compact --token-budget 2000 --format markdown`.
 - Before saying the work is impossible, blocked, cannot be answered, or needs user context that might already exist in shared memory, run a relevant `memd` CLI search first. If no relevant record is found, say exactly what you checked.
 - If the work changes understanding, runs tools, produces findings, or could matter to later sessions, record it with `memd add` before the final answer.
-- Use `memd add --chunk-type summary|trace|decision|research|plan --tags kind:progress|run|evidence|decision|finish,... --text "<summary>"`; include `--project-id` when known.
+- Use `memd add --chunk-type summary|trace|decision|research|plan --tags kind:progress|run|evidence|decision|finish,priority:N,... --text "<summary>"`; include `--project-id` when known. Use `priority:N` for durable lessons that should be candidates for future `memory.md` refreshes.
 - Do not provide a final substantive answer until the CLI retrieval and CLI write have both happened, unless `memd` is unavailable.
 - If `memd` is unavailable or misconfigured, treat that as a blocker and say so explicitly rather than silently skipping memory usage.
 - Small talk, trivial one-shot questions, and purely local formatting rewrites do not require `memd`.
