@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use anndists::dist::distances::DistCosine;
 use hnsw_rs::api::AnnT;
 use hnsw_rs::hnsw::{Hnsw, Neighbour};
+use hnsw_rs::hnswio::HnswIo;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
@@ -427,33 +428,40 @@ impl HnswIndex {
             EmbeddingCache::new(config.dimension)
         };
 
-        // Create fresh HNSW
-        let hnsw = Hnsw::new(
-            config.max_connections,
-            config.max_elements,
-            16,
-            config.ef_construction,
-            DistCosine {},
-        );
-
-        // Rebuild HNSW from cache if available
-        let rebuild_count = if !embedding_cache.is_empty() {
-            let mut count = 0;
-            for (internal_id, embedding) in embedding_cache.iter_valid() {
-                hnsw.insert_slice((embedding, internal_id));
-                count += 1;
+        let expected_points = embedding_cache.len();
+        let (hnsw, point_count, loaded_dump) = match Self::load_dumped_graph(path, expected_points)
+        {
+            Ok(Some(hnsw)) => {
+                let count = hnsw.get_nb_point();
+                (hnsw, count, true)
             }
-            count
-        } else {
-            0
+            Ok(None) => {
+                let (hnsw, count) = Self::rebuild_graph_from_cache(&config, &embedding_cache);
+                (hnsw, count, false)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = ?path,
+                    "failed to load dumped HNSW graph, rebuilding from embedding cache"
+                );
+                let (hnsw, count) = Self::rebuild_graph_from_cache(&config, &embedding_cache);
+                (hnsw, count, false)
+            }
         };
 
         let elapsed = start.elapsed();
 
-        if rebuild_count > 0 {
+        if loaded_dump {
+            tracing::info!(
+                "Loaded HNSW graph dump: {} embeddings in {:?}",
+                point_count,
+                elapsed
+            );
+        } else if point_count > 0 {
             tracing::info!(
                 "Rebuilt HNSW index from cache: {} embeddings in {:?}",
-                rebuild_count,
+                point_count,
                 elapsed
             );
         } else {
@@ -467,6 +475,72 @@ impl HnswIndex {
             config,
             persist_path: Some(path.to_path_buf()),
         })
+    }
+
+    fn load_dumped_graph(
+        path: &Path,
+        expected_points: usize,
+    ) -> Result<Option<Hnsw<'static, f32, DistCosine>>> {
+        if expected_points == 0 {
+            return Ok(None);
+        }
+
+        if !path.join("graph.hnsw.graph").exists() || !path.join("graph.hnsw.data").exists() {
+            return Ok(None);
+        }
+
+        // hnsw_rs ties the loaded graph lifetime to HnswIo because reload can
+        // mmap vector data. memd uses the default non-mmap reload, but keeping
+        // the loader alive for the process lifetime avoids unsound lifetime
+        // narrowing and is bounded to one tiny object per loaded tenant index.
+        let loader = Box::leak(Box::new(HnswIo::new(path, "graph")));
+        let hnsw = loader
+            .load_hnsw::<f32, DistCosine>()
+            .map_err(|e| MemdError::StorageError(format!("load hnsw dump: {e}")))?;
+
+        let loaded_points = hnsw.get_nb_point();
+        if loaded_points != expected_points {
+            return Err(MemdError::StorageError(format!(
+                "dumped HNSW point count mismatch: graph has {loaded_points}, cache has {expected_points}"
+            )));
+        }
+
+        Ok(Some(hnsw))
+    }
+
+    fn rebuild_graph_from_cache(
+        config: &HnswConfig,
+        embedding_cache: &EmbeddingCache,
+    ) -> (Hnsw<'static, f32, DistCosine>, usize) {
+        let hnsw = Hnsw::new(
+            config.max_connections,
+            config.max_elements,
+            16,
+            config.ef_construction,
+            DistCosine {},
+        );
+
+        if embedding_cache.is_empty() {
+            return (hnsw, 0);
+        }
+
+        let to_insert: Vec<(&[f32], usize)> = embedding_cache
+            .iter_valid()
+            .map(|(internal_id, embedding)| (embedding, internal_id))
+            .collect();
+        let count = to_insert.len();
+        let threshold = std::thread::available_parallelism()
+            .map(|n| std::cmp::max(64, n.get().saturating_mul(8)))
+            .unwrap_or(64);
+        if count >= threshold {
+            hnsw.parallel_insert_slice(&to_insert);
+        } else {
+            for (embedding, internal_id) in &to_insert {
+                hnsw.insert_slice((*embedding, *internal_id));
+            }
+        }
+
+        (hnsw, count)
     }
 
     /// Check if index needs rebuild (segment version changed)

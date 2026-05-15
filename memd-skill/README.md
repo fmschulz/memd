@@ -7,6 +7,7 @@ It covers:
 
 - when to retrieve with `memd agent-context`
 - when to search with `memd search`
+- when to refresh project-root `memory.md` with `memd memory-md`
 - when to write with `memd add`
 - when to keep retrieval hot with `memd warm start` and `--warm required`
 - when to amortize scripted operations with `memd batch --jsonl`

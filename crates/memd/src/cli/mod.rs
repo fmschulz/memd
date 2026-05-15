@@ -19,6 +19,7 @@ use crate::types::{ChunkId, MemoryChunk, ProjectId, Source, TenantId};
 mod args;
 mod batch;
 mod call;
+mod memory_md;
 mod ops_bridge;
 mod paths;
 mod render;
@@ -36,6 +37,7 @@ pub use args::{
 use args::{ProjectScopeConfig, SearchRerankerOptions};
 use batch::{read_batch_input, run_batch_jsonl, stream_batch_jsonl};
 use call::parse_call_arguments;
+use memory_md::{refresh_memory_md, MemoryMdOptions};
 use ops_bridge::cli_call_tool;
 use paths::{
     absolutize_project_dir, build_tenant_scope_config, normalize_absolute, path_is_inside,
@@ -183,6 +185,31 @@ pub async fn run_cli<S: Store>(
             .await?;
             write_cli_log(log_dir.as_deref(), "memd_search", &payload)?;
             write_rendered(output.as_deref(), &render_agent_context(&payload, format)?)?;
+        }
+
+        CliCommand::MemoryMd {
+            tenant_id,
+            project_id,
+            project_dir,
+            output,
+            project_limit,
+            global_limit,
+            candidate_k,
+        } => {
+            let result = refresh_memory_md(
+                store,
+                MemoryMdOptions {
+                    tenant_id,
+                    project_id,
+                    project_dir,
+                    output,
+                    project_limit,
+                    global_limit,
+                    candidate_k,
+                },
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
         }
 
         CliCommand::Call {
@@ -797,6 +824,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_md_writes_project_and_global_takeaways() {
+        let store = MemoryStore::new();
+        let tenant = TenantId::new("memory_md_tenant").unwrap();
+        store
+            .add(
+                MemoryChunk::new(
+                    tenant.clone(),
+                    "project takeaway decision: use project-scoped metadata before payload reads",
+                    ChunkType::Decision,
+                )
+                .with_project(ProjectId::from("memory_md_project"))
+                .with_tags(vec!["kind:decision".to_string(), "priority:9".to_string()]),
+            )
+            .await
+            .unwrap();
+        store
+            .add(
+                MemoryChunk::new(
+                    tenant,
+                    "machine wide reusable takeaway: stop stale warm workers before replacing the bundled binary",
+                    ChunkType::Summary,
+                )
+                .with_tags(vec!["kind:finish".to_string(), "priority:7".to_string()]),
+            )
+            .await
+            .unwrap();
+
+        let dir = tempdir().unwrap();
+        run_cli(
+            &store,
+            None,
+            CliCommand::MemoryMd {
+                tenant_id: Some("memory_md_tenant".to_string()),
+                project_id: Some("memory_md_project".to_string()),
+                project_dir: dir.path().to_path_buf(),
+                output: PathBuf::from("memory.md"),
+                project_limit: 10,
+                global_limit: 10,
+                candidate_k: 10,
+            },
+        )
+        .await
+        .unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join("memory.md")).unwrap();
+        assert!(content.contains("## Project Takeaways"));
+        assert!(content.contains("memory_md_project"));
+        assert!(content.contains("## Machine-Wide Takeaways"));
+        assert!(content.contains("memory_md_tenant"));
+        assert!(content.contains("priority:"));
+    }
+
+    #[tokio::test]
     async fn call_invokes_former_tool_operations_without_server() {
         let store = MemoryStore::new();
 
@@ -930,6 +1010,8 @@ mod tests {
         let guardrails =
             std::fs::read_to_string(project_dir.join(".memd/memory_guardrails.md")).unwrap();
         assert!(guardrails.contains("demo_tenant"));
+        assert!(guardrails.contains("memory-md"));
+        assert!(guardrails.contains("memory.md"));
         assert!(guardrails.contains("memd agent-context"));
         assert!(guardrails.contains("memd add"));
         assert!(guardrails.contains("Read scope mode: `local`"));
