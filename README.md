@@ -1,6 +1,7 @@
 # memd
 
 [![Version](https://img.shields.io/badge/version-0.30.0-blue)](CHANGELOG.md)
+[![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust&logoColor=white)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 `memd` is a local memory CLI that gives coding agents and AI scientists a
