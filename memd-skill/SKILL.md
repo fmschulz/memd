@@ -54,16 +54,61 @@ not need `memd`.
 
 For substantive work:
 
-1. Search first with `memd agent-context` or `memd search`.
-2. Use a stable `tenant_id` for the trust domain and `project_id` for narrower
+1. At session start, refresh `memory.md` with `memd memory-md` and read it
+   before task-specific retrieval.
+2. Search task-specific context with `memd agent-context` or `memd search`.
+3. Use a stable `tenant_id` for the trust domain and `project_id` for narrower
    project scope.
-3. Persist meaningful findings before the final response with `memd add`.
-4. If `memd` is unavailable or misconfigured, say so explicitly and treat that
+4. Persist meaningful findings before the final response with `memd add`.
+5. If `memd` is unavailable or misconfigured, say so explicitly and treat that
    as a blocker instead of silently skipping memory.
 
 Before saying a task is impossible, blocked, unknowable, or needs user context
 that might already exist in memory, run a relevant `memd` CLI search first. If
 it returns no useful record, state what you checked.
+
+## Session-Start memory.md
+
+For substantive sessions, keep a project-root `memory.md` file fresh:
+
+```bash
+memd memory-md \
+  --tenant-id "$TENANT_ID" \
+  --project-id "$PROJECT_ID" \
+  --project-dir . \
+  --output memory.md
+```
+
+If `.memd/project_scope.json` exists and contains the right scope, this shorter
+form is preferred:
+
+```bash
+memd memory-md --project-dir . --output memory.md
+```
+
+Then read `memory.md` before implementation and before task-specific
+`agent-context` retrieval. The file contains:
+
+- up to 10 highest-priority project takeaways
+- up to 10 highest-priority machine-wide takeaways in the selected tenant
+- source chunk IDs, tags, and computed priority scores
+
+The priority score is computed from explicit `priority:N` / `importance:N` tags,
+memory type, `kind:*` tags, recurring tags across retrieved candidates,
+multi-query matches, and search score. When recording durable lessons that
+should survive into future `memory.md` refreshes, add a `priority:N` tag:
+
+```bash
+memd add \
+  --tenant-id "$TENANT_ID" \
+  --project-id "$PROJECT_ID" \
+  --chunk-type summary \
+  --tags kind:finish,priority:8,task:"$TASK_ID" \
+  --text "Reusable lesson, path, decision, or recurring failure and how to solve it."
+```
+
+Use higher priority for general, repeatedly useful lessons; lower priority for
+narrow progress notes.
 
 ## Retrieve Context
 

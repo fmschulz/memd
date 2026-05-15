@@ -3795,14 +3795,14 @@ async fn exact_lexical_candidates_for_tenants<S: Store>(
                 break;
             }
             let chunks = store
-                .list_chunks(tenant, page_limit, offset)
+                .list_chunks_for_project(tenant, project_id_filter, page_limit, offset)
                 .await
                 .map_err(|e| McpError::ToolError(e.to_string()))?;
             if chunks.is_empty() {
                 break;
             }
-            scanned = scanned.saturating_add(chunks.len());
-            offset = offset.saturating_add(chunks.len());
+            scanned = scanned.saturating_add(page_limit);
+            offset = offset.saturating_add(page_limit);
 
             for chunk in chunks {
                 if project_id_filter.is_some() && chunk.project_id.as_option() != project_id_filter

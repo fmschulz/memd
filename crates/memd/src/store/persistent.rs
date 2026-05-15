@@ -119,7 +119,7 @@ impl Default for PersistentStoreConfig {
                 let normalized = v.trim().to_ascii_lowercase();
                 matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
             })
-            .unwrap_or(true);
+            .unwrap_or(false);
         let backfill_canonical_text_on_startup =
             std::env::var("MEMD_BACKFILL_CANONICAL_TEXT_ON_STARTUP")
                 .ok()
@@ -127,7 +127,7 @@ impl Default for PersistentStoreConfig {
                     let normalized = v.trim().to_ascii_lowercase();
                     matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
                 })
-                .unwrap_or(true);
+                .unwrap_or(false);
 
         Self {
             data_dir: PathBuf::from("data"),
@@ -1747,6 +1747,32 @@ impl Store for PersistentStore {
         for meta in metadata_rows {
             if let Some(chunk) = self
                 .get_chunk_for_retrieval(tenant_id, &meta.chunk_id, "list_chunks")
+                .await?
+            {
+                chunks.push(chunk);
+            }
+        }
+        Ok(chunks)
+    }
+
+    async fn list_chunks_for_project(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<MemoryChunk>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let metadata_rows = self
+            .metadata
+            .list_for_project(tenant_id, project_id, limit, offset)?;
+        let mut chunks = Vec::with_capacity(metadata_rows.len());
+        for meta in metadata_rows {
+            if let Some(chunk) = self
+                .get_chunk_for_retrieval(tenant_id, &meta.chunk_id, "list_chunks_for_project")
                 .await?
             {
                 chunks.push(chunk);
@@ -3559,6 +3585,66 @@ mod tests {
 
         assert!(chunk_ids.contains(&healthy_id));
         assert!(!chunk_ids.contains(&unreadable_id));
+    }
+
+    #[tokio::test]
+    async fn list_chunks_for_project_filters_metadata_before_payload_reads() {
+        let dir = tempdir().unwrap();
+        let config = PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            segment_max_chunks: 1,
+            wal_checkpoint_interval: 10,
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            ..Default::default()
+        };
+        let tenant = make_tenant();
+        let wanted_id;
+        let unrelated_id;
+
+        {
+            let store = PersistentStore::open(config.clone()).unwrap();
+            wanted_id = store
+                .add(
+                    make_chunk(&tenant, "wanted project context")
+                        .with_project(ProjectId::new(Some("wanted"))),
+                )
+                .await
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            unrelated_id = store
+                .add(
+                    make_chunk(&tenant, "newer unrelated context")
+                        .with_project(ProjectId::new(Some("other"))),
+                )
+                .await
+                .unwrap();
+        }
+
+        let unrelated_segment_id = {
+            let store = PersistentStore::open(config.clone()).unwrap();
+            store
+                .metadata
+                .get(&tenant, &unrelated_id)
+                .unwrap()
+                .expect("unrelated chunk metadata")
+                .segment_id
+        };
+        fs::remove_file(segment_index_path(
+            dir.path(),
+            &tenant,
+            unrelated_segment_id,
+        ))
+        .unwrap();
+
+        let store = PersistentStore::open(config).unwrap();
+        let chunks = store
+            .list_chunks_for_project(&tenant, Some("wanted"), 1, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].chunk_id, wanted_id);
     }
 
     #[tokio::test]

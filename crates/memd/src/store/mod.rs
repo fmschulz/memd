@@ -359,6 +359,49 @@ pub trait Store: Send + Sync {
         Ok(chunks.drain(offset..).take(limit).collect())
     }
 
+    /// List chunks for a tenant, optionally scoped to a project, with pagination.
+    ///
+    /// Default implementation pages through `list_chunks` and filters readable
+    /// chunks. Persistent stores override this so project filtering happens in
+    /// metadata before segment payload reads.
+    async fn list_chunks_for_project(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<MemoryChunk>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        if project_id.is_none() {
+            return self.list_chunks(tenant_id, limit, offset).await;
+        }
+
+        let page_size = limit.clamp(1, 500);
+        let target = offset.saturating_add(limit);
+        let mut raw_offset = 0usize;
+        let mut filtered = Vec::new();
+
+        while filtered.len() < target {
+            let chunks = self.list_chunks(tenant_id, page_size, raw_offset).await?;
+            if chunks.is_empty() {
+                break;
+            }
+            raw_offset = raw_offset.saturating_add(page_size);
+            filtered.extend(
+                chunks
+                    .into_iter()
+                    .filter(|chunk| chunk.project_id.as_option() == project_id),
+            );
+        }
+
+        if offset >= filtered.len() {
+            return Ok(Vec::new());
+        }
+        Ok(filtered.into_iter().skip(offset).take(limit).collect())
+    }
+
     /// Soft delete a chunk
     ///
     /// Returns true if the chunk was found and deleted, false if not found.

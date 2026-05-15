@@ -14,6 +14,7 @@ fn supported_cli_help_surfaces_resolve() {
         vec!["add", "--help"],
         vec!["search", "--help"],
         vec!["agent-context", "--help"],
+        vec!["memory-md", "--help"],
         vec!["call", "--help"],
         vec!["batch", "--help"],
         vec!["warm", "--help"],

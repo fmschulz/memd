@@ -35,6 +35,7 @@ test_chunk.rs
 /.codexloop/
 /.worktrees/
 /MEMORY.md
+/memory.md
 
 # User-local task tracking (per global CLAUDE.md convention)
 /tasks/

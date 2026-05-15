@@ -204,9 +204,19 @@ pub(super) fn render_guardrail_block(
     out.push_str(
         "- If `.memd/project_scope.json` exists, use its pinned `tenant_id` and `project_id` instead of inferring from the directory name.\n",
     );
+    out.push_str(
+        "- At session start, refresh and read `memory.md` before task-specific retrieval.\n",
+    );
     out.push_str("- Hard rule: do not send a final substantive answer without CLI memory retrieval and a CLI memory write.\n\n");
     out.push_str("### Mandatory CLI Protocol\n\n");
-    out.push_str("1. Retrieve first with `memd agent-context` or `memd search`.\n");
+    out.push_str("1. Refresh `memory.md` at session start.\n");
+    out.push_str(&format!(
+        "   - Default command: `{memd_command} memory-md --tenant-id {} --project-dir . --output memory.md`.\n",
+        scope_config.write_tenant
+    ));
+    out.push_str("   - If `.memd/project_scope.json` exists, omit explicit scope only when the command can read that file.\n");
+    out.push_str("2. Read `memory.md` before implementation.\n");
+    out.push_str("3. Retrieve task-specific context with `memd agent-context` or `memd search`.\n");
     out.push_str(&format!(
         "   - Default context file command: `{memd_command} agent-context --tenant-id {} --query \"<task>\" --k 2 --token-budget 700 --format markdown --output .memd/context.md --log-dir .memd/search-logs`.\n",
         scope_config.write_tenant
@@ -218,12 +228,12 @@ pub(super) fn render_guardrail_block(
     if scope_config.scope == TenantScopeMode::Global {
         out.push_str("   - In global mode, the tenant list is a snapshot from init-time data directory discovery. Re-run `memd init` to refresh.\n");
     }
-    out.push_str("2. Implement using retrieved context.\n");
-    out.push_str("3. Persist before final response with `memd add`.\n");
+    out.push_str("4. Implement using retrieved context.\n");
+    out.push_str("5. Persist before final response with `memd add`.\n");
     out.push_str(
-        "   - Write only to the required write tenant; include `--project-id` when known and tags such as `kind:progress`, `kind:evidence`, `kind:decision`, or `kind:finish`.\n",
+        "   - Write only to the required write tenant; include `--project-id` when known and tags such as `kind:progress`, `kind:evidence`, `kind:decision`, `kind:finish`, and `priority:N` for durable lessons.\n",
     );
-    out.push_str("4. If memd is unavailable:\n");
+    out.push_str("6. If memd is unavailable:\n");
     out.push_str(
         "   - Explicitly report memory persistence failure and stop before final answer.\n\n",
     );
