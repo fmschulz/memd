@@ -22,6 +22,7 @@ fn test_hnsw_persistence_round_trip() {
         ef_search: 50,
         max_elements: 1000,
         dimension: 4,
+        persist_graph_dump: true,
     };
 
     // Create index and insert embeddings
@@ -345,4 +346,121 @@ fn load_with_partial_canonical_dump_falls_back_to_rebuild() {
     let results = reloaded.search(&q, 1).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].chunk_id, chunk_id);
+}
+
+#[test]
+fn save_without_graph_dump_writes_only_embedding_cache() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("warm_index");
+
+    let config = HnswConfig {
+        max_elements: 100,
+        dimension: 4,
+        persist_graph_dump: false,
+        ..Default::default()
+    };
+
+    let chunk_id = ChunkId::new();
+    {
+        let index = HnswIndex::with_persistence(config.clone(), &path).unwrap();
+        let mut emb = vec![1.0, 0.0, 0.0, 0.0];
+        normalize(&mut emb);
+        index.insert(&chunk_id, &emb).unwrap();
+        index.save().unwrap();
+    }
+
+    assert!(path.join("embeddings.bin").exists());
+    assert!(path.join("mapping.json").exists());
+    assert!(
+        !path.join("graph.hnsw.graph").exists(),
+        "graph dump must not exist when persist_graph_dump=false"
+    );
+    assert!(!path.join("graph.hnsw.data").exists());
+
+    // Round trip: reload rebuilds from cache and still finds the vector.
+    let reloaded = HnswIndex::with_persistence(config, &path).unwrap();
+    let mut q = vec![1.0, 0.0, 0.0, 0.0];
+    normalize(&mut q);
+    let results = reloaded.search(&q, 1).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].chunk_id, chunk_id);
+    assert!(results[0].score > 0.99);
+}
+
+#[test]
+fn load_ignores_stale_dump_when_persist_graph_dump_disabled() {
+    // Toggle scenario: previous run had persist_graph_dump=true and
+    // wrote graph.hnsw.*. A subsequent open with persist_graph_dump=false
+    // must NOT load that stale dump — otherwise the embedding cache is
+    // not the source of truth for read-only workloads.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("warm_index");
+
+    let dumped_config = HnswConfig {
+        max_elements: 100,
+        dimension: 4,
+        persist_graph_dump: true,
+        ..Default::default()
+    };
+    let live_id = ChunkId::new();
+    {
+        let index = HnswIndex::with_persistence(dumped_config.clone(), &path).unwrap();
+        let mut emb = vec![1.0, 0.0, 0.0, 0.0];
+        normalize(&mut emb);
+        index.insert(&live_id, &emb).unwrap();
+        index.save().unwrap();
+    }
+    assert!(path.join("graph.hnsw.graph").exists());
+
+    // Now invalidate the embedding cache by injecting a different chunk
+    // via a flag-disabled save, then drop. The graph dump on disk still
+    // references `live_id` only; the cache rebuild would yield the same
+    // result. To make a behavioral difference observable, mutate the
+    // canonical graph dump bytes so that loading it would either panic
+    // or return a different point count than the cache.
+    {
+        use std::io::Write;
+        let mut h = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(false)
+            .open(path.join("graph.hnsw.data"))
+            .unwrap();
+        // Corrupt by truncating to a few bytes; with the flag honored
+        // we should rebuild from cache and ignore this entirely.
+        h.set_len(8).unwrap();
+        h.write_all(&[0u8; 8]).unwrap();
+    }
+
+    let disabled_config = HnswConfig {
+        max_elements: 100,
+        dimension: 4,
+        persist_graph_dump: false,
+        ..Default::default()
+    };
+    let reloaded = HnswIndex::with_persistence(disabled_config, &path).unwrap();
+    // Search must still find the original vector via the rebuilt graph.
+    let mut q = vec![1.0, 0.0, 0.0, 0.0];
+    normalize(&mut q);
+    let results = reloaded.search(&q, 1).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].chunk_id, live_id);
+}
+
+#[test]
+fn legacy_config_without_persist_graph_dump_round_trips_via_serde() {
+    // Simulates loading an HnswConfig serialized by a pre-Phase-2 build:
+    // the new persist_graph_dump field is absent and serde must default
+    // it to true so the on-disk format stays back-compatible.
+    let legacy_json = r#"{
+        "max_connections": 16,
+        "ef_construction": 200,
+        "ef_search": 50,
+        "max_elements": 100,
+        "dimension": 4
+    }"#;
+    let config: HnswConfig = serde_json::from_str(legacy_json).unwrap();
+    assert!(
+        config.persist_graph_dump,
+        "missing persist_graph_dump must default to true for back-compat"
+    );
 }
