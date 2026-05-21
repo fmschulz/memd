@@ -21,6 +21,7 @@ mod batch;
 mod call;
 mod consolidate;
 mod eval_counterfactual;
+mod maintenance;
 mod memory_md;
 mod session_start;
 mod ops_bridge;
@@ -326,6 +327,34 @@ pub async fn run_cli<S: Store>(
 
         CliCommand::WarmWorker { socket } => {
             run_warm_worker(store, tenant_manager, &socket).await?;
+        }
+
+        CliCommand::Maintenance {
+            data_dir,
+            tenant_id,
+            dry_run,
+            aggressive,
+        } => {
+            // Resolution order (Codex Phase 5 HIGH): explicit subcommand
+            // --data-dir wins, then the top-level --data-dir / config
+            // (already resolved into tenant_manager), then the default
+            // discovery. Without this chain, `memd --data-dir /x
+            // maintenance` would silently operate on $HOME/.memd/data.
+            let data_dir = match data_dir {
+                Some(p) => p,
+                None => match tenant_manager {
+                    Some(tm) => tm.data_dir().to_path_buf(),
+                    None => resolve_data_dir(None)?,
+                },
+            };
+            let report = maintenance::run(
+                &data_dir,
+                tenant_id.as_deref(),
+                dry_run,
+                aggressive,
+            )?;
+            let rendered = maintenance::render_report(&report, dry_run, aggressive);
+            print!("{}", rendered);
         }
 
         CliCommand::Get {

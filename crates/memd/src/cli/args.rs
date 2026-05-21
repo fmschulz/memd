@@ -674,12 +674,44 @@ pub enum CliCommand {
         #[arg(long, default_value_t = true, action = ArgAction::Set)]
         write_agent_files: bool,
     },
+
+    /// Disk hygiene: sweep orphan HNSW snapshots, repack legacy mapping
+    /// files, and (with --aggressive) trigger optional compaction
+    /// hooks. Safe to run while no writer process is active; concurrent
+    /// writers may race on warm_index files and should be quiesced
+    /// first. Output is machine-greppable (key: value lines) so it can
+    /// be wired into ops scripts.
+    Maintenance {
+        /// Data directory (defaults to the top-level --data-dir or
+        /// ~/.memd/data).
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+
+        /// Restrict to a single tenant directory. Omit to scan all
+        /// tenants.
+        #[arg(long)]
+        tenant_id: Option<String>,
+
+        /// Report what would change without modifying disk.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Run the full pass: orphan sweep + segment compaction hooks
+        /// + mapping repack. Implies more I/O than the default sweep.
+        #[arg(long)]
+        aggressive: bool,
+    },
 }
 
 impl CliCommand {
     /// Whether this command needs an initialized backing store.
     pub fn requires_store(&self) -> bool {
-        !matches!(self, CliCommand::Init { .. } | CliCommand::Warm { .. })
+        !matches!(
+            self,
+            CliCommand::Init { .. }
+                | CliCommand::Warm { .. }
+                | CliCommand::Maintenance { .. }
+        )
     }
 
     /// Warm mode for commands that can be served by the local warm worker.
