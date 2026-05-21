@@ -7,7 +7,7 @@ workflow:
     name: memd
     version: 0.50.0
     repo_url: https://github.com/fmschulz/memd.git
-    commit_sha: PENDING_RELEASE_COMMIT
+    commit_sha: 70225cee4c026e2d2a9f5d3a20d164b4e1d1190f
     launch_command: cargo build --release -p memd
   execution:
     workdir: /home/fschulz/dev/software/memd
