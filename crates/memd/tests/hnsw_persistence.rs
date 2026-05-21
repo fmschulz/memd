@@ -251,3 +251,98 @@ fn test_hnsw_large_index_persistence() {
     let results = loaded.search(&query, 5).unwrap();
     assert!(!results.is_empty());
 }
+
+#[test]
+fn save_after_reload_does_not_create_orphan_snapshots() {
+    use std::fs;
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("warm_index");
+
+    let config = HnswConfig {
+        max_elements: 100,
+        dimension: 4,
+        ..Default::default()
+    };
+
+    // First cycle: create, populate, save.
+    {
+        let index = HnswIndex::with_persistence(config.clone(), &path).unwrap();
+        let mut emb = vec![1.0, 0.0, 0.0, 0.0];
+        normalize(&mut emb);
+        index.insert(&ChunkId::new(), &emb).unwrap();
+        index.save().unwrap();
+    }
+
+    // Second cycle: reload, add one more, save again. With hnsw_rs 0.3.3
+    // this triggers the unique-basename fallback because load_hnsw sets
+    // datamap_opt=true on the reloaded Hnsw, so file_dump refuses to
+    // overwrite "graph.hnsw.*" and emits "graph-NNNN.hnsw.*" instead.
+    {
+        let index = HnswIndex::with_persistence(config.clone(), &path).unwrap();
+        let mut emb = vec![0.0, 1.0, 0.0, 0.0];
+        normalize(&mut emb);
+        index.insert(&ChunkId::new(), &emb).unwrap();
+        index.save().unwrap();
+    }
+
+    // Canonical files = graph.hnsw.{graph,data}. Anything matching
+    // graph-*.hnsw.* is a stale snapshot the loader never reads.
+    let mut orphans = 0usize;
+    for entry in fs::read_dir(&path).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("graph-")
+            && (name.ends_with(".hnsw.graph") || name.ends_with(".hnsw.data"))
+        {
+            orphans += 1;
+        }
+    }
+    assert_eq!(
+        orphans, 0,
+        "found {} orphan HNSW snapshots in {:?}",
+        orphans, path
+    );
+}
+
+#[test]
+fn load_with_partial_canonical_dump_falls_back_to_rebuild() {
+    use std::fs;
+    use std::io::Write;
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("warm_index");
+
+    let config = HnswConfig {
+        max_elements: 100,
+        dimension: 4,
+        ..Default::default()
+    };
+
+    // Seed a working index, save, then corrupt the canonical dump to
+    // simulate a process crash that landed mid-`file_dump`.
+    let chunk_id = ChunkId::new();
+    {
+        let index = HnswIndex::with_persistence(config.clone(), &path).unwrap();
+        let mut emb = vec![1.0, 0.0, 0.0, 0.0];
+        normalize(&mut emb);
+        index.insert(&chunk_id, &emb).unwrap();
+        index.save().unwrap();
+    }
+
+    // Truncate-and-garbage both canonical files. hnsw_rs 0.3.3 can panic
+    // (not just return Err) on malformed dumps; load_dumped_graph wraps
+    // the call in catch_unwind and returns Ok(None) on panic so we fall
+    // through to rebuild_graph_from_cache.
+    for f in ["graph.hnsw.graph", "graph.hnsw.data"] {
+        let mut h = fs::File::create(path.join(f)).unwrap();
+        h.write_all(&[0u8; 64]).unwrap();
+    }
+
+    // Reload must succeed (no panic propagating, no error returned) and
+    // the index must still find the original vector via the cache rebuild.
+    let reloaded = HnswIndex::with_persistence(config, &path).unwrap();
+    let mut q = vec![1.0, 0.0, 0.0, 0.0];
+    normalize(&mut q);
+    let results = reloaded.search(&q, 1).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].chunk_id, chunk_id);
+}

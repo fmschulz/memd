@@ -179,6 +179,11 @@ impl HnswIndex {
     pub fn with_persistence(config: HnswConfig, path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
 
+        // One-shot cleanup of orphan dumps from older memd versions.
+        // Safe to call every load: it only removes `graph-NNNN.hnsw.*`
+        // files that the loader never reads anyway.
+        let _ = Self::purge_orphan_dumps(&path);
+
         let mapping_path = path.join("mapping.json");
         if mapping_path.exists() {
             match Self::load(&path, config.clone()) {
@@ -324,7 +329,15 @@ impl HnswIndex {
         self.save_to(path)
     }
 
-    /// Save index to specific path
+    /// Save index to specific path.
+    ///
+    /// Cleans up any orphan `graph-NNNN.hnsw.*` snapshots produced by an
+    /// earlier reload-then-save cycle. hnsw_rs 0.3.3's `HnswIo::load_hnsw`
+    /// unconditionally sets `datamap_opt = true` on the returned `Hnsw`,
+    /// which forces `file_dump` to pick a unique basename instead of
+    /// overwriting `graph.hnsw.{graph,data}`. The loader only ever reads
+    /// the canonical basename, so without this cleanup memd accumulates
+    /// ~200 MB of dead bytes per save after the first reload.
     pub fn save_to(&self, path: &Path) -> Result<()> {
         std::fs::create_dir_all(path)?;
 
@@ -362,6 +375,16 @@ impl HnswIndex {
         // Atomic rename
         std::fs::rename(&config_path_tmp, path.join("config.json"))?;
 
+        // Remove the canonical dump plus any orphan snapshots from
+        // previous reload-then-save cycles. hnsw_rs only falls back to a
+        // unique basename when the canonical files still exist, so the
+        // removal forces the default basename "graph" on the next dump.
+        // The window where neither file is present is brief and bounded
+        // by the `file_dump` call immediately below; a crash here leaves
+        // embeddings.bin + mapping.json intact, so the next startup
+        // rebuilds the graph from the embedding cache.
+        Self::purge_graph_dumps(path)?;
+
         // Save HNSW graph using hnsw_rs file_dump
         let hnsw = self.hnsw.read();
         hnsw.file_dump(path, "graph")
@@ -373,6 +396,101 @@ impl HnswIndex {
         }
 
         tracing::info!("Saved HNSW index to {:?}", path);
+        Ok(())
+    }
+
+    /// Remove the canonical HNSW dump and any orphan `graph-NNNN.hnsw.*`
+    /// snapshots left behind by hnsw_rs's unique-basename fallback. Used
+    /// immediately before `file_dump` so the dumper sees an empty slate
+    /// and writes to the canonical basename.
+    ///
+    /// Canonical deletions must succeed (or the file must already be
+    /// absent): if `graph.hnsw.graph` or `graph.hnsw.data` survives this
+    /// call, `file_dump` silently falls back to a unique basename and
+    /// the orphan leak this method exists to prevent recurs without any
+    /// log line. Orphan deletions stay best-effort — losing a stale
+    /// snapshot is a disk-space issue, not a correctness one.
+    fn purge_graph_dumps(path: &Path) -> Result<()> {
+        let entries = match std::fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(MemdError::StorageError(format!("read warm_index: {}", e))),
+        };
+        for entry in entries.flatten() {
+            // Only operate on regular files. Symlinks and directories that
+            // happen to match the name pattern are left untouched.
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if !file_type.is_file() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let is_canonical = name == "graph.hnsw.graph" || name == "graph.hnsw.data";
+            let is_orphan = name.starts_with("graph-")
+                && (name.ends_with(".hnsw.graph") || name.ends_with(".hnsw.data"));
+            if is_canonical {
+                match std::fs::remove_file(entry.path()) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(MemdError::StorageError(format!(
+                            "remove canonical dump {}: {}",
+                            name, e
+                        )));
+                    }
+                }
+            } else if is_orphan {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove only orphan `graph-NNNN.hnsw.*` snapshots, leaving the
+    /// canonical `graph.hnsw.*` pair intact. Invoked once on load so a
+    /// freshly-upgraded memd reclaims disk without waiting for the next
+    /// save. Best-effort: any IO error short of "directory missing" is
+    /// reported, but the caller treats this as advisory and continues.
+    fn purge_orphan_dumps(path: &Path) -> Result<()> {
+        let entries = match std::fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(MemdError::StorageError(format!("read warm_index: {}", e))),
+        };
+        let mut removed = 0u64;
+        let mut bytes = 0u64;
+        for entry in entries.flatten() {
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if !file_type.is_file() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("graph-")
+                && (name.ends_with(".hnsw.graph") || name.ends_with(".hnsw.data"))
+            {
+                if let Ok(meta) = entry.metadata() {
+                    bytes += meta.len();
+                }
+                if std::fs::remove_file(entry.path()).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+        if removed > 0 {
+            tracing::info!(
+                removed,
+                bytes_freed = bytes,
+                path = ?path,
+                "purged orphan HNSW snapshots"
+            );
+        }
         Ok(())
     }
 
@@ -489,14 +607,36 @@ impl HnswIndex {
             return Ok(None);
         }
 
-        // hnsw_rs ties the loaded graph lifetime to HnswIo because reload can
-        // mmap vector data. memd uses the default non-mmap reload, but keeping
-        // the loader alive for the process lifetime avoids unsound lifetime
-        // narrowing and is bounded to one tiny object per loaded tenant index.
-        let loader = Box::leak(Box::new(HnswIo::new(path, "graph")));
-        let hnsw = loader
-            .load_hnsw::<f32, DistCosine>()
-            .map_err(|e| MemdError::StorageError(format!("load hnsw dump: {e}")))?;
+        // hnsw_rs 0.3.3 can PANIC (not Err) on a partial/corrupt dump —
+        // `load_description` and friends contain `.unwrap()` / assertions.
+        // A crash that landed mid-`file_dump` leaves both canonical files
+        // present but truncated, which would otherwise propagate as an
+        // unwinding panic out of memd. Catch it here so we fall through
+        // to `rebuild_graph_from_cache`. On the panic path the leaked
+        // HnswIo is unreachable but not freed; the allocation is small
+        // (one per failed load) and the daemon stays up.
+        let load_result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<_> {
+                // hnsw_rs ties the loaded graph lifetime to HnswIo because reload can
+                // mmap vector data. memd uses the default non-mmap reload, but keeping
+                // the loader alive for the process lifetime avoids unsound lifetime
+                // narrowing and is bounded to one tiny object per loaded tenant index.
+                let loader = Box::leak(Box::new(HnswIo::new(path, "graph")));
+                loader
+                    .load_hnsw::<f32, DistCosine>()
+                    .map_err(|e| MemdError::StorageError(format!("load hnsw dump: {e}")))
+            }));
+        let hnsw = match load_result {
+            Ok(Ok(hnsw)) => hnsw,
+            Ok(Err(e)) => return Err(e),
+            Err(_panic) => {
+                tracing::warn!(
+                    path = ?path,
+                    "hnsw_rs panicked while loading graph dump (likely partial after crash); falling back to rebuild from embedding cache"
+                );
+                return Ok(None);
+            }
+        };
 
         let loaded_points = hnsw.get_nb_point();
         if loaded_points != expected_points {
