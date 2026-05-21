@@ -1,6 +1,6 @@
 # memd
 
-[![Version](https://img.shields.io/badge/version-0.30.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.31.0-blue)](CHANGELOG.md)
 [![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust&logoColor=white)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -23,6 +23,7 @@ background process driven through ordinary CLI commands.
 - [Architecture](#architecture)
 - [Quick start](#quick-start)
 - [CLI surface](#cli-surface)
+- [Self-Improvement Loop](#self-improvement-loop)
 - [Local operation surface](#local-operation-surface)
 - [Trust boundary](#trust-boundary)
 - [Shared topology](#shared-topology)
@@ -223,6 +224,64 @@ The default agent-facing commands are:
 - `memd export`, `memd export-markdown`, `memd export-omf`, `memd import-omf`
   — portable local memory operations.
 - `memd init` — write `.memd/` scope files and CLI guardrail blocks.
+- `memd memory-md` — refresh project-root `memory.md` with the strongest
+  takeaways for session-start use; pass `--cross-tenant` to add a
+  Cross-Tenant Takeaways section sourced from
+  `kind:consolidated, priority>=8` chunks across other tenants.
+- `memd consolidate` — call the configured LLM (Claude Haiku or Codex
+  Spark, selected by `MEMD_CONSOLIDATOR`) to rewrite recent chunks into
+  deduplicated `kind:consolidated` lessons. Sources are soft-tombstoned
+  via `ChunkStatus::Superseded` (never deleted). Add
+  `--promote-to-shared` to copy multi-project lessons into the
+  `MEMD_SHARED_TENANT` tenant for cross-project transfer.
+- `memd session-start` — refresh `memory.md` synchronously, then spawn a
+  background consolidation when enough chunks have accumulated. Wired
+  into Claude Code via the bundled skill installer; a Codex hook
+  template lives at `memd-skill/examples/codex_session_start_hook.json`.
+- `memd eval-counterfactual` — replay a JSONL benchmark file, write an
+  overlap@k / rank-shift report under `evals/bench/reports/`. Used to
+  monitor whether `kind:consolidated` lessons are load-bearing in
+  retrieval.
+
+## Self-Improvement Loop
+
+`memd` keeps the working set of takeaways durable and useful across
+sessions through four cooperating mechanisms — each is independent and
+can be inspected in isolation:
+
+1. **Heuristic priority at write time.** `memd add` (and the MCP
+   `memory.add` handler) stamp a `priority:N` tag (3..=7) inferred from
+   the chunk's `ChunkType`, `kind:*` tags, and validation/finish text
+   signals. Explicit user `priority:` / `importance:` tags always win on
+   overlap. This makes the `priority_score` formula in `memory.md` fire
+   without requiring agents to tag every write.
+2. **LLM consolidation.** `memd consolidate` builds a working region
+   from chunks written/retrieved since the last run, asks the
+   configured backend (`MEMD_CONSOLIDATOR=claude|codex|auto|mock`) to
+   rewrite them into deduplicated `kind:consolidated` lessons with
+   `supersedes:<csv>` provenance, and soft-tombstones the sources. The
+   prompt frames untrusted chunk text as a JSON array (so chunks cannot
+   forge instructions), runs under a single timeout that reaps zombie
+   subprocesses on expiry, and globally dedupes `supersedes` claims so
+   the same source can never be claimed twice.
+3. **Retrieval-success signal.** Every CLI search appends one JSONL
+   record per returned chunk to `.memd/data/hit_counts.jsonl`; the
+   `memory.md` priority formula consumes a per-chunk 30-day aggregate
+   (1 h TTL cache) — frequently-retrieved chunks get up to +8, chunks
+   with no hits older than 30 days get −2. `memd eval-counterfactual`
+   measures whether the `kind:consolidated` chunks are actually
+   moving ranks vs. a same-pass filtered baseline.
+4. **Cross-tenant transfer.** Opt-in via `memory-md --cross-tenant` and
+   `consolidate --promote-to-shared`: lessons that recur across
+   projects can be hoisted to a shared tenant, deduped, and surfaced
+   in every project's `memory.md` without copying private context.
+   Promotions are idempotent under a deterministic `provenance:<sha8>`
+   tag.
+
+The session-start hook (`memd session-start --project-dir
+"$CLAUDE_PROJECT_DIR"`) ties everything together: it refreshes
+`memory.md` synchronously, then kicks a background `memd consolidate`
+when ≥ 10 dirty chunks have accumulated.
 
 ## Local Operation Surface
 

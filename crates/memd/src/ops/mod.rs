@@ -4281,11 +4281,27 @@ async fn ensure_highlight_library_digest<S: Store>(
         .map(|artifact| artifact.timestamp_created)
         .max()
         .unwrap_or(0);
-    let summary = format!(
+    let covered_task_ids = highlights
+        .iter()
+        .map(|item| item.task_id.clone())
+        .filter(|id| !id.is_empty())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut summary = format!(
         "Highlight library for {} contains {} ranked lessons with future-agent uplift.",
         project_id.unwrap_or(tenant_id.as_str()),
         highlights.len()
     );
+    if !covered_task_ids.is_empty() {
+        // memory.md uses this `Covers tasks:` line to suppress raw
+        // task_finish chunks already represented in the digest.
+        summary.push_str("\nCovers tasks: ");
+        let joined = covered_task_ids
+            .iter()
+            .map(|id| format!("task:id:{id}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        summary.push_str(&joined);
+    }
     let warning_highlights = highlights
         .iter()
         .filter(|item| item.category == "warning")
@@ -5140,6 +5156,18 @@ pub async fn handle_memory_add<S: Store>(
         let mut tags = chunk.tags.clone();
         tags.extend(params.tags);
         chunk = chunk.with_tags(tags);
+    }
+
+    // Phase 1: heuristic auto-priority stamp. No-op if caller already
+    // set `priority:` or `importance:`. Lets `priority_score` in
+    // memory.md actually fire for typical agent writes.
+    {
+        let mut tags = chunk.tags.clone();
+        if crate::auto_priority::stamp_auto_priority(chunk.chunk_type, &chunk.text, &mut tags)
+            .is_some()
+        {
+            chunk = chunk.with_tags(tags);
+        }
     }
 
     // Track E: parse `mode` → IngestionMode (fail-closed) and apply

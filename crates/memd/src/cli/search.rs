@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use tracing::info;
 
 use crate::error::{MemdError, Result};
+use crate::hit_stats::{query_mode_label, record_hits, HitRecord};
 use crate::mcp::handlers::{handle_memory_search, SearchParams};
 use crate::store::Store;
 
@@ -19,6 +20,7 @@ pub(super) fn export_format_name(format: ExportFormat) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn cli_search_payload<S: Store>(
     store: &S,
     tenant_id: String,
@@ -30,6 +32,74 @@ pub(super) async fn cli_search_payload<S: Store>(
     mode: CliQueryMode,
     no_text: bool,
     include_artifact: bool,
+    include_superseded: bool,
+) -> Result<Value> {
+    cli_search_payload_inner(
+        store,
+        tenant_id,
+        project_id,
+        query,
+        k,
+        compact,
+        token_budget,
+        mode,
+        no_text,
+        include_artifact,
+        include_superseded,
+        true,
+    )
+    .await
+}
+
+/// Variant of [`cli_search_payload`] that suppresses hit logging.
+/// Used by internal probes (eval-counterfactual, future health
+/// checks) so synthetic queries do not pollute the retrieval-success
+/// signal that feeds `priority_score`.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn cli_search_payload_silent<S: Store>(
+    store: &S,
+    tenant_id: String,
+    project_id: Option<String>,
+    query: String,
+    k: usize,
+    compact: bool,
+    token_budget: Option<usize>,
+    mode: CliQueryMode,
+    no_text: bool,
+    include_artifact: bool,
+    include_superseded: bool,
+) -> Result<Value> {
+    cli_search_payload_inner(
+        store,
+        tenant_id,
+        project_id,
+        query,
+        k,
+        compact,
+        token_budget,
+        mode,
+        no_text,
+        include_artifact,
+        include_superseded,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn cli_search_payload_inner<S: Store>(
+    store: &S,
+    tenant_id: String,
+    project_id: Option<String>,
+    query: String,
+    k: usize,
+    compact: bool,
+    token_budget: Option<usize>,
+    mode: CliQueryMode,
+    no_text: bool,
+    include_artifact: bool,
+    include_superseded: bool,
+    log_hits: bool,
 ) -> Result<Value> {
     let payload = direct_memory_search_payload(
         store,
@@ -42,6 +112,7 @@ pub(super) async fn cli_search_payload<S: Store>(
         mode,
         no_text,
         include_artifact,
+        include_superseded,
     )
     .await?;
     let result_count = payload
@@ -50,7 +121,57 @@ pub(super) async fn cli_search_payload<S: Store>(
         .map_or(0, Vec::len);
 
     info!(count = result_count, "search complete");
+    if log_hits {
+        log_search_hits(&payload, &tenant_id, project_id.as_deref(), mode);
+    }
     Ok(payload)
+}
+
+/// Append one [`HitRecord`] per chunk in `payload["results"]` to the
+/// project-root hit log. Best-effort: every IO error inside
+/// `record_hits` is swallowed so retrieval never fails for this.
+fn log_search_hits(
+    payload: &Value,
+    tenant_id: &str,
+    project_id: Option<&str>,
+    mode: CliQueryMode,
+) {
+    let Some(results) = payload.get("results").and_then(Value::as_array) else {
+        return;
+    };
+    if results.is_empty() {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let query_mode = query_mode_label(&format!("{mode:?}"));
+    let records: Vec<HitRecord> = results
+        .iter()
+        .enumerate()
+        .filter_map(|(rank, result)| {
+            let chunk_id = result.get("chunk_id").and_then(Value::as_str)?;
+            if chunk_id.is_empty() {
+                return None;
+            }
+            let score = result.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+            // Compact-shaped payloads drop chunks past the token
+            // budget; what remains in `results` *was* rendered.
+            let selected = true;
+            Some(HitRecord {
+                ts_ms: now,
+                chunk_id: chunk_id.to_string(),
+                tenant_id: tenant_id.to_string(),
+                project_id: project_id.map(str::to_string),
+                query_mode: query_mode.clone(),
+                rank,
+                score,
+                selected,
+            })
+        })
+        .collect();
+    record_hits(&records);
 }
 
 const MEMRERANKER_HELPER: &str = r#"
@@ -401,8 +522,10 @@ pub(super) async fn cli_agent_context_payload<S: Store>(
             mode,
             no_text,
             include_artifact,
+            false,
         )
         .await?;
+        log_search_hits(&payload, tenant_id, project_id, mode);
         let results = payload
             .get("results")
             .and_then(Value::as_array)
@@ -437,6 +560,7 @@ pub(super) async fn cli_agent_context_payload<S: Store>(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn direct_memory_search_payload<S: Store>(
     store: &S,
     tenant_id: &str,
@@ -448,6 +572,7 @@ pub(super) async fn direct_memory_search_payload<S: Store>(
     mode: CliQueryMode,
     no_text: bool,
     include_artifact: bool,
+    include_superseded: bool,
 ) -> Result<Value> {
     let params = SearchParams {
         tenant_id: tenant_id.to_string(),
@@ -459,6 +584,7 @@ pub(super) async fn direct_memory_search_payload<S: Store>(
         token_budget,
         include_text: no_text.then_some(false),
         include_artifact: include_artifact.then_some(true),
+        include_superseded: include_superseded.then_some(true),
         ..Default::default()
     };
     let mcp_value = handle_memory_search(store, params)

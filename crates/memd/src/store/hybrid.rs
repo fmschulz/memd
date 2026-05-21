@@ -1553,6 +1553,7 @@ mod tests {
                 recency_half_life_days: 7.0,
                 project_weight: 0.0,
                 type_weight: 0.0,
+                query_text_weight: 0.0,
                 cross_encoder_weight: 1.0,
             },
             ..Default::default()

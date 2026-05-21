@@ -19,7 +19,10 @@ use crate::types::{ChunkId, MemoryChunk, ProjectId, Source, TenantId};
 mod args;
 mod batch;
 mod call;
+mod consolidate;
+mod eval_counterfactual;
 mod memory_md;
+mod session_start;
 mod ops_bridge;
 mod paths;
 mod render;
@@ -37,7 +40,10 @@ pub use args::{
 use args::{ProjectScopeConfig, SearchRerankerOptions};
 use batch::{read_batch_input, run_batch_jsonl, stream_batch_jsonl};
 use call::parse_call_arguments;
+use consolidate::{run_consolidate, ConsolidateOptions};
+use eval_counterfactual::{run_eval_counterfactual, EvalCounterfactualOptions};
 use memory_md::{refresh_memory_md, MemoryMdOptions};
+use session_start::{run_session_start, SessionStartOptions};
 use ops_bridge::cli_call_tool;
 use paths::{
     absolutize_project_dir, build_tenant_scope_config, normalize_absolute, path_is_inside,
@@ -87,9 +93,9 @@ pub async fn run_cli<S: Store>(
                 chunk = chunk.with_project(ProjectId::new(Some(pid)));
             }
 
-            if let Some(t) = tags {
-                chunk = chunk.with_tags(t);
-            }
+            let mut effective_tags = tags.unwrap_or_default();
+            crate::auto_priority::stamp_auto_priority(chunk_type, &text, &mut effective_tags);
+            chunk = chunk.with_tags(effective_tags);
 
             if source_uri.is_some() || source_path.is_some() {
                 let source = Source {
@@ -119,6 +125,7 @@ pub async fn run_cli<S: Store>(
             mode,
             no_text,
             include_artifact,
+            include_superseded,
             format,
             output,
             reranker,
@@ -140,6 +147,7 @@ pub async fn run_cli<S: Store>(
                 mode,
                 no_text,
                 include_artifact,
+                include_superseded,
             )
             .await?;
             payload = apply_search_reranker(
@@ -195,6 +203,7 @@ pub async fn run_cli<S: Store>(
             project_limit,
             global_limit,
             candidate_k,
+            cross_tenant,
         } => {
             let result = refresh_memory_md(
                 store,
@@ -206,9 +215,64 @@ pub async fn run_cli<S: Store>(
                     project_limit,
                     global_limit,
                     candidate_k,
+                    cross_tenant,
                 },
             )
             .await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+
+        CliCommand::Consolidate {
+            tenant_id,
+            project_id,
+            project_dir,
+            max_region,
+            dry_run,
+            background,
+            force,
+            promote_to_shared,
+        } => {
+            let result = run_consolidate(
+                store,
+                ConsolidateOptions {
+                    tenant_id,
+                    project_id,
+                    project_dir,
+                    max_region,
+                    dry_run,
+                    background,
+                    force,
+                    promote_to_shared,
+                },
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+
+        CliCommand::EvalCounterfactual {
+            tenant_id,
+            project_id,
+            project_dir,
+            queries,
+            k,
+        } => {
+            let result = run_eval_counterfactual(
+                store,
+                EvalCounterfactualOptions {
+                    tenant_id,
+                    project_id,
+                    project_dir,
+                    queries_path: queries,
+                    k,
+                },
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+
+        CliCommand::SessionStart { project_dir } => {
+            let result =
+                run_session_start(store, SessionStartOptions { project_dir }).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
 
@@ -863,6 +927,7 @@ mod tests {
                 project_limit: 10,
                 global_limit: 10,
                 candidate_k: 10,
+                cross_tenant: false,
             },
         )
         .await

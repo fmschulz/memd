@@ -1,0 +1,20 @@
+{"query": "tenant scoped cache keys", "label": "cache_tenant_scope"}
+{"query": "memory.md surfaces consolidated lessons", "label": "memory_md_surfaces"}
+{"query": "recurring failures bugs timeouts blockers fixes", "label": "find_failures_phrase"}
+{"query": "highlight library digest ranked lessons", "label": "highlight_library"}
+{"query": "project architecture configuration deployment tradeoffs", "label": "find_decisions_phrase"}
+{"query": "session start hook refresh memory.md background consolidate", "label": "session_start_hook"}
+{"query": "supersede chunk lifecycle metadata superseded by", "label": "supersede_flow"}
+{"query": "warm worker socket pid stale binary", "label": "warm_lifecycle"}
+{"query": "auto priority stamp kind decision evidence finish", "label": "auto_priority_stamp"}
+{"query": "consolidator backend claude haiku codex spark", "label": "consolidator_backends"}
+{"query": "hit counter jsonl aggregator retrieval signal", "label": "hit_counter"}
+{"query": "eval counterfactual overlap rank shift retrieval", "label": "eval_counterfactual"}
+{"query": "cross tenant takeaways shared tenant promotion", "label": "cross_tenant"}
+{"query": "project brief digest covers tasks suppression", "label": "project_brief"}
+{"query": "hybrid search dense sparse fallback text retrieval", "label": "hybrid_search"}
+{"query": "task finish event recording promotion state", "label": "task_finish"}
+{"query": "agent context bounded retrieval token budget markdown", "label": "agent_context"}
+{"query": "visibility filter superseded expired history oversample refill", "label": "visibility_filter"}
+{"query": "WAL checkpoint recovery replay metadata orphan", "label": "wal_recovery"}
+{"query": "memd skill enforcement install settings.json hooks", "label": "skill_install"}

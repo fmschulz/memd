@@ -215,6 +215,11 @@ pub enum CliCommand {
         #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
         include_artifact: bool,
 
+        /// Include superseded chunks (hidden by default) — for
+        /// provenance lookups of consolidated lessons.
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        include_superseded: bool,
+
         /// Output format
         #[arg(long, value_enum, default_value = "json")]
         format: ExportFormat,
@@ -340,6 +345,98 @@ pub enum CliCommand {
         /// Candidate memories to retrieve per query before scoring
         #[arg(long, default_value_t = 40)]
         candidate_k: usize,
+
+        /// Render a `## Cross-Tenant Takeaways` section sourced from
+        /// `kind:consolidated, priority>=8` chunks across every
+        /// tenant under the data root.
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        cross_tenant: bool,
+    },
+
+    /// Consolidate recent memory chunks into deduplicated lessons.
+    ///
+    /// Builds a working region from chunks written/retrieved since the
+    /// last run, asks the configured LLM consolidator to rewrite them,
+    /// persists `kind:consolidated` lessons, and soft-tombstones the
+    /// superseded sources. Backend is chosen by `MEMD_CONSOLIDATOR`.
+    Consolidate {
+        /// Tenant identifier. Defaults to `.memd/project_scope.json`
+        /// or `.memd/config.json` when present.
+        #[arg(long)]
+        tenant_id: Option<String>,
+
+        /// Optional project identifier. Defaults to the scope file.
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Project directory containing the `.memd` scope/state files.
+        #[arg(long, default_value = ".")]
+        project_dir: PathBuf,
+
+        /// Maximum chunks in the consolidation working region.
+        #[arg(long, default_value_t = 50)]
+        max_region: usize,
+
+        /// Build and print the prompt without calling the LLM.
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        dry_run: bool,
+
+        /// Run consolidation in a detached background process.
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        background: bool,
+
+        /// Consolidate even when the region is below the threshold.
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        force: bool,
+
+        /// Promote consolidated lessons that span ≥2 distinct
+        /// projects to `MEMD_SHARED_TENANT` (default `shared`).
+        /// OFF by default — never crosses the tenant boundary
+        /// without an explicit opt-in.
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        promote_to_shared: bool,
+    },
+
+    /// Counterfactual retrieval eval (Phase 3).
+    ///
+    /// For each query in the benchmark file, runs retrieval twice
+    /// (full bank vs. `kind:consolidated`-filtered) and reports the
+    /// overlap@k loss and mean rank shift. Writes a Markdown report
+    /// under `evals/bench/reports/`.
+    EvalCounterfactual {
+        /// Tenant identifier.
+        #[arg(long)]
+        tenant_id: String,
+
+        /// Optional project identifier.
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Project directory (resolves default queries file).
+        #[arg(long, default_value = ".")]
+        project_dir: PathBuf,
+
+        /// Path to the JSONL queries file. Defaults to
+        /// `evals/bench/queries/counterfactual_queries.jsonl` under
+        /// the project directory.
+        #[arg(long)]
+        queries: Option<PathBuf>,
+
+        /// Top-k for retrieval comparison.
+        #[arg(long, default_value_t = 5)]
+        k: usize,
+    },
+
+    /// Session-start hook entry point.
+    ///
+    /// Refreshes `memory.md` synchronously and, when enough chunks
+    /// have accumulated, spawns a detached background consolidation.
+    /// Safe to wire into a SessionStart hook for every repo: a
+    /// missing `.memd` scope is a clean no-op.
+    SessionStart {
+        /// Project directory containing the `.memd` scope/state files.
+        #[arg(long, default_value = ".")]
+        project_dir: PathBuf,
     },
 
     /// Invoke a local memd operation by its historical tool name.

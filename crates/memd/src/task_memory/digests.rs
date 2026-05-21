@@ -775,7 +775,19 @@ pub fn build_project_brief_view(
 }
 
 pub fn build_project_brief_digest_artifact(view: &ProjectBriefView) -> TaskArtifact {
-    let summary = view.overview.clone();
+    let mut summary = view.overview.clone();
+    if !view.source_task_ids.is_empty() {
+        // memory.md uses this `Covers tasks:` line to suppress raw
+        // task_finish chunks already represented in the digest.
+        summary.push_str("\nCovers tasks: ");
+        let joined = view
+            .source_task_ids
+            .iter()
+            .map(|id| format!("task:id:{id}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        summary.push_str(&joined);
+    }
     let what_failed = view
         .recent_failures
         .iter()
