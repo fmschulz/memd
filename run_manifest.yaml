@@ -1,14 +1,14 @@
-run_id: memd-docs-2026-03-21
-workflow_summary: "Repository-grounded documentation run for memd, a local MCP server for shared agent memory, task-oriented knowledge artifacts, structural code retrieval, and hybrid search."
+run_id: memd-release-v0.40.0
+workflow_summary: "Release provenance for memd v0.40.0 — local memory CLI for coding agents and AI scientists with hybrid retrieval, structured task memory, and a four-phase self-improvement loop (heuristic priority, LLM consolidation, retrieval-success scoring, opt-in cross-tenant transfer)."
 workflow:
   engine: other
   engine_version: NOT CAPTURED
   pipeline:
     name: memd
-    version: 0.1.0
+    version: 0.40.0
     repo_url: https://github.com/fmschulz/memd.git
-    commit_sha: 3b1fbabbff4e968ffc57992b127097e2d0dd0b2c
-    launch_command: cargo build --release && ./target/release/memd --mode mcp
+    commit_sha: d6bed1f6ece166f8f39e86ff824ad7d378a85115
+    launch_command: cargo build --release -p memd
   execution:
     workdir: /home/fschulz/dev/software/memd
 inputs:
@@ -17,27 +17,44 @@ inputs:
     notes: Workspace version, edition, dependency set
   - name: crate metadata
     uri: file://crates/memd/Cargo.toml
-    notes: memd package metadata and feature flags
+    notes: memd package metadata and feature flags (cross-encoder-reranker, live-llm, test-support)
   - name: top-level user documentation
     uri: file://README.md
-  - name: quickstart guide
-    uri: file://QUICKSTART.md
-  - name: MCP tool definitions
-    uri: file://crates/memd/src/mcp/tools.rs
+  - name: changelog
+    uri: file://CHANGELOG.md
+    notes: v0.40.0 release notes covering the self-improvement loop and reranker query-text bonus
+  - name: bundled skill
+    uri: file://memd-skill/SKILL.md
+    notes: Agent-facing skill documentation refreshed for v0.40.0
+  - name: bundled binary
+    uri: file://memd-skill/bin/linux-x64/memd
+    notes: Pre-compiled release binary, regenerated from cargo build --release
   - name: persistent store implementation
     uri: file://crates/memd/src/store/persistent.rs
   - name: dense retrieval implementation
     uri: file://crates/memd/src/store/dense.rs
   - name: hybrid retrieval implementation
     uri: file://crates/memd/src/store/hybrid.rs
+  - name: feature reranker (v0.40.0 query-text lexical bonus)
+    uri: file://crates/memd/src/retrieval/reranker.rs
+  - name: auto-priority module (Phase 1)
+    uri: file://crates/memd/src/auto_priority.rs
+  - name: consolidator module (Phase 2)
+    uri: file://crates/memd/src/consolidate/mod.rs
+  - name: consolidate CLI command (Phase 2)
+    uri: file://crates/memd/src/cli/consolidate.rs
+  - name: session-start CLI command (Phase 2)
+    uri: file://crates/memd/src/cli/session_start.rs
+  - name: hit-stats module (Phase 3)
+    uri: file://crates/memd/src/hit_stats.rs
+  - name: counterfactual eval CLI command (Phase 3)
+    uri: file://crates/memd/src/cli/eval_counterfactual.rs
+  - name: counterfactual benchmark queries (Phase 3)
+    uri: file://evals/bench/queries/counterfactual_queries.jsonl
+  - name: memory.md renderer with cross-tenant support (Phase 4)
+    uri: file://crates/memd/src/cli/memory_md.rs
   - name: task memory schema
     uri: file://crates/memd/src/task_memory/mod.rs
-  - name: task schema documentation
-    uri: file://docs/scientific-task-memory/schema/README.md
-  - name: offline retrieval benchmark protocol
-    uri: file://evals/BENCHMARK_PROTOCOL.md
-  - name: task memory benchmark results
-    uri: file://docs/scientific-task-memory/benchmark-results/task_memory_benchmark_results.md
 software:
   tools:
     - name: cargo
@@ -52,97 +69,151 @@ software:
 steps:
   - step_id: "1"
     name: Repository evidence audit
-    purpose: Record the repository state, branch, commit, toolchain versions, and source artifacts used to ground the documentation.
+    purpose: Record the repository state, commit, and toolchain versions backing the v0.40.0 release.
     tool: bash
-    command: git rev-parse HEAD && git branch --show-current && cargo --version && rustc --version && python3 --version
+    command: git rev-parse HEAD && git branch --show-current && cargo --version && rustc --version
     status: VERIFIED_IN_SESSION
     outputs:
-      - branch name
-      - commit SHA
+      - branch name (main)
+      - commit SHA (d6bed1f6ece166f8f39e86ff824ad7d378a85115)
       - toolchain versions
   - step_id: "2"
     name: Release build entrypoint
-    purpose: Produce the standalone memd binary used for persistent or in-memory MCP service deployment.
+    purpose: Produce the standalone memd binary used for CLI and bundled-skill deployment.
     tool: cargo
     tool_version: 1.92.0 (344c4567c 2025-10-21)
-    command: cargo build --release
-    status: DOCUMENTED_FROM_REPO
+    command: cargo build --release -p memd
+    status: VERIFIED_IN_SESSION
     outputs:
-      - target/release/memd
-    notes: Command is documented in README.md and QUICKSTART.md.
+      - target/release/memd (memd 0.40.0)
+      - memd-skill/bin/linux-x64/memd (re-bundled, identical artifact)
   - step_id: "3"
-    name: MCP server startup
-    purpose: Start memd as a stdio MCP server for agent clients.
-    tool: memd
-    tool_version: 0.1.0
-    command: ./target/release/memd --mode mcp
-    status: DOCUMENTED_FROM_REPO
+    name: Test suite
+    purpose: Verify the v0.40.0 release builds and all unit + integration tests pass before tagging.
+    tool: cargo
+    tool_version: 1.92.0 (344c4567c 2025-10-21)
+    command: cargo test -p memd
+    status: VERIFIED_IN_SESSION
     outputs:
-      - stdio MCP server
-    notes: Persistent mode uses ~/.memd/data by default; in-memory mode is available for disposable runs.
+      - 772 library tests passing
+      - 100+ integration tests across markdown_export, omf_roundtrip, cli_contract, dream_maintenance_contract, event_consolidation_contract, expiry_and_history, fuzzy_dedup, hnsw_persistence, ingestion_mode, lifecycle_overlay, trace_tools, visibility_filter, plus the new memory_md_phase1, consolidate_integration, phase3_eval_counterfactual, phase4_cross_tenant suites
   - step_id: "4"
-    name: Protocol smoke initialization
-    purpose: Verify that the MCP server starts and advertises its tool surface.
-    tool: memd
-    tool_version: 0.1.0
-    command: "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"quickstart\",\"version\":\"0.1.0\"}}}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}' | ./target/release/memd --mode mcp --in-memory --data-dir /tmp/memd-quickstart"
-    status: DOCUMENTED_FROM_REPO
+    name: Phase 1 — heuristic priority verification
+    purpose: Confirm `memd add` (CLI + MCP) auto-stamps `priority:N` based on type, kind tags, and validation text.
+    tool: cargo
+    tool_version: 1.92.0 (344c4567c 2025-10-21)
+    command: cargo test -p memd auto_priority --test memory_md_phase1
+    status: VERIFIED_IN_SESSION
     outputs:
-      - initialize response
-      - tools/list response
+      - 8 auto_priority unit tests passing
+      - 2 end-to-end memory.md suppression tests passing
   - step_id: "5"
+    name: Phase 2 — LLM consolidation verification
+    purpose: Confirm `memd consolidate` rewrites the working region into deduplicated `kind:consolidated` lessons with `supersedes:<csv>` provenance and soft-tombstones the sources.
+    tool: cargo
+    tool_version: 1.92.0 (344c4567c 2025-10-21)
+    command: cargo test -p memd consolidate --test consolidate_integration
+    status: VERIFIED_IN_SESSION
+    outputs:
+      - 35 consolidate unit tests passing (mod, claude_haiku, codex_spark, select, prompt, cli/consolidate)
+      - end-to-end integration test asserting 12 sources → 3 consolidated lessons, all sources Superseded, search excludes them, `--include-superseded` resurfaces them
+  - step_id: "6"
+    name: Phase 3 — hit counter + counterfactual eval
+    purpose: Confirm retrieval emits one JSONL hit record per returned chunk and that `memd eval-counterfactual` writes a Markdown report.
+    tool: cargo
+    tool_version: 1.92.0 (344c4567c 2025-10-21)
+    command: cargo test -p memd hit_stats eval_counterfactual --test phase3_eval_counterfactual
+    status: VERIFIED_IN_SESSION
+    outputs:
+      - 6 hit_stats tests passing (atomic-append boundary enforced, TTL cache honoured)
+      - 5 eval_counterfactual unit tests passing
+      - integration test confirms report under evals/bench/reports/counterfactual_<unix>.md
+  - step_id: "7"
+    name: Phase 4 — cross-tenant transfer
+    purpose: Confirm `--cross-tenant` and `--promote-to-shared` are strict opt-ins and produce idempotent, deduped output.
+    tool: cargo
+    tool_version: 1.92.0 (344c4567c 2025-10-21)
+    command: cargo test -p memd --test phase4_cross_tenant
+    status: VERIFIED_IN_SESSION
+    outputs:
+      - 4 integration tests passing (section renders only on flag, promotion fires only on flag, multi-project promotion produces deterministic provenance, near-duplicates collapse)
+  - step_id: "8"
     name: Optional ONNX reranker validation
     purpose: Verify that the feature-gated ONNX cross-encoder scorer can initialize and score a relevant pair above a distractor.
     tool: cargo
     tool_version: 1.92.0 (344c4567c 2025-10-21)
     command: cargo test -p memd --features cross-encoder-reranker smoke_real_onnx_scores_relevant_pair_higher -- --ignored --nocapture
-    status: VERIFIED_IN_SESSION
+    status: DOCUMENTED_FROM_REPO
     outputs:
-      - passing ONNX smoke test
-  - step_id: "6"
+      - passing ONNX smoke test (when run with the feature flag and downloaded model)
+  - step_id: "9"
     name: Offline retrieval benchmark harness
     purpose: Evaluate hybrid retrieval variants on kept BEIR-style datasets and smoke datasets using deterministic bootstrap confidence intervals.
     tool: cargo
     tool_version: 1.92.0 (344c4567c 2025-10-21)
-    command: "./evals/bench/scripts/run_offline_retrieval_benchmark.sh --model all-minilm --system-variant hybrid-feature --bootstrap-iterations 1000 --seed 42"
+    command: ./evals/bench/scripts/run_offline_retrieval_benchmark.sh --model all-minilm --system-variant hybrid-feature --bootstrap-iterations 1000 --seed 42
     status: DOCUMENTED_FROM_REPO
     outputs:
       - evals/bench/results/offline-*/cross_corpus_all-minilm_hybrid-feature.json
-  - step_id: "7"
-    name: Task memory benchmark harness
-    purpose: Compare generic memory chunk retrieval with the structured task-artifact retrieval path on the checked-in scientific task memory corpus.
-    tool: python3
-    tool_version: 3.11.14
-    command: python3 evals/bench/tools/task_memory_benchmark.py --memd-path target/debug/memd --corpus docs/scientific-task-memory/benchmark-results/task_memory_benchmark_corpus.json --workers 1 --ops-per-worker 1
-    status: DOCUMENTED_FROM_REPO
+  - step_id: "10"
+    name: Bundled skill smoke
+    purpose: Confirm the pre-compiled binary shipped under memd-skill/bin advertises every new subcommand.
+    tool: memd
+    tool_version: 0.40.0
+    command: memd-skill/bin/linux-x64/memd --help
+    status: VERIFIED_IN_SESSION
     outputs:
-      - docs/scientific-task-memory/benchmark-results/task_memory_benchmark_results.json
-      - docs/scientific-task-memory/benchmark-results/task_memory_benchmark_results.md
+      - memd-skill/bin/linux-x64/memd --version reports 0.40.0
+      - --help advertises memory-md, consolidate, eval-counterfactual, session-start
 qc_steps:
-  - Commands, version metadata, and software scope were cross-checked against repository artifacts before drafting.
-  - Task-memory benchmark numbers were taken only from checked-in benchmark result files.
-  - ONNX claims were limited to the feature-gated cross-encoder path and checked against code and a real ignored smoke test.
+  - Every version reference in the repo (Cargo.toml, README badge, tools/wiki/pyproject.toml, CHANGELOG header) was updated to 0.40.0 in one pass and verified with grep.
+  - Each of the four self-improvement phases was independently reviewed via `codex exec`; review records under tasks/reviews/phase{1..4}_codex.md address CRITICAL/HIGH/MEDIUM findings before the next phase landed.
+  - The pre-compiled binary under memd-skill/bin/linux-x64/memd was rebuilt from the v0.40.0 source tree and verified to surface every new subcommand.
+  - Test counts are taken from the final `cargo test -p memd` run on the v0.40.0 commit; no flaky-skip exclusions.
 outputs:
-  - METHODS.md
-  - MANUSCRIPT.md
-  - run_manifest.yaml
-limitations: This manifest documents a repository evidence synthesis run rather than a single Nextflow, Snakemake, or CWL execution. Release-build and benchmark entrypoints are documented from checked-in commands and results, but not all workflows were rerun end-to-end during this documentation pass.
+  - CHANGELOG.md (v0.40.0 release notes)
+  - README.md (self-improvement loop section, refreshed CLI surface)
+  - memd-skill/SKILL.md (session-start hook, consolidator backends, counterfactual eval, cross-tenant usage)
+  - memd-skill/bin/linux-x64/memd (v0.40.0 release binary)
+  - memd-skill/install_memd_enforcement.sh (idempotent Claude Code SessionStart hook wiring)
+  - memd-skill/examples/codex_session_start_hook.json (Codex hook template)
+  - run_manifest.yaml (this file)
+  - tasks/reviews/phase{1..4}_codex.md (per-phase Codex review records)
+limitations: This manifest documents the v0.40.0 release provenance pass — a synthesis of repository state, test verification, and reviewer feedback, rather than a single Nextflow, Snakemake, or CWL execution. The offline retrieval benchmark and ONNX smoke entrypoints are documented from checked-in commands; they are not rerun on every release.
 evidence:
   - Cargo.toml
-  - crates/memd/Cargo.toml
+  - CHANGELOG.md
   - README.md
-  - QUICKSTART.md
-  - configs/default.toml
+  - crates/memd/Cargo.toml
   - crates/memd/src/lib.rs
   - crates/memd/src/main.rs
+  - crates/memd/src/auto_priority.rs
+  - crates/memd/src/hit_stats.rs
+  - crates/memd/src/consolidate/mod.rs
+  - crates/memd/src/consolidate/claude_haiku.rs
+  - crates/memd/src/consolidate/codex_spark.rs
+  - crates/memd/src/consolidate/prompt.rs
+  - crates/memd/src/consolidate/select.rs
+  - crates/memd/src/cli/consolidate.rs
+  - crates/memd/src/cli/eval_counterfactual.rs
+  - crates/memd/src/cli/memory_md.rs
+  - crates/memd/src/cli/session_start.rs
   - crates/memd/src/mcp/tools.rs
   - crates/memd/src/store/persistent.rs
   - crates/memd/src/store/dense.rs
   - crates/memd/src/store/hybrid.rs
-  - crates/memd/src/index/bm25.rs
-  - crates/memd/src/index/hnsw.rs
+  - crates/memd/src/retrieval/reranker.rs
   - crates/memd/src/task_memory/mod.rs
-  - docs/scientific-task-memory/schema/README.md
-  - docs/scientific-task-memory/benchmark-results/README.md
-  - docs/scientific-task-memory/benchmark-results/task_memory_benchmark_results.md
-  - evals/BENCHMARK_PROTOCOL.md
+  - crates/memd/tests/memory_md_phase1.rs
+  - crates/memd/tests/consolidate_integration.rs
+  - crates/memd/tests/phase3_eval_counterfactual.rs
+  - crates/memd/tests/phase4_cross_tenant.rs
+  - evals/bench/queries/counterfactual_queries.jsonl
+  - memd-skill/SKILL.md
+  - memd-skill/bin/linux-x64/memd
+  - memd-skill/install_memd_enforcement.sh
+  - memd-skill/examples/codex_session_start_hook.json
+  - tasks/reviews/phase1_codex.md
+  - tasks/reviews/phase2_codex.md
+  - tasks/reviews/phase3_codex.md
+  - tasks/reviews/phase4_codex.md
