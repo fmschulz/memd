@@ -370,7 +370,7 @@ fn save_without_graph_dump_writes_only_embedding_cache() {
     }
 
     assert!(path.join("embeddings.bin").exists());
-    assert!(path.join("mapping.json").exists());
+    assert!(path.join("mapping.bin").exists());
     assert!(
         !path.join("graph.hnsw.graph").exists(),
         "graph dump must not exist when persist_graph_dump=false"
@@ -444,6 +444,121 @@ fn load_ignores_stale_dump_when_persist_graph_dump_disabled() {
     let results = reloaded.search(&q, 1).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].chunk_id, live_id);
+}
+
+#[test]
+fn save_writes_bincode_mapping_not_json() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("warm_index");
+
+    let config = HnswConfig {
+        dimension: 4,
+        max_elements: 100,
+        ..Default::default()
+    };
+    let index = HnswIndex::with_persistence(config, &path).unwrap();
+    let mut emb = vec![1.0, 0.0, 0.0, 0.0];
+    normalize(&mut emb);
+    index.insert(&ChunkId::new(), &emb).unwrap();
+    index.save().unwrap();
+
+    assert!(
+        path.join("mapping.bin").exists(),
+        "save must write mapping.bin"
+    );
+    assert!(
+        !path.join("mapping.json").exists(),
+        "mapping.json must not survive a fresh save under the new format"
+    );
+}
+
+#[test]
+fn load_falls_back_to_legacy_mapping_json() {
+    use std::fs;
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("warm_index");
+    fs::create_dir_all(&path).unwrap();
+
+    let config = HnswConfig {
+        dimension: 4,
+        max_elements: 100,
+        ..Default::default()
+    };
+
+    // Seed a real index, save (produces mapping.bin) — capture the
+    // chunk id so we can confirm the legacy-load preserves it.
+    let chunk_id = ChunkId::new();
+    {
+        let index = HnswIndex::with_persistence(config.clone(), &path).unwrap();
+        let mut emb = vec![1.0, 0.0, 0.0, 0.0];
+        normalize(&mut emb);
+        index.insert(&chunk_id, &emb).unwrap();
+        index.save().unwrap();
+    }
+    assert!(path.join("mapping.bin").exists());
+
+    // Simulate a legacy install: rename mapping.bin -> mapping.json by
+    // copying the serde_json projection of the deserialized mapping.
+    let bin_bytes = fs::read(path.join("mapping.bin")).unwrap();
+    let (legacy_mapping, _len): (memd::index::hnsw::IndexMapping, _) =
+        bincode::serde::decode_from_slice(&bin_bytes, bincode::config::standard()).unwrap();
+    fs::remove_file(path.join("mapping.bin")).unwrap();
+    fs::write(
+        path.join("mapping.json"),
+        serde_json::to_vec(&legacy_mapping).unwrap(),
+    )
+    .unwrap();
+
+    // Reload must accept mapping.json and still find the chunk.
+    let reloaded = HnswIndex::with_persistence(config, &path).unwrap();
+    assert_eq!(reloaded.len(), 1);
+    let mut q = vec![1.0, 0.0, 0.0, 0.0];
+    normalize(&mut q);
+    let results = reloaded.search(&q, 1).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].chunk_id, chunk_id);
+}
+
+#[test]
+fn legacy_mapping_json_is_replaced_on_next_save() {
+    use std::fs;
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("warm_index");
+    fs::create_dir_all(&path).unwrap();
+
+    let config = HnswConfig {
+        dimension: 4,
+        max_elements: 100,
+        ..Default::default()
+    };
+
+    // Seed via the new save format, then convert to legacy on disk.
+    let chunk_id = ChunkId::new();
+    {
+        let index = HnswIndex::with_persistence(config.clone(), &path).unwrap();
+        let mut emb = vec![1.0, 0.0, 0.0, 0.0];
+        normalize(&mut emb);
+        index.insert(&chunk_id, &emb).unwrap();
+        index.save().unwrap();
+    }
+    let bin_bytes = fs::read(path.join("mapping.bin")).unwrap();
+    let (legacy_mapping, _len): (memd::index::hnsw::IndexMapping, _) =
+        bincode::serde::decode_from_slice(&bin_bytes, bincode::config::standard()).unwrap();
+    fs::remove_file(path.join("mapping.bin")).unwrap();
+    fs::write(
+        path.join("mapping.json"),
+        serde_json::to_vec(&legacy_mapping).unwrap(),
+    )
+    .unwrap();
+
+    // Reopen + save. The legacy file must be gone after the save.
+    let index = HnswIndex::with_persistence(config, &path).unwrap();
+    index.save().unwrap();
+    assert!(path.join("mapping.bin").exists());
+    assert!(
+        !path.join("mapping.json").exists(),
+        "legacy mapping.json must be removed after first save under the new format"
+    );
 }
 
 #[test]
