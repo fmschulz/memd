@@ -110,6 +110,94 @@ memd add \
 Use higher priority for general, repeatedly useful lessons; lower priority for
 narrow progress notes.
 
+### Automatic session-start
+
+When the host is wired up (the bundled `memd-skill/install_memd_enforcement.sh
+--install-binary` script adds a Claude Code `SessionStart` hook; Codex users
+can copy `memd-skill/examples/codex_session_start_hook.json`), the
+session begins with:
+
+```bash
+memd session-start --project-dir "$CLAUDE_PROJECT_DIR"
+```
+
+This refreshes `memory.md` synchronously and — when ≥10 dirty chunks have
+accumulated since the last consolidation — spawns a detached `memd
+consolidate` in the background. A missing `.memd` scope is a clean no-op,
+so it is safe to leave the hook wired for every repo.
+
+### Write-time priority
+
+`memd add` (and the MCP `memory.add` handler) automatically stamp a heuristic
+`priority:N` tag (3..=7) based on `--chunk-type`, `kind:*` tags, and
+validation/finish text signals when the caller does not pass one. Explicit
+user tags always win on overlap, so passing `priority:8`/`priority:9` for
+genuinely load-bearing lessons remains the right move.
+
+### LLM consolidation
+
+If you keep recording small near-duplicate progress notes, run a manual
+consolidation pass to dedupe them into a smaller set of durable lessons:
+
+```bash
+memd consolidate --project-dir .
+```
+
+The selector reads `MEMD_CONSOLIDATOR`: `claude` runs
+`claude -p --model claude-haiku-4-5-20251001 --output-format json`,
+`codex` runs `codex exec --model codex-5.3-spark --json --skip-git-repo-check
+--sandbox read-only`, `auto` picks Codex when `$CODEX_*` is set and falls
+back to `claude` on `PATH`. The whole spawn → stdin write → wait sequence
+runs under one 60 s timeout that explicitly kills and reaps the child on
+expiry. The region is sent to the model as a JSON array so untrusted chunk
+text cannot forge prompt framing.
+
+Source chunks are soft-tombstoned (lifecycle status `Superseded`) — nothing
+is ever deleted; the raw records remain accessible via `memd search
+--include-superseded`. Consolidated chunks carry
+`kind:consolidated, priority:N, supersedes:<csv>, consolidator:<name>`
+plus the dominant inherited `ctx:*` tags.
+
+Skipped without `--force` when fewer than 10 chunks have accumulated since
+the previous run; `.memd/data/consolidate.state.json` tracks the watermark.
+
+For cross-project transfer (opt-in), add `--promote-to-shared`: lessons
+whose `supersedes` set spans ≥2 distinct named `project_id`s are copied to
+`$MEMD_SHARED_TENANT` (default `shared`) with provenance tags
+(`kind:cross_tenant_promoted, source_tenant:<orig>, source_chunk:<id>,
+source_projects:<csv>` plus a deterministic `provenance:<source>:<sha8>`
+that makes the promotion idempotent across re-runs).
+
+### Counterfactual retrieval eval
+
+To measure whether the LLM-produced consolidated lessons are actually
+load-bearing in retrieval (vs. being decorative), run:
+
+```bash
+memd eval-counterfactual \
+  --tenant-id "$TENANT_ID" \
+  --project-id "$PROJECT_ID" \
+  --k 5
+```
+
+This replays `evals/bench/queries/counterfactual_queries.jsonl` (one JSON
+object per line; `{"query": "...", "label": "..."}`) and writes a Markdown
+report to `evals/bench/reports/counterfactual_<unix>.md` with overlap@k
+loss and mean rank shift between the full retrieval pass and the same pass
+with `kind:consolidated` rows filtered out. Higher overlap-loss means the
+consolidated layer is doing real work.
+
+### Cross-tenant takeaways
+
+```bash
+memd memory-md --project-dir . --cross-tenant
+```
+
+Adds a `## Cross-Tenant Takeaways` section sourced from
+`kind:consolidated, priority>=8` chunks across every other tenant under
+the store data root, deduped by a normalised first-100-char key. OFF by
+default — the cross-tenant read only happens when the flag is passed.
+
 ## Retrieve Context
 
 Default pre-work command:

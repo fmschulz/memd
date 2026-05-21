@@ -1,11 +1,14 @@
 #![recursion_limit = "256"]
 
+pub mod auto_priority;
 pub mod chunking;
 pub mod cli;
 pub mod compaction;
 pub mod config;
+pub mod consolidate;
 pub mod embeddings;
 pub mod error;
+pub mod hit_stats;
 pub mod index;
 pub mod logging;
 pub mod maintenance;

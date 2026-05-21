@@ -103,6 +103,45 @@ install_binary() {
   mv "$tmp" "$target"
 }
 
+# Idempotently wire a Claude Code SessionStart hook that refreshes
+# memory.md and kicks a background consolidation. Existing settings
+# are preserved; the hook is only appended when not already present.
+wire_session_start_hook() {
+  local settings="${HOME}/.claude/settings.json"
+  mkdir -p "$(dirname "$settings")"
+  python - "$settings" <<'PY'
+import json, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+except (json.JSONDecodeError, OSError):
+    print("could not parse %s; leaving SessionStart hook unset" % path, file=sys.stderr)
+    sys.exit(0)
+if not isinstance(data, dict):
+    print("unexpected settings shape; leaving SessionStart hook unset", file=sys.stderr)
+    sys.exit(0)
+
+command = 'memd session-start --project-dir "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || true'
+hooks = data.setdefault("hooks", {})
+session_start = hooks.setdefault("SessionStart", [])
+
+already = any(
+    "memd session-start" in inner.get("command", "")
+    for group in session_start
+    for inner in group.get("hooks", [])
+)
+if already:
+    print("SessionStart hook already present; left unchanged")
+    sys.exit(0)
+
+session_start.append({"hooks": [{"type": "command", "command": command}]})
+path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+print("added memd SessionStart hook to %s" % path)
+PY
+}
+
 require_cmd python
 
 if [[ "$INSTALL_BINARY" -eq 1 ]]; then
@@ -137,10 +176,15 @@ upsert_block \
   "<!-- memd-enforcement:end -->" \
   "$ENFORCEMENT_SNIPPET"
 
+wire_session_start_hook
+
 printf 'Installed memd skill + CLI enforcement.\n'
 printf 'Updated:\n'
 printf '  - %s\n' "${HOME}/.codex/AGENTS.md"
 printf '  - %s\n' "${HOME}/.claude/CLAUDE.md"
+printf '  - %s (SessionStart hook)\n' "${HOME}/.claude/settings.json"
+printf 'Codex: copy memd-skill/examples/codex_session_start_hook.json into your\n'
+printf '       project .codex/hooks.json to enable the equivalent hook.\n'
 if [[ "$INSTALL_BINARY" -eq 1 ]]; then
   printf 'Installed bundled memd CLI: %s\n' "${LOCAL_BIN}/memd"
 fi

@@ -6,6 +6,17 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-05-21
+
+This release introduces the **memory self-improvement loop** — a
+continuously-updated, LLM-curated working set of takeaways that survives
+across sessions. Four cooperating mechanisms (heuristic priority at write
+time, LLM consolidation, retrieval-success counterfactual scoring,
+opt-in cross-tenant transfer) replace the previous purely extractive
+`memory.md` rendering. The reranker also gains a lightweight query-text
+lexical bonus that materially improves retrieval quality without
+requiring a cross-encoder.
+
 ### Added
 
 - Added `memd memory-md`, a session-start CLI command that refreshes a
@@ -13,6 +24,79 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   machine-wide takeaways ranked by explicit `priority:N` / `importance:N`
   tags, memory type, `kind:*` tags, recurrence, multi-query matches, and
   search score.
+- **Reranker: query-text lexical bonus.** `FeatureReranker` now blends a
+  query/document keyword + bigram + phrase + numeric overlap score
+  (weight 0.12 by default) into the final ranking, so a relevant chunk
+  whose RRF score is dragged down by long-tail noise still surfaces. The
+  bonus is bounded [0.0, 1.0] and uses ASCII-only tokenisation so it
+  cannot mis-score on Unicode text. Configurable via
+  `RerankerConfig::query_text_weight`.
+- **Phase 1 — Heuristic priority foundation.** New `auto_priority`
+  module stamps a `priority:N` tag (3..=7) at write time based on
+  `ChunkType`, `kind:*` tags, and validation/finish text signals;
+  explicit user tags always win. The cap is set below the
+  preserve-on-suppression threshold so heuristic stamps can never
+  masquerade as deliberate operator judgement. `memory.md` now adds
+  (a) a +15 priority bonus for `task:role:highlight_library`,
+  `task:role:project_brief`, and `kind:consolidated` chunks; (b) a
+  4th query targeting digests; (c) a post-merge filter that drops raw
+  `task:kind:task_finish` takeaways whose `task:id` is covered by a
+  system-generated digest (verified via `task:status:generated`),
+  keyed by `(project_id, task_id)` so cross-project finishes are
+  preserved, and skipping any chunk with explicit `priority>=8`.
+- **Phase 2 — LLM-backed consolidation.** New `consolidate` module
+  with a pluggable `Consolidator` trait and adapters for
+  `claude -p --model claude-haiku-4-5-20251001 --output-format json`
+  and `codex exec --model codex-5.3-spark --json`. Selected at runtime
+  via `MEMD_CONSOLIDATOR=claude|codex|auto|mock`. New `memd
+  consolidate` subcommand builds a working region from chunks
+  written/retrieved since the last run, calls the LLM to rewrite them
+  into deduplicated `kind:consolidated` lessons with
+  `supersedes:<csv>` provenance and `consolidator:<name>` attribution,
+  inherits the dominant `ctx:*` tags, and soft-tombstones every
+  source via `ChunkStatus::Superseded` (never deletes). Chunk text is
+  serialised as JSON inside the prompt so untrusted content cannot
+  forge framing. Subprocess execution timeouts the whole
+  spawn+write+wait sequence and reaps zombies on expiry. New `memd
+  session-start` subcommand refreshes `memory.md` synchronously then
+  spawns a detached `memd consolidate --background` when ≥ 10 dirty
+  chunks have accumulated (preflighting that a consolidator backend
+  exists). `memory.md` and `memd search` now hide
+  `kind:superseded`-tagged chunks; `memd search --include-superseded`
+  exposes them for provenance lookups. The bundled skill installer
+  wires the Claude Code SessionStart hook into
+  `~/.claude/settings.json` idempotently; a Codex example template
+  ships at `memd-skill/examples/codex_session_start_hook.json`.
+- **Phase 3 — Retrieval-success signal.** New `hit_stats` module
+  appends one JSONL record per returned chunk to
+  `.memd/data/hit_counts.jsonl` (one `write_all` per line, lines
+  ≥4 KiB dropped to preserve the Linux atomic-append boundary), with
+  a 1 h TTL aggregate cached to `.memd/data/hit_counts.summary.json`.
+  `priority_score` consumes those stats: +0.8 per recent selection
+  (capped at +8), −2 for chunks with zero hits older than 30 days.
+  New `memd eval-counterfactual` subcommand replays a JSONL
+  benchmark file (default
+  `evals/bench/queries/counterfactual_queries.jsonl`, 20 starter
+  queries included) and writes a Markdown report under
+  `evals/bench/reports/counterfactual_<unix>.md` with overlap@k loss
+  and mean rank shift between full retrieval and a
+  `kind:consolidated`-filtered baseline derived from the same
+  ranking pass. Internal probes call a `cli_search_payload_silent`
+  variant so they do not pollute the retrieval-success signal.
+- **Phase 4 — Cross-tenant transfer.** `memd memory-md
+  --cross-tenant` (opt-in) renders a `## Cross-Tenant Takeaways`
+  section sourced from `kind:consolidated, priority>=8` chunks
+  across every other tenant under the store data root, deduped by a
+  normalised first-100-char key. `memd consolidate
+  --promote-to-shared` (opt-in) copies any consolidated lesson whose
+  supersedes set spans ≥ 2 distinct named projects to the
+  `MEMD_SHARED_TENANT` (default `shared`) with
+  `kind:cross_tenant_promoted, source_tenant:<orig>,
+  source_chunk:<id>, source_projects:<csv>` provenance. Promotion is
+  idempotent — every promoted chunk carries a deterministic
+  `provenance:<source_tenant>:<sha8>` tag derived from the source
+  consolidated chunk id and the sorted supersedes list; duplicates
+  are detected and re-used.
 
 ### Changed
 

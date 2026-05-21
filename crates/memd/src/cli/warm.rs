@@ -164,6 +164,10 @@ fn warm_wire_command_from_cli(
             mode,
             no_text,
             include_artifact,
+            // The warm wire protocol does not carry this flag; a
+            // provenance lookup that opts into superseded chunks runs
+            // on the cold path instead.
+            include_superseded: false,
             format,
             output,
             reranker,
@@ -280,6 +284,7 @@ async fn execute_warm_wire_command<S: Store>(
                 mode,
                 no_text,
                 include_artifact,
+                false,
             )
             .await?;
             payload = apply_search_reranker(payload, &query, &reranker)?;
