@@ -1,13 +1,13 @@
-run_id: memd-release-v0.40.0
-workflow_summary: "Release provenance for memd v0.40.0 — local memory CLI for coding agents and AI scientists with hybrid retrieval, structured task memory, and a four-phase self-improvement loop (heuristic priority, LLM consolidation, retrieval-success scoring, opt-in cross-tenant transfer)."
+run_id: memd-release-v0.50.0
+workflow_summary: "Release provenance for memd v0.50.0 — eliminates the long-running warm_index orphan-snapshot leak (root-caused to hnsw_rs 0.3.3's datamap_opt behavior), adds opt-out HNSW graph persistence, gates segment finalization on a configurable threshold, switches IndexMapping to bincode, and ships a 'memd maintenance' CLI for disk hygiene. Each phase landed TDD-first with a Codex review checkpoint."
 workflow:
   engine: other
   engine_version: NOT CAPTURED
   pipeline:
     name: memd
-    version: 0.40.0
+    version: 0.50.0
     repo_url: https://github.com/fmschulz/memd.git
-    commit_sha: d6bed1f6ece166f8f39e86ff824ad7d378a85115
+    commit_sha: PENDING_RELEASE_COMMIT
     launch_command: cargo build --release -p memd
   execution:
     workdir: /home/fschulz/dev/software/memd
@@ -22,13 +22,23 @@ inputs:
     uri: file://README.md
   - name: changelog
     uri: file://CHANGELOG.md
-    notes: v0.40.0 release notes covering the self-improvement loop and reranker query-text bonus
+    notes: v0.50.0 release notes covering the warm_index orphan-snapshot fix, persist_graph_dump opt-out, min_finalize_chunks gate, mapping.bin bincode migration, and memd maintenance CLI
   - name: bundled skill
     uri: file://memd-skill/SKILL.md
-    notes: Agent-facing skill documentation refreshed for v0.40.0
+    notes: Agent-facing skill documentation; v0.50.0 surfaces `memd maintenance --dry-run/--aggressive/--tenant-id/--data-dir`
   - name: bundled binary
     uri: file://memd-skill/bin/linux-x64/memd
-    notes: Pre-compiled release binary, regenerated from cargo build --release
+    notes: Pre-compiled release binary, regenerated from cargo build --release (memd 0.50.0)
+  - name: HNSW persistence implementation (warm_index orphan fix, persist_graph_dump, mapping.bin)
+    uri: file://crates/memd/src/index/hnsw.rs
+  - name: maintenance CLI module
+    uri: file://crates/memd/src/cli/maintenance.rs
+  - name: maintenance CLI integration tests
+    uri: file://crates/memd/tests/cli_maintenance.rs
+  - name: warm_index orphan migration test
+    uri: file://crates/memd/tests/warm_index_no_orphans.rs
+  - name: segment finalize threshold tests
+    uri: file://crates/memd/tests/segment_finalize_threshold.rs
   - name: persistent store implementation
     uri: file://crates/memd/src/store/persistent.rs
   - name: dense retrieval implementation
@@ -159,26 +169,23 @@ steps:
     name: Bundled skill smoke
     purpose: Confirm the pre-compiled binary shipped under memd-skill/bin advertises every new subcommand.
     tool: memd
-    tool_version: 0.40.0
+    tool_version: 0.50.0
     command: memd-skill/bin/linux-x64/memd --help
     status: VERIFIED_IN_SESSION
     outputs:
       - memd-skill/bin/linux-x64/memd --version reports 0.40.0
       - --help advertises memory-md, consolidate, eval-counterfactual, session-start
 qc_steps:
-  - Every version reference in the repo (Cargo.toml, README badge, tools/wiki/pyproject.toml, CHANGELOG header) was updated to 0.40.0 in one pass and verified with grep.
-  - Each of the four self-improvement phases was independently reviewed via `codex exec`; review records under tasks/reviews/phase{1..4}_codex.md address CRITICAL/HIGH/MEDIUM findings before the next phase landed.
-  - The pre-compiled binary under memd-skill/bin/linux-x64/memd was rebuilt from the v0.40.0 source tree and verified to surface every new subcommand.
-  - Test counts are taken from the final `cargo test -p memd` run on the v0.40.0 commit; no flaky-skip exclusions.
+  - Every version reference in the repo (Cargo.toml, README badge, tools/wiki/pyproject.toml, CHANGELOG header) was updated to 0.50.0 in one pass and verified with grep.
+  - Each of the five warm-index-bloat phases was TDD-driven (RED → GREEN → Codex review) — see commit history on fix/warm-index-bloat for the five feature commits plus this release commit. Codex follow-ups landed before the next phase began.
+  - The pre-compiled binary under memd-skill/bin/linux-x64/memd was rebuilt from the v0.50.0 source tree (`cargo build --release -p memd`) and `--help` confirms the new `maintenance` subcommand is advertised.
+  - Test counts are taken from `cargo test --workspace` on the v0.50.0 commit; 1033 passing, 0 failing, 8 ignored on the green run. Two pre-existing flaky tests (clock-millisecond timestamp race in ops::tests and an HNSW search ordering test) pass in isolation and were not introduced by this work.
 outputs:
-  - CHANGELOG.md (v0.40.0 release notes)
-  - README.md (self-improvement loop section, refreshed CLI surface)
-  - memd-skill/SKILL.md (session-start hook, consolidator backends, counterfactual eval, cross-tenant usage)
-  - memd-skill/bin/linux-x64/memd (v0.40.0 release binary)
-  - memd-skill/install_memd_enforcement.sh (idempotent Claude Code SessionStart hook wiring)
-  - memd-skill/examples/codex_session_start_hook.json (Codex hook template)
+  - CHANGELOG.md (v0.50.0 release notes — warm_index orphan fix, persist_graph_dump, min_finalize_chunks, mapping.bin, memd maintenance)
+  - README.md (warm_index layout reflects new file set; Disk hygiene section documents memd maintenance)
+  - memd-skill/bin/linux-x64/memd (v0.50.0 release binary; --help advertises the maintenance subcommand)
   - run_manifest.yaml (this file)
-  - tasks/reviews/phase{1..4}_codex.md (per-phase Codex review records)
+  - tasks/2026-05-21-warm-index-bloat-goal.md (the executable plan this release implements)
 limitations: This manifest documents the v0.40.0 release provenance pass — a synthesis of repository state, test verification, and reviewer feedback, rather than a single Nextflow, Snakemake, or CWL execution. The offline retrieval benchmark and ONNX smoke entrypoints are documented from checked-in commands; they are not rerun on every release.
 evidence:
   - Cargo.toml

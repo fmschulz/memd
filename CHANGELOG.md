@@ -6,6 +6,73 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [0.50.0] - 2026-05-21
+
+This release eliminates the long-running warm_index orphan-snapshot leak
+and ships disk-hygiene tooling that lets operators reclaim space without
+manual file-juggling. Triage measured one production tenant's warm_index
+at ~249 GB while the underlying chunk data was a few hundred MB — a
+single hnsw_rs reload-then-save behavior was the culprit. The fix is
+narrow, foundational, and TDD-driven, with a Codex code review checkpoint
+on every phase.
+
+### Fixed
+
+- HNSW warm index no longer leaks orphan `graph-NNNN.hnsw.*` snapshots
+  on every save. Root cause: hnsw_rs 0.3.3's `HnswIo::load_hnsw`
+  unconditionally sets `datamap_opt = true` on the returned `Hnsw`,
+  forcing `file_dump` into the unique-basename fallback. The loader
+  only ever reads the canonical basename, so every reload-then-save
+  cycle stranded one fresh snapshot pair on disk. Existing orphans
+  are swept on the next load and reclaimed at scale via `memd
+  maintenance`. Triage on one long-lived install observed a single
+  tenant's warm_index at ~249 GB (with ~1.5k stale snapshots) before
+  this fix; per-install footprint will vary with reload-then-save
+  frequency.
+- `HnswIndex::load` now wraps `hnsw_rs::load_hnsw` in `catch_unwind`.
+  A crash that landed mid-`file_dump` leaves both canonical files
+  present but truncated; hnsw_rs panics (not Err) when reading those.
+  The daemon now degrades to rebuild-from-embedding-cache instead of
+  unwinding.
+
+### Added
+
+- `HnswConfig.persist_graph_dump` (default `true`): set to `false` to
+  skip the HNSW graph dump entirely and rely on rebuilding from
+  `embeddings.bin` on load. Halves warm_index disk footprint at the
+  cost of one rebuild pass per startup. Old configs lacking the field
+  deserialize to `true` for back-compat.
+- `PersistentStoreConfig.min_finalize_chunks` (default `256`): active
+  segments below this threshold are not sealed on graceful shutdown
+  or Drop. The chunks remain durable via WAL replay on the next
+  startup. The gate disables itself automatically when
+  `wal_checkpoint_interval > 0` so checkpointing-enabled deployments
+  do not lose data. KNOWN LIMITATION: today the WAL recovery rewrite
+  path still creates a fresh segment per startup; the visible
+  cross-run segment-count reduction needs a follow-up segment-reuse
+  patch (incremental `payload.idx` persistence + open-for-append).
+  This release lands the configurable surface so the reuse work has a
+  stable entry point.
+- `memd maintenance` CLI subcommand. Flags:
+  - `--data-dir <p>` (inherits the top-level `--data-dir` if omitted)
+  - `--tenant-id <t>` restricts the sweep to one tenant
+  - `--dry-run` reports without modifying disk
+  - `--aggressive` runs the full pass (orphan sweep today; segment
+    compaction and mapping repack hooks reserved for follow-up).
+  Output is greppable key:value (`removed_orphan_snapshots: N` for
+  real runs, `would_remove_orphan_snapshots: N` for dry runs, plus
+  `orphan_snapshots_failed: M` for real runs that hit unlink errors).
+
+### Changed
+
+- `IndexMapping` now persists as `mapping.bin` (bincode, `config::standard()`)
+  instead of `mapping.json`. Bincode is typically several times more
+  compact than the equivalent JSON for this struct shape; cold-load
+  parsing is correspondingly faster. Legacy `mapping.json` is read
+  once on upgrade and the next save rewrites as `mapping.bin` and
+  removes the JSON file. Crash between rename and remove leaves a
+  loadable state (parent-dir sync runs between the two operations).
+
 ## [0.40.0] - 2026-05-21
 
 This release introduces the **memory self-improvement loop** — a
