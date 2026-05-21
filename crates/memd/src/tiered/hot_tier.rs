@@ -45,6 +45,7 @@ impl Default for HotTierConfig {
                 ef_search: 30, // Lower than warm tier (50) for faster queries
                 max_elements: 50_000,
                 dimension: 384,
+                persist_graph_dump: true,
             },
         }
     }
@@ -351,6 +352,7 @@ mod tests {
                 ef_search: 30,
                 max_elements: 100,
                 dimension: 4,
+                persist_graph_dump: true,
             },
         }
     }

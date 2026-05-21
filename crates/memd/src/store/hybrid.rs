@@ -329,6 +329,7 @@ impl HybridSearcher {
                 max_connections: 16,
                 ef_construction: 200,
                 ef_search: 30, // Lower than warm tier for faster queries
+                persist_graph_dump: true,
             },
             ..Default::default()
         };

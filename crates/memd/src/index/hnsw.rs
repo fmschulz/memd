@@ -32,6 +32,19 @@ pub struct HnswConfig {
     pub max_elements: usize,
     /// Embedding dimension
     pub dimension: usize,
+    /// If true, also persist the full HNSW graph to disk as
+    /// `graph.hnsw.{graph,data}` for fast startup. If false, only the
+    /// embedding cache + mapping are written and the graph is rebuilt
+    /// from the cache on load. The cache is already the source of truth
+    /// so this halves warm_index disk footprint on disk-constrained
+    /// installs. Defaults to true; older on-disk configs that lack the
+    /// field deserialize to true via `default_persist_graph_dump`.
+    #[serde(default = "default_persist_graph_dump")]
+    pub persist_graph_dump: bool,
+}
+
+fn default_persist_graph_dump() -> bool {
+    true
 }
 
 impl Default for HnswConfig {
@@ -42,6 +55,7 @@ impl Default for HnswConfig {
             ef_search: 50,         // Higher = better recall, slower search
             max_elements: 100_000, // 100K chunks per tenant
             dimension: 384,        // all-MiniLM-L6-v2 (TODO: 1024 for Qwen3 upgrade)
+            persist_graph_dump: true,
         }
     }
 }
@@ -379,16 +393,26 @@ impl HnswIndex {
         // previous reload-then-save cycles. hnsw_rs only falls back to a
         // unique basename when the canonical files still exist, so the
         // removal forces the default basename "graph" on the next dump.
-        // The window where neither file is present is brief and bounded
-        // by the `file_dump` call immediately below; a crash here leaves
-        // embeddings.bin + mapping.json intact, so the next startup
-        // rebuilds the graph from the embedding cache.
+        // We purge unconditionally — leaving a stale dump while
+        // `persist_graph_dump = false` would break the
+        // embedding-cache-is-source-of-truth invariant. The window where
+        // neither file is present is brief and bounded by the
+        // `file_dump` call below; a crash there leaves embeddings.bin +
+        // mapping.json intact, so the next startup rebuilds the graph
+        // from the embedding cache.
         Self::purge_graph_dumps(path)?;
 
-        // Save HNSW graph using hnsw_rs file_dump
-        let hnsw = self.hnsw.read();
-        hnsw.file_dump(path, "graph")
-            .map_err(|e| MemdError::StorageError(format!("dump hnsw: {:?}", e)))?;
+        if self.config.persist_graph_dump {
+            // Save HNSW graph using hnsw_rs file_dump
+            let hnsw = self.hnsw.read();
+            hnsw.file_dump(path, "graph")
+                .map_err(|e| MemdError::StorageError(format!("dump hnsw: {:?}", e)))?;
+        } else {
+            tracing::debug!(
+                path = ?path,
+                "persist_graph_dump=false; skipping HNSW file_dump, graph will be rebuilt from embedding cache on next load"
+            );
+        }
 
         // Sync parent directory
         if let Ok(dir) = File::open(path) {
@@ -547,8 +571,17 @@ impl HnswIndex {
         };
 
         let expected_points = embedding_cache.len();
-        let (hnsw, point_count, loaded_dump) = match Self::load_dumped_graph(path, expected_points)
-        {
+        // When persist_graph_dump=false, ignore any stale graph dump
+        // left over from a previous run that had the flag set. Loading
+        // it would silently surface old graph state until the next save
+        // purges the files, breaking the embedding-cache-is-source-of-
+        // truth invariant for read-only / read-mostly workloads.
+        let dump_load_result = if config.persist_graph_dump {
+            Self::load_dumped_graph(path, expected_points)
+        } else {
+            Ok(None)
+        };
+        let (hnsw, point_count, loaded_dump) = match dump_load_result {
             Ok(Some(hnsw)) => {
                 let count = hnsw.get_nb_point();
                 (hnsw, count, true)
