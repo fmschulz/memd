@@ -6,7 +6,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
-## [0.31.0] - 2026-05-21
+## [0.40.0] - 2026-05-21
 
 This release introduces the **memory self-improvement loop** — a
 continuously-updated, LLM-curated working set of takeaways that survives
