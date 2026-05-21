@@ -205,8 +205,7 @@ impl HnswIndex {
         // Accept either the new bincode mapping or the legacy JSON
         // mapping. Order matters only for layout discoverability; load()
         // itself prefers .bin.
-        let has_mapping =
-            path.join("mapping.bin").exists() || path.join("mapping.json").exists();
+        let has_mapping = path.join("mapping.bin").exists() || path.join("mapping.json").exists();
         if has_mapping {
             match Self::load(&path, config.clone()) {
                 Ok(index) => {
@@ -570,10 +569,9 @@ impl HnswIndex {
             let mut buf = Vec::new();
             file.read_to_end(&mut buf)?;
             let (mapping, _len) =
-                bincode::serde::decode_from_slice(&buf, bincode::config::standard())
-                    .map_err(|e| {
-                        MemdError::StorageError(format!("deserialize mapping.bin: {}", e))
-                    })?;
+                bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map_err(
+                    |e| MemdError::StorageError(format!("deserialize mapping.bin: {}", e)),
+                )?;
             mapping
         } else if json_path.exists() {
             tracing::info!(

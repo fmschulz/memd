@@ -71,7 +71,11 @@ pub fn run(
     }
 
     let entries = std::fs::read_dir(&tenants_root).map_err(|e| {
-        MemdError::StorageError(format!("read tenants dir {}: {}", tenants_root.display(), e))
+        MemdError::StorageError(format!(
+            "read tenants dir {}: {}",
+            tenants_root.display(),
+            e
+        ))
     })?;
 
     for entry in entries {
@@ -101,16 +105,13 @@ pub fn run(
     Ok(report)
 }
 
-fn sweep_warm_index(
-    warm: &Path,
-    dry_run: bool,
-    report: &mut MaintenanceReport,
-) -> Result<()> {
+fn sweep_warm_index(warm: &Path, dry_run: bool, report: &mut MaintenanceReport) -> Result<()> {
     if !warm.exists() {
         return Ok(());
     }
-    let entries = std::fs::read_dir(warm)
-        .map_err(|e| MemdError::StorageError(format!("read warm_index {}: {}", warm.display(), e)))?;
+    let entries = std::fs::read_dir(warm).map_err(|e| {
+        MemdError::StorageError(format!("read warm_index {}: {}", warm.display(), e))
+    })?;
     for entry in entries {
         let entry =
             entry.map_err(|e| MemdError::StorageError(format!("warm_index entry: {}", e)))?;
