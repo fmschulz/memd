@@ -8,6 +8,9 @@ description = "Local memory CLI for AI agents with hybrid retrieval"
 [features]
 default = []
 cross-encoder-reranker = ["dep:ort", "dep:ndarray", "dep:flate2", "dep:tar"]
+# Opt-in: run consolidation tests that invoke a real `claude`/`codex`
+# CLI. OFF by default so the suite stays hermetic and offline.
+live-llm = []
 # Exposes `pub(crate)` test-only helpers (e.g.
 # `SqliteMetadataStore::force_timestamp_created`) to integration tests in
 # `crates/memd/tests/` that cannot see `#[cfg(test)]` items. The feature is

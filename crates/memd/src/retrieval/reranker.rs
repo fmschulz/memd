@@ -6,6 +6,7 @@
 #[cfg(feature = "cross-encoder-reranker")]
 use super::onnx_cross_encoder;
 use crate::types::{ChunkId, ChunkType};
+use std::collections::HashSet;
 
 /// Reranker strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +38,8 @@ pub struct RerankerConfig {
     pub project_weight: f32,
     /// Weight for type match bonus.
     pub type_weight: f32,
+    /// Weight for lightweight query-text lexical match bonus.
+    pub query_text_weight: f32,
     /// Weight for cross-encoder interaction score.
     pub cross_encoder_weight: f32,
 }
@@ -50,6 +53,7 @@ impl Default for RerankerConfig {
             recency_half_life_days: 7.0,
             project_weight: 0.2,
             type_weight: 0.05,
+            query_text_weight: 0.12,
             cross_encoder_weight: 0.7,
         }
     }
@@ -158,10 +162,15 @@ impl FeatureReranker {
                     self.compute_project_bonus(&chunk.project_id, &context.current_project);
                 let type_bonus =
                     self.compute_type_bonus(chunk.chunk_type, &context.preferred_types);
+                let query_text_bonus = self.compute_query_text_bonus(
+                    context.query_text.as_deref().unwrap_or_default(),
+                    chunk.text.as_deref(),
+                );
                 let final_score = self.config.rrf_weight * chunk.rrf_score
                     + self.config.recency_weight * recency_bonus
                     + self.config.project_weight * project_bonus
-                    + self.config.type_weight * type_bonus;
+                    + self.config.type_weight * type_bonus
+                    + self.config.query_text_weight * query_text_bonus;
 
                 RankedResult {
                     chunk_id: chunk.chunk_id,
@@ -203,6 +212,62 @@ impl FeatureReranker {
         } else {
             0.0
         }
+    }
+
+    fn compute_query_text_bonus(&self, query: &str, text: Option<&str>) -> f32 {
+        let Some(text) = text else {
+            return 0.0;
+        };
+        if query.trim().is_empty() || text.trim().is_empty() {
+            return 0.0;
+        }
+
+        let query_tokens = signal_query_tokens(query);
+        if query_tokens.is_empty() {
+            return 0.0;
+        }
+
+        let text_tokens = ascii_tokens(text);
+        if text_tokens.is_empty() {
+            return 0.0;
+        }
+
+        let query_unique: HashSet<&str> = query_tokens.iter().map(String::as_str).collect();
+        let text_unique: HashSet<&str> = text_tokens.iter().map(String::as_str).collect();
+        let overlap = query_unique.intersection(&text_unique).count() as f32;
+        let keyword_score = overlap / query_unique.len() as f32;
+
+        let query_bigrams = bigram_set(&query_tokens);
+        let text_bigrams = bigram_set(&text_tokens);
+        let bigram_score = if query_bigrams.is_empty() {
+            0.0
+        } else {
+            query_bigrams.intersection(&text_bigrams).count() as f32 / query_bigrams.len() as f32
+        };
+
+        let text_norm = text_tokens.join(" ");
+        let phrase_score = if query_phrases(query, &query_tokens)
+            .iter()
+            .any(|phrase| text_norm.contains(phrase))
+        {
+            1.0
+        } else {
+            0.0
+        };
+
+        let query_numbers: HashSet<&str> = query_tokens
+            .iter()
+            .filter(|token| has_ascii_digit(token))
+            .map(String::as_str)
+            .collect();
+        let numeric_score = if query_numbers.is_empty() {
+            0.0
+        } else {
+            query_numbers.intersection(&text_unique).count() as f32 / query_numbers.len() as f32
+        };
+
+        (0.60 * keyword_score + 0.20 * bigram_score + 0.10 * phrase_score + 0.10 * numeric_score)
+            .clamp(0.0, 1.0)
     }
 }
 
@@ -338,6 +403,118 @@ fn sort_desc(results: &mut [RankedResult]) {
     });
 }
 
+fn ascii_tokens(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
+}
+
+fn signal_query_tokens(query: &str) -> Vec<String> {
+    ascii_tokens(query)
+        .into_iter()
+        .filter(|token| has_ascii_digit(token) || (token.len() >= 3 && !is_query_stopword(token)))
+        .collect()
+}
+
+const QUERY_TEXT_STOPWORDS: &[&str] = &[
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "been",
+    "but",
+    "by",
+    "can",
+    "could",
+    "did",
+    "do",
+    "does",
+    "for",
+    "from",
+    "had",
+    "has",
+    "have",
+    "he",
+    "her",
+    "hers",
+    "him",
+    "his",
+    "how",
+    "i",
+    "in",
+    "into",
+    "is",
+    "it",
+    "its",
+    "list",
+    "me",
+    "of",
+    "on",
+    "or",
+    "our",
+    "she",
+    "summarize",
+    "that",
+    "the",
+    "their",
+    "them",
+    "then",
+    "there",
+    "they",
+    "this",
+    "to",
+    "was",
+    "we",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "whom",
+    "whose",
+    "why",
+    "will",
+    "with",
+    "would",
+    "you",
+    "your",
+];
+
+fn is_query_stopword(token: &str) -> bool {
+    QUERY_TEXT_STOPWORDS.contains(&token)
+}
+
+fn has_ascii_digit(token: &str) -> bool {
+    token.chars().any(|c| c.is_ascii_digit())
+}
+
+fn bigram_set(tokens: &[String]) -> HashSet<(String, String)> {
+    tokens
+        .windows(2)
+        .map(|pair| (pair[0].clone(), pair[1].clone()))
+        .collect()
+}
+
+fn query_phrases(query: &str, signal_tokens: &[String]) -> Vec<String> {
+    let mut phrases = Vec::new();
+    let parts: Vec<&str> = query.split('"').collect();
+    for quoted in parts.iter().skip(1).step_by(2) {
+        let quoted_tokens = signal_query_tokens(quoted);
+        if quoted_tokens.len() >= 2 {
+            phrases.push(quoted_tokens.join(" "));
+        }
+    }
+    if signal_tokens.len() >= 3 {
+        phrases.push(signal_tokens.join(" "));
+    }
+    phrases
+}
+
 fn tokenize(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|token| !token.is_empty())
@@ -428,6 +605,18 @@ mod tests {
 
     const MS_PER_DAY: i64 = 1000 * 60 * 60 * 24;
 
+    fn query_text_only_config() -> RerankerConfig {
+        RerankerConfig {
+            rrf_weight: 0.0,
+            recency_weight: 0.0,
+            project_weight: 0.0,
+            type_weight: 0.0,
+            query_text_weight: 1.0,
+            cross_encoder_weight: 0.0,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn feature_reranker_prefers_recent_when_rrf_is_tied() {
         let reranker = FeatureReranker::default_config();
@@ -465,6 +654,96 @@ mod tests {
     }
 
     #[test]
+    fn feature_reranker_prefers_query_text_overlap_when_other_features_tie() {
+        let reranker = FeatureReranker::new(query_text_only_config());
+        let chunks = vec![
+            ChunkWithMeta {
+                chunk_id: make_chunk_id(1),
+                rrf_score: 0.5,
+                timestamp_created: 0,
+                project_id: None,
+                chunk_type: ChunkType::Doc,
+                text: Some("Maria moved to Boston in 2021 after the semester ended".to_string()),
+            },
+            ChunkWithMeta {
+                chunk_id: make_chunk_id(2),
+                rrf_score: 0.5,
+                timestamp_created: 0,
+                project_id: None,
+                chunk_type: ChunkType::Doc,
+                text: Some("The group discussed unrelated travel plans".to_string()),
+            },
+        ];
+
+        let context = RerankerContext::now().with_query("Where did Maria move in 2021?");
+        let results = reranker.rerank(chunks, &context);
+
+        assert_eq!(results[0].chunk_id, make_chunk_id(1));
+        assert!(results[0].final_score > results[1].final_score);
+    }
+
+    #[test]
+    fn query_text_bonus_ignores_stopword_only_overlap() {
+        let reranker = FeatureReranker::new(RerankerConfig {
+            rrf_weight: 1.0,
+            recency_weight: 0.0,
+            project_weight: 0.0,
+            type_weight: 0.0,
+            query_text_weight: 1.0,
+            cross_encoder_weight: 0.0,
+            ..Default::default()
+        });
+        let chunks = vec![
+            ChunkWithMeta {
+                chunk_id: make_chunk_id(1),
+                rrf_score: 0.6,
+                timestamp_created: 0,
+                project_id: None,
+                chunk_type: ChunkType::Doc,
+                text: Some("unrelated content".to_string()),
+            },
+            ChunkWithMeta {
+                chunk_id: make_chunk_id(2),
+                rrf_score: 0.5,
+                timestamp_created: 0,
+                project_id: None,
+                chunk_type: ChunkType::Doc,
+                text: Some("the and was for did".to_string()),
+            },
+        ];
+
+        let context = RerankerContext::now().with_query("the and was for did");
+        let results = reranker.rerank(chunks, &context);
+
+        assert_eq!(results[0].chunk_id, make_chunk_id(1));
+    }
+
+    #[test]
+    fn query_text_bonus_counts_numeric_matches() {
+        let reranker = FeatureReranker::default_config();
+
+        let with_number = reranker.compute_query_text_bonus(
+            "What happened in 2021?",
+            Some("They moved apartments in 2021"),
+        );
+        let without_number =
+            reranker.compute_query_text_bonus("What happened in 2021?", Some("They moved later"));
+
+        assert!(with_number > without_number);
+        assert!(with_number > 0.0);
+    }
+
+    #[test]
+    fn query_text_bonus_is_zero_without_chunk_text() {
+        let reranker = FeatureReranker::default_config();
+
+        assert_eq!(
+            reranker.compute_query_text_bonus("Where did Maria move?", None),
+            0.0
+        );
+    }
+
+    #[test]
     fn cross_encoder_interaction_prefers_token_and_phrase_matches() {
         let config = RerankerConfig {
             mode: RerankerMode::CrossEncoder,
@@ -473,6 +752,7 @@ mod tests {
             recency_half_life_days: 7.0,
             project_weight: 0.0,
             type_weight: 0.0,
+            query_text_weight: 0.0,
             cross_encoder_weight: 1.0,
         };
         let reranker = CrossEncoderReranker::new(config);
