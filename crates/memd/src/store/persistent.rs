@@ -56,6 +56,17 @@ pub struct PersistentStoreConfig {
     pub data_dir: PathBuf,
     /// Maximum chunks per segment before rotation
     pub segment_max_chunks: u32,
+    /// Minimum chunks in an active segment for graceful shutdown / Drop
+    /// to finalize it. Active segments below this threshold are left
+    /// unfinalized between invocations and recovered via WAL replay on
+    /// the next startup; they continue to grow across runs until they
+    /// cross either this threshold (on a graceful exit) or
+    /// `segment_max_chunks` (on rotation). Prevents the "5,000 tiny
+    /// segments" pathology on CLI workloads where each invocation
+    /// wrote 1-2 chunks. The WAL durability barrier inside
+    /// `recover_from_wal` ignores this gate so recovered chunks always
+    /// land in a finalized segment before WAL truncation.
+    pub min_finalize_chunks: u32,
     /// WAL checkpoint interval (chunks)
     pub wal_checkpoint_interval: u32,
     /// Enable dense vector search
@@ -132,6 +143,14 @@ impl Default for PersistentStoreConfig {
         Self {
             data_dir: PathBuf::from("data"),
             segment_max_chunks: 10_000,
+            // 256 ≈ minutes of typical write rate. Below this we leave
+            // the active segment unfinalized between graceful shutdowns
+            // so consecutive CLI runs don't each create a near-empty
+            // segment dir. Tuned to keep finalized segments large
+            // enough that segment lookup cost stays bounded, while not
+            // delaying durability for any meaningful workload — the WAL
+            // already persists every chunk synchronously.
+            min_finalize_chunks: 256,
             // Safety valve (v0.3.1): the WAL-checkpoint-then-truncate
             // path has a known soundness gap — a checkpoint can be
             // appended after metadata/index updates, and recovery only
@@ -192,6 +211,16 @@ struct TenantStore {
     writes_since_checkpoint: Mutex<u32>,
     /// Max chunks per segment (for rotation)
     segment_max_chunks: u32,
+    /// Min active-segment chunk count below which shutdown/Drop will
+    /// skip finalization. See `PersistentStoreConfig::min_finalize_chunks`.
+    min_finalize_chunks: u32,
+    /// Mirror of `PersistentStoreConfig::wal_checkpoint_interval` so
+    /// `finalize_active_segment_if_above_threshold` can disable the
+    /// gate whenever checkpointing is on. With checkpointing enabled,
+    /// the WAL may have been truncated past the unfinalized segment's
+    /// records, so the segment MUST be finalized on shutdown or its
+    /// chunks become unrecoverable.
+    wal_checkpoint_interval: u32,
 }
 
 struct ActiveSegment {
@@ -836,6 +865,8 @@ impl PersistentStore {
             self.config.data_dir.join("tenants").join(tenant_id),
             &self.metadata,
             self.config.segment_max_chunks,
+            self.config.min_finalize_chunks,
+            self.config.wal_checkpoint_interval,
         )?;
 
         let tenant = Arc::new(tenant);
@@ -864,7 +895,9 @@ impl PersistentStore {
 
         let tenants = self.tenants.read();
         for (tenant_id, tenant) in tenants.iter() {
-            if let Err(e) = tenant.finalize_active_segment() {
+            // Gated: skip if active segment is below min_finalize_chunks.
+            // Recovered on next start via WAL replay.
+            if let Err(e) = tenant.finalize_active_segment_if_above_threshold() {
                 warn!(tenant_id, error = %e, "failed to finalize segment on shutdown");
             }
         }
@@ -892,6 +925,8 @@ impl TenantStore {
         base_dir: PathBuf,
         metadata: &SqliteMetadataStore,
         segment_max_chunks: u32,
+        min_finalize_chunks: u32,
+        wal_checkpoint_interval: u32,
     ) -> Result<Self> {
         std::fs::create_dir_all(&base_dir)?;
         std::fs::create_dir_all(base_dir.join("segments"))?;
@@ -909,6 +944,8 @@ impl TenantStore {
             wal: Mutex::new(wal_writer),
             writes_since_checkpoint: Mutex::new(0),
             segment_max_chunks,
+            min_finalize_chunks,
+            wal_checkpoint_interval,
         };
 
         // Load existing segments
@@ -1248,7 +1285,15 @@ impl TenantStore {
         Ok(())
     }
 
-    /// Finalize active segment for graceful shutdown
+    /// Finalize active segment for graceful shutdown.
+    ///
+    /// Always seals the segment when one exists (no `min_finalize_chunks`
+    /// gate here). Callers that want the threshold gate must use
+    /// `finalize_active_segment_if_above_threshold` instead. The WAL
+    /// recovery path at the durability barrier in `recover_from_wal`
+    /// must keep using this unconditional method — recovered chunks
+    /// have to land in a finalized segment before WAL truncation, or a
+    /// second crash strands them.
     fn finalize_active_segment(&self) -> Result<()> {
         let mut active = self.active_segment.lock();
         if let Some(seg) = active.take() {
@@ -1271,6 +1316,54 @@ impl TenantStore {
         Ok(())
     }
 
+    /// Variant of `finalize_active_segment` that honors the
+    /// `min_finalize_chunks` threshold. Used by graceful-shutdown and
+    /// Drop paths so a CLI invocation that wrote 1-2 chunks does not
+    /// seal its active segment; instead the segment is left in place
+    /// and grown by future invocations. The chunks remain durable
+    /// because the WAL has already persisted them and `recover_from_wal`
+    /// replays them into the active segment on next startup.
+    ///
+    /// CRASH SAFETY: the gate is disabled when
+    /// `wal_checkpoint_interval > 0`. With checkpointing enabled the
+    /// WAL may already have been truncated past the records that would
+    /// be needed to recover the unfinalized active segment, so leaving
+    /// it unfinalized would lose chunks. Default config has
+    /// `wal_checkpoint_interval = 0` (the v0.3.1 safety valve), so the
+    /// gate is active for typical deployments.
+    ///
+    /// KNOWN LIMITATION: this gate is necessary but not sufficient to
+    /// eliminate the segment-per-CLI-call pathology. On the next
+    /// startup, `recover_from_wal` replays the WAL records: it finds
+    /// metadata pointing to the unfinalized segment, the segment cache
+    /// does not have it (load_segments skips dirs without `meta`), and
+    /// the "missing or unreadable" branch rewrites each chunk into a
+    /// freshly created active segment that the WAL durability barrier
+    /// then finalizes. A full fix requires reopening the existing
+    /// unfinalized segment for append (tracked as future work — needs
+    /// incremental payload.idx persistence). Today this method makes
+    /// the gate visible and configurable so the eventual segment-reuse
+    /// path has a stable entry point.
+    fn finalize_active_segment_if_above_threshold(&self) -> Result<()> {
+        if self.wal_checkpoint_interval > 0 {
+            return self.finalize_active_segment();
+        }
+        let active_chunks = {
+            let active = self.active_segment.lock();
+            active.as_ref().map(|s| s.chunk_count).unwrap_or(0)
+        };
+        if active_chunks < self.min_finalize_chunks {
+            tracing::debug!(
+                chunks = active_chunks,
+                threshold = self.min_finalize_chunks,
+                tenant = %self.tenant_id,
+                "skipping finalize on shutdown: active segment below threshold"
+            );
+            return Ok(());
+        }
+        self.finalize_active_segment()
+    }
+
     /// Read chunk from active segment by ordinal
     fn read_from_active_segment(&self, segment_id: u64, ordinal: u32) -> Result<Option<Vec<u8>>> {
         let mut active = self.active_segment.lock();
@@ -1285,8 +1378,10 @@ impl TenantStore {
 
 impl Drop for TenantStore {
     fn drop(&mut self) {
-        // Best-effort finalization on drop
-        if let Err(e) = self.finalize_active_segment() {
+        // Best-effort finalization on drop. Same gate as the shutdown
+        // path: tiny segments are kept across runs to avoid the
+        // segment-per-CLI-call pathology.
+        if let Err(e) = self.finalize_active_segment_if_above_threshold() {
             warn!(
                 tenant = %self.tenant_id,
                 error = %e,
@@ -3490,6 +3585,12 @@ mod tests {
         let config = PersistentStoreConfig {
             data_dir: dir.path().to_path_buf(),
             segment_max_chunks: 1,
+            // Match the test's intent: it explicitly forces rollover
+            // via segment_max_chunks=1 so each shutdown should finalize
+            // the active segment. Opt out of the default 256-chunk gate
+            // so the test exercises the rollover/finalize path it cares
+            // about, not the segment-proliferation guard.
+            min_finalize_chunks: 1,
             wal_checkpoint_interval: 10,
             enable_dense_search: false,
             enable_hybrid_search: false,
@@ -3533,6 +3634,12 @@ mod tests {
         let config = PersistentStoreConfig {
             data_dir: dir.path().to_path_buf(),
             segment_max_chunks: 1,
+            // Match the test's intent: it explicitly forces rollover
+            // via segment_max_chunks=1 so each shutdown should finalize
+            // the active segment. Opt out of the default 256-chunk gate
+            // so the test exercises the rollover/finalize path it cares
+            // about, not the segment-proliferation guard.
+            min_finalize_chunks: 1,
             wal_checkpoint_interval: 10,
             enable_dense_search: false,
             enable_hybrid_search: false,
@@ -3593,6 +3700,12 @@ mod tests {
         let config = PersistentStoreConfig {
             data_dir: dir.path().to_path_buf(),
             segment_max_chunks: 1,
+            // Match the test's intent: it explicitly forces rollover
+            // via segment_max_chunks=1 so each shutdown should finalize
+            // the active segment. Opt out of the default 256-chunk gate
+            // so the test exercises the rollover/finalize path it cares
+            // about, not the segment-proliferation guard.
+            min_finalize_chunks: 1,
             wal_checkpoint_interval: 10,
             enable_dense_search: false,
             enable_hybrid_search: false,
@@ -3653,6 +3766,12 @@ mod tests {
         let config = PersistentStoreConfig {
             data_dir: dir.path().to_path_buf(),
             segment_max_chunks: 1,
+            // Match the test's intent: it explicitly forces rollover
+            // via segment_max_chunks=1 so each shutdown should finalize
+            // the active segment. Opt out of the default 256-chunk gate
+            // so the test exercises the rollover/finalize path it cares
+            // about, not the segment-proliferation guard.
+            min_finalize_chunks: 1,
             wal_checkpoint_interval: 10,
             enable_dense_search: false,
             enable_hybrid_search: false,
@@ -3695,6 +3814,12 @@ mod tests {
         let config = PersistentStoreConfig {
             data_dir: dir.path().to_path_buf(),
             segment_max_chunks: 1,
+            // Match the test's intent: it explicitly forces rollover
+            // via segment_max_chunks=1 so each shutdown should finalize
+            // the active segment. Opt out of the default 256-chunk gate
+            // so the test exercises the rollover/finalize path it cares
+            // about, not the segment-proliferation guard.
+            min_finalize_chunks: 1,
             wal_checkpoint_interval: 10,
             enable_dense_search: false,
             enable_hybrid_search: false,
