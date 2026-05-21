@@ -708,9 +708,7 @@ impl CliCommand {
     pub fn requires_store(&self) -> bool {
         !matches!(
             self,
-            CliCommand::Init { .. }
-                | CliCommand::Warm { .. }
-                | CliCommand::Maintenance { .. }
+            CliCommand::Init { .. } | CliCommand::Warm { .. } | CliCommand::Maintenance { .. }
         )
     }
 

@@ -23,11 +23,11 @@ mod consolidate;
 mod eval_counterfactual;
 mod maintenance;
 mod memory_md;
-mod session_start;
 mod ops_bridge;
 mod paths;
 mod render;
 mod search;
+mod session_start;
 mod warm;
 
 #[cfg(test)]
@@ -44,7 +44,6 @@ use call::parse_call_arguments;
 use consolidate::{run_consolidate, ConsolidateOptions};
 use eval_counterfactual::{run_eval_counterfactual, EvalCounterfactualOptions};
 use memory_md::{refresh_memory_md, MemoryMdOptions};
-use session_start::{run_session_start, SessionStartOptions};
 use ops_bridge::cli_call_tool;
 use paths::{
     absolutize_project_dir, build_tenant_scope_config, normalize_absolute, path_is_inside,
@@ -60,6 +59,7 @@ use render::{
 use search::{
     apply_search_reranker, cli_agent_context_payload, cli_search_payload, export_format_name,
 };
+use session_start::{run_session_start, SessionStartOptions};
 use warm::run_warm_worker;
 pub use warm::{run_warm_admin, try_run_warm_client, warm_socket_path};
 
@@ -272,8 +272,7 @@ pub async fn run_cli<S: Store>(
         }
 
         CliCommand::SessionStart { project_dir } => {
-            let result =
-                run_session_start(store, SessionStartOptions { project_dir }).await?;
+            let result = run_session_start(store, SessionStartOptions { project_dir }).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
 
@@ -347,12 +346,7 @@ pub async fn run_cli<S: Store>(
                     None => resolve_data_dir(None)?,
                 },
             };
-            let report = maintenance::run(
-                &data_dir,
-                tenant_id.as_deref(),
-                dry_run,
-                aggressive,
-            )?;
+            let report = maintenance::run(&data_dir, tenant_id.as_deref(), dry_run, aggressive)?;
             let rendered = maintenance::render_report(&report, dry_run, aggressive);
             print!("{}", rendered);
         }
