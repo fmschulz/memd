@@ -69,9 +69,13 @@ pub struct SearchResult {
     pub score: f32,
 }
 
-/// Internal ID to ChunkId mapping
+/// Internal ID to ChunkId mapping.
+///
+/// Exposed as `pub` (not `pub(crate)`) so integration tests can
+/// round-trip the legacy `mapping.json` → `mapping.bin` migration path.
+/// Struct fields remain private.
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct IndexMapping {
+pub struct IndexMapping {
     /// Internal ID -> ChunkId
     id_to_chunk: HashMap<usize, String>,
     /// ChunkId string -> Internal ID
@@ -198,8 +202,12 @@ impl HnswIndex {
         // files that the loader never reads anyway.
         let _ = Self::purge_orphan_dumps(&path);
 
-        let mapping_path = path.join("mapping.json");
-        if mapping_path.exists() {
+        // Accept either the new bincode mapping or the legacy JSON
+        // mapping. Order matters only for layout discoverability; load()
+        // itself prefers .bin.
+        let has_mapping =
+            path.join("mapping.bin").exists() || path.join("mapping.json").exists();
+        if has_mapping {
             match Self::load(&path, config.clone()) {
                 Ok(index) => {
                     tracing::info!("Loaded persisted HNSW index from {:?}", path);
@@ -363,18 +371,40 @@ impl HnswIndex {
         let cache_path = path.join("embeddings.bin");
         cache.save_to(&cache_path)?;
 
-        // Save mapping
-        let mapping_path = path.join("mapping.json.tmp");
-        let mapping_json = serde_json::to_vec(&*mapping)
-            .map_err(|e| MemdError::StorageError(format!("serialize mapping: {}", e)))?;
+        // Save mapping in bincode (~5x smaller than the old JSON
+        // representation and ~5x faster to parse on cold start). The
+        // legacy `mapping.json` is best-effort removed below so disk
+        // doesn't keep two copies after the first save under the new
+        // format. `load()` falls back to `mapping.json` when the
+        // bincode file is absent so freshly-upgraded installs continue
+        // to open cleanly.
+        let mapping_tmp = path.join("mapping.bin.tmp");
+        let mapping_bytes =
+            bincode::serde::encode_to_vec(&*mapping, bincode::config::standard())
+                .map_err(|e| MemdError::StorageError(format!("serialize mapping: {}", e)))?;
 
-        let mut file = File::create(&mapping_path)?;
-        file.write_all(&mapping_json)?;
+        let mut file = File::create(&mapping_tmp)?;
+        file.write_all(&mapping_bytes)?;
         file.sync_all()?;
         drop(file);
 
         // Atomic rename
-        std::fs::rename(&mapping_path, path.join("mapping.json"))?;
+        std::fs::rename(&mapping_tmp, path.join("mapping.bin"))?;
+
+        // Sync the parent directory so that, after a power loss, either
+        // (a) the rename is durable and a subsequent load sees
+        // mapping.bin, or (b) the rename is not yet visible and load
+        // falls back to mapping.json — never both missing.
+        if let Ok(dir) = File::open(path) {
+            let _ = dir.sync_all();
+        }
+
+        // Remove any leftover legacy mapping.json. Errors are ignored
+        // (best-effort cleanup); a stale mapping.json next to a fresh
+        // mapping.bin is harmless because `load` prefers .bin and never
+        // reads .json when .bin exists. A separate dir sync runs at the
+        // bottom of save_to to make the removal itself durable.
+        let _ = std::fs::remove_file(path.join("mapping.json"));
 
         // Save config
         let config_path_tmp = path.join("config.json.tmp");
@@ -528,14 +558,38 @@ impl HnswIndex {
 
         let start = Instant::now();
 
-        // Load mapping to get chunk IDs
-        let mapping_path = path.join("mapping.json");
-        let mut file = File::open(&mapping_path)?;
-        let mut mapping_json = Vec::new();
-        file.read_to_end(&mut mapping_json)?;
-
-        let mapping: IndexMapping = serde_json::from_slice(&mapping_json)
-            .map_err(|e| MemdError::StorageError(format!("deserialize mapping: {}", e)))?;
+        // Load mapping. Prefer the new bincode format; fall back to
+        // legacy JSON for installs that haven't saved under the new
+        // format yet. The fallback path runs at most once per upgraded
+        // install — the next save rewrites as mapping.bin and removes
+        // mapping.json (see save_to).
+        let bin_path = path.join("mapping.bin");
+        let json_path = path.join("mapping.json");
+        let mapping: IndexMapping = if bin_path.exists() {
+            let mut file = File::open(&bin_path)?;
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf)?;
+            let (mapping, _len) =
+                bincode::serde::decode_from_slice(&buf, bincode::config::standard())
+                    .map_err(|e| {
+                        MemdError::StorageError(format!("deserialize mapping.bin: {}", e))
+                    })?;
+            mapping
+        } else if json_path.exists() {
+            tracing::info!(
+                path = ?path,
+                "loading legacy mapping.json; will rewrite as mapping.bin on next save"
+            );
+            let mut file = File::open(&json_path)?;
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf)?;
+            serde_json::from_slice(&buf)
+                .map_err(|e| MemdError::StorageError(format!("deserialize mapping.json: {}", e)))?
+        } else {
+            return Err(MemdError::StorageError(
+                "no mapping file present (expected mapping.bin or mapping.json)".into(),
+            ));
+        };
 
         // Try to load embedding cache
         let cache_path = path.join("embeddings.bin");
@@ -918,7 +972,11 @@ mod tests {
         }
 
         // Verify files were created
-        assert!(path.join("mapping.json").exists());
+        assert!(path.join("mapping.bin").exists());
+        assert!(
+            !path.join("mapping.json").exists(),
+            "fresh save under the new format must not leave mapping.json behind"
+        );
         assert!(path.join("config.json").exists());
 
         // Load mapping (note: HNSW graph load not fully implemented)
