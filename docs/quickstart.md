@@ -154,11 +154,10 @@ that make CLI retrieval and CLI writes mandatory for substantive work.
 ## 7. Verify the CLI Workflow
 
 ```bash
-./scripts/verify_cli_workflow.sh
 ./memd-skill/verify_memd_enforcement.sh
 ```
 
-Both scripts exercise the skill + CLI path: add, search, agent-context output,
+The script exercises the skill + CLI path: add, search, agent-context output,
 audit logs, and instruction blocks.
 
 For scripts that need many structured operations without a background worker,
