@@ -1,0 +1,56 @@
+name: Version consistency
+
+# Verifies that every place the memd version is recorded agrees with the
+# canonical value in workspace Cargo.toml. Fails the PR or push if any
+# version-bearing file has drifted.
+#
+# Sources checked:
+#   - Cargo.toml                          (canonical)
+#   - tools/wiki/pyproject.toml
+#   - README.md                           (shields.io badge)
+#   - docs/index.md                       (shields.io badge)
+#   - CHANGELOG.md                        (top "## [X.Y.Z]" header)
+#   - memd-skill/bin/linux-x64/memd       (--version output)
+#
+# A non-matching latest git tag is reported as advisory only — it just means
+# the release hasn't been cut yet.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'tools/wiki/pyproject.toml'
+      - 'README.md'
+      - 'docs/index.md'
+      - 'CHANGELOG.md'
+      - 'memd-skill/bin/linux-x64/memd'
+      - '.github/scripts/check_version_consistency.sh'
+      - '.github/workflows/version-consistency.yml'
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'tools/wiki/pyproject.toml'
+      - 'README.md'
+      - 'docs/index.md'
+      - 'CHANGELOG.md'
+      - 'memd-skill/bin/linux-x64/memd'
+      - '.github/scripts/check_version_consistency.sh'
+      - '.github/workflows/version-consistency.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check version consistency
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tag history for the advisory check
+
+      - name: Run version consistency check
+        run: ./.github/scripts/check_version_consistency.sh
