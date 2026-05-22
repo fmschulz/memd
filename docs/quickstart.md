@@ -135,12 +135,12 @@ For decisions:
 
 See:
 
-- [memd-skill/INSTALL.md](memd-skill/INSTALL.md)
-- [memd-skill/SKILL.md](memd-skill/SKILL.md)
+- [memd-skill/INSTALL.md](https://github.com/fmschulz/memd/blob/main/memd-skill/INSTALL.md)
+- [memd-skill/SKILL.md](https://github.com/fmschulz/memd/blob/main/memd-skill/SKILL.md)
 
 The skill includes a bundled Linux binary:
 
-- [memd-skill/bin/linux-x64/memd](memd-skill/bin/linux-x64/memd)
+- [memd-skill/bin/linux-x64/memd](https://github.com/fmschulz/memd/blob/main/memd-skill/bin/linux-x64/memd)
 
 For instruction-level enforcement in Codex CLI and Claude Code:
 
@@ -194,7 +194,7 @@ For the real ONNX smoke test:
 cargo test -p memd --features cross-encoder-reranker smoke_real_onnx_scores_relevant_pair_higher -- --ignored --nocapture
 ```
 
-See the ONNX section in [README.md](README.md) for cache location, runtime
+See the [Optional rerankers](reranking.md) page for cache location, runtime
 downloads, and environment variables.
 
 ## 9. Optional MemReranker-4B Reranking

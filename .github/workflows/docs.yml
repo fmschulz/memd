@@ -15,20 +15,19 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write   # mkdocs gh-deploy pushes to gh-pages branch
+  contents: read
   pages: write
   id-token: write
 
 jobs:
-  deploy:
-    name: Build and deploy mkdocs site
+  build:
+    name: Build mkdocs site
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0     # full history needed for `git-revision-date` plugins
-          persist-credentials: true
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -41,15 +40,24 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install \
             mkdocs-material==9.5.* \
-            pymdown-extensions \
-            mkdocs-minify-plugin
+            pymdown-extensions
 
       - name: Build site (strict)
         run: mkdocs build --strict
 
-      - name: Deploy to gh-pages
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          mkdocs gh-deploy --force
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
