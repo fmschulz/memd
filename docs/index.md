@@ -32,12 +32,17 @@ private CLI-managed warm worker driven by ordinary CLI commands.
 
 ## Headline number
 
-| Lane | Retrieval setup | Hit@3 | MRR | Avg search latency |
-| --- | --- | ---: | ---: | ---: |
-| `cli_warm` | private warm worker | 1.00 | 0.87 | **9.7 ms** |
-| `cli_batch` | streaming JSONL in one loaded process | 1.00 | 0.87 | **0.6 ms** |
+Cross-system LoCoMo retrieval (10 conversations, 5,882 turns, 1,536 queries):
 
-Internal task-memory benchmark, see [Benchmarking](benchmarking.md) for the full table and the cross-system LoCoMo + Bright-Pro adapter results.
+| System | MRR@10 | Hit@10 | Avg search |
+| --- | ---: | ---: | ---: |
+| **`memd` v0.50.0** | **0.420** | **0.621** | **26.7 ms** |
+| `superlocalmemory` v3.4.46 (lexical) | 0.369 | 0.599 | 804.5 ms |
+| `mem0` v2.0.2 (LLM-extracted) | 0.354 | 0.591 | 40.9 ms |
+
+`memd` wins on every quality metric and search latency. See
+[Benchmarking](benchmarking.md) for per-category breakdown, reproducibility
+notes, and the internal-corpus + Bright-Pro adapter results.
 
 ---
 
