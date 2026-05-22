@@ -28,7 +28,7 @@ That consistency is the main reason the schema exists. It is not just a richer n
 
 The source of truth is the canonical task artifact envelope implemented in:
 
-- [task_memory/mod.rs](../../../crates/memd/src/task_memory/mod.rs)
+- [task_memory/mod.rs](https://github.com/fmschulz/memd/blob/main/crates/memd/src/task_memory/mod.rs)
 
 Current artifact kinds:
 
@@ -103,7 +103,7 @@ Important canonical fields include:
 
 The canonical envelope is projected into normalized SQLite side tables in:
 
-- [sqlite.rs](../../../crates/memd/src/store/metadata/sqlite.rs)
+- [sqlite.rs](https://github.com/fmschulz/memd/blob/main/crates/memd/src/store/metadata/sqlite.rs)
 
 Current tables:
 
@@ -127,7 +127,7 @@ These tables exist to support exact task-aware filters and joins without couplin
 
 Canonical artifacts are projected into ordinary retrieval chunks. The projection layer lives in:
 
-- [task_memory/mod.rs](../../../crates/memd/src/task_memory/mod.rs)
+- [task_memory/mod.rs](https://github.com/fmschulz/memd/blob/main/crates/memd/src/task_memory/mod.rs)
 
 Current projection kinds:
 
@@ -241,10 +241,10 @@ additional ranked hits.
 
 Task artifacts are WAL-backed. The relevant implementation is in:
 
-- [format.rs](../../../crates/memd/src/store/wal/format.rs)
-- [writer.rs](../../../crates/memd/src/store/wal/writer.rs)
-- [reader.rs](../../../crates/memd/src/store/wal/reader.rs)
-- [persistent.rs](../../../crates/memd/src/store/persistent.rs)
+- [format.rs](https://github.com/fmschulz/memd/blob/main/crates/memd/src/store/wal/format.rs)
+- [writer.rs](https://github.com/fmschulz/memd/blob/main/crates/memd/src/store/wal/writer.rs)
+- [reader.rs](https://github.com/fmschulz/memd/blob/main/crates/memd/src/store/wal/reader.rs)
+- [persistent.rs](https://github.com/fmschulz/memd/blob/main/crates/memd/src/store/persistent.rs)
 
 This means canonical task side tables can be rebuilt during recovery, rather than depending on best-effort metadata writes.
 
