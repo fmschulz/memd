@@ -1,0 +1,99 @@
+name: Auto-release on version bump
+
+# Tags and creates a GitHub Release the moment a commit lands on main with a
+# bumped workspace Cargo.toml [workspace.package].version. Idempotent: if the
+# tag already exists, the workflow is a no-op. Release body is the matching
+# section from CHANGELOG.md (the section header line is stripped).
+#
+# Pairs with version-consistency.yml (drift guard) and release-skill-binary.yml
+# (rebuild + PR the bundled skill binary on tag push).
+#
+# Why this exists: between v0.40.0 and v0.50.0 the workspace version bumped
+# on main but no tag was ever pushed, so GitHub's "latest release" sidebar
+# stayed at v0.40.0 for weeks. This workflow makes that state impossible.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'CHANGELOG.md'
+      - '.github/workflows/auto-release.yml'
+
+permissions:
+  contents: write   # create tags and releases
+
+concurrency:
+  group: auto-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Tag + GitHub Release if version bumped
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full tag history
+
+      - name: Extract canonical version
+        id: ver
+        run: |
+          set -euo pipefail
+          V="$(awk -F\" '/^version[[:space:]]*=/ {print $2; exit}' Cargo.toml)"
+          if [[ -z "${V}" ]]; then
+            echo "::error::could not read workspace version from Cargo.toml"
+            exit 1
+          fi
+          echo "version=${V}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${V}" >> "$GITHUB_OUTPUT"
+          echo "Detected workspace version: ${V}"
+
+      - name: Skip if tag already exists
+        id: exists
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.ver.outputs.tag }}"
+          if git ls-remote --tags --exit-code origin "${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists on origin; nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag ${TAG} not on origin; will tag and release."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract CHANGELOG section
+        if: steps.exists.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          awk -v v="${V}" '
+            $0 ~ "^## \\[" v "\\]" { flag=1; next }
+            flag && /^## \[/ { exit }
+            flag { print }
+          ' CHANGELOG.md > /tmp/release-notes.md
+          if [[ ! -s /tmp/release-notes.md ]]; then
+            echo "::error::no CHANGELOG.md section found for ${V}"
+            echo "Add an '## [${V}] - YYYY-MM-DD' entry before pushing the bump."
+            exit 1
+          fi
+          head -20 /tmp/release-notes.md
+          echo "..."
+
+      - name: Tag and release
+        if: steps.exists.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.ver.outputs.tag }}"
+          V="${{ steps.ver.outputs.version }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "memd ${TAG}"
+          git push origin "${TAG}"
+          gh release create "${TAG}" \
+            --title "memd ${TAG}" \
+            --notes-file /tmp/release-notes.md
+          echo "Released ${TAG}: https://github.com/${{ github.repository }}/releases/tag/${TAG}"
