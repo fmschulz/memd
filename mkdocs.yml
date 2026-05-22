@@ -1,0 +1,101 @@
+site_name: memd
+site_description: Local memory CLI for coding agents and AI scientists
+site_url: https://fmschulz.github.io/memd/
+repo_url: https://github.com/fmschulz/memd
+repo_name: fmschulz/memd
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+  font:
+    text: Inter
+    code: JetBrains Mono
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Quick start: quickstart.md
+  - Concepts:
+      - Architecture: architecture.md
+      - Trust boundary: trust-boundary.md
+      - Data layout: data-layout.md
+      - Shared topology: shared-topology.md
+  - Reference:
+      - CLI reference: cli-reference.md
+      - Configuration: configuration.md
+      - Observability: observability.md
+      - OMF (memory interchange): omf.md
+  - Task memory:
+      - Schema: scientific-task-memory/schema/README.md
+      - Benchmark report: scientific-task-memory/benchmark-results/README.md
+  - Benchmarking:
+      - Overview: benchmarking.md
+  - Advanced:
+      - Optional rerankers: reranking.md
+      - Compiled wiki: compiled-wiki.md
+  - Agent skill: agent-skill.md
+  - Self-improvement loop: self-improvement.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/fmschulz/memd
+  version:
+    provider: mike
