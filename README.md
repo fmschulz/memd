@@ -123,16 +123,20 @@ More: [Architecture](https://fmschulz.github.io/memd/architecture/),
 
 ## Headline benchmark
 
-Internal task-memory corpus, recommended local execution modes:
+Cross-system retrieval on upstream
+[`locomo10.json`](https://github.com/snap-stanford/locomo) (10 conversations,
+5,882 turns, 1,536 queries, MRR@10 over categories 1–4):
 
-| Lane | Retrieval setup | Hit@3 | MRR | Avg search latency |
-| --- | --- | ---: | ---: | ---: |
-| `cli_warm` | private warm worker | 1.00 | 0.87 | 9.7 ms |
-| `cli_batch` | streaming JSONL in one loaded process | 1.00 | 0.87 | 0.6 ms |
+| System | MRR@10 | Hit@10 | Avg search | Seed |
+|---|---:|---:|---:|---:|
+| **`memd` v0.50.0** | **0.420** | **0.621** | **26.7 ms** | 108 s |
+| `superlocalmemory` v3.4.46 (lexical) | 0.369 | 0.599 | 804.5 ms | 1.8 s |
+| `mem0` v2.0.2 (LLM-extracted) | 0.354 | 0.591 | 40.9 ms | 13,424 s |
 
-A flattened chunk baseline reaches `hit@3 = 1.00`, `MRR = 0.98` in the same
-report. Bright-Pro adapter, multi-turn token benchmark, and the in-prep
-LoCoMo cross-system comparison are documented at
+`memd` wins on quality (+14% MRR@10 vs SuperLocalMemory, +19% vs Mem0) and
+on search latency. Internal task-memory benchmark (cli_warm: Hit@3 1.00,
+MRR 0.87, 9.7 ms), Bright-Pro biology adapter, multi-turn token benchmark,
+and reproducibility notes are documented at
 [Benchmarking](https://fmschulz.github.io/memd/benchmarking/).
 
 ## Agent skill

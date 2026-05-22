@@ -1,8 +1,9 @@
 # Benchmarking
 
-`memd` ships three checked-in benchmark families. They exercise different
-parts of the system, so their numbers should not be mixed without the
-workload context.
+`memd` ships four benchmark families. They exercise different parts of the
+system, so their numbers should not be mixed without the workload context.
+The cross-system [LoCoMo retrieval](#cross-system-retrieval-locomo) result
+is the public headline; the others are internal-corpus or scoped checks.
 
 ## Quick runs
 
@@ -63,7 +64,59 @@ excludes fresh indexing and reuses the already-built store.
 
 ## Cross-system retrieval (LoCoMo)
 
-A cross-system LoCoMo retrieval benchmark is in preparation. It will compare
-`memd` to popular open-source memory systems (Mem0, Cognee, Letta) on
-upstream `locomo10.json` using evidence-ID scoring. Results will land here
-once the protocol is finalized.
+Direct retrieval benchmark on upstream
+[`locomo10.json`](https://github.com/snap-stanford/locomo): each system is
+seeded with the same conversation turns and scored against LoCoMo
+evidence IDs (MRR@10 over categories 1–4: 10 conversations, 5,882 turns,
+1,536 queries).
+
+| System | MRR@10 | Hit@1 | Hit@3 | Hit@10 | Avg search | Seed |
+|---|---:|---:|---:|---:|---:|---:|
+| **`memd` v0.50.0** | **0.420** | **0.322** | **0.490** | **0.621** | **26.7 ms** | 108 s |
+| `superlocalmemory` v3.4.46 (lexical) | 0.369 | 0.245 | 0.469 | 0.599 | 804.5 ms | 1.8 s |
+| `mem0` v2.0.2 (LLM-extracted) | 0.354 | 0.255 | 0.412 | 0.591 | 40.9 ms | 13,424 s |
+
+`memd` wins on every quality metric (+14% MRR@10 vs SuperLocalMemory, +19%
+vs Mem0) and is the fastest at search. Seeding cost trades off against
+quality — SuperLocalMemory has the cheapest seed (no embeddings in this
+configuration), Mem0 the most expensive (LLM extraction).
+
+### Per-category
+
+`memd` wins all four LoCoMo categories.
+
+| Category | Description | `memd` | `mem0` | `slm` |
+|---|---|---:|---:|---:|
+| 1 | multi-hop | **0.359** | 0.292 | 0.259 |
+| 2 | specific facts | **0.513** | 0.390 | 0.433 |
+| 3 | open-domain | **0.279** | 0.255 | 0.227 |
+| 4 | long-form | **0.421** | 0.372 | 0.397 |
+
+### Three design philosophies
+
+- **`memd`** — chunk-native dense + sparse hybrid retrieval. No LLM
+  extraction during seed, no LLM rerank during search.
+- **`mem0`** — LLM-extracts memory units from raw turns (here using a
+  local vLLM `gemma4-31b` endpoint), then vector-searches over the
+  extracted memories.
+- **`superlocalmemory`** — atomic-fact graph with Fisher-Rao retrieval.
+  Reported here in the lexical-only fallback because the published
+  Mode A 74.8% MRR@10 number was not reproducible in our workspace; SLM's
+  subprocess embedding-worker singleton deadlocked under the LoCoMo
+  workload. The lexical result (0.369) does match prior independent
+  fallback runs in this workspace (0.368), so the configuration itself
+  is reproducible.
+
+### Reproducibility
+
+The full benchmark harness lives in the sibling `memory-benchmark`
+workspace (separate repo). A self-contained in-repo
+`evals/benchmarks/locomo/` is in progress and will land here once the
+SLM embedded mode is debugged upstream and the OpenAI / Anthropic /
+self-hosted vLLM LLM choice is documented for `mem0` reproducers.
+
+Same-LLM caveat: `mem0` numbers above use a self-hosted vLLM
+`gemma4-31b` endpoint, not the GPT-4-class model the upstream Mem0
+README benchmarks against. Numbers are directly comparable across
+the three systems in this table but not directly comparable to the
+upstream Mem0 leaderboard.
