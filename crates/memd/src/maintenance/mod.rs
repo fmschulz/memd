@@ -387,7 +387,7 @@ pub async fn plan_duplicate_projection_retirements<S: Store>(
                 .is_some()
                 .cmp(&left.linked_digest_artifact_id.is_some())
                 .then_with(|| right.timestamp_created.cmp(&left.timestamp_created))
-                .then_with(|| left.chunk_id.to_string().cmp(&right.chunk_id.to_string()))
+                .then_with(|| right.chunk_id.to_string().cmp(&left.chunk_id.to_string()))
         });
         let survivor = group[0].chunk_id.clone();
         for duplicate in group.into_iter().skip(1) {

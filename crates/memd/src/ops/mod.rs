@@ -3966,6 +3966,12 @@ fn digest_artifacts_equivalent(existing: &TaskArtifact, candidate: &TaskArtifact
     rhs.timestamp_created = 0;
     lhs.timestamp_observed = None;
     rhs.timestamp_observed = None;
+    // `source_updated_at_ms` is derived from the artifacts loaded to
+    // build the digest. A refresh can see the previous digest wrapper as
+    // the newest artifact even when the digest content is unchanged, so
+    // it is not part of the idempotence identity.
+    lhs.source_updated_at_ms = None;
+    rhs.source_updated_at_ms = None;
     lhs == rhs
 }
 
@@ -4152,18 +4158,31 @@ fn build_scope_key(project_id: Option<&str>, tenant_id: &TenantId, suffix: &str)
         .unwrap_or_else(|| format!("tenant:{}:{}", tenant_id, suffix))
 }
 
+fn digest_source_artifacts(artifacts: &[TaskArtifact]) -> Vec<TaskArtifact> {
+    artifacts
+        .iter()
+        .filter(|artifact| artifact.artifact_kind != ArtifactKind::Digest)
+        .cloned()
+        .collect()
+}
+
+fn latest_source_update_ms(artifacts: &[TaskArtifact]) -> i64 {
+    artifacts
+        .iter()
+        .map(|artifact| artifact.timestamp_created)
+        .max()
+        .unwrap_or(0)
+}
+
 async fn ensure_failure_library_digest<S: Store>(
     store: &S,
     tenant_id: &TenantId,
     project_id: Option<&str>,
 ) -> Result<(TaskArtifact, Vec<FailureViewItem>), McpError> {
     let artifacts = load_project_artifacts(store, tenant_id, project_id, 500).await?;
-    let failures = infer_failure_items(&artifacts);
-    let source_updated_at_ms = artifacts
-        .iter()
-        .map(|artifact| artifact.timestamp_created)
-        .max()
-        .unwrap_or(0);
+    let source_artifacts = digest_source_artifacts(&artifacts);
+    let failures = infer_failure_items(&source_artifacts);
+    let source_updated_at_ms = latest_source_update_ms(&source_artifacts);
     let artifact = build_library_digest_artifact(
         tenant_id.clone(),
         project_id.map(|id| ProjectId::from(id)),
@@ -4197,12 +4216,9 @@ async fn ensure_decision_library_digest<S: Store>(
     project_id: Option<&str>,
 ) -> Result<(TaskArtifact, Vec<DecisionViewItem>), McpError> {
     let artifacts = load_project_artifacts(store, tenant_id, project_id, 500).await?;
-    let decisions = infer_decision_items(&artifacts);
-    let source_updated_at_ms = artifacts
-        .iter()
-        .map(|artifact| artifact.timestamp_created)
-        .max()
-        .unwrap_or(0);
+    let source_artifacts = digest_source_artifacts(&artifacts);
+    let decisions = infer_decision_items(&source_artifacts);
+    let source_updated_at_ms = latest_source_update_ms(&source_artifacts);
     let artifact = build_library_digest_artifact(
         tenant_id.clone(),
         project_id.map(|id| ProjectId::from(id)),
@@ -4236,12 +4252,9 @@ async fn ensure_evidence_library_digest<S: Store>(
     project_id: Option<&str>,
 ) -> Result<(TaskArtifact, Vec<EvidenceViewItem>), McpError> {
     let artifacts = load_project_artifacts(store, tenant_id, project_id, 500).await?;
-    let evidence = infer_evidence_items(&artifacts);
-    let source_updated_at_ms = artifacts
-        .iter()
-        .map(|artifact| artifact.timestamp_created)
-        .max()
-        .unwrap_or(0);
+    let source_artifacts = digest_source_artifacts(&artifacts);
+    let evidence = infer_evidence_items(&source_artifacts);
+    let source_updated_at_ms = latest_source_update_ms(&source_artifacts);
     let artifact = build_library_digest_artifact(
         tenant_id.clone(),
         project_id.map(|id| ProjectId::from(id)),
@@ -4275,12 +4288,9 @@ async fn ensure_highlight_library_digest<S: Store>(
     project_id: Option<&str>,
 ) -> Result<(TaskArtifact, Vec<HighlightViewItem>), McpError> {
     let artifacts = load_project_artifacts(store, tenant_id, project_id, 500).await?;
-    let highlights = infer_highlight_items(&artifacts);
-    let source_updated_at_ms = artifacts
-        .iter()
-        .map(|artifact| artifact.timestamp_created)
-        .max()
-        .unwrap_or(0);
+    let source_artifacts = digest_source_artifacts(&artifacts);
+    let highlights = infer_highlight_items(&source_artifacts);
+    let source_updated_at_ms = latest_source_update_ms(&source_artifacts);
     let covered_task_ids = highlights
         .iter()
         .map(|item| item.task_id.clone())
@@ -14210,6 +14220,7 @@ mod tests {
 
     #[tokio::test]
     async fn artifact_find_highlights_returns_ranked_lessons_without_rewriting_unchanged_digest() {
+        let _flag_guard = with_fallback_flag();
         let store = make_store();
 
         let first = handle_task_start(

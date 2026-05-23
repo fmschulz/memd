@@ -123,8 +123,16 @@ memd session-start --project-dir "$CLAUDE_PROJECT_DIR"
 
 This refreshes `memory.md` synchronously and — when ≥10 dirty chunks have
 accumulated since the last consolidation — spawns a detached `memd
-consolidate` in the background. A missing `.memd` scope is a clean no-op,
-so it is safe to leave the hook wired for every repo.
+consolidate` in the background.
+
+If `.memd/project_scope.json` is missing, `session-start` auto-creates a
+minimal scope file using `$MEMD_DEFAULT_TENANT` (then `$USER`, then
+`"default"`) as `tenant_id` and the lower-cased repo basename as
+`project_id`. Auto-scope writes ONLY `.memd/project_scope.json` — it never
+touches `AGENTS.md`, `CLAUDE.md`, or writes tenant guardrails on the user's
+behalf. Opt out by setting `MEMD_AUTO_SCOPE=0` or dropping a `.memd-skip`
+file in the repo root. Run `memd init` explicitly when you want the full
+guardrail suite.
 
 ### Write-time priority
 
@@ -357,6 +365,21 @@ memd init --tenant-id "$TENANT_ID" --project-id "$PROJECT_ID"
 This writes `.memd/memory_guardrails.md`, `.memd/tenant_scope.json`, and
 `.memd/project_scope.json`, and can upsert CLI guardrail blocks into local
 `AGENTS.md` and `CLAUDE.md`.
+
+For the "just works in any repo" UX, you do NOT need to run `memd init` —
+the `SessionStart` hook will auto-create a minimal `.memd/project_scope.json`
+on first use. See [Automatic session-start](#automatic-session-start). Run
+`memd init` only when you want the full guardrail suite for a repo.
+
+## Verify the install
+
+```bash
+memd doctor
+```
+
+Reports binary path/version, data directory, global agent rules (Claude,
+Codex, Cursor), the Claude `SessionStart` hook, and the current project's
+`.memd` scope. Use `--format json` for machine-readable output.
 
 ## Practical Rules
 

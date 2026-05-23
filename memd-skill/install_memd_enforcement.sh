@@ -13,6 +13,8 @@ Installs the skill + CLI memd workflow by:
   - upserting CLI-first memd instructions into:
       ~/.codex/AGENTS.md
       ~/.claude/CLAUDE.md
+  - writing the Cursor user rule to ~/.cursor/rules/memd.mdc
+  - wiring a Claude Code SessionStart hook in ~/.claude/settings.json
   - optionally copying the bundled Linux memd binary into ~/.local/bin
 
 This script does not register external client tools and does not install wrappers
@@ -178,13 +180,39 @@ upsert_block \
 
 wire_session_start_hook
 
+# Install Cursor user-level rule so Cursor reads the same memd CLI
+# contract that Claude Code and Codex see. Cursor reads .mdc files
+# under ~/.cursor/rules/; a rule with `alwaysApply: true` is loaded
+# into every conversation system prompt.
+install_cursor_rule() {
+  local rule_dir="${HOME}/.cursor/rules"
+  local rule_path="${rule_dir}/memd.mdc"
+  mkdir -p "$rule_dir"
+  cat >"$rule_path" <<EOF
+---
+description: memd CLI contract for shared local memory across sessions
+alwaysApply: true
+---
+
+${ENFORCEMENT_SNIPPET}
+EOF
+  # Pin a deterministic mode rather than depending on the caller's
+  # umask. The rule isn't sensitive; we just don't want it to be 0600
+  # on some hosts and 0644 on others.
+  chmod 0644 "$rule_path"
+}
+
+install_cursor_rule
+
 printf 'Installed memd skill + CLI enforcement.\n'
 printf 'Updated:\n'
 printf '  - %s\n' "${HOME}/.codex/AGENTS.md"
 printf '  - %s\n' "${HOME}/.claude/CLAUDE.md"
+printf '  - %s (Cursor user rule)\n' "${HOME}/.cursor/rules/memd.mdc"
 printf '  - %s (SessionStart hook)\n' "${HOME}/.claude/settings.json"
 printf 'Codex: copy memd-skill/examples/codex_session_start_hook.json into your\n'
 printf '       project .codex/hooks.json to enable the equivalent hook.\n'
 if [[ "$INSTALL_BINARY" -eq 1 ]]; then
   printf 'Installed bundled memd CLI: %s\n' "${LOCAL_BIN}/memd"
 fi
+printf '\nRun '"'"'memd doctor'"'"' to verify the install.\n'

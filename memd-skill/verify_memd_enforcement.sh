@@ -56,6 +56,21 @@ if ! grep -Fq "Mandatory \`memd\` CLI contract" "${HOME}/.claude/CLAUDE.md"; the
   exit 1
 fi
 
+if [[ ! -f "${HOME}/.cursor/rules/memd.mdc" ]]; then
+  echo "missing Cursor user rule at ~/.cursor/rules/memd.mdc" >&2
+  exit 1
+fi
+
+if ! grep -Fq "Mandatory \`memd\` CLI contract" "${HOME}/.cursor/rules/memd.mdc"; then
+  echo "missing CLI memd contract in ~/.cursor/rules/memd.mdc" >&2
+  exit 1
+fi
+
+# `memd doctor` should run and exit 0 on a wired host.
+memd doctor --format json >"${TMP_DIR}/doctor.json"
+grep -Fq '"binary"' "${TMP_DIR}/doctor.json"
+grep -Fq '"global_rules"' "${TMP_DIR}/doctor.json"
+
 CONTEXT_FILE="${TMP_DIR}/context.md"
 LOG_DIR="${TMP_DIR}/logs"
 
