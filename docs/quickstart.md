@@ -142,14 +142,18 @@ The skill includes a bundled Linux binary:
 
 - [memd-skill/bin/linux-x64/memd](https://github.com/fmschulz/memd/blob/main/memd-skill/bin/linux-x64/memd)
 
-For instruction-level enforcement in Codex CLI and Claude Code:
+For instruction-level enforcement in Codex CLI, Claude Code, and Cursor:
 
 ```bash
 ./memd-skill/install_memd_enforcement.sh --install-binary
 ```
 
-The installer copies the bundled CLI binary when requested and upserts rules
-that make CLI retrieval and CLI writes mandatory for substantive work.
+The installer copies the bundled CLI binary when requested, upserts rules that
+make CLI retrieval and CLI writes mandatory for substantive work, writes the
+Cursor rule, and wires the Claude Code `SessionStart` hook. On first
+SessionStart in an unscoped repo, `memd session-start` auto-creates a minimal
+`.memd/project_scope.json`; use `memd init` when you want the full per-repo
+guardrail files.
 
 ## 7. Verify the CLI Workflow
 
@@ -158,7 +162,13 @@ that make CLI retrieval and CLI writes mandatory for substantive work.
 ```
 
 The script exercises the skill + CLI path: add, search, agent-context output,
-audit logs, and instruction blocks.
+audit logs, instruction blocks, the Cursor rule, and `memd doctor`.
+
+For a quick host wiring check:
+
+```bash
+memd doctor
+```
 
 For scripts that need many structured operations without a background worker,
 use JSONL batch mode:

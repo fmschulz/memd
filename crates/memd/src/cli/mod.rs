@@ -20,6 +20,7 @@ mod args;
 mod batch;
 mod call;
 mod consolidate;
+mod doctor;
 mod eval_counterfactual;
 mod maintenance;
 mod memory_md;
@@ -42,6 +43,7 @@ use args::{ProjectScopeConfig, SearchRerankerOptions};
 use batch::{read_batch_input, run_batch_jsonl, stream_batch_jsonl};
 use call::parse_call_arguments;
 use consolidate::{run_consolidate, ConsolidateOptions};
+use doctor::{run_doctor, DoctorOptions};
 use eval_counterfactual::{run_eval_counterfactual, EvalCounterfactualOptions};
 use memory_md::{refresh_memory_md, MemoryMdOptions};
 use ops_bridge::cli_call_tool;
@@ -274,6 +276,16 @@ pub async fn run_cli<S: Store>(
         CliCommand::SessionStart { project_dir } => {
             let result = run_session_start(store, SessionStartOptions { project_dir }).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+
+        CliCommand::Doctor {
+            project_dir,
+            format,
+        } => {
+            run_doctor(DoctorOptions {
+                project_dir,
+                format,
+            })?;
         }
 
         CliCommand::Call {

@@ -6,7 +6,16 @@ use memd::store::persistent::{PersistentStore, PersistentStoreConfig};
 use memd::store::Store;
 use memd::{ChunkType, MemoryChunk, ProjectId, TenantId};
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
 use tempfile::tempdir;
+
+static CONSOLIDATOR_ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+fn with_consolidator_env<'a>() -> MutexGuard<'a, ()> {
+    CONSOLIDATOR_ENV_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn open_store(dir: &std::path::Path) -> PersistentStore {
     let cfg = PersistentStoreConfig {
@@ -119,6 +128,7 @@ async fn cross_tenant_section_appears_when_flag_set() {
 
 #[tokio::test]
 async fn shared_tenant_promotion_fires_when_multiproject() {
+    let _env_guard = with_consolidator_env();
     let dir = tempdir().unwrap();
     let store = open_store(&dir.path().join("store"));
     let tenant = TenantId::new("t").unwrap();
@@ -132,9 +142,7 @@ async fn shared_tenant_promotion_fires_when_multiproject() {
             .add(
                 MemoryChunk::new(
                     tenant.clone(),
-                    format!(
-                        "Run {i} in {project}: tenant scoped cache keys hit the bug."
-                    ),
+                    format!("Run {i} in {project}: tenant scoped cache keys hit the bug."),
                     ChunkType::Summary,
                 )
                 .with_project(ProjectId::from(project))
@@ -184,6 +192,7 @@ async fn shared_tenant_promotion_fires_when_multiproject() {
 
 #[tokio::test]
 async fn shared_promotion_requires_explicit_opt_in() {
+    let _env_guard = with_consolidator_env();
     // Without `--promote-to-shared`, consolidation must never write
     // anything to the shared tenant, even when a single lesson spans
     // multiple projects.
@@ -244,7 +253,10 @@ async fn shared_promotion_requires_explicit_opt_in() {
         .await
         .unwrap_or_default()
         .len();
-    assert_eq!(after, 0, "promotion must NOT fire without --promote-to-shared");
+    assert_eq!(
+        after, 0,
+        "promotion must NOT fire without --promote-to-shared"
+    );
 }
 
 #[tokio::test]

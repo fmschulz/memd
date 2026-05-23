@@ -1,5 +1,5 @@
 {
-  "_comment": "memd SessionStart hook for Codex CLI. Copy this into your project's .codex/hooks.json (merging with any existing hooks). It refreshes memory.md and kicks a background consolidation when enough new chunks have accumulated. The command is a no-op when the repo has no .memd scope file, so it is safe to leave wired everywhere.",
+  "_comment": "memd SessionStart hook for Codex CLI. Copy this into your project's .codex/hooks.json (merging with any existing hooks). It auto-creates a minimal .memd/project_scope.json when missing, refreshes memory.md, and kicks a background consolidation when enough new chunks have accumulated. Set MEMD_AUTO_SCOPE=0 or add .memd-skip in the repo root to opt out.",
   "hooks": {
     "SessionStart": [
       {

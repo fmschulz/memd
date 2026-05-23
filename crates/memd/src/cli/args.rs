@@ -675,6 +675,25 @@ pub enum CliCommand {
         write_agent_files: bool,
     },
 
+    /// Diagnose host wiring and per-repo scope.
+    ///
+    /// Reports the state of: `memd` binary discovery, data directory,
+    /// global agent rules (Claude / Codex / Cursor), Claude
+    /// `SessionStart` hook, and the current project's `.memd`
+    /// scope. Always exits 0; use `--format json` for machine-readable
+    /// output.
+    Doctor {
+        /// Project directory to inspect for `.memd/project_scope.json`.
+        #[arg(long, default_value = ".")]
+        project_dir: PathBuf,
+
+        /// Output format. `markdown` (default) renders a human-readable
+        /// report with stable `[ok]`/`[--]` prefixes; `json` emits the
+        /// raw structured report.
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: ExportFormat,
+    },
+
     /// Disk hygiene: sweep orphan HNSW snapshots, repack legacy mapping
     /// files, and (with --aggressive) trigger optional compaction
     /// hooks. Safe to run while no writer process is active; concurrent
@@ -708,7 +727,10 @@ impl CliCommand {
     pub fn requires_store(&self) -> bool {
         !matches!(
             self,
-            CliCommand::Init { .. } | CliCommand::Warm { .. } | CliCommand::Maintenance { .. }
+            CliCommand::Init { .. }
+                | CliCommand::Warm { .. }
+                | CliCommand::Maintenance { .. }
+                | CliCommand::Doctor { .. }
         )
     }
 

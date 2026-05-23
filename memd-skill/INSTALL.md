@@ -63,12 +63,26 @@ The script:
 
 - upserts CLI-first `memd` rules into `~/.codex/AGENTS.md`
 - upserts CLI-first `memd` rules into `~/.claude/CLAUDE.md`
+- writes the same contract as a Cursor user rule at `~/.cursor/rules/memd.mdc`
+  (`alwaysApply: true`)
+- wires a Claude Code `SessionStart` hook in `~/.claude/settings.json`
 - makes CLI retrieval mandatory before substantive work
 - makes CLI writes mandatory before final substantive answers
 - adds a pre-refusal rule requiring a relevant CLI memory search before an
   agent says work is impossible, blocked, or unknowable
 
 It does not register external client tools and does not install wrapper guards.
+
+After the installer runs, verify the wiring:
+
+```bash
+memd doctor
+```
+
+`memd doctor` reports the state of: the `memd` binary, data directory,
+global agent rules (Claude / Codex / Cursor), the Claude `SessionStart`
+hook, and the current project's `.memd` scope. Use `--format json` for
+machine-readable output.
 
 ## Basic CLI Workflow
 
@@ -154,7 +168,25 @@ memd add \
 
 ## Repository Guardrails
 
-Initialize a repository-scoped `.memd/` directory:
+### Implicit (no per-repo setup)
+
+When the `SessionStart` hook fires in a repo with no `.memd/project_scope.json`,
+`memd session-start` auto-creates a minimal scope file using:
+
+- `tenant_id`: `$MEMD_DEFAULT_TENANT`, then `$USER`, then `"default"`
+- `project_id`: lower-cased basename of the repo
+
+This is what makes the "clone the installer, open any repo in Claude Code /
+Codex / Cursor, and memd just works" UX hold. Auto-scope writes ONLY
+`.memd/project_scope.json` — it never touches `AGENTS.md`, `CLAUDE.md`, or
+writes tenant guardrails on the user's behalf. Opt out by setting
+`MEMD_AUTO_SCOPE=0` in the environment, or dropping an empty `.memd-skip`
+file in the repo root.
+
+### Explicit (full guardrails)
+
+For richer per-repo guardrails — tenant scope rules, AGENTS.md / CLAUDE.md
+upserts, custom `read_tenants` — run:
 
 ```bash
 memd init --tenant-id quickstart --project-id auth
@@ -180,6 +212,8 @@ That verifier checks:
 - the enforcement blocks exist in `~/.codex/AGENTS.md` and
   `~/.claude/CLAUDE.md`
 - both blocks describe the CLI contract
+- `~/.cursor/rules/memd.mdc` exists and carries the CLI contract
+- `memd doctor --format json` runs cleanly
 - `memd add` stores a test memory
 - `memd search` recovers it
 - `memd agent-context` writes a CLI-only context file and JSONL audit log
@@ -210,7 +244,7 @@ Check:
 Check:
 
 1. You ran `./memd-skill/install_memd_enforcement.sh`
-2. The enforcement block exists in both instruction files
+2. The enforcement block exists in both instruction files and the Cursor rule
 3. The clients were restarted after the files changed
 4. The work is substantive enough to trigger the contract
 

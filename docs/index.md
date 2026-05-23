@@ -1,6 +1,6 @@
 # memd
 
-[![Version](https://img.shields.io/badge/version-0.50.0-blue)](https://github.com/fmschulz/memd/blob/main/CHANGELOG.md){ .md-button }
+[![Version](https://img.shields.io/badge/version-0.51.0-blue)](https://github.com/fmschulz/memd/blob/main/CHANGELOG.md){ .md-button }
 [![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust&logoColor=white)](https://github.com/fmschulz/memd/blob/main/Cargo.toml){ .md-button }
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/fmschulz/memd/blob/main/LICENSE){ .md-button }
 
@@ -26,7 +26,7 @@ private CLI-managed warm worker driven by ordinary CLI commands.
 | **Batch CLI** | Many structured operations in one loaded process | `memd batch --jsonl requests.jsonl` |
 | **Export/import** | Move local memory to portable formats | `memd export-omf`, `memd import-omf` |
 | **Operations** | Structured memory / task / artifact / context / code / debug ops | `memd call task.start --json '{…}'` |
-| **Guardrails** | Pin tenant/project scope and CLI-first agent rules | `memd init` |
+| **Guardrails** | Pin tenant/project scope and verify CLI-first agent wiring | `memd init`, `memd doctor` |
 
 ---
 

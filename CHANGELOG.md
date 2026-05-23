@@ -6,6 +6,30 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [0.51.0] - 2026-05-23
+
+### Added
+
+- Added `memd doctor`, a filesystem-only diagnostic command that reports
+  binary discovery, data directory presence, global agent rule wiring for
+  Claude / Codex / Cursor, the Claude Code `SessionStart` hook, and the
+  current project's `.memd` scope. It supports human-readable Markdown and
+  machine-readable JSON / JSONL output and does not require opening the store.
+- `memd session-start` now auto-creates a minimal
+  `.memd/project_scope.json` when a repo has no scope yet, using
+  `$MEMD_DEFAULT_TENANT`, then `$USER`, then `"default"` for `tenant_id` and
+  the sanitized repo basename for `project_id`. Set `MEMD_AUTO_SCOPE=0` or
+  add `.memd-skip` in the repo root to opt out.
+- The skill installer now writes a Cursor user rule at
+  `~/.cursor/rules/memd.mdc` and wires the Claude Code `SessionStart` hook in
+  `~/.claude/settings.json`.
+
+### Changed
+
+- Updated README, MkDocs pages, skill docs, and verification scripts to cover
+  auto-scope, Cursor enforcement, `memd doctor`, and the expanded installer
+  behavior.
+
 ## [0.50.0] - 2026-05-21
 
 This release eliminates the long-running warm_index orphan-snapshot leak
