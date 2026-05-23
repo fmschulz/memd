@@ -1,6 +1,6 @@
 # memd
 
-[![Version](https://img.shields.io/badge/version-0.50.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.51.0-blue)](CHANGELOG.md)
 [![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust&logoColor=white)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-fmschulz.github.io%2Fmemd-blue)](https://fmschulz.github.io/memd/)
@@ -27,7 +27,7 @@ private CLI-managed warm worker driven by ordinary CLI commands.
 | Batch CLI | Many structured operations in one loaded process | `memd batch --jsonl requests.jsonl` |
 | Export/import | Move local memory to portable formats | `memd export-omf`, `memd import-omf` |
 | Operations | Structured memory/task/artifact/context/code/debug ops | `memd call task.start --json '{…}'` |
-| Guardrails | Pin tenant/project scope and CLI-first agent rules | `memd init` |
+| Guardrails | Pin tenant/project scope and verify CLI-first agent wiring | `memd init`, `memd doctor` |
 
 Use `memd search --mode brief-project|resume-task|find-failures|find-decisions|find-evidence|find-highlights`
 when retrieval should bias toward persisted digests and canonical summaries.
@@ -149,11 +149,15 @@ Actions.
 ./memd-skill/install_memd_enforcement.sh --install-binary
 ```
 
-The installer copies the bundled binary into `~/.local/bin/memd` and upserts
+The installer copies the bundled binary into `~/.local/bin/memd`, upserts
 CLI-first instruction blocks into `~/.codex/AGENTS.md` and
-`~/.claude/CLAUDE.md`. It also injects a pre-refusal rule: agents must check
-`memd` before declaring a task impossible, blocked, or unknowable. The
-installer touches instruction files only.
+`~/.claude/CLAUDE.md`, writes the matching Cursor rule to
+`~/.cursor/rules/memd.mdc`, and wires a Claude Code `SessionStart` hook in
+`~/.claude/settings.json`. It also injects a pre-refusal rule: agents must
+check `memd` before declaring a task impossible, blocked, or unknowable.
+
+Run `memd doctor` after installation to verify the binary, data directory,
+global rules, SessionStart hook, and current project scope.
 
 More: [Agent skill](https://fmschulz.github.io/memd/agent-skill/),
 [Self-improvement loop](https://fmschulz.github.io/memd/self-improvement/).

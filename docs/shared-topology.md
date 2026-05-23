@@ -47,6 +47,7 @@ flowchart LR
 | `thread_id` | tag `thread:<id>` or per-call argument | conversation or PR scope |
 | `task_id` | tag `task:<id>` | one unit of work |
 
-See [Quick start](quickstart.md#1-build) for `memd init` which writes
-`.memd/tenant_scope.json` and `.memd/project_scope.json` so subsequent
-commands can omit the IDs.
+The SessionStart hook can auto-create a minimal `.memd/project_scope.json`
+from the default tenant and repo basename. Use `memd init` when you want the
+full `.memd/tenant_scope.json`, `.memd/project_scope.json`, and local
+guardrail files so subsequent commands can omit the IDs.
