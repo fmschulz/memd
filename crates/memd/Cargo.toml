@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Local memory CLI for AI agents with hybrid retrieval"
+repository = "https://github.com/fmschulz/memd"
+homepage = "https://fmschulz.github.io/memd/"
+documentation = "https://docs.rs/memd"
+readme = "README.md"
+keywords = ["memory", "cli", "agents", "retrieval"]
+categories = ["command-line-utilities", "development-tools"]
 
 [features]
 default = []
