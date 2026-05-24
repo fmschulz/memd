@@ -5,7 +5,8 @@ name: Auto-release on version bump
 # tag already exists, the workflow is a no-op. Release body is the matching
 # section from CHANGELOG.md (the section header line is stripped).
 #
-# Pairs with version-consistency.yml (drift guard) and release-skill-binary.yml
+# Pairs with version-consistency.yml (drift guard), publish-crate.yml
+# (publish memd to crates.io on tag push), and release-skill-binary.yml
 # (rebuild + PR the bundled skill binary on tag push).
 #
 # Why this exists: between v0.40.0 and v0.50.0 the workspace version bumped
