@@ -29,6 +29,30 @@ tests and CI). SIGINT / SIGTERM shut the server down cleanly.
 `memd-wiki serve` never rebuilds the tree — run `memd-wiki build` first
 whenever memd state changes.
 
+## Portable Markdown output
+
+`memd-wiki` writes a plain Markdown tree. The output can live in any directory:
+a checked-in docs folder, a static-site source tree, a shared filesystem
+folder, or an Obsidian vault. Set `wiki.outdir` in `.memd/config.json` or pass
+`--output-dir`:
+
+```json
+{
+  "tenant_id": "memd",
+  "project_id": "memd",
+  "wiki": {
+    "outdir": "/path/to/markdown-memory"
+  }
+}
+```
+
+Obsidian is only one reader for that tree. The general contract is that
+`memd` remains the source of truth, and the wiki is the human-readable,
+searchable projection. Agents should write durable memory with `memd add` or
+structured `task.*` / `artifact.*` operations, then rebuild the wiki. Do not
+hand-edit generated compiler or LLM lanes; keep human-only notes under
+`notes/`.
+
 ## Three ownership lanes
 
 The wiki has three lanes:

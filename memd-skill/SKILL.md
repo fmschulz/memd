@@ -50,6 +50,17 @@ Use `memd` when agents need to:
 Small talk, trivial one-shot answers, and purely local formatting rewrites do
 not need `memd`.
 
+## What Not to Store
+
+Do not store full chat logs or play-by-play transcripts. Store only durable
+facts, decisions, evidence, commands, parameters, validation, and follow-ups
+that another agent is likely to reuse.
+
+Do not store secrets or private credentials in `memd`: cookies, tokens, API
+keys, passwords, verification codes, ID numbers, bank cards, private contact
+details, third-party account configuration, or sensitive values copied from
+logs.
+
 ## Required CLI Contract
 
 For substantive work:
@@ -387,6 +398,9 @@ Codex, Cursor), the Claude `SessionStart` hook, and the current project's
 - Do not repeat known failed approaches unless you have a reason.
 - Store conclusions with enough context for a later agent to trust or challenge
   them.
+- Keep stored memories concise and reusable; do not archive full chat logs.
+- Never store secrets, credentials, private account data, or sensitive values
+  copied from logs.
 - Record parameters, commands, outputs, and validation for substantive runs.
 - Record why a decision was chosen, not only what changed.
 - Record uncertainty and follow-ups at the stopping point.
