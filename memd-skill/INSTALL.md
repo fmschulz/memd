@@ -70,6 +70,10 @@ The script:
 - makes CLI writes mandatory before final substantive answers
 - adds a pre-refusal rule requiring a relevant CLI memory search before an
   agent says work is impossible, blocked, or unknowable
+- tells agents not to store full chat logs, play-by-play transcripts, cookies,
+  tokens, API keys, passwords, verification codes, ID numbers, bank cards,
+  private contact details, third-party account configuration, or sensitive log
+  values in `memd`
 
 It does not register external client tools and does not install wrapper guards.
 
@@ -165,6 +169,10 @@ memd add \
   --tags kind:progress,task:jwt-auth \
   --text "Mapped auth middleware touchpoints; next step is RS256 issuance and validation tests."
 ```
+
+Keep writes concise and reusable. `memd` is for durable facts, decisions,
+evidence, commands, parameters, validation, and follow-ups; it is not a place
+to archive full chat logs or sensitive credentials.
 
 ## Repository Guardrails
 

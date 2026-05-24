@@ -161,6 +161,8 @@ Mandatory `memd` CLI contract for substantive technical and scientific work:
 - Before saying the work is impossible, blocked, cannot be answered, or needs user context that might already exist in shared memory, run a relevant `memd` CLI search first. If no relevant record is found, say exactly what you checked.
 - If the work changes understanding, runs tools, produces findings, or could matter to later sessions, record it with `memd add` before the final answer.
 - Use `memd add --chunk-type summary|trace|decision|research|plan --tags kind:progress|run|evidence|decision|finish,priority:N,... --text "<summary>"`; include `--project-id` when known. Use `priority:N` for durable lessons that should be candidates for future `memory.md` refreshes.
+- Do not store full chat logs, play-by-play transcripts, or low-value temporary process notes. Store concise, durable facts that another agent is likely to reuse.
+- Do not store secrets or private credentials in `memd`: cookies, tokens, API keys, passwords, verification codes, ID numbers, bank cards, private contact details, third-party account configuration, or sensitive values copied from logs.
 - Do not provide a final substantive answer until the CLI retrieval and CLI write have both happened, unless `memd` is unavailable.
 - If `memd` is unavailable or misconfigured, treat that as a blocker and say so explicitly rather than silently skipping memory usage.
 - Small talk, trivial one-shot questions, and purely local formatting rewrites do not require `memd`.
