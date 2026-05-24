@@ -312,6 +312,30 @@ rather than silently falling through.
 `--config-start PATH` overrides the starting directory for the
 ancestor walk.
 
+### Portable Markdown output
+
+Use `wiki.outdir` when you want the compiled wiki to live somewhere other than
+the default `./compiled_wiki/` directory. The target can be a checked-in docs
+folder, a static-site source tree, a shared filesystem folder, or an Obsidian
+vault:
+
+```json
+{
+  "tenant_id": "memd",
+  "project_id": "memd",
+  "wiki": {
+    "outdir": "/path/to/markdown-memory"
+  }
+}
+```
+
+Treat the output tree as a rendered memory surface, not the primary database.
+Agents should write durable memory through `memd add` or structured
+`task.*` / `artifact.*` operations, then rerun `memd-wiki build`. The
+compiler owns `index.md`, `log.md`, `projects/`, `tasks/`, `libraries/`,
+`concepts/`, `entities/`, and `manifest.json`; human-only notes belong under
+`notes/`.
+
 ## Usage
 
 `memd-wiki` ships two subcommands: `build` (the default when no

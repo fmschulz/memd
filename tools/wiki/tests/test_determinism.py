@@ -3,7 +3,7 @@
 Plan §6 (honest v1 contract): a second ``build_wiki()`` against
 unchanged memd state produces ``written=0, unchanged=N`` and a
 byte-identical ``manifest.json``. This test exercises that invariant
-end-to-end via a mocked MCP transport so it never needs a live daemon.
+end-to-end via a mocked CLI client so it never needs a live memd store.
 
 Plan §6.1: ``manifest.json`` carries ``schema_version`` and
 ``compiler_owned_prefixes`` so the v2 LLM-authored / human-edited
@@ -216,6 +216,28 @@ def _make_mock_server() -> object:
     return _handle
 
 
+def _fake_client_class(handler: object) -> type:
+    class _FakeMemdCliClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def call_tool(self, name: str, arguments: dict) -> dict:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            }
+            req = type("FakeRequest", (), {})()
+            req.data = json.dumps(payload).encode("utf-8")
+            response = handler(req, timeout=0.0)
+            envelope = json.loads(response.read().decode("utf-8"))
+            content = envelope["result"]["content"][0]["text"]
+            return json.loads(content)
+
+    return _FakeMemdCliClient
+
+
 class DeterministicRebuildTests(unittest.TestCase):
     def test_second_run_writes_zero_and_manifest_is_byte_identical(self) -> None:
         handler = _make_mock_server()
@@ -231,8 +253,8 @@ class DeterministicRebuildTests(unittest.TestCase):
                 forbidden_data_dirs=[],
             )
             with patch(
-                "compiled_wiki.mcp_client.urllib.request.urlopen",
-                side_effect=handler,
+                "compiled_wiki.compiler.MemdCliClient",
+                new=_fake_client_class(handler),
             ):
                 first = build_wiki(config)
                 manifest_after_first = (outdir / "manifest.json").read_bytes()
@@ -270,8 +292,8 @@ class PermutationStabilityTests(unittest.TestCase):
                 forbidden_data_dirs=[],
             )
             with patch(
-                "compiled_wiki.mcp_client.urllib.request.urlopen",
-                side_effect=handler,
+                "compiled_wiki.compiler.MemdCliClient",
+                new=_fake_client_class(handler),
             ):
                 build_wiki(config)
             # Concatenate all deterministic byte-level output so the
@@ -407,8 +429,8 @@ class ManifestSchemaTests(unittest.TestCase):
                 forbidden_data_dirs=[],
             )
             with patch(
-                "compiled_wiki.mcp_client.urllib.request.urlopen",
-                side_effect=handler,
+                "compiled_wiki.compiler.MemdCliClient",
+                new=_fake_client_class(handler),
             ):
                 build_wiki(config)
             manifest = json.loads((outdir / "manifest.json").read_text(encoding="utf-8"))

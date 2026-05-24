@@ -6,7 +6,7 @@ This directory defines the rules for the `memd-wiki` compiler.
 
 There are three layers:
 
-1. Raw source of truth: live `memd` project state accessed through MCP HTTP tools.
+1. Raw source of truth: live `memd` project state accessed through the local CLI.
 2. Compiled wiki: markdown files generated into `output/`.
 3. Schema: this file, which defines how the compiler organizes and maintains pages.
 

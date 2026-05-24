@@ -44,7 +44,7 @@ class CheckServerCompatTests(unittest.TestCase):
     def test_unparseable_server_version_is_warn(self) -> None:
         result = check_server_compat("not-a-version", "0.9.0")
         self.assertEqual(result.severity, "warn")
-        self.assertIn("could not parse memd server", result.message)
+        self.assertIn("could not parse memd executable", result.message)
 
     def test_unparseable_client_version_is_warn(self) -> None:
         # Defensive: we shouldn't ship an unparseable __version__, but if

@@ -318,6 +318,28 @@ def _make_mock_server(
     return _handle
 
 
+def _fake_client_class(handler: object) -> type:
+    class _FakeMemdCliClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            }
+            req = type("FakeRequest", (), {})()
+            req.data = json.dumps(payload).encode("utf-8")
+            response = handler(req, timeout=0.0)
+            envelope = json.loads(response.read().decode("utf-8"))
+            content = envelope["result"]["content"][0]["text"]
+            return json.loads(content)
+
+    return _FakeMemdCliClient
+
+
 class BuildWithWikiPageTests(unittest.TestCase):
     def test_seeded_wiki_page_writes_concept_file_and_manifest_entry(self) -> None:
         wiki_page = _seed_wiki_page()
@@ -337,8 +359,8 @@ class BuildWithWikiPageTests(unittest.TestCase):
                 forbidden_data_dirs=[],
             )
             with patch(
-                "compiled_wiki.mcp_client.urllib.request.urlopen",
-                side_effect=handler,
+                "compiled_wiki.compiler.MemdCliClient",
+                new=_fake_client_class(handler),
             ):
                 build_wiki(config)
 
@@ -390,8 +412,8 @@ class BuildWithWikiPageTests(unittest.TestCase):
                 forbidden_data_dirs=[],
             )
             with patch(
-                "compiled_wiki.mcp_client.urllib.request.urlopen",
-                side_effect=handler,
+                "compiled_wiki.compiler.MemdCliClient",
+                new=_fake_client_class(handler),
             ):
                 build_wiki(config)
                 second = build_wiki(config)
@@ -412,8 +434,8 @@ class BuildWithWikiPageTests(unittest.TestCase):
                 forbidden_data_dirs=[],
             )
             with patch(
-                "compiled_wiki.mcp_client.urllib.request.urlopen",
-                side_effect=handler,
+                "compiled_wiki.compiler.MemdCliClient",
+                new=_fake_client_class(handler),
             ):
                 build_wiki(config)
             # Empty wiki_pages: concepts/ and entities/ stay absent.
@@ -438,8 +460,8 @@ class BuildWithWikiPageTests(unittest.TestCase):
                 forbidden_data_dirs=[],
             )
             with patch(
-                "compiled_wiki.mcp_client.urllib.request.urlopen",
-                side_effect=handler,
+                "compiled_wiki.compiler.MemdCliClient",
+                new=_fake_client_class(handler),
             ):
                 build_wiki(config)
             text = (outdir / "concepts" / "0199-wiki.md").read_text(encoding="utf-8")

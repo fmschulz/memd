@@ -18,6 +18,9 @@ upserts CLI guardrail blocks into `~/.codex/AGENTS.md` and
 3. Record meaningful progress, evidence, and decisions with `memd add`.
 4. Run a `memd` search **before** claiming a task is impossible, blocked,
    or unknowable.
+5. Keep stored memories concise and reusable; do not store full chat logs,
+   secrets, credentials, private account data, or sensitive values copied from
+   logs.
 
 The installer does not register external client tools or wrap commands.
 
