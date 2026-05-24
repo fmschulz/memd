@@ -1,0 +1,100 @@
+name: Publish crate
+
+# Publishes the `memd` crate to crates.io when a release tag is pushed.
+#
+# crates.io setup required once per crate:
+#   1. Open the `memd` crate settings on crates.io.
+#   2. Add a GitHub Actions Trusted Publisher for:
+#        repository: fmschulz/memd
+#        workflow: publish-crate.yml
+#        environment: release
+#
+# This avoids storing a long-lived crates.io API token in GitHub. The
+# rust-lang action exchanges GitHub's OIDC identity for a temporary
+# crates.io token and revokes it when the job completes.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish, e.g. v0.52.0'
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-crate-${{ github.ref_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish memd to crates.io
+    runs-on: ubuntu-latest
+    environment: release
+    timeout-minutes: 20
+    steps:
+      - name: Resolve target ref
+        id: ref
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.name }}
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Extract version
+        id: ver
+        run: |
+          set -euo pipefail
+          VERSION="$(awk -F\" '/^version[[:space:]]*=/ {print $2; exit}' Cargo.toml)"
+          if [[ -z "${VERSION}" ]]; then
+            echo "::error::could not read workspace version from Cargo.toml"
+            exit 1
+          fi
+          TAG="${{ steps.ref.outputs.name }}"
+          if [[ "${TAG}" != "v${VERSION}" ]]; then
+            echo "::error::tag ${TAG} does not match workspace version ${VERSION}"
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Publishing candidate: memd ${VERSION}"
+
+      - name: Skip if already published
+        id: published
+        run: |
+          set -euo pipefail
+          URL="https://crates.io/api/v1/crates/memd/${{ steps.ver.outputs.version }}"
+          if curl -fsS "${URL}" >/dev/null; then
+            echo "memd ${{ steps.ver.outputs.version }} is already published; skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "memd ${{ steps.ver.outputs.version }} is not on crates.io yet."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify package
+        if: steps.published.outputs.skip == 'false'
+        run: cargo publish -p memd --dry-run
+
+      - name: Authenticate with crates.io
+        if: steps.published.outputs.skip == 'false'
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish crate
+        if: steps.published.outputs.skip == 'false'
+        run: cargo publish -p memd --token "${{ steps.auth.outputs.token }}"
