@@ -30,6 +30,20 @@ The installer does not register external client tools or wrap commands.
 ./memd-skill/install_memd_enforcement.sh --install-binary
 ```
 
+If the bundled binary fails with a `GLIBC_... not found` error, the host is
+older than the release build environment. Build a host-compatible binary from
+the checkout instead:
+
+```bash
+cargo build --release -p memd
+install -m 0755 target/release/memd ~/.local/bin/memd
+./memd-skill/install_memd_enforcement.sh
+memd doctor
+```
+
+Run the installer without `--install-binary` after a local build; otherwise it
+will replace the host-built binary with the bundled one again.
+
 What the script does:
 
 1. Stops any running warm worker.

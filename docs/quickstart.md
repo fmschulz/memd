@@ -155,6 +155,11 @@ SessionStart in an unscoped repo, `memd session-start` auto-creates a minimal
 `.memd/project_scope.json`; use `memd init` when you want the full per-repo
 guardrail files.
 
+If the bundled binary fails with a `GLIBC_... not found` error on an older
+Linux host, build locally with `cargo build --release -p memd`, install
+`target/release/memd` into `~/.local/bin/memd`, then rerun the installer
+without `--install-binary`.
+
 ## 7. Verify the CLI Workflow
 
 ```bash
