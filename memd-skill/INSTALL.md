@@ -53,6 +53,29 @@ which memd
 memd --version
 ```
 
+On older enterprise or HPC Linux hosts, the bundled binary can fail before it
+prints a version, with an error like:
+
+```text
+memd: /lib64/libc.so.6: version `GLIBC_2.xx' not found
+```
+
+That means the release binary was built against a newer glibc than the host
+provides. Build and install a host-compatible binary from the checkout instead:
+
+```bash
+cargo build --release -p memd
+install -m 0755 target/release/memd ~/.local/bin/memd
+hash -r
+memd --version
+./memd-skill/install_memd_enforcement.sh
+memd doctor
+```
+
+After a local build, run the installer without `--install-binary`; passing
+`--install-binary` again will overwrite the host-built binary with the bundled
+one.
+
 ## Install CLI Enforcement Instructions
 
 ```bash
@@ -237,6 +260,19 @@ Install the bundled binary:
 ```
 
 Then make sure `~/.local/bin` is on `PATH`.
+
+If that command installs a binary that fails with `GLIBC_... not found`, build
+from source on the target host instead:
+
+```bash
+cargo build --release -p memd
+install -m 0755 target/release/memd ~/.local/bin/memd
+./memd-skill/install_memd_enforcement.sh
+memd doctor
+```
+
+Do not rerun the installer with `--install-binary` on that host unless the
+bundled binary has been rebuilt for its glibc version.
 
 ### Agents are not sharing memory
 
