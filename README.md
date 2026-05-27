@@ -156,6 +156,12 @@ CLI-first instruction blocks into `~/.codex/AGENTS.md` and
 `~/.claude/settings.json`. It also injects a pre-refusal rule: agents must
 check `memd` before declaring a task impossible, blocked, or unknowable.
 
+On older enterprise or HPC Linux hosts, the bundled binary may fail with a
+`GLIBC_... not found` error. In that case, build `memd` locally with
+`cargo build --release -p memd`, install `target/release/memd` into
+`~/.local/bin/memd`, and run `./memd-skill/install_memd_enforcement.sh`
+without `--install-binary` so the working host-built binary is not replaced.
+
 Run `memd doctor` after installation to verify the binary, data directory,
 global rules, SessionStart hook, and current project scope.
 
