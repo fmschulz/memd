@@ -16,7 +16,6 @@ use tracing::debug;
 use crate::error::Result;
 use crate::store::metadata::{ChunkMetadata, MetadataStore};
 use crate::store::persistent::PersistentStore;
-use crate::store::Store;
 use crate::types::lifecycle::MemoryTier;
 use crate::types::{ChunkStatus, MemoryChunk, TenantId};
 
@@ -52,10 +51,9 @@ impl Default for ExportOptions {
 /// Export a tenant's memory as an OMF 1.0 document.
 ///
 /// Order: stable ascending `timestamp_created` (matches `list_for_export`).
-/// Errors propagate from the underlying metadata/segment reads; a missing
-/// payload for a metadata row is silently skipped (the row is likely in
-/// the process of being written or was torn down by compaction between
-/// the list read and the per-chunk fetch).
+/// Metadata errors propagate. Unreadable segment payloads are skipped with
+/// the same warning path used by retrieval, so one stale metadata row does not
+/// poison full-tenant archive/export operations.
 pub async fn export_omf(
     store: &PersistentStore,
     tenant_id: &TenantId,
@@ -98,7 +96,10 @@ pub async fn export_omf(
             continue;
         }
 
-        let chunk = match <PersistentStore as Store>::get(store, tenant_id, &meta.chunk_id).await? {
+        let chunk = match store
+            .get_chunk_for_retrieval(tenant_id, &meta.chunk_id, "export_omf")
+            .await?
+        {
             Some(c) => c,
             None => {
                 // list_for_export just surfaced this row; a None here

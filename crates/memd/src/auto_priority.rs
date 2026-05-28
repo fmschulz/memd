@@ -61,9 +61,8 @@ pub fn stamp_auto_priority(
 
 /// True if the caller already set a `priority:` or `importance:` tag.
 pub fn has_explicit_priority(tags: &[String]) -> bool {
-    tags.iter().any(|tag| {
-        tag.starts_with("priority:") || tag.starts_with("importance:")
-    })
+    tags.iter()
+        .any(|tag| tag.starts_with("priority:") || tag.starts_with("importance:"))
 }
 
 /// Compute the heuristic priority. Public for tests.
@@ -73,10 +72,10 @@ pub fn compute_priority(chunk_type: ChunkType, text: &str, tags: &[String]) -> u
     // Chunk type base.
     score += match chunk_type {
         ChunkType::Decision => 5,
-        ChunkType::Summary => 3,
-        ChunkType::Research => 3,
-        ChunkType::Trace => 1,
-        ChunkType::Plan => 2,
+        ChunkType::Summary => 1,
+        ChunkType::Research => 2,
+        ChunkType::Trace => 0,
+        ChunkType::Plan => 1,
         _ => 0,
     };
 
@@ -89,7 +88,7 @@ pub fn compute_priority(chunk_type: ChunkType, text: &str, tags: &[String]) -> u
             "kind:evidence" => score += 3,
             "kind:run" => score += 1,
             "kind:progress" => score += 0,
-            _ if tag.starts_with("kind:consolidated") => score += 5,
+            _ if tag.starts_with("kind:consolidated") => score += 6,
             _ if tag.starts_with("kind:superseded") => return 0, // never stamp tombstones
             _ if tag.starts_with("validated:true") || tag == "supports:true" => score += 1,
             _ if tag.starts_with("status:failed") => score += 1,
@@ -131,17 +130,25 @@ mod tests {
     #[test]
     fn decision_chunk_with_kind_decision_gets_high_priority() {
         let mut tags = vec!["kind:decision".to_string(), "task:T1".to_string()];
-        let stamped =
-            stamp_auto_priority(ChunkType::Decision, "Use tenant-scoped cache keys.", &mut tags);
+        let stamped = stamp_auto_priority(
+            ChunkType::Decision,
+            "Use tenant-scoped cache keys.",
+            &mut tags,
+        );
         assert_eq!(stamped, Some(MAX_AUTO_PRIORITY));
-        assert!(tags.iter().any(|t| t == &format!("priority:{MAX_AUTO_PRIORITY}")));
+        assert!(tags
+            .iter()
+            .any(|t| t == &format!("priority:{MAX_AUTO_PRIORITY}")));
     }
 
     #[test]
     fn explicit_user_priority_is_preserved() {
         let mut tags = vec!["priority:5".to_string(), "kind:decision".to_string()];
-        let stamped =
-            stamp_auto_priority(ChunkType::Decision, "Use tenant-scoped cache keys.", &mut tags);
+        let stamped = stamp_auto_priority(
+            ChunkType::Decision,
+            "Use tenant-scoped cache keys.",
+            &mut tags,
+        );
         assert_eq!(stamped, None);
         assert!(tags.iter().filter(|t| t.starts_with("priority:")).count() == 1);
     }
@@ -157,6 +164,18 @@ mod tests {
     fn low_signal_chunk_is_not_stamped() {
         let mut tags = vec!["kind:progress".to_string()];
         let stamped = stamp_auto_priority(ChunkType::Doc, "todo: investigate", &mut tags);
+        assert_eq!(stamped, None);
+        assert!(!tags.iter().any(|t| t.starts_with("priority:")));
+    }
+
+    #[test]
+    fn routine_summary_without_quality_signal_is_not_stamped() {
+        let mut tags = vec!["kind:progress".to_string()];
+        let stamped = stamp_auto_priority(
+            ChunkType::Summary,
+            "Read the relevant files and started planning the next change.",
+            &mut tags,
+        );
         assert_eq!(stamped, None);
         assert!(!tags.iter().any(|t| t.starts_with("priority:")));
     }

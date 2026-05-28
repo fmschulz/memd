@@ -48,7 +48,11 @@ pub fn resolve_backend(
     codex_env: bool,
     claude_path: bool,
 ) -> Result<Backend> {
-    match explicit.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+    match explicit
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
         Some("claude") => Ok(Backend::Claude),
         Some("codex") => Ok(Backend::Codex),
         Some("mock") => Ok(Backend::Mock),
@@ -126,10 +130,7 @@ mod tests {
 
     #[test]
     fn auto_falls_back_to_claude() {
-        assert_eq!(
-            resolve_backend(None, false, true).unwrap(),
-            Backend::Claude
-        );
+        assert_eq!(resolve_backend(None, false, true).unwrap(), Backend::Claude);
     }
 
     #[test]

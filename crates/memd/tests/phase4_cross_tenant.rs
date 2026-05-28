@@ -83,6 +83,7 @@ async fn cross_tenant_section_appears_when_flag_set() {
             global_limit: 10,
             candidate_k: 40,
             cross_tenant: false,
+            explain_output: None,
         },
     )
     .await
@@ -106,6 +107,7 @@ async fn cross_tenant_section_appears_when_flag_set() {
             global_limit: 10,
             candidate_k: 40,
             cross_tenant: true,
+            explain_output: None,
         },
     )
     .await
@@ -311,6 +313,7 @@ async fn cross_tenant_dedup_removes_near_duplicates() {
             global_limit: 10,
             candidate_k: 40,
             cross_tenant: true,
+            explain_output: None,
         },
     )
     .await

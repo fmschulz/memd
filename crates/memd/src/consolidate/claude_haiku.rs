@@ -62,9 +62,8 @@ impl Consolidator for ClaudeHaikuConsolidator {
 /// Pull the `result` string out of `claude --output-format json`
 /// output. Public for unit tests.
 pub(crate) fn extract_claude_result(stdout: &str) -> Result<String> {
-    let value: Value = serde_json::from_str(stdout.trim()).map_err(|e| {
-        MemdError::ValidationError(format!("claude returned non-JSON output: {e}"))
-    })?;
+    let value: Value = serde_json::from_str(stdout.trim())
+        .map_err(|e| MemdError::ValidationError(format!("claude returned non-JSON output: {e}")))?;
     // `--output-format json` wraps the answer in a `result` field;
     // some versions also surface an `is_error` flag.
     if value.get("is_error").and_then(Value::as_bool) == Some(true) {

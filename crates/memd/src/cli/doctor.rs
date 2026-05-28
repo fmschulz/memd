@@ -20,6 +20,8 @@ use serde_json::{json, Value};
 
 use super::args::ExportFormat;
 use crate::error::Result;
+use crate::store::Store;
+use crate::types::TenantId;
 
 /// Marker the installer drops into agent rule files. Identical
 /// substring is used by both `~/.claude/CLAUDE.md` and
@@ -28,6 +30,11 @@ const ENFORCEMENT_MARKER: &str = "memd-enforcement:start";
 
 /// Marker used inside the wired `SessionStart` hook command.
 const SESSION_HOOK_MARKER: &str = "memd session-start";
+const PROJECT_DRIFT_LOW_CHUNK_THRESHOLD: usize = 2;
+const PROJECT_DRIFT_MIN_DOMINANT_CHUNKS: usize = 10;
+const PROJECT_DRIFT_DOMINANCE_RATIO: usize = 5;
+const PROJECT_DRIFT_SCAN_LIMIT: usize = 5_000;
+const PROJECT_DRIFT_PAGE_SIZE: usize = 500;
 
 #[derive(Debug, Clone)]
 pub(super) struct DoctorOptions {
@@ -35,11 +42,13 @@ pub(super) struct DoctorOptions {
     pub(super) format: ExportFormat,
 }
 
-/// Run the doctor command. Pure-ish: filesystem reads only, no
-/// network, no store. Returns the structured report as JSON; the
+/// Run the doctor command. Returns the structured report as JSON; the
 /// CLI dispatcher renders it according to `options.format`.
-pub(super) fn run_doctor(options: DoctorOptions) -> Result<Value> {
-    let report = collect_report(&options.project_dir);
+pub(super) async fn run_doctor<S: Store>(store: &S, options: DoctorOptions) -> Result<Value> {
+    let mut report = collect_report(&options.project_dir);
+    if let Some(scope) = report.get_mut("project_scope") {
+        enrich_project_scope_memory(store, scope).await;
+    }
     match options.format {
         ExportFormat::Json => {
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -283,6 +292,190 @@ fn check_project_scope(project_dir: &Path) -> Value {
     })
 }
 
+async fn enrich_project_scope_memory<S: Store>(store: &S, project_scope: &mut Value) {
+    let Some(scope) = project_scope.as_object_mut() else {
+        return;
+    };
+    if !scope
+        .get("ok")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    let tenant_id = scope
+        .get("tenant_id")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let project_id = scope.get("project_id").and_then(|value| value.as_str());
+    let Some(project_id) = project_id.filter(|value| !value.trim().is_empty()) else {
+        return;
+    };
+    let Ok(tenant) = TenantId::new(tenant_id) else {
+        scope.insert(
+            "memory".to_string(),
+            json!({"ok": false, "reason": "invalid tenant_id in project scope"}),
+        );
+        return;
+    };
+
+    let counts = match project_counts_for_tenant(store, &tenant).await {
+        Ok(counts) => counts,
+        Err(err) => {
+            scope.insert(
+                "memory".to_string(),
+                json!({"ok": false, "reason": format!("could not inspect project memory: {err}")}),
+            );
+            return;
+        }
+    };
+    let configured_chunks = counts
+        .iter()
+        .find_map(|(candidate, count)| (candidate.as_deref() == Some(project_id)).then_some(*count))
+        .unwrap_or(0);
+    let normalized = normalize_project_id_for_drift(project_id);
+    let similar = counts
+        .into_iter()
+        .filter_map(|(candidate, count)| {
+            let candidate = candidate?;
+            if candidate == project_id {
+                return None;
+            }
+            if normalize_project_id_for_drift(&candidate) != normalized {
+                return None;
+            }
+            Some(json!({
+                "project_id": candidate,
+                "active_chunks": count,
+                "normalized_id": normalized,
+            }))
+        })
+        .collect::<Vec<_>>();
+    let dominant_similar_chunks = similar
+        .iter()
+        .filter_map(|entry| entry.get("active_chunks").and_then(|value| value.as_u64()))
+        .max()
+        .unwrap_or(0) as usize;
+
+    let mut memory = json!({
+        "ok": true,
+        "configured_project_active_chunks": configured_chunks,
+        "similar_project_ids": similar,
+    });
+    let has_similar_project_ids = !memory["similar_project_ids"]
+        .as_array()
+        .map(Vec::is_empty)
+        .unwrap_or(true);
+    let similar_dominates_configured = dominant_similar_chunks >= PROJECT_DRIFT_MIN_DOMINANT_CHUNKS
+        && dominant_similar_chunks
+            > configured_chunks.saturating_mul(PROJECT_DRIFT_DOMINANCE_RATIO);
+    if has_similar_project_ids
+        && (configured_chunks <= PROJECT_DRIFT_LOW_CHUNK_THRESHOLD || similar_dominates_configured)
+    {
+        let variants = memory["similar_project_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.get("project_id").and_then(|value| value.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        memory["ok"] = json!(false);
+        memory["warning"] = json!(format!(
+            "configured project_id `{project_id}` has {configured_chunks} active chunks, but similar project_id(s) exist: {variants}"
+        ));
+        scope.insert("ok".to_string(), json!(false));
+        scope.insert(
+            "reason".to_string(),
+            json!("configured project_id has little/no memory but similar project IDs exist"),
+        );
+    }
+    scope.insert("memory".to_string(), memory);
+}
+
+async fn project_counts_for_tenant<S: Store>(
+    store: &S,
+    tenant: &TenantId,
+) -> crate::error::Result<Vec<(Option<String>, usize)>> {
+    if let Some(persistent) = store.as_persistent() {
+        return persistent.metadata().project_counts(tenant, 1_000);
+    }
+    let scanned = scan_project_counts_for_tenant(store, tenant).await?;
+    if !scanned.is_empty() {
+        return Ok(scanned);
+    }
+    project_counts_from_default_metadata(tenant, 1_000)
+}
+
+async fn scan_project_counts_for_tenant<S: Store>(
+    store: &S,
+    tenant: &TenantId,
+) -> crate::error::Result<Vec<(Option<String>, usize)>> {
+    let mut counts = std::collections::BTreeMap::<Option<String>, usize>::new();
+    let mut offset = 0usize;
+    while offset < PROJECT_DRIFT_SCAN_LIMIT {
+        let limit = PROJECT_DRIFT_PAGE_SIZE.min(PROJECT_DRIFT_SCAN_LIMIT - offset);
+        let chunks = store.list_chunks(tenant, limit, offset).await?;
+        if chunks.is_empty() {
+            break;
+        }
+        offset = offset.saturating_add(limit);
+        for chunk in chunks {
+            *counts
+                .entry(chunk.project_id.as_option().map(str::to_string))
+                .or_insert(0) += 1;
+        }
+    }
+    Ok(counts.into_iter().collect())
+}
+
+fn project_counts_from_default_metadata(
+    tenant: &TenantId,
+    limit: usize,
+) -> crate::error::Result<Vec<(Option<String>, usize)>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let Some(path) =
+        dirs::home_dir().map(|home| home.join(".memd").join("data").join("metadata.db"))
+    else {
+        return Ok(Vec::new());
+    };
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut stmt = conn.prepare(
+        "SELECT project_id, COUNT(*) AS active_chunks
+         FROM chunks
+         WHERE tenant_id = ?1 AND status != 'deleted'
+         GROUP BY project_id
+         ORDER BY active_chunks DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![tenant.as_str(), limit as i64], |row| {
+        let project_id: Option<String> = row.get(0)?;
+        let count: i64 = row.get(1)?;
+        Ok((project_id, count.max(0) as usize))
+    })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
+fn normalize_project_id_for_drift(project_id: &str) -> String {
+    project_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
 fn home_path(suffix: &str) -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(suffix))
 }
@@ -337,11 +530,25 @@ fn render_text(report: &Value) -> String {
     );
     push_line(&mut out, "project scope", &report["project_scope"], |v| {
         if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
-            format!(
+            let mut detail = format!(
                 "tenant={} project={}",
                 v.get("tenant_id").and_then(|p| p.as_str()).unwrap_or("?"),
                 v.get("project_id").and_then(|p| p.as_str()).unwrap_or("?"),
-            )
+            );
+            if let Some(count) = v
+                .get("memory")
+                .and_then(|m| m.get("configured_project_active_chunks"))
+                .and_then(|count| count.as_u64())
+            {
+                detail.push_str(&format!(" chunks={count}"));
+            }
+            detail
+        } else if let Some(memory_warning) = v
+            .get("memory")
+            .and_then(|m| m.get("warning"))
+            .and_then(|warning| warning.as_str())
+        {
+            memory_warning.to_string()
         } else {
             path_or_reason(v)
         }
@@ -369,6 +576,7 @@ fn push_line<F: Fn(&Value) -> String>(out: &mut String, label: &str, v: &Value, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ChunkType, MemoryChunk, MemoryStore, ProjectId, Store, TenantId};
     use tempfile::tempdir;
 
     #[test]
@@ -427,6 +635,139 @@ mod tests {
         let v = check_project_scope(dir.path());
         assert_eq!(v["ok"], false);
         assert_eq!(v["reason"], "malformed JSON");
+    }
+
+    #[test]
+    fn project_id_drift_normalization_ignores_separators() {
+        assert_eq!(
+            normalize_project_id_for_drift("bester_hosting"),
+            normalize_project_id_for_drift("bester-hosting")
+        );
+        assert_ne!(
+            normalize_project_id_for_drift("bester_hosting"),
+            normalize_project_id_for_drift("bester-hosting-old")
+        );
+    }
+
+    #[tokio::test]
+    async fn project_scope_warns_on_similar_project_id_with_no_memory() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".memd")).unwrap();
+        std::fs::write(
+            dir.path().join(".memd/project_scope.json"),
+            r#"{"tenant_id":"fschulz","project_id":"bester_hosting"}"#,
+        )
+        .unwrap();
+        let store = MemoryStore::new();
+        let tenant = TenantId::new("fschulz").unwrap();
+        store
+            .add(
+                MemoryChunk::new(
+                    tenant,
+                    "Useful gateway restore lesson under the hyphenated project id.",
+                    ChunkType::Summary,
+                )
+                .with_project(ProjectId::from("bester-hosting")),
+            )
+            .await
+            .unwrap();
+
+        let mut v = check_project_scope(dir.path());
+        enrich_project_scope_memory(&store, &mut v).await;
+
+        assert_eq!(v["ok"], false);
+        assert_eq!(
+            v["reason"],
+            "configured project_id has little/no memory but similar project IDs exist"
+        );
+        assert_eq!(v["memory"]["configured_project_active_chunks"], 0);
+        assert_eq!(
+            v["memory"]["similar_project_ids"][0]["project_id"],
+            "bester-hosting"
+        );
+        assert!(v["memory"]["warning"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("bester_hosting"));
+    }
+
+    #[tokio::test]
+    async fn project_scope_warns_when_similar_project_id_dominates_existing_memory() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".memd")).unwrap();
+        std::fs::write(
+            dir.path().join(".memd/project_scope.json"),
+            r#"{"tenant_id":"fschulz","project_id":"bester_hosting"}"#,
+        )
+        .unwrap();
+        let store = MemoryStore::new();
+        let tenant = TenantId::new("fschulz").unwrap();
+        for index in 0..8 {
+            store
+                .add(
+                    MemoryChunk::new(
+                        tenant.clone(),
+                        format!("Low-volume underscore project record {index}."),
+                        ChunkType::Summary,
+                    )
+                    .with_project(ProjectId::from("bester_hosting")),
+                )
+                .await
+                .unwrap();
+        }
+        for index in 0..50 {
+            store
+                .add(
+                    MemoryChunk::new(
+                        tenant.clone(),
+                        format!("Dominant hyphenated project record {index}."),
+                        ChunkType::Summary,
+                    )
+                    .with_project(ProjectId::from("bester-hosting")),
+                )
+                .await
+                .unwrap();
+        }
+
+        let mut v = check_project_scope(dir.path());
+        enrich_project_scope_memory(&store, &mut v).await;
+
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["memory"]["configured_project_active_chunks"], 8);
+        assert_eq!(
+            v["memory"]["similar_project_ids"][0]["project_id"],
+            "bester-hosting"
+        );
+    }
+
+    #[tokio::test]
+    async fn project_scope_does_not_warn_for_unrelated_project_names() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".memd")).unwrap();
+        std::fs::write(
+            dir.path().join(".memd/project_scope.json"),
+            r#"{"tenant_id":"fschulz","project_id":"bester_hosting"}"#,
+        )
+        .unwrap();
+        let store = MemoryStore::new();
+        let tenant = TenantId::new("fschulz").unwrap();
+        store
+            .add(
+                MemoryChunk::new(tenant, "Unrelated memory.", ChunkType::Summary)
+                    .with_project(ProjectId::from("bester-hosting-old")),
+            )
+            .await
+            .unwrap();
+
+        let mut v = check_project_scope(dir.path());
+        enrich_project_scope_memory(&store, &mut v).await;
+
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["memory"]["configured_project_active_chunks"], 0);
+        assert_eq!(
+            v["memory"]["similar_project_ids"].as_array().unwrap().len(),
+            0
+        );
     }
 
     #[test]

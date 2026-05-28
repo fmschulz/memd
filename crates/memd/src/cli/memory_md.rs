@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use serde_json::{json, Value};
 
 use super::args::{CliQueryMode, ProjectScopeConfig};
@@ -70,6 +71,16 @@ const HIT_WINDOW_DAYS: u32 = 30;
 /// Age in ms above which a chunk with zero hits is considered stale.
 const STALE_CHUNK_AGE_MS: i64 = 30 * 86_400_000;
 
+const TAKEAWAY_CATEGORIES: &[(&str, u8)] = &[
+    ("Decisions", 0),
+    ("Validated Fixes", 1),
+    ("Known Failures", 2),
+    ("Commands/Paths", 3),
+    ("Open Follow-ups", 4),
+    ("Evidence", 5),
+    ("Other Takeaways", 6),
+];
+
 #[derive(Debug)]
 pub(super) struct MemoryMdOptions {
     pub(super) tenant_id: Option<String>,
@@ -80,6 +91,20 @@ pub(super) struct MemoryMdOptions {
     pub(super) global_limit: usize,
     pub(super) candidate_k: usize,
     pub(super) cross_tenant: bool,
+    pub(super) explain_output: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+pub(super) struct MemoryMdEvalOptions {
+    pub(super) tenant_id: Option<String>,
+    pub(super) project_id: Option<String>,
+    pub(super) project_dir: PathBuf,
+    pub(super) output: PathBuf,
+    pub(super) project_limit: usize,
+    pub(super) candidate_k: usize,
+    pub(super) top_n: usize,
+    pub(super) min_useful_ratio: f64,
+    pub(super) max_generated_wrappers: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +120,65 @@ struct Takeaway {
     tags: Vec<String>,
     sources: BTreeSet<String>,
     occurrences: usize,
+}
+
+#[derive(Debug, Clone)]
+struct RankedTakeawayCollection {
+    takeaways: Vec<Takeaway>,
+    explanations: Vec<MemoryMdCandidateExplanation>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct PriorityBreakdown {
+    explicit: f32,
+    kind_weight: f32,
+    type_weight: f32,
+    recurrence: f32,
+    multi_query: f32,
+    search_score: f32,
+    library_bonus: f32,
+    utility: f32,
+    staleness_penalty: f32,
+    total: f32,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct MemoryMdCandidateExplanation {
+    section: String,
+    source: String,
+    query: String,
+    mode: String,
+    raw_rank: usize,
+    chunk_id: String,
+    tenant_id: String,
+    project_id: Option<String>,
+    chunk_type: String,
+    timestamp_created: i64,
+    search_score: f32,
+    priority_score: Option<f32>,
+    priority_breakdown: Option<PriorityBreakdown>,
+    display_status: String,
+    filter_reason: Option<String>,
+    display_rank: Option<usize>,
+    generated_digest: bool,
+    tags: Vec<String>,
+    matched_sources: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TakeawayCategory {
+    heading: &'static str,
+    reason: &'static str,
+    order: u8,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct MemoryMdQualityReport {
+    displayed_count: usize,
+    useful_count: usize,
+    generated_wrapper_count: usize,
+    missing_reason_count: usize,
+    useful_ratio: f64,
 }
 
 pub(super) async fn refresh_memory_md<S: Store>(
@@ -123,10 +207,13 @@ pub(super) async fn refresh_memory_md<S: Store>(
     // map is shared with every `priority_score` call so we don't
     // re-read the JSONL log per chunk.
     let hit_stats = aggregate_hits_in(&project_dir, HIT_WINDOW_DAYS, DEFAULT_SUMMARY_TTL_MS);
-    let project_takeaways = if project_limit == 0 {
-        Vec::new()
+    let project_collection = if project_limit == 0 {
+        RankedTakeawayCollection {
+            takeaways: Vec::new(),
+            explanations: Vec::new(),
+        }
     } else {
-        collect_ranked_takeaways(
+        collect_ranked_takeaways_with_explanations(
             store,
             tenant.as_str(),
             project_id.as_deref(),
@@ -134,13 +221,17 @@ pub(super) async fn refresh_memory_md<S: Store>(
             candidate_k,
             project_limit,
             &hit_stats,
+            "project",
         )
         .await?
     };
-    let global_takeaways = if global_limit == 0 {
-        Vec::new()
+    let global_collection = if global_limit == 0 {
+        RankedTakeawayCollection {
+            takeaways: Vec::new(),
+            explanations: Vec::new(),
+        }
     } else {
-        collect_ranked_takeaways(
+        collect_ranked_takeaways_with_explanations(
             store,
             tenant.as_str(),
             None,
@@ -148,6 +239,7 @@ pub(super) async fn refresh_memory_md<S: Store>(
             candidate_k,
             global_limit,
             &hit_stats,
+            "machine_wide",
         )
         .await?
     };
@@ -158,6 +250,14 @@ pub(super) async fn refresh_memory_md<S: Store>(
         Vec::new()
     };
 
+    let RankedTakeawayCollection {
+        takeaways: project_takeaways,
+        explanations: project_explanations,
+    } = project_collection;
+    let RankedTakeawayCollection {
+        takeaways: global_takeaways,
+        explanations: global_explanations,
+    } = global_collection;
     let output_path = if options.output.is_absolute() {
         options.output
     } else {
@@ -172,15 +272,127 @@ pub(super) async fn refresh_memory_md<S: Store>(
     );
     std::fs::write(&output_path, rendered)?;
 
+    let explain_output = if let Some(path) = options.explain_output {
+        let path = if path.is_absolute() {
+            path
+        } else {
+            project_dir.join(path)
+        };
+        let report = json!({
+            "tenant_id": tenant.to_string(),
+            "project_id": project_id.clone(),
+            "generated_unix_ms": now_ms(),
+            "candidate_k": candidate_k,
+            "limits": {
+                "project": project_limit,
+                "machine_wide": global_limit,
+                "cross_tenant": if options.cross_tenant { 5 } else { 0 },
+            },
+            "project": project_explanations,
+            "machine_wide": global_explanations,
+            "cross_tenant_note": if options.cross_tenant {
+                Some("cross-tenant output is built from already-ranked tenant summaries and is not expanded into raw candidate explanations")
+            } else {
+                None
+            },
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&report)?)?;
+        Some(path)
+    } else {
+        None
+    };
+
     Ok(json!({
         "tenant_id": tenant.to_string(),
         "project_id": project_id,
         "output": output_path,
+        "explain_output": explain_output,
         "project_takeaways": project_takeaways.len(),
         "global_takeaways": global_takeaways.len(),
         "cross_tenant_takeaways": cross_tenant_takeaways.len(),
         "candidate_k": candidate_k
     }))
+}
+
+pub(super) async fn run_memory_md_eval<S: Store>(
+    store: &S,
+    options: MemoryMdEvalOptions,
+) -> Result<Value> {
+    let project_dir = absolutize_project_dir(&options.project_dir)?;
+    let output = options.output.clone();
+    let rendered_path = if output.is_absolute() {
+        output.clone()
+    } else {
+        project_dir.join(&output)
+    };
+    let refresh = refresh_memory_md(
+        store,
+        MemoryMdOptions {
+            tenant_id: options.tenant_id,
+            project_id: options.project_id,
+            project_dir,
+            output,
+            project_limit: options.project_limit,
+            global_limit: 0,
+            candidate_k: options.candidate_k,
+            cross_tenant: false,
+            explain_output: None,
+        },
+    )
+    .await?;
+    let content = std::fs::read_to_string(&rendered_path)?;
+    let top_n = options.top_n.clamp(1, 10);
+    let report = evaluate_memory_md_quality(&content, top_n);
+    let min_useful_ratio = options.min_useful_ratio.clamp(0.0, 1.0);
+
+    let mut failures = Vec::new();
+    if report.displayed_count == 0 {
+        failures.push("no project takeaways were displayed".to_string());
+    }
+    if report.useful_ratio + f64::EPSILON < min_useful_ratio {
+        failures.push(format!(
+            "useful_ratio {:.3} below threshold {:.3}",
+            report.useful_ratio, min_useful_ratio
+        ));
+    }
+    if report.generated_wrapper_count > options.max_generated_wrappers {
+        failures.push(format!(
+            "generated_wrapper_count {} exceeds threshold {}",
+            report.generated_wrapper_count, options.max_generated_wrappers
+        ));
+    }
+    if report.missing_reason_count > 0 {
+        failures.push(format!(
+            "{} displayed items are missing reason metadata",
+            report.missing_reason_count
+        ));
+    }
+
+    let payload = json!({
+        "passed": failures.is_empty(),
+        "output": rendered_path,
+        "top_n": top_n,
+        "displayed_count": report.displayed_count,
+        "useful_count": report.useful_count,
+        "useful_ratio": report.useful_ratio,
+        "generated_wrapper_count": report.generated_wrapper_count,
+        "missing_reason_count": report.missing_reason_count,
+        "thresholds": {
+            "min_useful_ratio": min_useful_ratio,
+            "max_generated_wrappers": options.max_generated_wrappers,
+        },
+        "refresh": refresh,
+        "failures": failures,
+    });
+
+    if !failures.is_empty() {
+        return Err(MemdError::ValidationError(format!(
+            "memory-md quality thresholds failed: {}",
+            serde_json::to_string(&payload)?
+        )));
+    }
+
+    Ok(payload)
 }
 
 async fn collect_ranked_takeaways<S: Store>(
@@ -192,7 +404,32 @@ async fn collect_ranked_takeaways<S: Store>(
     limit: usize,
     hit_stats: &HashMap<String, HitStats>,
 ) -> Result<Vec<Takeaway>> {
+    Ok(collect_ranked_takeaways_with_explanations(
+        store,
+        tenant_id,
+        project_id,
+        queries,
+        candidate_k,
+        limit,
+        hit_stats,
+        "internal",
+    )
+    .await?
+    .takeaways)
+}
+
+async fn collect_ranked_takeaways_with_explanations<S: Store>(
+    store: &S,
+    tenant_id: &str,
+    project_id: Option<&str>,
+    queries: &[(CliQueryMode, &str, &str)],
+    candidate_k: usize,
+    limit: usize,
+    hit_stats: &HashMap<String, HitStats>,
+    section: &str,
+) -> Result<RankedTakeawayCollection> {
     let mut by_chunk: HashMap<String, Takeaway> = HashMap::new();
+    let mut explanations = Vec::new();
 
     for (mode, source, query) in queries {
         let payload = cli_search_payload(
@@ -209,19 +446,31 @@ async fn collect_ranked_takeaways<S: Store>(
             false,
         )
         .await?;
-        merge_payload_candidates(&mut by_chunk, &payload, source);
+        merge_payload_candidates(
+            &mut by_chunk,
+            &mut explanations,
+            &payload,
+            section,
+            source,
+            query,
+            *mode,
+        );
     }
 
     let tag_counts = recurring_tag_counts(by_chunk.values());
     let now_ms = now_ms() as i64;
+    let mut breakdowns = HashMap::new();
     let mut takeaways = by_chunk
         .into_values()
         .map(|mut takeaway| {
-            takeaway.priority = priority_score(&takeaway, &tag_counts, hit_stats, now_ms);
+            let breakdown = priority_breakdown(&takeaway, &tag_counts, hit_stats, now_ms);
+            takeaway.priority = breakdown.total;
+            breakdowns.insert(takeaway.chunk_id.clone(), breakdown);
             takeaway
         })
         .collect::<Vec<_>>();
-    suppress_finishes_covered_by_libraries(&mut takeaways);
+    let scored_takeaways = takeaways.clone();
+    let suppressed_ids = suppress_finishes_covered_by_libraries(&mut takeaways);
     takeaways.sort_by(|left, right| {
         right
             .priority
@@ -229,8 +478,24 @@ async fn collect_ranked_takeaways<S: Store>(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| right.timestamp_created.cmp(&left.timestamp_created))
     });
+    let displayed_ids = takeaways
+        .iter()
+        .take(limit)
+        .enumerate()
+        .map(|(idx, takeaway)| (takeaway.chunk_id.clone(), idx + 1))
+        .collect::<HashMap<_, _>>();
     takeaways.truncate(limit);
-    Ok(takeaways)
+    finalize_candidate_explanations(
+        &mut explanations,
+        &scored_takeaways,
+        &suppressed_ids,
+        &displayed_ids,
+        &breakdowns,
+    );
+    Ok(RankedTakeawayCollection {
+        takeaways,
+        explanations,
+    })
 }
 
 /// Drop raw `task:kind:task_finish` takeaways already represented by
@@ -244,7 +509,7 @@ async fn collect_ranked_takeaways<S: Store>(
 /// from one project never suppresses a same-id finish from another —
 /// this matters for the machine-wide section of `memory.md`, which
 /// spans projects.
-fn suppress_finishes_covered_by_libraries(takeaways: &mut Vec<Takeaway>) {
+fn suppress_finishes_covered_by_libraries(takeaways: &mut Vec<Takeaway>) -> BTreeSet<String> {
     let covered: BTreeSet<(Option<String>, String)> = takeaways
         .iter()
         .filter(|takeaway| is_library_digest(&takeaway.tags))
@@ -256,9 +521,15 @@ fn suppress_finishes_covered_by_libraries(takeaways: &mut Vec<Takeaway>) {
         })
         .collect();
     if covered.is_empty() {
-        return;
+        return BTreeSet::new();
     }
-    takeaways.retain(|takeaway| !is_suppressible_finish(takeaway, &covered));
+    let suppressed = takeaways
+        .iter()
+        .filter(|takeaway| is_suppressible_finish(takeaway, &covered))
+        .map(|takeaway| takeaway.chunk_id.clone())
+        .collect::<BTreeSet<_>>();
+    takeaways.retain(|takeaway| !suppressed.contains(&takeaway.chunk_id));
+    suppressed
 }
 
 /// True only for system-generated library digests. The
@@ -266,9 +537,9 @@ fn suppress_finishes_covered_by_libraries(takeaways: &mut Vec<Takeaway>) {
 /// chunk spoofing a `task:role:*` tag to suppress real finishes.
 fn is_library_digest(tags: &[String]) -> bool {
     let generated = tags.iter().any(|tag| tag == "task:status:generated");
-    let role = tags.iter().any(|tag| {
-        tag == "task:role:highlight_library" || tag == "task:role:project_brief"
-    });
+    let role = tags
+        .iter()
+        .any(|tag| tag == "task:role:highlight_library" || tag == "task:role:project_brief");
     generated && role
 }
 
@@ -330,13 +601,17 @@ fn extract_covered_task_ids(text: &str) -> Vec<String> {
 
 fn merge_payload_candidates(
     by_chunk: &mut HashMap<String, Takeaway>,
+    explanations: &mut Vec<MemoryMdCandidateExplanation>,
     payload: &Value,
+    section: &str,
     source: &str,
+    query: &str,
+    mode: CliQueryMode,
 ) {
     let Some(results) = payload.get("results").and_then(Value::as_array) else {
         return;
     };
-    for result in results {
+    for (idx, result) in results.iter().enumerate() {
         let Some(chunk_id) = result.get("chunk_id").and_then(Value::as_str) else {
             continue;
         };
@@ -345,9 +620,6 @@ fn merge_payload_candidates(
             .and_then(Value::as_str)
             .unwrap_or_default()
             .trim();
-        if text.is_empty() {
-            continue;
-        }
         let tags = result
             .get("tags")
             .and_then(Value::as_array)
@@ -359,7 +631,18 @@ fn merge_payload_candidates(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if is_empty_generated_digest(text, &tags) {
+        let mut explanation =
+            candidate_explanation(section, source, query, mode, idx + 1, result, &tags, text);
+        if text.is_empty() {
+            explanation.display_status = "filtered".to_string();
+            explanation.filter_reason = Some("empty_text".to_string());
+            explanations.push(explanation);
+            continue;
+        }
+        if is_generated_digest_takeaway(&tags) {
+            explanation.display_status = "filtered".to_string();
+            explanation.filter_reason = Some("generated_digest_wrapper".to_string());
+            explanations.push(explanation);
             continue;
         }
         // Defence-in-depth: the lifecycle visibility filter already
@@ -367,6 +650,9 @@ fn merge_payload_candidates(
         // `kind:superseded` tag so consolidated output never competes
         // with the raw chunks it replaced.
         if tags.iter().any(|tag| tag.starts_with("kind:superseded")) {
+            explanation.display_status = "filtered".to_string();
+            explanation.filter_reason = Some("superseded_tag".to_string());
+            explanations.push(explanation);
             continue;
         }
         let score = result.get("score").and_then(Value::as_f64).unwrap_or(0.0) as f32;
@@ -403,6 +689,106 @@ fn merge_payload_candidates(
         entry.score = entry.score.max(score);
         entry.occurrences = entry.occurrences.saturating_add(1);
         entry.sources.insert(source.to_string());
+        explanations.push(explanation);
+    }
+}
+
+fn candidate_explanation(
+    section: &str,
+    source: &str,
+    query: &str,
+    mode: CliQueryMode,
+    raw_rank: usize,
+    result: &Value,
+    tags: &[String],
+    text: &str,
+) -> MemoryMdCandidateExplanation {
+    MemoryMdCandidateExplanation {
+        section: section.to_string(),
+        source: source.to_string(),
+        query: query.to_string(),
+        mode: query_mode_label(mode).to_string(),
+        raw_rank,
+        chunk_id: result
+            .get("chunk_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        tenant_id: result
+            .get("tenant_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        project_id: result
+            .get("project_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        chunk_type: result
+            .get("chunk_type")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        timestamp_created: result
+            .get("timestamp_created")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+        search_score: result.get("score").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+        priority_score: None,
+        priority_breakdown: None,
+        display_status: "candidate".to_string(),
+        filter_reason: None,
+        display_rank: None,
+        generated_digest: is_generated_digest_takeaway(tags)
+            || text
+                .to_ascii_lowercase()
+                .contains("task digest status generated"),
+        tags: tags.to_vec(),
+        matched_sources: vec![source.to_string()],
+    }
+}
+
+fn finalize_candidate_explanations(
+    explanations: &mut [MemoryMdCandidateExplanation],
+    scored_takeaways: &[Takeaway],
+    suppressed_ids: &BTreeSet<String>,
+    displayed_ids: &HashMap<String, usize>,
+    breakdowns: &HashMap<String, PriorityBreakdown>,
+) {
+    let by_id = scored_takeaways
+        .iter()
+        .map(|takeaway| (takeaway.chunk_id.as_str(), takeaway))
+        .collect::<HashMap<_, _>>();
+    for explanation in explanations {
+        if explanation.display_status == "filtered" {
+            continue;
+        }
+        if let Some(takeaway) = by_id.get(explanation.chunk_id.as_str()) {
+            explanation.priority_score = Some(takeaway.priority);
+            explanation.priority_breakdown = breakdowns.get(&takeaway.chunk_id).cloned();
+            explanation.matched_sources = takeaway.sources.iter().cloned().collect();
+        }
+        if suppressed_ids.contains(&explanation.chunk_id) {
+            explanation.display_status = "filtered".to_string();
+            explanation.filter_reason = Some("covered_by_library".to_string());
+        } else if let Some(rank) = displayed_ids.get(&explanation.chunk_id) {
+            explanation.display_status = "displayed".to_string();
+            explanation.display_rank = Some(*rank);
+        } else {
+            explanation.display_status = "filtered".to_string();
+            explanation.filter_reason = Some("below_display_limit".to_string());
+        }
+    }
+}
+
+fn query_mode_label(mode: CliQueryMode) -> &'static str {
+    match mode {
+        CliQueryMode::Generic => "generic",
+        CliQueryMode::BriefProject => "brief_project",
+        CliQueryMode::ResumeTask => "resume_task",
+        CliQueryMode::FindFailures => "find_failures",
+        CliQueryMode::FindDecisions => "find_decisions",
+        CliQueryMode::FindEvidence => "find_evidence",
+        CliQueryMode::FindHighlights => "find_highlights",
     }
 }
 
@@ -418,12 +804,22 @@ fn recurring_tag_counts<'a>(
     counts
 }
 
+#[cfg(test)]
 fn priority_score(
     takeaway: &Takeaway,
     tag_counts: &HashMap<String, usize>,
     hit_stats: &HashMap<String, HitStats>,
     now_ms: i64,
 ) -> f32 {
+    priority_breakdown(takeaway, tag_counts, hit_stats, now_ms).total
+}
+
+fn priority_breakdown(
+    takeaway: &Takeaway,
+    tag_counts: &HashMap<String, usize>,
+    hit_stats: &HashMap<String, HitStats>,
+    now_ms: i64,
+) -> PriorityBreakdown {
     let explicit = explicit_priority(&takeaway.tags).unwrap_or(0.0);
     let kind_weight = takeaway
         .tags
@@ -481,7 +877,7 @@ fn priority_score(
         0.0
     };
 
-    explicit
+    let total = explicit
         + kind_weight
         + type_weight
         + recurrence
@@ -489,7 +885,20 @@ fn priority_score(
         + search_score
         + library_bonus
         + utility
-        + staleness_penalty
+        + staleness_penalty;
+
+    PriorityBreakdown {
+        explicit,
+        kind_weight,
+        type_weight,
+        recurrence,
+        multi_query,
+        search_score,
+        library_bonus,
+        utility,
+        staleness_penalty,
+        total,
+    }
 }
 
 fn explicit_priority(tags: &[String]) -> Option<f32> {
@@ -513,16 +922,11 @@ fn high_signal_tag(tag: &str) -> bool {
         || tag.starts_with("importance:")
 }
 
-fn is_empty_generated_digest(text: &str, tags: &[String]) -> bool {
-    let generated_digest = tags.iter().any(|tag| tag == "task:status:generated")
+fn is_generated_digest_takeaway(tags: &[String]) -> bool {
+    tags.iter().any(|tag| tag == "task:status:generated")
         && tags
             .iter()
-            .any(|tag| tag.starts_with("task:role:") || tag.starts_with("task:digest:"));
-    if !generated_digest {
-        return false;
-    }
-    let lowered = text.to_ascii_lowercase();
-    lowered.contains(" contains 0 ") || lowered.contains(" has 0 ")
+            .any(|tag| tag.starts_with("task:role:") || tag.starts_with("task:digest:"))
 }
 
 /// Cross-tenant takeaways: pull `kind:consolidated` lessons with
@@ -643,7 +1047,9 @@ fn render_memory_md(
     out.push_str("- Repeated lessons should be recorded again with a higher `priority:N` tag when they keep mattering.\n\n");
 
     render_section(&mut out, "Project Takeaways", project_takeaways);
-    render_section(&mut out, "Machine-Wide Takeaways", global_takeaways);
+    if !global_takeaways.is_empty() {
+        render_section(&mut out, "Machine-Wide Takeaways", global_takeaways);
+    }
     if !cross_tenant_takeaways.is_empty() {
         render_section(&mut out, "Cross-Tenant Takeaways", cross_tenant_takeaways);
     }
@@ -657,45 +1063,301 @@ fn render_section(out: &mut String, title: &str, takeaways: &[Takeaway]) {
         return;
     }
 
-    for (idx, takeaway) in takeaways.iter().enumerate() {
-        out.push_str(&format!(
-            "{}. {}\n",
-            idx + 1,
-            summarize_text(&takeaway.text, 320)
-        ));
-        out.push_str(&format!(
-            "   - priority: `{:.1}`; chunk: `{}`; type: `{}`; tenant: `{}`",
-            takeaway.priority, takeaway.chunk_id, takeaway.chunk_type, takeaway.tenant_id
-        ));
-        if let Some(project_id) = takeaway.project_id.as_deref() {
-            out.push_str(&format!("; project: `{project_id}`"));
+    let mut categorized = takeaways
+        .iter()
+        .map(|takeaway| (takeaway_category(takeaway), takeaway))
+        .collect::<Vec<_>>();
+    categorized.sort_by(|(left_category, left), (right_category, right)| {
+        left_category
+            .order
+            .cmp(&right_category.order)
+            .then_with(|| {
+                right
+                    .priority
+                    .partial_cmp(&left.priority)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| right.timestamp_created.cmp(&left.timestamp_created))
+    });
+
+    for (heading, _) in TAKEAWAY_CATEGORIES {
+        let group = categorized
+            .iter()
+            .filter(|(category, _)| category.heading == *heading)
+            .collect::<Vec<_>>();
+        if group.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("### {heading}\n\n"));
+        for (idx, (category, takeaway)) in group.iter().enumerate() {
+            render_takeaway(out, idx + 1, takeaway, category.reason);
         }
         out.push('\n');
-        if !takeaway.tags.is_empty() {
-            out.push_str(&format!(
-                "   - tags: `{}`\n",
-                takeaway
-                    .tags
-                    .iter()
-                    .take(8)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-        if !takeaway.sources.is_empty() {
-            out.push_str(&format!(
-                "   - matched: `{}`\n",
-                takeaway
-                    .sources
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
+    }
+}
+
+fn render_takeaway(out: &mut String, idx: usize, takeaway: &Takeaway, reason: &str) {
+    out.push_str(&format!(
+        "{}. {}\n",
+        idx,
+        summarize_text(&takeaway.text, 320)
+    ));
+    out.push_str(&format!(
+        "   - priority: `{:.1}`; chunk: `{}`; type: `{}`; tenant: `{}`",
+        takeaway.priority, takeaway.chunk_id, takeaway.chunk_type, takeaway.tenant_id
+    ));
+    if let Some(project_id) = takeaway.project_id.as_deref() {
+        out.push_str(&format!("; project: `{project_id}`"));
+    }
+    if takeaway.timestamp_created > 0 {
+        out.push_str(&format!(
+            "; created_unix_ms: `{}`",
+            takeaway.timestamp_created
+        ));
     }
     out.push('\n');
+    out.push_str(&format!("   - reason: `{reason}`\n"));
+    if !takeaway.tags.is_empty() {
+        out.push_str(&format!(
+            "   - tags: `{}`\n",
+            takeaway
+                .tags
+                .iter()
+                .take(8)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !takeaway.sources.is_empty() {
+        out.push_str(&format!(
+            "   - matched: `{}`\n",
+            takeaway
+                .sources
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+}
+
+fn takeaway_category(takeaway: &Takeaway) -> TakeawayCategory {
+    let lowered = takeaway.text.to_ascii_lowercase();
+    let has_tag = |needle: &str| takeaway.tags.iter().any(|tag| tag == needle);
+    let has_source = |needle: &str| takeaway.sources.iter().any(|source| source == needle);
+
+    if takeaway.chunk_type == "decision"
+        || has_tag("kind:decision")
+        || lowered.contains("decision:")
+        || lowered.contains("rationale:")
+    {
+        return category("Decisions", "decision or rationale");
+    }
+    if lowered.contains("fix:")
+        || lowered.contains("validated fix")
+        || lowered.contains("validated:")
+        || lowered.contains("validation:")
+        || lowered.contains("fixed by")
+        || lowered.contains("solution:")
+        || lowered.contains("passed")
+        || lowered.contains("confirmed")
+        || lowered.contains("reproduced")
+    {
+        return category("Validated Fixes", "validated fix or result");
+    }
+    if lowered.contains("root cause")
+        || lowered.contains("failed because")
+        || lowered.contains("failure")
+        || lowered.contains("blocker")
+        || has_source("project_failures")
+        || has_source("global_failures")
+    {
+        return category("Known Failures", "failure or root-cause evidence");
+    }
+    if lowered.contains("command:")
+        || lowered.contains("path:")
+        || lowered.contains("parameter:")
+        || lowered.contains("parameters:")
+        || lowered.contains("/home/")
+        || lowered.contains("crates/")
+        || lowered.contains("tasks/")
+        || lowered.contains(".rs")
+        || lowered.contains(".md")
+        || lowered.contains("http://")
+        || lowered.contains("https://")
+    {
+        return category("Commands/Paths", "command, path, or parameter evidence");
+    }
+    if lowered.contains("next step:")
+        || lowered.contains("follow-up:")
+        || lowered.contains("followup:")
+        || lowered.contains("followups:")
+    {
+        return category("Open Follow-ups", "explicit follow-up");
+    }
+    if has_tag("kind:evidence") || has_tag("kind:run") || has_source("project_highlights") {
+        return category("Evidence", "evidence or run result");
+    }
+
+    category("Other Takeaways", "ranked project takeaway")
+}
+
+fn category(heading: &'static str, reason: &'static str) -> TakeawayCategory {
+    let order = TAKEAWAY_CATEGORIES
+        .iter()
+        .find_map(|(candidate, order)| (*candidate == heading).then_some(*order))
+        .unwrap_or(u8::MAX);
+    TakeawayCategory {
+        heading,
+        reason,
+        order,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DisplayedMemoryMdItem {
+    category: String,
+    text: String,
+    details: Vec<String>,
+}
+
+fn evaluate_memory_md_quality(content: &str, top_n: usize) -> MemoryMdQualityReport {
+    let items = parse_project_takeaways(content, top_n);
+    let displayed_count = items.len();
+    let useful_count = items
+        .iter()
+        .filter(|item| is_useful_display_item(item))
+        .count();
+    let generated_wrapper_count = items
+        .iter()
+        .filter(|item| is_generated_wrapper_display_item(item))
+        .count();
+    let missing_reason_count = items
+        .iter()
+        .filter(|item| !item.details.iter().any(|line| line.contains("reason: `")))
+        .count();
+    let useful_ratio = if displayed_count == 0 {
+        0.0
+    } else {
+        useful_count as f64 / displayed_count as f64
+    };
+
+    MemoryMdQualityReport {
+        displayed_count,
+        useful_count,
+        generated_wrapper_count,
+        missing_reason_count,
+        useful_ratio,
+    }
+}
+
+fn parse_project_takeaways(content: &str, top_n: usize) -> Vec<DisplayedMemoryMdItem> {
+    let mut in_project = false;
+    let mut category = "Other Takeaways".to_string();
+    let mut items = Vec::new();
+    let mut current: Option<DisplayedMemoryMdItem> = None;
+
+    for line in content.lines() {
+        if line.starts_with("## ") {
+            if in_project {
+                if let Some(item) = current.take() {
+                    items.push(item);
+                }
+                break;
+            }
+            in_project = line.trim() == "## Project Takeaways";
+            continue;
+        }
+        if !in_project {
+            continue;
+        }
+        if let Some(heading) = line.strip_prefix("### ") {
+            if let Some(item) = current.take() {
+                items.push(item);
+                if items.len() >= top_n {
+                    break;
+                }
+            }
+            category = heading.trim().to_string();
+            continue;
+        }
+        if let Some(text) = ordered_item_text(line) {
+            if let Some(item) = current.take() {
+                items.push(item);
+                if items.len() >= top_n {
+                    break;
+                }
+            }
+            current = Some(DisplayedMemoryMdItem {
+                category: category.clone(),
+                text: text.to_string(),
+                details: Vec::new(),
+            });
+            continue;
+        }
+        if let Some(item) = current.as_mut() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                item.details.push(trimmed.to_string());
+            }
+        }
+    }
+    if items.len() < top_n {
+        if let Some(item) = current {
+            items.push(item);
+        }
+    }
+    items.truncate(top_n);
+    items
+}
+
+fn ordered_item_text(line: &str) -> Option<&str> {
+    let (number, rest) = line.split_once(". ")?;
+    if number.is_empty() || !number.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    Some(rest.trim())
+}
+
+fn is_useful_display_item(item: &DisplayedMemoryMdItem) -> bool {
+    if is_generated_wrapper_display_item(item) {
+        return false;
+    }
+
+    matches!(
+        item.category.as_str(),
+        "Decisions"
+            | "Validated Fixes"
+            | "Known Failures"
+            | "Commands/Paths"
+            | "Open Follow-ups"
+            | "Evidence"
+    ) || {
+        let lowered = item.text.to_ascii_lowercase();
+        lowered.contains("decision:")
+            || lowered.contains("rationale:")
+            || lowered.contains("validation:")
+            || lowered.contains("validated")
+            || lowered.contains("root cause")
+            || lowered.contains("command:")
+            || lowered.contains("path:")
+            || lowered.contains("follow-up:")
+            || lowered.contains("next step:")
+    }
+}
+
+fn is_generated_wrapper_display_item(item: &DisplayedMemoryMdItem) -> bool {
+    let mut lowered = item.text.to_ascii_lowercase();
+    for line in &item.details {
+        lowered.push(' ');
+        lowered.push_str(&line.to_ascii_lowercase());
+    }
+    lowered.contains("task digest status generated")
+        || lowered.contains("task:status:generated")
+        || lowered.contains("task:role:highlight_library")
+        || lowered.contains("task:digest:")
+        || (lowered.contains("highlight library for") && lowered.contains("ranked lessons"))
 }
 
 fn summarize_text(text: &str, limit: usize) -> String {
@@ -764,12 +1426,103 @@ mod tests {
         assert!(rendered.contains("..."));
     }
 
-    fn make_takeaway(
-        chunk_id: &str,
-        text: &str,
-        tags: Vec<&str>,
-        chunk_type: &str,
-    ) -> Takeaway {
+    #[test]
+    fn render_memory_md_omits_empty_global_section() {
+        let takeaway = Takeaway {
+            chunk_id: "chunk-a".to_string(),
+            tenant_id: "tenant-a".to_string(),
+            project_id: Some("project-a".to_string()),
+            text: "validated project lesson".to_string(),
+            score: 1.0,
+            priority: 42.0,
+            chunk_type: "summary".to_string(),
+            timestamp_created: 0,
+            tags: vec!["kind:finish".to_string()],
+            sources: BTreeSet::from(["project_highlights".to_string()]),
+            occurrences: 1,
+        };
+        let rendered = render_memory_md("tenant-a", Some("project-a"), &[takeaway], &[], &[]);
+        assert!(rendered.contains("## Project Takeaways"));
+        assert!(!rendered.contains("## Machine-Wide Takeaways"));
+    }
+
+    #[test]
+    fn render_memory_md_groups_takeaways_by_signal_category() {
+        let mut decision = make_takeaway(
+            "decision",
+            "Decision: keep project aliases explicit. Rationale: silent merging hides drift.",
+            vec!["kind:decision"],
+            "summary",
+        );
+        decision.priority = 80.0;
+        decision.timestamp_created = 42;
+
+        let mut fix = make_takeaway(
+            "fix",
+            "Validation: cargo test -p memd passed after the scoped startup change.",
+            vec!["kind:finish"],
+            "summary",
+        );
+        fix.priority = 70.0;
+
+        let mut command = make_takeaway(
+            "command",
+            "Command: memd memory-md --project-dir . --output memory.md",
+            vec!["kind:run"],
+            "trace",
+        );
+        command.priority = 60.0;
+
+        let rendered = render_memory_md(
+            "tenant-a",
+            Some("project-a"),
+            &[command, fix, decision],
+            &[],
+            &[],
+        );
+
+        assert!(rendered.contains("### Decisions"));
+        assert!(rendered.contains("### Validated Fixes"));
+        assert!(rendered.contains("### Commands/Paths"));
+        assert!(rendered.contains("reason: `decision or rationale`"));
+        assert!(rendered.contains("reason: `validated fix or result`"));
+        assert!(rendered.contains("reason: `command, path, or parameter evidence`"));
+        assert!(rendered.contains("created_unix_ms: `42`"));
+    }
+
+    #[test]
+    fn memory_md_quality_report_scores_useful_items_and_wrappers() {
+        let content = r#"# memory.md
+
+## Project Takeaways
+
+### Decisions
+
+1. Decision: keep project aliases explicit.
+   - reason: `decision or rationale`
+
+### Other Takeaways
+
+1. Task digest status generated. Summary: Highlight library for p contains 2 ranked lessons.
+   - reason: `ranked project takeaway`
+   - tags: `task:status:generated, task:role:highlight_library`
+
+2. Routine status update with no reason.
+
+## Machine-Wide Takeaways
+
+1. Decision outside project section should not be counted.
+   - reason: `decision or rationale`
+"#;
+        let report = evaluate_memory_md_quality(content, 10);
+        assert_eq!(report.displayed_count, 3);
+        assert_eq!(report.useful_count, 1);
+        assert_eq!(report.generated_wrapper_count, 1);
+        assert_eq!(report.missing_reason_count, 1);
+        assert!((report.useful_ratio - (1.0 / 3.0)).abs() < f64::EPSILON);
+    }
+
+    fn make_takeaway(chunk_id: &str, text: &str, tags: Vec<&str>, chunk_type: &str) -> Takeaway {
         Takeaway {
             chunk_id: chunk_id.to_string(),
             tenant_id: "t".to_string(),
@@ -789,7 +1542,10 @@ mod tests {
     fn extract_covered_task_ids_parses_summary_footer() {
         let text = "Highlight library for foo contains 3 ranked lessons.\nCovers tasks: task:id:T1, task:id:T2, task:id:T3";
         let ids = extract_covered_task_ids(text);
-        assert_eq!(ids, vec!["T1".to_string(), "T2".to_string(), "T3".to_string()]);
+        assert_eq!(
+            ids,
+            vec!["T1".to_string(), "T2".to_string(), "T3".to_string()]
+        );
     }
 
     #[test]
@@ -923,12 +1679,7 @@ mod tests {
             vec!["task:role:highlight_library", "kind:finish"],
             "summary",
         );
-        let raw = make_takeaway(
-            "raw",
-            "Plain finish.",
-            vec!["kind:finish"],
-            "summary",
-        );
+        let raw = make_takeaway("raw", "Plain finish.", vec!["kind:finish"], "summary");
         let lib_score = priority_score(&library, &counts, &hit_stats, 0);
         let raw_score = priority_score(&raw, &counts, &hit_stats, 0);
         assert!(
@@ -985,18 +1736,67 @@ mod tests {
     }
 
     #[test]
-    fn empty_generated_digest_placeholders_are_skipped() {
+    fn generated_digest_candidates_are_skipped_from_takeaways() {
         let tags = vec![
             "task:status:generated".to_string(),
             "task:role:decision_library".to_string(),
         ];
-        assert!(is_empty_generated_digest(
-            "Task digest status generated. Summary: Decision library contains 0 explicit decisions.",
-            &tags,
-        ));
-        assert!(!is_empty_generated_digest(
-            "Useful decision with concrete operational value.",
-            &tags,
-        ));
+        assert!(is_generated_digest_takeaway(&tags));
+        assert!(!is_generated_digest_takeaway(&[
+            "kind:decision".to_string(),
+            "priority:9".to_string(),
+        ]));
+
+        let payload = serde_json::json!({
+            "results": [
+                {
+                    "chunk_id": "digest",
+                    "tenant_id": "t",
+                    "project_id": "p",
+                    "text": "Task digest status generated. Summary: Highlight library for p contains 2 ranked lessons.",
+                    "score": 25.0,
+                    "chunk_type": "summary",
+                    "timestamp_created": 10,
+                    "tags": tags
+                },
+                {
+                    "chunk_id": "raw",
+                    "tenant_id": "t",
+                    "project_id": "p",
+                    "text": "Validated fix: use the stable project scope when restoring the gateway.",
+                    "score": 4.0,
+                    "chunk_type": "summary",
+                    "timestamp_created": 11,
+                    "tags": ["kind:finish"]
+                }
+            ]
+        });
+        let mut by_chunk = HashMap::new();
+        let mut explanations = Vec::new();
+        merge_payload_candidates(
+            &mut by_chunk,
+            &mut explanations,
+            &payload,
+            "project",
+            "project_highlights",
+            "project takeaways",
+            CliQueryMode::FindHighlights,
+        );
+        assert!(!by_chunk.contains_key("digest"));
+        assert!(by_chunk.contains_key("raw"));
+        assert_eq!(
+            explanations
+                .iter()
+                .find(|item| item.chunk_id == "digest")
+                .and_then(|item| item.filter_reason.as_deref()),
+            Some("generated_digest_wrapper")
+        );
+        assert_eq!(
+            explanations
+                .iter()
+                .find(|item| item.chunk_id == "raw")
+                .map(|item| item.display_status.as_str()),
+            Some("candidate")
+        );
     }
 }

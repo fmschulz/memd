@@ -7,6 +7,9 @@ operations** (`memd call <operation>` and `memd batch --jsonl`).
 
 ## Agent-facing commands
 
+For write-quality expectations and cleanup safety, see the
+[Operational contract](operational-contract.md).
+
 | Command | Purpose |
 | --- | --- |
 | `memd agent-context` | Prefetch bounded context to a file with audit logs. |
@@ -18,7 +21,10 @@ operations** (`memd call <operation>` and `memd batch --jsonl`).
 | `memd export`, `memd export-markdown`, `memd export-omf`, `memd import-omf` | Portable local memory operations. |
 | `memd init` | Write `.memd/` scope files and CLI guardrail blocks. |
 | `memd doctor` | Diagnose binary discovery, data directory, global agent rules, Claude Code SessionStart hook, and current project scope. |
-| `memd memory-md` | Refresh project-root `memory.md` with the strongest takeaways for session-start use; pass `--cross-tenant` to add a Cross-Tenant Takeaways section sourced from `kind:consolidated, priority>=8` chunks across other tenants. |
+| `memd memory-md` | Refresh project-root `memory.md` with the strongest takeaways for session-start use; pass `--explain-output <path>` to write a JSON candidate audit with query source, score components, tags, and display/filter decisions; pass `--cross-tenant` to add a Cross-Tenant Takeaways section sourced from `kind:consolidated, priority>=8` chunks across other tenants. |
+| `memd cleanup-plan` | Generate a non-destructive cleanup approval report with tenant/project classifications and archive/purge command previews. |
+| `memd purge` | Dry-run or archive-first cleanup of hidden rows; `--apply` verifies the archive before mutation, and `--include-unreadable-active` previews active metadata rows whose segment payload cannot be loaded. |
+| `memd purge-archive` | Read-only verification for `memd purge --archive` files: validates format/counts/payload flags, emits SHA-256, and can enforce expected tenant/project. |
 | `memd consolidate` | Call the configured LLM (Claude Haiku or Codex Spark, selected by `MEMD_CONSOLIDATOR`) to rewrite recent chunks into deduplicated `kind:consolidated` lessons. Sources are soft-tombstoned via `ChunkStatus::Superseded` (never deleted). Add `--promote-to-shared` to copy multi-project lessons into the `MEMD_SHARED_TENANT` tenant for cross-project transfer. |
 | `memd session-start` | Auto-create a minimal `.memd/project_scope.json` when missing, refresh `memory.md` synchronously, then spawn a background consolidation when enough chunks have accumulated. Wired into Claude Code via the bundled skill installer; a Codex hook template lives at `memd-skill/examples/codex_session_start_hook.json`. |
 | `memd eval-counterfactual` | Replay a JSONL benchmark file; write an overlap@k / rank-shift report under `evals/bench/reports/`. Monitors whether `kind:consolidated` lessons are load-bearing in retrieval. |

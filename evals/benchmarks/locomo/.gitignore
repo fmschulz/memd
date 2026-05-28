@@ -1,0 +1,9 @@
+# Don't track the dataset (~10 MB) — fetched on demand.
+datasets/locomo10.json
+# Don't track per-run result directories (qdrant, sqlite, etc.) but DO
+# track curated baselines and per-system markdown/json results when checked
+# in deliberately.
+results/*_data/
+results/*.log
+# Don't track the per-system venvs.
+envs/

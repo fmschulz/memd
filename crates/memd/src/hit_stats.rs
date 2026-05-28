@@ -202,12 +202,7 @@ fn scan_hit_log(log_path: &Path, window_days: u32, now: i64) -> HashMap<String, 
     stats
 }
 
-fn write_cache(
-    summary_path: &Path,
-    window_days: u32,
-    now: i64,
-    stats: &HashMap<String, HitStats>,
-) {
+fn write_cache(summary_path: &Path, window_days: u32, now: i64, stats: &HashMap<String, HitStats>) {
     let Some(parent) = summary_path.parent() else {
         return;
     };

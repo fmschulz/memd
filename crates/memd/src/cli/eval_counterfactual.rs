@@ -80,13 +80,15 @@ pub(super) async fn run_eval_counterfactual<S: Store>(
         // from the same ranking pass as the full baseline — no second
         // search, no per-chunk store.get round-trips.
         let scan_k = k.saturating_mul(4).max(k);
-        let scored = scored_for_query(store, tenant.as_str(), &options.project_id, &q.query, scan_k)
-            .await?;
-        let full: Vec<String> = scored
-            .iter()
-            .take(k)
-            .map(|r| r.chunk_id.clone())
-            .collect();
+        let scored = scored_for_query(
+            store,
+            tenant.as_str(),
+            &options.project_id,
+            &q.query,
+            scan_k,
+        )
+        .await?;
+        let full: Vec<String> = scored.iter().take(k).map(|r| r.chunk_id.clone()).collect();
         let filtered: Vec<String> = scored
             .iter()
             .filter(|r| !r.is_consolidated)
@@ -107,13 +109,9 @@ pub(super) async fn run_eval_counterfactual<S: Store>(
     }
 
     let report_path = write_report(&project_dir, &evals, k)?;
-    let mean_overlap_loss = evals
-        .iter()
-        .map(|e| overlap_loss(e, k) as f64)
-        .sum::<f64>()
-        / evals.len() as f64;
-    let mean_rank_shift =
-        evals.iter().map(|e| e.avg_rank_shift).sum::<f64>() / evals.len() as f64;
+    let mean_overlap_loss =
+        evals.iter().map(|e| overlap_loss(e, k) as f64).sum::<f64>() / evals.len() as f64;
+    let mean_rank_shift = evals.iter().map(|e| e.avg_rank_shift).sum::<f64>() / evals.len() as f64;
 
     Ok(json!({
         "tenant_id": options.tenant_id,
@@ -198,10 +196,7 @@ async fn scored_for_query<S: Store>(
                     let is_consolidated = r
                         .get("tags")
                         .and_then(Value::as_array)
-                        .map(|tags| {
-                            tags.iter()
-                                .any(|t| t.as_str() == Some("kind:consolidated"))
-                        })
+                        .map(|tags| tags.iter().any(|t| t.as_str() == Some("kind:consolidated")))
                         .unwrap_or(false);
                     Some(ScoredResult {
                         chunk_id,
@@ -243,11 +238,7 @@ fn avg_rank_shift(full: &[String], filtered: &[String]) -> f64 {
     }
 }
 
-fn write_report(
-    project_dir: &std::path::Path,
-    evals: &[QueryEval],
-    k: usize,
-) -> Result<PathBuf> {
+fn write_report(project_dir: &std::path::Path, evals: &[QueryEval], k: usize) -> Result<PathBuf> {
     let reports_dir = project_dir.join(REPORTS_DIR);
     std::fs::create_dir_all(&reports_dir)?;
     let stamp = SystemTime::now()
@@ -261,18 +252,17 @@ fn write_report(
     out.push_str(&format!("- queries: {}\n", evals.len()));
     out.push_str(&format!("- k: {}\n\n", k));
 
-    let mean_overlap_loss = evals
-        .iter()
-        .map(|e| overlap_loss(e, k) as f64)
-        .sum::<f64>()
-        / evals.len() as f64;
+    let mean_overlap_loss =
+        evals.iter().map(|e| overlap_loss(e, k) as f64).sum::<f64>() / evals.len() as f64;
     out.push_str(&format!(
         "- mean overlap loss @ k: {:.2} / {k} (normalized to actual top-k size)\n",
         mean_overlap_loss
     ));
-    let mean_rank_shift =
-        evals.iter().map(|e| e.avg_rank_shift).sum::<f64>() / evals.len() as f64;
-    out.push_str(&format!("- mean abs rank shift: {:.2}\n\n", mean_rank_shift));
+    let mean_rank_shift = evals.iter().map(|e| e.avg_rank_shift).sum::<f64>() / evals.len() as f64;
+    out.push_str(&format!(
+        "- mean abs rank shift: {:.2}\n\n",
+        mean_rank_shift
+    ));
 
     out.push_str("| # | label | query | overlap@k | rank-shift | full top-k | filtered top-k |\n");
     out.push_str("|---|-------|-------|-----------|------------|------------|----------------|\n");

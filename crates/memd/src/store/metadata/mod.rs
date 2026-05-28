@@ -321,6 +321,20 @@ pub trait MetadataStore: Send + Sync {
         canonical: &str,
     ) -> Result<Vec<ChunkMetadata>>;
 
+    /// List live, visible chunks matching an exact content hash within
+    /// one tenant/project/chunk-kind scope. Unlike helpers where
+    /// `project_id = None` means "any project", this treats `None` as
+    /// `project_id IS NULL` so default write-time dedupe cannot cross a
+    /// project boundary accidentally.
+    fn list_live_by_content_hash(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        chunk_type: ChunkType,
+        hash: &str,
+        limit: usize,
+    ) -> Result<Vec<ChunkMetadata>>;
+
     /// List the most recently created chunks for a tenant, optionally
     /// scoped to a project. `Option<&str>::None` means "any project"
     /// (no filter), matching the historical semantics. For "rows

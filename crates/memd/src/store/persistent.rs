@@ -5,7 +5,7 @@
 //! Uses hybrid search (dense + sparse) for retrieval.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -248,6 +248,26 @@ pub struct CanonicalBackfillStats {
     /// Rows visited but not updated (missing text, load error, write
     /// error). The next pass will retry.
     pub rows_skipped: usize,
+}
+
+/// Result of physically rewriting finalized segment files for a tenant.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SegmentRewriteResult {
+    /// Finalized segment directories compacted or removed.
+    pub segments_rewritten: usize,
+    /// Old segment directories removed because they contained no live rows.
+    pub segments_removed: usize,
+    /// Live chunk payloads copied into replacement segment files.
+    pub chunks_moved: usize,
+    /// Bytes occupied by old rewritten segment directories.
+    pub bytes_before: u64,
+    /// Bytes occupied by replacement segment directories.
+    pub bytes_after: u64,
+    /// Best-effort byte delta from old segment directories to replacements.
+    pub bytes_reclaimed: u64,
+    /// Non-fatal cleanup warnings, typically stale old segment directories
+    /// that could not be removed after metadata had already moved.
+    pub warnings: Vec<String>,
 }
 
 struct PendingChunkAdd {
@@ -680,6 +700,21 @@ impl PersistentStore {
         )
     }
 
+    /// Rewrite finalized segment files for a tenant, omitting payloads
+    /// that no longer have a live metadata row.
+    pub fn rewrite_segments_for_tenant(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<SegmentRewriteResult> {
+        let tenant = self.get_or_create_tenant(tenant_id.as_str())?;
+        tenant.rewrite_finalized_segments(&self.metadata, tenant_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_dense_searcher_for_tests(&mut self, dense_searcher: Arc<DenseSearcher>) {
+        self.dense_searcher = Some(dense_searcher);
+    }
+
     /// Run compaction for a tenant if thresholds are exceeded
     ///
     /// Returns None if no compaction needed (all thresholds below limits).
@@ -708,8 +743,20 @@ impl PersistentStore {
 
         let metrics =
             CompactionMetrics::gather(&self.metadata, hnsw_stats, segment_count, tenant_id)?;
+        let hidden_index_entries_present = if let Some(dense) = self.dense_searcher.as_ref() {
+            let deleted_chunk_ids = self.metadata.get_deleted_chunk_ids(tenant_id)?;
+            let lifecycle_hidden_ids = self.metadata.list_lifecycle_hidden(tenant_id)?;
+            let mut excluded_chunk_ids = std::collections::HashSet::with_capacity(
+                deleted_chunk_ids.len() + lifecycle_hidden_ids.len(),
+            );
+            excluded_chunk_ids.extend(deleted_chunk_ids);
+            excluded_chunk_ids.extend(lifecycle_hidden_ids);
+            dense.has_valid_embeddings_for_chunks(tenant_id, &excluded_chunk_ids)
+        } else {
+            false
+        };
 
-        if !runner.should_run(&metrics) {
+        if !runner.should_run(&metrics) && !hidden_index_entries_present {
             return Ok(None);
         }
 
@@ -1374,6 +1421,138 @@ impl TenantStore {
         }
         Ok(None)
     }
+
+    fn rewrite_finalized_segments(
+        &self,
+        metadata: &SqliteMetadataStore,
+        tenant_id: &TenantId,
+    ) -> Result<SegmentRewriteResult> {
+        // Seal the active writer first so a purge in a short-lived CLI
+        // process can reclaim bytes from chunks written in the same run.
+        self.finalize_active_segment()?;
+        let _active_guard = self.active_segment.lock();
+
+        let mut next_segment_id = self.next_segment_id();
+        let mut segment_ids = {
+            let segments = self.segments.read();
+            segments.keys().copied().collect::<Vec<_>>()
+        };
+        segment_ids.sort_unstable();
+
+        let segments_dir = self.base_dir.join("segments");
+        let mut result = SegmentRewriteResult::default();
+
+        for old_segment_id in segment_ids {
+            let rows = metadata.get_by_segment(tenant_id, old_segment_id)?;
+            let live_rows = rows
+                .iter()
+                .filter(|row| row.status != ChunkStatus::Deleted)
+                .collect::<Vec<_>>();
+
+            let mut segments = self.segments.write();
+            let Some(reader) = segments.get(&old_segment_id) else {
+                continue;
+            };
+
+            let chunk_count = reader.chunk_count() as usize;
+            let active_count = reader.active_count() as usize;
+            if live_rows.len() == chunk_count && active_count == chunk_count {
+                continue;
+            }
+
+            let old_dir = reader.dir().to_path_buf();
+            let old_size = path_size(&old_dir)?;
+            result.bytes_before = result.bytes_before.saturating_add(old_size);
+
+            if live_rows.is_empty() {
+                segments.remove(&old_segment_id);
+                match std::fs::remove_dir_all(&old_dir) {
+                    Ok(()) => {
+                        result.segments_removed += 1;
+                        result.segments_rewritten += 1;
+                        result.bytes_reclaimed = result.bytes_reclaimed.saturating_add(old_size);
+                    }
+                    Err(err) => result.warnings.push(format!(
+                        "failed to remove obsolete segment {}: {}",
+                        old_segment_id, err
+                    )),
+                }
+                continue;
+            }
+
+            let mut payloads = Vec::with_capacity(live_rows.len());
+            for row in &live_rows {
+                let payload = reader.read_chunk(row.ordinal)?.ok_or_else(|| {
+                    MemdError::StorageError(format!(
+                        "live metadata row {} points at missing/tombstoned segment {} ordinal {}",
+                        row.chunk_id, old_segment_id, row.ordinal
+                    ))
+                })?;
+                payloads.push((row.chunk_id.clone(), payload));
+            }
+
+            let new_segment_id = next_segment_id;
+            next_segment_id += 1;
+            let mut writer = SegmentWriter::create(&segments_dir, new_segment_id)?;
+            let mut relocations = Vec::with_capacity(payloads.len());
+            for (chunk_id, payload) in &payloads {
+                let new_ordinal = writer.append_chunk(payload)?;
+                relocations.push((chunk_id.clone(), new_segment_id, new_ordinal));
+            }
+            writer.finalize()?;
+            let new_dir = segments_dir.join(format!("seg_{:06}", new_segment_id));
+            let new_reader = SegmentReader::open(new_dir.clone())?;
+            let new_size = path_size(&new_dir)?;
+
+            if let Err(err) = metadata.update_chunk_locations(tenant_id, &relocations) {
+                let _ = std::fs::remove_dir_all(&new_dir);
+                return Err(err);
+            }
+
+            segments.remove(&old_segment_id);
+            segments.insert(new_segment_id, new_reader);
+            match std::fs::remove_dir_all(&old_dir) {
+                Ok(()) => {}
+                Err(err) => result.warnings.push(format!(
+                    "failed to remove rewritten segment {}: {}",
+                    old_segment_id, err
+                )),
+            }
+
+            result.segments_rewritten += 1;
+            result.chunks_moved += relocations.len();
+            result.bytes_after = result.bytes_after.saturating_add(new_size);
+            result.bytes_reclaimed = result
+                .bytes_reclaimed
+                .saturating_add(old_size.saturating_sub(new_size));
+        }
+
+        sync_directory_if_exists(&segments_dir)?;
+        Ok(result)
+    }
+}
+
+fn path_size(path: &Path) -> Result<u64> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    if path.is_file() {
+        return path.metadata().map(|m| m.len()).map_err(MemdError::IoError);
+    }
+    let mut total = 0u64;
+    for entry in std::fs::read_dir(path).map_err(MemdError::IoError)? {
+        let entry = entry.map_err(MemdError::IoError)?;
+        total = total.saturating_add(path_size(&entry.path())?);
+    }
+    Ok(total)
+}
+
+fn sync_directory_if_exists(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let dir = std::fs::File::open(path).map_err(MemdError::IoError)?;
+    dir.sync_all().map_err(MemdError::IoError)
 }
 
 impl Drop for TenantStore {
@@ -2943,7 +3122,7 @@ impl PersistentStore {
         })
     }
 
-    async fn get_chunk_for_retrieval(
+    pub(crate) async fn get_chunk_for_retrieval(
         &self,
         tenant_id: &TenantId,
         chunk_id: &ChunkId,

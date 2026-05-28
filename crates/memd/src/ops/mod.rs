@@ -26,6 +26,11 @@ const EXACT_RESCUE_PAGE_SIZE: usize = 500;
 const EXACT_RESCUE_PROJECT_SCAN_LIMIT: usize = 50_000;
 const EXACT_RESCUE_GLOBAL_SCAN_LIMIT: usize = 10_000;
 const EXACT_RESCUE_SCORE_BOOST: f32 = 20.0;
+const LEXICAL_OVERLAP_PROJECT_SCAN_LIMIT: usize = 500;
+const LEXICAL_OVERLAP_SCORE_BOOST: f32 = 16.0;
+const LEXICAL_OVERLAP_MAX_CANDIDATES: usize = 100;
+const WRITE_ADMISSION_EPHEMERAL_TTL_MS: i64 = 14 * 24 * 60 * 60 * 1000;
+const WRITE_ADMISSION_RUN_TRACE_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 /// Apply process-wide compatibility routing for operation handlers.
 pub fn configure_operation_routing(
@@ -67,9 +72,6 @@ fn configured_project_aliases(primary_tenant: &TenantId, project_id: &str) -> Ve
         .flat_map(|rule| {
             rule.aliases.iter().filter_map(move |alias| {
                 let alias_project = alias.project_id.as_deref().unwrap_or(project_id);
-                if alias_project != project_id {
-                    return None;
-                }
                 Some(OriginScope {
                     requested_tenant_id: primary_tenant.to_string(),
                     origin_tenant_id: alias.tenant_id.clone(),
@@ -144,9 +146,10 @@ use crate::task_memory::{
 };
 use crate::tiered::TieredTiming;
 use crate::types::{
-    ChunkId, ChunkStatus, ChunkType, LifecycleDelta, MemoryChunk, ProjectId, Source, TenantId,
-    VisibilityPolicy,
+    ChunkId, ChunkStatus, ChunkType, LifecycleDelta, MemoryChunk, MemoryTier, ProjectId, Source,
+    TenantId, VisibilityPolicy,
 };
+use crate::write_admission::{AdmissionDecision, AdmissionOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -1288,6 +1291,12 @@ pub struct ScopeExpansion {
     pub aliases: Vec<OriginScope>,
 }
 
+#[derive(Debug, Clone)]
+struct ProjectSearchScope {
+    tenant_id: TenantId,
+    project_id: Option<String>,
+}
+
 /// Single chunk in search results
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChunkResult {
@@ -1411,12 +1420,34 @@ pub struct VerificationHint {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AddResult {
     pub chunk_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedupe_decision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deduped_existing_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_decision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_after_ms: Option<i64>,
 }
 
 /// Result of a batch add operation
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AddBatchResult {
     pub chunk_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedupe_decisions: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deduped_existing_ids: Option<Vec<Option<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_decisions: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_reasons: Option<Vec<String>>,
 }
 
 /// Result of a task artifact write operation.
@@ -2889,25 +2920,29 @@ fn origin_for_result(
     origin_tenant_id: &TenantId,
     origin_project_id: Option<String>,
 ) -> Option<OriginScope> {
+    if let Some(alias) = expansion.and_then(|expansion| {
+        expansion
+            .aliases
+            .iter()
+            .find(|alias| {
+                alias.origin_tenant_id == origin_tenant_id.as_str()
+                    && alias.origin_project_id == origin_project_id
+            })
+            .cloned()
+    }) {
+        return Some(alias);
+    }
+
     if origin_tenant_id == requested_tenant_id {
         return None;
     }
-    expansion
-        .and_then(|expansion| {
-            expansion
-                .aliases
-                .iter()
-                .find(|alias| alias.origin_tenant_id == origin_tenant_id.as_str())
-                .cloned()
-        })
-        .or_else(|| {
-            Some(OriginScope {
-                requested_tenant_id: requested_tenant_id.to_string(),
-                origin_tenant_id: origin_tenant_id.to_string(),
-                origin_project_id,
-                alias_reason: "legacy_cross_tenant_project_fallback".to_string(),
-            })
-        })
+
+    Some(OriginScope {
+        requested_tenant_id: requested_tenant_id.to_string(),
+        origin_tenant_id: origin_tenant_id.to_string(),
+        origin_project_id,
+        alias_reason: "legacy_cross_tenant_project_fallback".to_string(),
+    })
 }
 
 fn annotate_chunk_origins(
@@ -3166,6 +3201,199 @@ pub(crate) fn apply_conversation_review_default(
     }
     const FOURTEEN_DAYS_MS: i64 = 14 * 24 * 60 * 60 * 1000;
     Some(current_time_ms() + FOURTEEN_DAYS_MS)
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedAdmission {
+    outcome: AdmissionOutcome,
+    expires_at_ms: Option<i64>,
+    review_after_ms: Option<i64>,
+    lifecycle_tier: Option<MemoryTier>,
+    default_run_trace_retention: bool,
+}
+
+fn resolve_write_admission(
+    chunk_type: ChunkType,
+    text: &str,
+    tags: &[String],
+    mode: crate::types::IngestionMode,
+    requested_expires_at_ms: Option<i64>,
+    requested_review_after_ms: Option<i64>,
+) -> Result<ResolvedAdmission, McpError> {
+    let outcome = crate::write_admission::classify_write(chunk_type, text, tags, mode);
+    if outcome.decision == AdmissionDecision::Reject {
+        return Err(McpError::InvalidParams(format!(
+            "memory.add rejected by quality gate: {}",
+            outcome.reason
+        )));
+    }
+
+    let mut expires_at_ms = requested_expires_at_ms;
+    let mut review_after_ms = apply_conversation_review_default(mode, requested_review_after_ms);
+    let mut lifecycle_tier = None;
+    let mut default_run_trace_retention = false;
+    if outcome.decision == AdmissionDecision::Ephemeral {
+        let default_expiry = current_time_ms() + WRITE_ADMISSION_EPHEMERAL_TTL_MS;
+        expires_at_ms.get_or_insert(default_expiry);
+        review_after_ms.get_or_insert(default_expiry);
+        lifecycle_tier = Some(MemoryTier::History);
+    } else if should_apply_run_trace_retention(chunk_type, tags) {
+        let default_expiry = current_time_ms() + WRITE_ADMISSION_RUN_TRACE_TTL_MS;
+        expires_at_ms.get_or_insert(default_expiry);
+        review_after_ms.get_or_insert(default_expiry);
+        default_run_trace_retention = true;
+    }
+
+    Ok(ResolvedAdmission {
+        outcome,
+        expires_at_ms,
+        review_after_ms,
+        lifecycle_tier,
+        default_run_trace_retention,
+    })
+}
+
+fn drop_optional_run_trace_retention_for_in_memory_store<S: Store>(
+    store: &S,
+    admission: &mut ResolvedAdmission,
+) {
+    if admission.default_run_trace_retention && store.as_persistent().is_none() {
+        admission.expires_at_ms = None;
+        admission.review_after_ms = None;
+        admission.default_run_trace_retention = false;
+    }
+}
+
+fn admission_lifecycle_delta(admission: &ResolvedAdmission) -> LifecycleDelta {
+    LifecycleDelta {
+        tier: admission.lifecycle_tier,
+        expires_at_ms: admission.expires_at_ms.map(Some),
+        review_after_ms: admission.review_after_ms.map(Some),
+        ..Default::default()
+    }
+}
+
+fn apply_admission_tags(chunk: MemoryChunk, admission: &ResolvedAdmission) -> MemoryChunk {
+    if admission.outcome.decision != AdmissionDecision::Ephemeral {
+        return chunk;
+    }
+    let mut tags = chunk.tags.clone();
+    if !tags.iter().any(|tag| tag == "admission:ephemeral") {
+        tags.push("admission:ephemeral".to_string());
+    }
+    if !tags.iter().any(|tag| tag == "retention:short_lived") {
+        tags.push("retention:short_lived".to_string());
+    }
+    chunk.with_tags(tags)
+}
+
+fn admission_decision_string(admission: &ResolvedAdmission) -> String {
+    admission.outcome.decision.as_str().to_string()
+}
+
+fn admission_lifecycle_tier_string(admission: &ResolvedAdmission) -> Option<String> {
+    admission.lifecycle_tier.map(|tier| tier.to_string())
+}
+
+fn should_apply_run_trace_retention(chunk_type: ChunkType, tags: &[String]) -> bool {
+    let is_run_trace = chunk_type == ChunkType::Trace || tags.iter().any(|tag| tag == "kind:run");
+    if !is_run_trace {
+        return false;
+    }
+
+    if crate::auto_priority::has_explicit_priority(tags) {
+        return false;
+    }
+
+    !tags.iter().any(|tag| {
+        matches!(
+            tag.as_str(),
+            "kind:evidence"
+                | "kind:decision"
+                | "kind:finish"
+                | "kind:consolidated"
+                | "retention:durable"
+                | "validated:true"
+                | "supports:true"
+        ) || tag.starts_with("evidence:")
+            || tag.starts_with("source:evidence")
+    })
+}
+
+fn sha256_hex(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn is_digest_projection_tag(tag: &str) -> bool {
+    tag == "task:kind:digest"
+        || tag == "task:projection:digest"
+        || tag.starts_with("task:digest:")
+        || tag.starts_with("task:role:")
+}
+
+fn default_content_dedupe_exempt(chunk: &MemoryChunk, caller_tags: &[String]) -> bool {
+    caller_tags
+        .iter()
+        .chain(chunk.tags.iter())
+        .any(|tag| is_digest_projection_tag(tag))
+        || crate::auto_priority::has_explicit_priority(caller_tags)
+}
+
+fn caller_tags_already_preserved(existing: &MemoryChunk, caller_tags: &[String]) -> bool {
+    caller_tags
+        .iter()
+        .all(|tag| existing.tags.iter().any(|existing_tag| existing_tag == tag))
+}
+
+async fn find_default_content_duplicate<S: Store>(
+    store: &S,
+    chunk: &MemoryChunk,
+    caller_tags: &[String],
+) -> Result<Option<ChunkId>, McpError> {
+    if default_content_dedupe_exempt(chunk, caller_tags) {
+        return Ok(None);
+    }
+
+    let Some(ps) = store.as_persistent() else {
+        return Ok(None);
+    };
+
+    let project_id = chunk.project_id.as_option().map(|s| s.to_string());
+    let hash = sha256_hex(&chunk.text);
+    let candidates = ps
+        .metadata()
+        .list_live_by_content_hash(
+            &chunk.tenant_id,
+            project_id.as_deref(),
+            chunk.chunk_type,
+            &hash,
+            8,
+        )
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+
+    for candidate in candidates {
+        let Some(existing) = ps
+            .get(&chunk.tenant_id, &candidate.chunk_id)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?
+        else {
+            continue;
+        };
+        if existing.text == chunk.text
+            && existing.chunk_type == chunk.chunk_type
+            && existing.project_id == chunk.project_id
+            && (chunk.source == Source::empty() || chunk.source == existing.source)
+            && caller_tags_already_preserved(&existing, caller_tags)
+        {
+            return Ok(Some(candidate.chunk_id));
+        }
+    }
+
+    Ok(None)
 }
 
 fn parse_chunk_type(s: &str) -> Result<ChunkType, McpError> {
@@ -3605,41 +3833,69 @@ async fn scoped_tenants_for_project<S: Store>(
     primary_tenant: &TenantId,
     project_id: Option<&str>,
 ) -> Result<Vec<TenantId>, McpError> {
+    let scopes = project_scopes_for_project(store, primary_tenant, project_id).await?;
+    let mut tenants = Vec::new();
+    let mut seen = HashSet::new();
+    for scope in scopes {
+        if seen.insert(scope.tenant_id.to_string()) {
+            tenants.push(scope.tenant_id);
+        }
+    }
+    Ok(tenants)
+}
+
+async fn project_scopes_for_project<S: Store>(
+    store: &S,
+    primary_tenant: &TenantId,
+    project_id: Option<&str>,
+) -> Result<Vec<ProjectSearchScope>, McpError> {
     let Some(project_id) = project_id.filter(|value| !value.trim().is_empty()) else {
-        return Ok(vec![primary_tenant.clone()]);
+        return Ok(vec![ProjectSearchScope {
+            tenant_id: primary_tenant.clone(),
+            project_id: None,
+        }]);
     };
 
+    let mut scopes = vec![ProjectSearchScope {
+        tenant_id: primary_tenant.clone(),
+        project_id: Some(project_id.to_string()),
+    }];
+    let mut seen = HashSet::from([(primary_tenant.to_string(), Some(project_id.to_string()))]);
     let aliases = configured_project_aliases(primary_tenant, project_id);
     if !aliases.is_empty() {
-        let mut scoped = vec![primary_tenant.clone()];
-        let mut seen = HashSet::from([primary_tenant.to_string()]);
         for alias in aliases {
             let alias_tenant = TenantId::new(&alias.origin_tenant_id)
                 .map_err(|e| McpError::InvalidParams(e.to_string()))?;
-            if seen.insert(alias_tenant.to_string())
-                && tenant_has_project(store, &alias_tenant, project_id).await?
-            {
-                scoped.push(alias_tenant);
+            let alias_project = alias
+                .origin_project_id
+                .as_deref()
+                .unwrap_or(project_id)
+                .to_string();
+            let key = (alias_tenant.to_string(), Some(alias_project.clone()));
+            if seen.insert(key) && tenant_has_project(store, &alias_tenant, &alias_project).await? {
+                scopes.push(ProjectSearchScope {
+                    tenant_id: alias_tenant,
+                    project_id: Some(alias_project),
+                });
             }
         }
-        return Ok(scoped);
+        return Ok(scopes);
     }
 
     // Default behavior: tenant isolation. Only widen when the operator
     // has explicitly opted into the legacy all-tenant fallback via
     // `server.allow_cross_tenant_project_fallback = true`.
     if !cross_tenant_project_fallback_enabled() {
-        return Ok(vec![primary_tenant.clone()]);
+        return Ok(scopes);
     }
 
-    let mut scoped = vec![primary_tenant.clone()];
-    let mut seen = HashSet::from([primary_tenant.to_string()]);
     for tenant in store
         .list_tenants()
         .await
         .map_err(|e| McpError::ToolError(e.to_string()))?
     {
-        if !seen.insert(tenant.to_string()) {
+        let key = (tenant.to_string(), Some(project_id.to_string()));
+        if !seen.insert(key) {
             continue;
         }
         if tenant_has_project(store, &tenant, project_id).await? {
@@ -3649,10 +3905,13 @@ async fn scoped_tenants_for_project<S: Store>(
                 project_id,
                 "cross-tenant project fallback widened retrieval beyond the caller's tenant"
             );
-            scoped.push(tenant);
+            scopes.push(ProjectSearchScope {
+                tenant_id: tenant,
+                project_id: Some(project_id.to_string()),
+            });
         }
     }
-    Ok(scoped)
+    Ok(scopes)
 }
 
 async fn tenant_has_project<S: Store>(
@@ -3715,24 +3974,26 @@ fn merge_scored_chunk_lists(
         .collect()
 }
 
-async fn search_with_scores_for_tenants<S: Store>(
+async fn search_with_scores_for_project_scopes<S: Store>(
     store: &S,
-    tenants: &[TenantId],
+    scopes: &[ProjectSearchScope],
     query: &str,
     fetch_k: usize,
 ) -> Result<Vec<(MemoryChunk, f32)>, McpError> {
-    let mut lists = Vec::with_capacity(tenants.len());
-    for tenant in tenants {
-        lists.push(
-            store
-                .search_with_scores(tenant, query, fetch_k)
-                .await
-                .map_err(|e| McpError::ToolError(e.to_string()))?,
-        );
+    let mut lists = Vec::with_capacity(scopes.len());
+    for scope in scopes {
+        let mut scored = store
+            .search_with_scores(&scope.tenant_id, query, fetch_k)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        if let Some(project_id) = scope.project_id.as_deref() {
+            scored.retain(|(chunk, _)| chunk.project_id.as_option() == Some(project_id));
+        }
+        lists.push(scored);
     }
     Ok(merge_scored_chunk_lists(
         lists,
-        fetch_k.saturating_mul(tenants.len().max(1)),
+        fetch_k.saturating_mul(scopes.len().max(1)),
     ))
 }
 
@@ -3759,11 +4020,94 @@ fn exact_rescue_terms(query: &str) -> Vec<String> {
         .collect()
 }
 
+fn lexical_overlap_terms(query: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    query
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter_map(|term| {
+            let cleaned = term.trim().to_ascii_lowercase();
+            if cleaned.len() < 4 || is_lexical_overlap_stopword(&cleaned) {
+                return None;
+            }
+            if seen.insert(cleaned.clone()) {
+                Some(cleaned)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn is_lexical_overlap_stopword(term: &str) -> bool {
+    matches!(
+        term,
+        "about"
+            | "after"
+            | "again"
+            | "also"
+            | "because"
+            | "before"
+            | "could"
+            | "from"
+            | "have"
+            | "into"
+            | "need"
+            | "needs"
+            | "only"
+            | "over"
+            | "should"
+            | "than"
+            | "that"
+            | "their"
+            | "there"
+            | "these"
+            | "this"
+            | "those"
+            | "when"
+            | "where"
+            | "with"
+            | "would"
+    )
+}
+
 fn chunk_contains_exact_rescue_term(chunk: &MemoryChunk, terms: &[String]) -> bool {
     let haystack = format!("{} {}", chunk.text, chunk.tags.join(" ")).to_ascii_lowercase();
     terms.iter().any(|term| haystack.contains(term))
 }
 
+fn chunk_lexical_overlap_count(chunk: &MemoryChunk, terms: &[String]) -> usize {
+    let haystack = format!("{} {}", chunk.text, chunk.tags.join(" ")).to_ascii_lowercase();
+    terms
+        .iter()
+        .filter(|term| haystack.contains(term.as_str()))
+        .count()
+}
+
+fn lexical_overlap_minimum(terms: &[String]) -> usize {
+    if terms.len() >= 8 {
+        4
+    } else if terms.len() >= 6 {
+        3
+    } else {
+        2
+    }
+}
+
+fn should_run_lexical_overlap_rescue(scored: &[(MemoryChunk, f32)], query: &str, k: usize) -> bool {
+    let terms = lexical_overlap_terms(query);
+    if terms.len() < 4 {
+        return false;
+    }
+    let min_overlap = lexical_overlap_minimum(&terms);
+    let top = scored.iter().take(k).collect::<Vec<_>>();
+    if top.is_empty() {
+        return true;
+    }
+    !top.iter()
+        .any(|(chunk, _)| chunk_lexical_overlap_count(chunk, &terms) >= min_overlap)
+}
+
+#[cfg(test)]
 async fn exact_lexical_candidates_for_tenants<S: Store>(
     store: &S,
     tenants: &[TenantId],
@@ -3825,29 +4169,162 @@ async fn exact_lexical_candidates_for_tenants<S: Store>(
         .collect())
 }
 
-async fn search_with_tier_info_for_tenants<S: Store>(
+async fn exact_lexical_candidates_for_project_scopes<S: Store>(
     store: &S,
-    tenants: &[TenantId],
+    scopes: &[ProjectSearchScope],
+    query: &str,
+    limit: usize,
+) -> Result<Vec<(MemoryChunk, f32)>, McpError> {
+    let terms = exact_rescue_terms(query);
+    if terms.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut candidates = Vec::new();
+    for scope in scopes {
+        let scan_limit = if scope.project_id.is_some() {
+            EXACT_RESCUE_PROJECT_SCAN_LIMIT
+        } else {
+            EXACT_RESCUE_GLOBAL_SCAN_LIMIT
+        };
+        let mut offset = 0usize;
+        let mut scanned = 0usize;
+        loop {
+            if scanned >= scan_limit || candidates.len() >= limit {
+                break;
+            }
+            let page_limit = EXACT_RESCUE_PAGE_SIZE.min(scan_limit.saturating_sub(scanned));
+            if page_limit == 0 {
+                break;
+            }
+            let chunks = store
+                .list_chunks_for_project(
+                    &scope.tenant_id,
+                    scope.project_id.as_deref(),
+                    page_limit,
+                    offset,
+                )
+                .await
+                .map_err(|e| McpError::ToolError(e.to_string()))?;
+            if chunks.is_empty() {
+                break;
+            }
+            scanned = scanned.saturating_add(page_limit);
+            offset = offset.saturating_add(page_limit);
+
+            for chunk in chunks {
+                if let Some(project_id) = scope.project_id.as_deref() {
+                    if chunk.project_id.as_option() != Some(project_id) {
+                        continue;
+                    }
+                }
+                if chunk_contains_exact_rescue_term(&chunk, &terms) {
+                    candidates.push(chunk);
+                    if candidates.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(rank_candidate_chunks(candidates, query, limit)
+        .into_iter()
+        .map(|(chunk, score)| (chunk, score + EXACT_RESCUE_SCORE_BOOST))
+        .collect())
+}
+
+async fn lexical_overlap_candidates_for_project_scopes<S: Store>(
+    store: &S,
+    scopes: &[ProjectSearchScope],
+    query: &str,
+    limit: usize,
+) -> Result<Vec<(MemoryChunk, f32)>, McpError> {
+    if limit == 0 || !scopes.iter().any(|scope| scope.project_id.is_some()) {
+        return Ok(Vec::new());
+    }
+    let terms = lexical_overlap_terms(query);
+    if terms.len() < 4 {
+        return Ok(Vec::new());
+    }
+    let min_overlap = lexical_overlap_minimum(&terms);
+    let candidate_cap = limit
+        .saturating_mul(20)
+        .clamp(limit, LEXICAL_OVERLAP_MAX_CANDIDATES);
+    let mut candidates = Vec::new();
+
+    for scope in scopes {
+        let Some(project_id) = scope.project_id.as_deref() else {
+            continue;
+        };
+        let mut offset = 0usize;
+        let mut scanned = 0usize;
+        while scanned < LEXICAL_OVERLAP_PROJECT_SCAN_LIMIT && candidates.len() < candidate_cap {
+            let page_limit =
+                EXACT_RESCUE_PAGE_SIZE.min(LEXICAL_OVERLAP_PROJECT_SCAN_LIMIT - scanned);
+            if page_limit == 0 {
+                break;
+            }
+            let chunks = store
+                .list_chunks_for_project(&scope.tenant_id, Some(project_id), page_limit, offset)
+                .await
+                .map_err(|e| McpError::ToolError(e.to_string()))?;
+            if chunks.is_empty() {
+                break;
+            }
+            scanned = scanned.saturating_add(page_limit);
+            offset = offset.saturating_add(page_limit);
+
+            for chunk in chunks {
+                if chunk.project_id.as_option() != Some(project_id) {
+                    continue;
+                }
+                if chunk_lexical_overlap_count(&chunk, &terms) >= min_overlap {
+                    candidates.push(chunk);
+                    if candidates.len() >= candidate_cap {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(rank_candidate_chunks(candidates, query, limit)
+        .into_iter()
+        .map(|(chunk, score)| (chunk, score + LEXICAL_OVERLAP_SCORE_BOOST))
+        .collect())
+}
+
+async fn search_with_tier_info_for_project_scopes<S: Store>(
+    store: &S,
+    scopes: &[ProjectSearchScope],
     query: &str,
     fetch_k: usize,
 ) -> Result<(Vec<(MemoryChunk, f32)>, Option<TieredTiming>), McpError> {
-    if tenants.len() == 1 {
-        return store
-            .search_with_tier_info(&tenants[0], query, fetch_k)
-            .await
-            .map_err(|e| McpError::ToolError(e.to_string()));
-    }
-
-    let mut lists = Vec::with_capacity(tenants.len());
-    for tenant in tenants {
-        let (results, _) = store
-            .search_with_tier_info(tenant, query, fetch_k)
+    if scopes.len() == 1 {
+        let (mut scored, timing) = store
+            .search_with_tier_info(&scopes[0].tenant_id, query, fetch_k)
             .await
             .map_err(|e| McpError::ToolError(e.to_string()))?;
+        if let Some(project_id) = scopes[0].project_id.as_deref() {
+            scored.retain(|(chunk, _)| chunk.project_id.as_option() == Some(project_id));
+        }
+        return Ok((scored, timing));
+    }
+
+    let mut lists = Vec::with_capacity(scopes.len());
+    for scope in scopes {
+        let (mut results, _) = store
+            .search_with_tier_info(&scope.tenant_id, query, fetch_k)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        if let Some(project_id) = scope.project_id.as_deref() {
+            results.retain(|(chunk, _)| chunk.project_id.as_option() == Some(project_id));
+        }
         lists.push(results);
     }
     Ok((
-        merge_scored_chunk_lists(lists, fetch_k.saturating_mul(tenants.len().max(1))),
+        merge_scored_chunk_lists(lists, fetch_k.saturating_mul(scopes.len().max(1))),
         None,
     ))
 }
@@ -3975,11 +4452,68 @@ fn digest_artifacts_equivalent(existing: &TaskArtifact, candidate: &TaskArtifact
     lhs == rhs
 }
 
+fn contains_empty_generated_digest_summary(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    text.contains("contains 0 ranked lessons")
+        || text.contains("contains 0 recent failure summaries")
+        || text.contains("contains 0 explicit or inferred decisions")
+        || text.contains("contains 0 evidence highlights")
+        || text.contains(
+            "has 0 active tasks, 0 recent completed tasks, 0 recent failures, 0 decisions, and 0 evidence highlights",
+        )
+}
+
+fn is_empty_generated_digest_artifact(artifact: &TaskArtifact) -> bool {
+    if artifact.artifact_kind != ArtifactKind::Digest
+        || artifact.status.as_deref() != Some("generated")
+    {
+        return false;
+    }
+
+    let Some(role) = artifact.artifact_role.as_deref() else {
+        return false;
+    };
+    if !matches!(
+        role,
+        DIGEST_ROLE_PROJECT_BRIEF
+            | DIGEST_ROLE_FAILURE_LIBRARY
+            | DIGEST_ROLE_DECISION_LIBRARY
+            | DIGEST_ROLE_EVIDENCE_LIBRARY
+            | DIGEST_ROLE_HIGHLIGHT_LIBRARY
+    ) {
+        return false;
+    }
+
+    let no_payload = artifact.blockers.is_empty()
+        && artifact.what_worked.is_empty()
+        && artifact.what_failed.is_empty()
+        && artifact.validation.is_empty()
+        && artifact.uncertainty.is_empty()
+        && artifact.followups.is_empty()
+        && artifact.expected_outputs.is_empty()
+        && artifact.related_artifact_ids.is_empty();
+    no_payload
+        && artifact
+            .summary
+            .as_deref()
+            .map(contains_empty_generated_digest_summary)
+            .unwrap_or(false)
+}
+
 async fn persist_digest_artifact<S: Store>(
     store: &S,
     mut artifact: TaskArtifact,
 ) -> Result<TaskArtifact, McpError> {
     finalize_artifact_for_storage(&mut artifact);
+    if is_empty_generated_digest_artifact(&artifact) {
+        debug!(
+            artifact_id = %artifact.artifact_id,
+            role = ?artifact.artifact_role,
+            project_id = ?artifact.project_id.as_option(),
+            "skipping persistence for empty generated digest"
+        );
+        return Ok(artifact);
+    }
     if let Some(existing) = store
         .get_task_artifact(&artifact.tenant_id, &artifact.artifact_id)
         .await
@@ -4291,9 +4825,24 @@ async fn ensure_highlight_library_digest<S: Store>(
     let source_artifacts = digest_source_artifacts(&artifacts);
     let highlights = infer_highlight_items(&source_artifacts);
     let source_updated_at_ms = latest_source_update_ms(&source_artifacts);
+    let task_id_by_artifact_id = source_artifacts
+        .iter()
+        .map(|artifact| (artifact.artifact_id.as_str(), artifact.task_id.as_str()))
+        .collect::<std::collections::BTreeMap<_, _>>();
     let covered_task_ids = highlights
         .iter()
-        .map(|item| item.task_id.clone())
+        .flat_map(|item| {
+            let mut task_ids = item
+                .supporting_artifact_ids
+                .iter()
+                .filter_map(|artifact_id| task_id_by_artifact_id.get(artifact_id.as_str()))
+                .map(|task_id| (*task_id).to_string())
+                .collect::<Vec<_>>();
+            if task_ids.is_empty() && !item.task_id.is_empty() {
+                task_ids.push(item.task_id.clone());
+            }
+            task_ids
+        })
         .filter(|id| !id.is_empty())
         .collect::<std::collections::BTreeSet<_>>();
     let mut summary = format!(
@@ -4709,17 +5258,17 @@ async fn search_task_projection_chunk_ids_for_tenants<S: Store>(
     Ok(out)
 }
 
-async fn summary_preferred_results<S: Store>(
+async fn summary_preferred_results_for_project_scopes<S: Store>(
     store: &S,
-    tenants: &[TenantId],
+    scopes: &[ProjectSearchScope],
     query: &str,
-    project_id: Option<&str>,
     mode: QueryMode,
     limit: usize,
 ) -> Result<Vec<(MemoryChunk, f32)>, McpError> {
+    let has_project_scope = scopes.iter().any(|scope| scope.project_id.is_some());
     let modes = if mode != QueryMode::Generic {
         vec![mode]
-    } else if project_id.is_some() {
+    } else if has_project_scope {
         vec![
             QueryMode::BriefProject,
             QueryMode::FindFailures,
@@ -4735,40 +5284,72 @@ async fn summary_preferred_results<S: Store>(
         return Ok(Vec::new());
     }
 
-    let mut all_ids = Vec::new();
-    let mut seen = HashSet::new();
-    for mode in modes {
-        let ids = candidate_chunk_ids_for_tenants_and_mode(
-            store,
-            tenants,
-            mode,
-            &TaskSearchFilters {
-                project_id: project_id.map(|value| value.to_string()),
-                ..Default::default()
-            },
-            limit.saturating_mul(4),
-        )
-        .await?;
-        for id in ids {
-            if seen.insert(id.clone()) {
-                all_ids.push(id);
+    let mut lists = Vec::with_capacity(scopes.len());
+    for scope in scopes {
+        let mut all_ids = Vec::new();
+        let mut seen = HashSet::new();
+        for mode in &modes {
+            let ids = candidate_chunk_ids_for_mode(
+                store,
+                &scope.tenant_id,
+                *mode,
+                &TaskSearchFilters {
+                    project_id: scope.project_id.clone(),
+                    ..Default::default()
+                },
+                limit.saturating_mul(4),
+            )
+            .await?;
+            for id in ids {
+                if seen.insert(id.clone()) {
+                    all_ids.push(id);
+                }
             }
         }
-    }
-
-    let mut lists = Vec::with_capacity(tenants.len());
-    for tenant in tenants {
-        lists.push(
-            store
-                .rerank_chunks_for_query(tenant, query, &all_ids, limit)
-                .await
-                .map_err(|e| McpError::ToolError(e.to_string()))?,
-        );
+        let mut ranked = store
+            .rerank_chunks_for_query(&scope.tenant_id, query, &all_ids, limit)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        ranked.retain(|(chunk, _)| !is_empty_generated_digest_chunk(chunk));
+        lists.push(ranked);
     }
     Ok(merge_scored_chunk_lists(
         lists,
-        limit.saturating_mul(tenants.len().max(1)),
+        limit.saturating_mul(scopes.len().max(1)),
     ))
+}
+
+fn is_empty_generated_digest_chunk(chunk: &MemoryChunk) -> bool {
+    let generated = chunk.tags.iter().any(|tag| tag == "task:status:generated");
+    let digest_like = chunk
+        .tags
+        .iter()
+        .any(|tag| tag.starts_with("task:role:") || tag.starts_with("task:digest:"));
+    if !generated || !digest_like {
+        return false;
+    }
+
+    contains_empty_generated_digest_summary(&chunk.text)
+}
+
+fn is_generated_digest_projection_chunk(chunk: &MemoryChunk) -> bool {
+    let generated = chunk.tags.iter().any(|tag| tag == "task:status:generated");
+    let digest_like = chunk.tags.iter().any(|tag| {
+        tag == "task:kind:digest"
+            || tag == "task:projection:digest"
+            || tag.starts_with("task:role:")
+            || tag.starts_with("task:digest:")
+    });
+    generated && digest_like
+}
+
+fn suppress_generated_digest_projection_chunks(
+    scored: Vec<(MemoryChunk, f32)>,
+) -> Vec<(MemoryChunk, f32)> {
+    scored
+        .into_iter()
+        .filter(|(chunk, _)| !is_generated_digest_projection_chunk(chunk))
+        .collect()
 }
 
 fn merge_preferred_and_raw(
@@ -4782,19 +5363,24 @@ fn merge_preferred_and_raw(
     for (chunk, score) in preferred {
         if seen.insert(chunk.chunk_id.clone()) {
             merged.push((chunk, score + 10.0));
-            if merged.len() >= limit {
-                return merged;
-            }
         }
     }
     for (chunk, score) in raw {
         if seen.insert(chunk.chunk_id.clone()) {
             merged.push((chunk, score));
-            if merged.len() >= limit {
-                break;
-            }
         }
     }
+    merged.sort_by(|(left_chunk, left_score), (right_chunk, right_score)| {
+        right_score
+            .partial_cmp(left_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                right_chunk
+                    .timestamp_created
+                    .cmp(&left_chunk.timestamp_created)
+            })
+    });
+    merged.truncate(limit);
     merged
 }
 
@@ -4899,7 +5485,7 @@ pub async fn handle_memory_search<S: Store>(
     // further trims to `params.k` after hiding non-visible rows.
     let pre_visibility_cap = params.k.saturating_mul(oversample_factor);
     let fetch_k = adaptive_fetch_k(params.k, &params.query, has_filters).max(pre_visibility_cap);
-    let scoped_tenants = scoped_tenants_for_project(store, &tenant_id, project_id_filter).await?;
+    let project_scopes = project_scopes_for_project(store, &tenant_id, project_id_filter).await?;
 
     info!(
         tenant_id = %tenant_id,
@@ -4912,54 +5498,59 @@ pub async fn handle_memory_search<S: Store>(
 
     // Use search_with_tier_info if debug_tiers is requested
     if debug_tiers {
-        let (scored_chunks, timing) =
-            search_with_tier_info_for_tenants(store, &scoped_tenants, &params.query, fetch_k)
-                .await?;
-        let exact_candidates = exact_lexical_candidates_for_tenants(
+        let (scored_chunks, timing) = search_with_tier_info_for_project_scopes(
             store,
-            &scoped_tenants,
+            &project_scopes,
             &params.query,
-            project_id_filter,
+            fetch_k,
+        )
+        .await?;
+        let exact_candidates = exact_lexical_candidates_for_project_scopes(
+            store,
+            &project_scopes,
+            &params.query,
             params.k.min(fetch_k),
         )
         .await?;
-        let preferred = summary_preferred_results(
+        let preferred = summary_preferred_results_for_project_scopes(
             store,
-            &scoped_tenants,
+            &project_scopes,
             &params.query,
-            project_id_filter,
             mode,
             params.k.min(8),
         )
         .await?;
-        let mut scored_chunks = apply_search_filters(
-            merge_preferred_and_raw(
-                preferred,
-                merge_scored_chunk_lists(vec![exact_candidates, scored_chunks], fetch_k),
-                fetch_k,
-            ),
-            project_id_filter,
-            &parsed_filters,
-            pre_visibility_cap,
+        let mut merged = merge_preferred_and_raw(
+            preferred,
+            merge_scored_chunk_lists(vec![exact_candidates, scored_chunks], fetch_k),
+            fetch_k,
         );
+        if should_run_lexical_overlap_rescue(&merged, &params.query, params.k) {
+            let lexical_candidates = lexical_overlap_candidates_for_project_scopes(
+                store,
+                &project_scopes,
+                &params.query,
+                params.k.min(fetch_k),
+            )
+            .await?;
+            merged = merge_scored_chunk_lists(vec![lexical_candidates, merged], fetch_k);
+        }
+        let mut scored_chunks =
+            apply_search_filters(merged, None, &parsed_filters, pre_visibility_cap);
         let mut timing = timing;
         let mut repair_info = None;
 
         if scored_chunks.is_empty() && !params.query.is_empty() {
             if let Some(repaired_query) = normalize_query_for_repair(&params.query) {
-                let (repair_scored, repair_timing) = search_with_tier_info_for_tenants(
+                let (repair_scored, repair_timing) = search_with_tier_info_for_project_scopes(
                     store,
-                    &scoped_tenants,
+                    &project_scopes,
                     &repaired_query,
                     fetch_k,
                 )
                 .await?;
-                let repaired_filtered = apply_search_filters(
-                    repair_scored,
-                    project_id_filter,
-                    &parsed_filters,
-                    pre_visibility_cap,
-                );
+                let repaired_filtered =
+                    apply_search_filters(repair_scored, None, &parsed_filters, pre_visibility_cap);
                 let repaired = !repaired_filtered.is_empty();
                 if repaired {
                     scored_chunks = repaired_filtered;
@@ -4972,6 +5563,10 @@ pub async fn handle_memory_search<S: Store>(
                     repaired_query: Some(repaired_query),
                 });
             }
+        }
+
+        if mode == QueryMode::Generic {
+            scored_chunks = suppress_generated_digest_projection_chunks(scored_chunks);
         }
 
         // Apply lifecycle visibility filter with oversample-and-refill to
@@ -5039,47 +5634,52 @@ pub async fn handle_memory_search<S: Store>(
 
     // Standard path without tier info
     let scored_chunks =
-        search_with_scores_for_tenants(store, &scoped_tenants, &params.query, fetch_k).await?;
-    let exact_candidates = exact_lexical_candidates_for_tenants(
+        search_with_scores_for_project_scopes(store, &project_scopes, &params.query, fetch_k)
+            .await?;
+    let exact_candidates = exact_lexical_candidates_for_project_scopes(
         store,
-        &scoped_tenants,
+        &project_scopes,
         &params.query,
-        project_id_filter,
         params.k.min(fetch_k),
     )
     .await?;
-    let preferred = summary_preferred_results(
+    let preferred = summary_preferred_results_for_project_scopes(
         store,
-        &scoped_tenants,
+        &project_scopes,
         &params.query,
-        project_id_filter,
         mode,
         params.k.min(8),
     )
     .await?;
-    let mut scored_chunks = apply_search_filters(
-        merge_preferred_and_raw(
-            preferred,
-            merge_scored_chunk_lists(vec![exact_candidates, scored_chunks], fetch_k),
-            fetch_k,
-        ),
-        project_id_filter,
-        &parsed_filters,
-        pre_visibility_cap,
+    let mut merged = merge_preferred_and_raw(
+        preferred,
+        merge_scored_chunk_lists(vec![exact_candidates, scored_chunks], fetch_k),
+        fetch_k,
     );
+    if should_run_lexical_overlap_rescue(&merged, &params.query, params.k) {
+        let lexical_candidates = lexical_overlap_candidates_for_project_scopes(
+            store,
+            &project_scopes,
+            &params.query,
+            params.k.min(fetch_k),
+        )
+        .await?;
+        merged = merge_scored_chunk_lists(vec![lexical_candidates, merged], fetch_k);
+    }
+    let mut scored_chunks = apply_search_filters(merged, None, &parsed_filters, pre_visibility_cap);
     let mut repair_info = None;
 
     if scored_chunks.is_empty() && !params.query.is_empty() {
         if let Some(repaired_query) = normalize_query_for_repair(&params.query) {
-            let repair_scored =
-                search_with_scores_for_tenants(store, &scoped_tenants, &repaired_query, fetch_k)
-                    .await?;
-            let repaired_filtered = apply_search_filters(
-                repair_scored,
-                project_id_filter,
-                &parsed_filters,
-                pre_visibility_cap,
-            );
+            let repair_scored = search_with_scores_for_project_scopes(
+                store,
+                &project_scopes,
+                &repaired_query,
+                fetch_k,
+            )
+            .await?;
+            let repaired_filtered =
+                apply_search_filters(repair_scored, None, &parsed_filters, pre_visibility_cap);
             let repaired = !repaired_filtered.is_empty();
             if repaired {
                 scored_chunks = repaired_filtered;
@@ -5091,6 +5691,10 @@ pub async fn handle_memory_search<S: Store>(
                 repaired_query: Some(repaired_query),
             });
         }
+    }
+
+    if mode == QueryMode::Generic {
+        scored_chunks = suppress_generated_digest_projection_chunks(scored_chunks);
     }
 
     // Apply lifecycle visibility filter with oversample-and-refill
@@ -5167,11 +5771,24 @@ pub async fn handle_memory_add<S: Store>(
         tags.extend(params.tags);
         chunk = chunk.with_tags(tags);
     }
+    let caller_tags_for_dedupe = chunk.tags.clone();
+
+    let ingestion_mode = parse_ingestion_mode(params.mode.as_deref())?;
+    let mut admission = resolve_write_admission(
+        chunk.chunk_type,
+        &chunk.text,
+        &chunk.tags,
+        ingestion_mode,
+        params.expires_at_ms,
+        params.review_after_ms,
+    )?;
+    drop_optional_run_trace_retention_for_in_memory_store(store, &mut admission);
+    chunk = apply_admission_tags(chunk, &admission);
 
     // Phase 1: heuristic auto-priority stamp. No-op if caller already
     // set `priority:` or `importance:`. Lets `priority_score` in
     // memory.md actually fire for typical agent writes.
-    {
+    if admission.outcome.decision == AdmissionDecision::Durable {
         let mut tags = chunk.tags.clone();
         if crate::auto_priority::stamp_auto_priority(chunk.chunk_type, &chunk.text, &mut tags)
             .is_some()
@@ -5183,22 +5800,35 @@ pub async fn handle_memory_add<S: Store>(
     // Track E: parse `mode` → IngestionMode (fail-closed) and apply
     // the conversation-mode default review window when the caller
     // didn't pass an explicit review_after_ms.
-    let ingestion_mode = parse_ingestion_mode(params.mode.as_deref())?;
     chunk = chunk.with_ingestion_mode(ingestion_mode);
-    let effective_review_after_ms =
-        apply_conversation_review_default(ingestion_mode, params.review_after_ms);
-
-    // `params.review_after_ms` may have been None on input; substitute
-    // the defaulted value so the rest of the handler treats it as
-    // explicitly requested.
-    let review_after_ms = effective_review_after_ms;
-    let has_lifecycle = params.expires_at_ms.is_some() || review_after_ms.is_some();
+    let lifecycle_delta = admission_lifecycle_delta(&admission);
+    let has_lifecycle = !lifecycle_delta.is_empty();
+    let caller_requested_lifecycle =
+        params.expires_at_ms.is_some() || params.review_after_ms.is_some();
     let resolved_dedup = match params.supersede_near_duplicates.as_ref() {
         Some(spec) => {
             crate::mcp::dedup::resolve_spec(spec).map_err(|e| McpError::ToolError(e.to_string()))?
         }
         None => None,
     };
+
+    if resolved_dedup.is_none() && !caller_requested_lifecycle {
+        if let Some(existing_id) =
+            find_default_content_duplicate(store, &chunk, &caller_tags_for_dedupe).await?
+        {
+            info!(chunk_id = %existing_id, "reused existing exact content duplicate");
+            return format_mcp_response(&AddResult {
+                chunk_id: existing_id.to_string(),
+                dedupe_decision: Some("reused_existing_exact_content".to_string()),
+                deduped_existing_id: Some(existing_id.to_string()),
+                admission_decision: Some(admission_decision_string(&admission)),
+                admission_reason: Some(admission.outcome.reason.clone()),
+                lifecycle_tier: admission_lifecycle_tier_string(&admission),
+                expires_at_ms: admission.expires_at_ms,
+                review_after_ms: admission.review_after_ms,
+            });
+        }
+    }
 
     // Track D path: when dedup is requested, find candidates first
     // (read-only on the store), then atomically supersede each one with
@@ -5225,11 +5855,6 @@ pub async fn handle_memory_add<S: Store>(
         // Snapshot tenant_id before `chunk` is consumed by either
         // dedup branch.
         let tenant_id_for_extras = chunk.tenant_id.clone();
-        let lifecycle_delta = LifecycleDelta {
-            expires_at_ms: params.expires_at_ms.map(Some),
-            review_after_ms: review_after_ms.map(Some),
-            ..Default::default()
-        };
 
         let new_chunk_id = if candidates.is_empty() {
             // No prior matches — fall back to a normal add. Lifecycle
@@ -5301,6 +5926,11 @@ pub async fn handle_memory_add<S: Store>(
         return format_mcp_response(&serde_json::json!({
             "chunk_id": new_chunk_id.to_string(),
             "superseded_ids": superseded_ids,
+            "admission_decision": admission_decision_string(&admission),
+            "admission_reason": admission.outcome.reason.clone(),
+            "lifecycle_tier": admission_lifecycle_tier_string(&admission),
+            "expires_at_ms": admission.expires_at_ms,
+            "review_after_ms": admission.review_after_ms,
         }));
     }
 
@@ -5314,12 +5944,7 @@ pub async fn handle_memory_add<S: Store>(
                 "memory.add with temporal fields requires a persistent store".into(),
             )
         })?;
-        let delta = LifecycleDelta {
-            expires_at_ms: params.expires_at_ms.map(Some),
-            review_after_ms: review_after_ms.map(Some),
-            ..Default::default()
-        };
-        ps.add_chunk_with_lifecycle(chunk, delta)
+        ps.add_chunk_with_lifecycle(chunk, lifecycle_delta)
             .await
             .map_err(|e| McpError::ToolError(e.to_string()))?
     } else {
@@ -5333,6 +5958,13 @@ pub async fn handle_memory_add<S: Store>(
 
     format_mcp_response(&AddResult {
         chunk_id: chunk_id.to_string(),
+        dedupe_decision: None,
+        deduped_existing_id: None,
+        admission_decision: Some(admission_decision_string(&admission)),
+        admission_reason: Some(admission.outcome.reason.clone()),
+        lifecycle_tier: admission_lifecycle_tier_string(&admission),
+        expires_at_ms: admission.expires_at_ms,
+        review_after_ms: admission.review_after_ms,
     })
 }
 
@@ -5570,8 +6202,13 @@ pub async fn handle_memory_add_batch<S: Store>(
         // batch. SourceParams is not Clone, so we have to move it out
         // of chunk_params here rather than borrow inside the second
         // pass.
-        let mut prepared: Vec<(MemoryChunk, LifecycleDelta, bool, Option<String>)> =
-            Vec::with_capacity(params.chunks.len());
+        let mut prepared: Vec<(
+            MemoryChunk,
+            LifecycleDelta,
+            bool,
+            Option<String>,
+            ResolvedAdmission,
+        )> = Vec::with_capacity(params.chunks.len());
         for chunk_params in params.chunks {
             let chunk_type = parse_chunk_type(&chunk_params.chunk_type)?;
             let project_id_for_dedup = chunk_params.project_id.clone();
@@ -5593,16 +6230,27 @@ pub async fn handle_memory_add_batch<S: Store>(
             }
             // Track E: per-chunk mode + conversation default review window.
             let ingestion_mode = parse_ingestion_mode(chunk_params.mode.as_deref())?;
+            let mut admission = resolve_write_admission(
+                chunk.chunk_type,
+                &chunk.text,
+                &chunk.tags,
+                ingestion_mode,
+                chunk_params.expires_at_ms,
+                chunk_params.review_after_ms,
+            )
+            .map_err(|err| {
+                McpError::InvalidParams(format!(
+                    "memory.add_batch rejected chunk {} by quality gate: {}",
+                    prepared.len(),
+                    err.message()
+                ))
+            })?;
+            drop_optional_run_trace_retention_for_in_memory_store(store, &mut admission);
+            chunk = apply_admission_tags(chunk, &admission);
             chunk = chunk.with_ingestion_mode(ingestion_mode);
-            let review_after_ms =
-                apply_conversation_review_default(ingestion_mode, chunk_params.review_after_ms);
-            let has_lifecycle = chunk_params.expires_at_ms.is_some() || review_after_ms.is_some();
-            let delta = LifecycleDelta {
-                expires_at_ms: chunk_params.expires_at_ms.map(Some),
-                review_after_ms: review_after_ms.map(Some),
-                ..Default::default()
-            };
-            prepared.push((chunk, delta, has_lifecycle, project_id_for_dedup));
+            let delta = admission_lifecycle_delta(&admission);
+            let has_lifecycle = !delta.is_empty();
+            prepared.push((chunk, delta, has_lifecycle, project_id_for_dedup, admission));
         }
 
         // Second pass: per-chunk dedup-or-add. Failures still leave
@@ -5610,7 +6258,9 @@ pub async fn handle_memory_add_batch<S: Store>(
         // failure contract.
         let mut chunk_ids: Vec<String> = Vec::with_capacity(prepared.len());
         let mut superseded_ids: Vec<Vec<String>> = Vec::with_capacity(prepared.len());
-        for (chunk, delta, has_lifecycle, project_id) in prepared {
+        let mut admission_decisions = Vec::with_capacity(prepared.len());
+        let mut admission_reasons = Vec::with_capacity(prepared.len());
+        for (chunk, delta, has_lifecycle, project_id, admission) in prepared {
             let candidates = crate::mcp::dedup::compute_dedup_candidates(
                 ps,
                 &tenant_id,
@@ -5656,12 +6306,16 @@ pub async fn handle_memory_add_batch<S: Store>(
             };
             chunk_ids.push(new_id.to_string());
             superseded_ids.push(linked);
+            admission_decisions.push(admission_decision_string(&admission));
+            admission_reasons.push(admission.outcome.reason);
         }
 
         info!(count = chunk_ids.len(), "batch add (with dedup) completed");
         return format_mcp_response(&serde_json::json!({
             "chunk_ids": chunk_ids,
             "superseded_ids": superseded_ids,
+            "admission_decisions": admission_decisions,
+            "admission_reasons": admission_reasons,
         }));
     }
 
@@ -5672,10 +6326,18 @@ pub async fn handle_memory_add_batch<S: Store>(
     // tuples both branches consume. Batches without any per-chunk
     // lifecycle (no expires_at_ms / review_after_ms / conversation
     // mode) keep the bulk `store.add_batch` fast path unchanged.
-    let mut prepared: Vec<(MemoryChunk, LifecycleDelta, bool)> =
-        Vec::with_capacity(params.chunks.len());
+    let mut prepared: Vec<(
+        MemoryChunk,
+        LifecycleDelta,
+        bool,
+        ResolvedAdmission,
+        Vec<String>,
+        bool,
+    )> = Vec::with_capacity(params.chunks.len());
     for chunk_params in params.chunks {
         let chunk_type = parse_chunk_type(&chunk_params.chunk_type)?;
+        let caller_requested_lifecycle =
+            chunk_params.expires_at_ms.is_some() || chunk_params.review_after_ms.is_some();
         let mut chunk = MemoryChunk::new(tenant_id.clone(), &chunk_params.text, chunk_type);
         if let Some(project_id) = &chunk_params.project_id {
             chunk = chunk.with_project(ProjectId::new(Some(project_id.clone())));
@@ -5692,21 +6354,83 @@ pub async fn handle_memory_add_batch<S: Store>(
             tags.extend(chunk_params.tags);
             chunk = chunk.with_tags(tags);
         }
+        let caller_tags_for_dedupe = chunk.tags.clone();
         let ingestion_mode = parse_ingestion_mode(chunk_params.mode.as_deref())?;
+        let mut admission = resolve_write_admission(
+            chunk.chunk_type,
+            &chunk.text,
+            &chunk.tags,
+            ingestion_mode,
+            chunk_params.expires_at_ms,
+            chunk_params.review_after_ms,
+        )
+        .map_err(|err| {
+            McpError::InvalidParams(format!(
+                "memory.add_batch rejected chunk {} by quality gate: {}",
+                prepared.len(),
+                err.message()
+            ))
+        })?;
+        drop_optional_run_trace_retention_for_in_memory_store(store, &mut admission);
+        chunk = apply_admission_tags(chunk, &admission);
         chunk = chunk.with_ingestion_mode(ingestion_mode);
-        let review_after_ms =
-            apply_conversation_review_default(ingestion_mode, chunk_params.review_after_ms);
-        let delta = LifecycleDelta {
-            expires_at_ms: chunk_params.expires_at_ms.map(Some),
-            review_after_ms: review_after_ms.map(Some),
-            ..Default::default()
-        };
+        let delta = admission_lifecycle_delta(&admission);
         let has_lifecycle = !delta.is_empty();
-        prepared.push((chunk, delta, has_lifecycle));
+        prepared.push((
+            chunk,
+            delta,
+            has_lifecycle,
+            admission,
+            caller_tags_for_dedupe,
+            caller_requested_lifecycle,
+        ));
     }
-    let any_lifecycle = prepared.iter().any(|(_, _, hl)| *hl);
+    let any_lifecycle = prepared.iter().any(|(_, _, hl, _, _, _)| *hl);
+    let admission_decisions = prepared
+        .iter()
+        .map(|(_, _, _, admission, _, _)| admission_decision_string(admission))
+        .collect::<Vec<_>>();
+    let admission_reasons = prepared
+        .iter()
+        .map(|(_, _, _, admission, _, _)| admission.outcome.reason.clone())
+        .collect::<Vec<_>>();
 
-    let chunk_ids = if any_lifecycle {
+    let mut dedupe_decisions = Vec::with_capacity(prepared.len());
+    let mut deduped_existing_ids = Vec::with_capacity(prepared.len());
+    let mut any_default_deduped = false;
+
+    let chunk_ids = if let Some(ps) = store.as_persistent() {
+        let mut ids = Vec::with_capacity(prepared.len());
+        for (chunk, delta, has_lifecycle, _, caller_tags, caller_requested_lifecycle) in prepared {
+            if !caller_requested_lifecycle {
+                if let Some(existing_id) =
+                    find_default_content_duplicate(store, &chunk, &caller_tags).await?
+                {
+                    let existing_id_string = existing_id.to_string();
+                    ids.push(existing_id);
+                    dedupe_decisions.push("reused_existing_exact_content".to_string());
+                    deduped_existing_ids.push(Some(existing_id_string));
+                    any_default_deduped = true;
+                    continue;
+                }
+            }
+
+            let id = if has_lifecycle {
+                ps.add_chunk_with_lifecycle(chunk, delta)
+                    .await
+                    .map_err(|e| McpError::ToolError(e.to_string()))?
+            } else {
+                store
+                    .add(chunk)
+                    .await
+                    .map_err(|e| McpError::ToolError(e.to_string()))?
+            };
+            ids.push(id);
+            dedupe_decisions.push("inserted".to_string());
+            deduped_existing_ids.push(None);
+        }
+        ids
+    } else if any_lifecycle {
         let ps = store.as_persistent().ok_or_else(|| {
             McpError::ToolError(
                 "memory.add_batch with temporal fields requires a persistent store".into(),
@@ -5716,7 +6440,7 @@ pub async fn handle_memory_add_batch<S: Store>(
         // overlay is applied. Failures still leave earlier rows
         // committed — same contract as the bulk add_batch fast path.
         let mut ids = Vec::with_capacity(prepared.len());
-        for (chunk, delta, _) in prepared {
+        for (chunk, delta, _, _, _, _) in prepared {
             let id = ps
                 .add_chunk_with_lifecycle(chunk, delta)
                 .await
@@ -5728,7 +6452,7 @@ pub async fn handle_memory_add_batch<S: Store>(
         // No lifecycle overlay anywhere → bulk path. The chunks already
         // carry the per-row ingestion_mode label (set in the pre-pass);
         // store.add_batch threads that through to ChunkMetadata.
-        let chunks: Vec<MemoryChunk> = prepared.into_iter().map(|(c, _, _)| c).collect();
+        let chunks: Vec<MemoryChunk> = prepared.into_iter().map(|(c, _, _, _, _, _)| c).collect();
         store
             .add_batch(chunks)
             .await
@@ -5739,6 +6463,10 @@ pub async fn handle_memory_add_batch<S: Store>(
 
     format_mcp_response(&AddBatchResult {
         chunk_ids: chunk_ids.iter().map(|id| id.to_string()).collect(),
+        dedupe_decisions: any_default_deduped.then_some(dedupe_decisions),
+        deduped_existing_ids: any_default_deduped.then_some(deduped_existing_ids),
+        admission_decisions: Some(admission_decisions),
+        admission_reasons: Some(admission_reasons),
     })
 }
 
@@ -9808,6 +10536,8 @@ mod tests {
         let text = add_result["content"][0]["text"].as_str().unwrap();
         let add_response: AddResult = serde_json::from_str(text).unwrap();
         assert!(!add_response.chunk_id.is_empty());
+        assert_eq!(add_response.admission_decision.as_deref(), Some("durable"));
+        assert_eq!(add_response.admission_reason.as_deref(), Some("accepted"));
 
         // Search for it
         let search_params = SearchParams {
@@ -9834,6 +10564,351 @@ mod tests {
         let search_response: SearchResult = serde_json::from_str(text).unwrap();
         assert_eq!(search_response.results.len(), 1);
         assert_eq!(search_response.results[0].text, "hello world");
+    }
+
+    #[tokio::test]
+    async fn memory_add_rejects_low_signal_progress_and_generated_wrappers() {
+        let store = make_store();
+
+        let low_signal = handle_memory_add(
+            &store,
+            None,
+            AddParams {
+                tenant_id: "quality_gate".to_string(),
+                text: "starting to inspect the files".to_string(),
+                chunk_type: "summary".to_string(),
+                tags: vec!["kind:progress".to_string()],
+                ..Default::default()
+            },
+        )
+        .await;
+        let err = low_signal.expect_err("low-signal progress should be rejected");
+        assert!(err
+            .message()
+            .contains("low-signal progress chatter needs a concrete result"));
+
+        let generated = handle_memory_add(
+            &store,
+            None,
+            AddParams {
+                tenant_id: "quality_gate".to_string(),
+                text: "Task digest status generated. Summary: Highlight library for p contains 0 ranked lessons.".to_string(),
+                chunk_type: "summary".to_string(),
+                tags: vec![
+                    "task:status:generated".to_string(),
+                    "task:role:highlight_library".to_string(),
+                ],
+                ..Default::default()
+            },
+        )
+        .await;
+        let err = generated.expect_err("generated digest wrapper should be rejected");
+        assert!(err.message().contains("generated digest wrapper records"));
+
+        let search_result = handle_memory_search(
+            &store,
+            SearchParams {
+                tenant_id: "quality_gate".to_string(),
+                query: "starting generated Highlight library".to_string(),
+                k: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let text = search_result["content"][0]["text"].as_str().unwrap();
+        let search_response: SearchResult = serde_json::from_str(text).unwrap();
+        assert!(
+            search_response.results.is_empty(),
+            "rejected writes must not be retrievable"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_add_allows_explicit_priority_override_for_progress() {
+        let store = make_store();
+
+        let add_result = handle_memory_add(
+            &store,
+            None,
+            AddParams {
+                tenant_id: "quality_gate_override".to_string(),
+                text: "starting".to_string(),
+                chunk_type: "summary".to_string(),
+                tags: vec!["kind:progress".to_string(), "priority:9".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let text = add_result["content"][0]["text"].as_str().unwrap();
+        let add_response: AddResult = serde_json::from_str(text).unwrap();
+        assert!(!add_response.chunk_id.is_empty());
+        assert_eq!(add_response.admission_decision.as_deref(), Some("durable"));
+    }
+
+    #[tokio::test]
+    async fn memory_add_downgrades_low_signal_conversation_progress_to_ephemeral() {
+        let (store, _dir) = make_persistent_store();
+        let tenant = TenantId::new("quality_gate_ephemeral").unwrap();
+
+        let add_result = handle_memory_add(
+            &store,
+            None,
+            AddParams {
+                tenant_id: tenant.to_string(),
+                text: "starting to inspect the files".to_string(),
+                chunk_type: "summary".to_string(),
+                tags: vec!["kind:progress".to_string()],
+                mode: Some("conversation".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let text = add_result["content"][0]["text"].as_str().unwrap();
+        let add_response: AddResult = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            add_response.admission_decision.as_deref(),
+            Some("ephemeral")
+        );
+        assert!(add_response
+            .admission_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("short-lived hidden context"));
+        assert_eq!(add_response.lifecycle_tier.as_deref(), Some("history"));
+        assert!(add_response.expires_at_ms.is_some());
+        assert!(add_response.review_after_ms.is_some());
+
+        let chunk_id = ChunkId::parse(&add_response.chunk_id).unwrap();
+        let resolved = store
+            .get_with_lifecycle(&tenant, &chunk_id)
+            .await
+            .unwrap()
+            .expect("ephemeral chunk should still be stored");
+        assert_eq!(resolved.lifecycle.tier, MemoryTier::History);
+        assert!(resolved
+            .chunk
+            .tags
+            .iter()
+            .any(|tag| tag == "admission:ephemeral"));
+
+        let default_result = handle_memory_search(
+            &store,
+            SearchParams {
+                tenant_id: tenant.to_string(),
+                query: "starting to inspect the files".to_string(),
+                k: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let text = default_result["content"][0]["text"].as_str().unwrap();
+        let default_response: SearchResult = serde_json::from_str(text).unwrap();
+        assert!(
+            default_response.results.is_empty(),
+            "history-tier ephemeral progress should be hidden from default search"
+        );
+
+        let history_result = handle_memory_search(
+            &store,
+            SearchParams {
+                tenant_id: tenant.to_string(),
+                query: "starting to inspect the files".to_string(),
+                k: 10,
+                include_history: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let text = history_result["content"][0]["text"].as_str().unwrap();
+        let history_response: SearchResult = serde_json::from_str(text).unwrap();
+        assert_eq!(history_response.results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn memory_add_applies_medium_ttl_to_ordinary_run_trace() {
+        let (store, _dir) = make_persistent_store();
+        let tenant = TenantId::new("run_trace_ttl").unwrap();
+        let before_ms = current_time_ms();
+
+        let add_result = handle_memory_add(
+            &store,
+            None,
+            AddParams {
+                tenant_id: tenant.to_string(),
+                text: "Command: cargo test -p memd trace_retention -- --nocapture.".to_string(),
+                chunk_type: "trace".to_string(),
+                tags: vec!["kind:run".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let text = add_result["content"][0]["text"].as_str().unwrap();
+        let add_response: AddResult = serde_json::from_str(text).unwrap();
+        let expires_at = add_response
+            .expires_at_ms
+            .expect("ordinary run trace should get a medium TTL");
+        assert_eq!(add_response.review_after_ms, Some(expires_at));
+        assert_eq!(add_response.lifecycle_tier, None);
+        assert!(expires_at >= before_ms + WRITE_ADMISSION_RUN_TRACE_TTL_MS);
+        assert!(expires_at <= current_time_ms() + WRITE_ADMISSION_RUN_TRACE_TTL_MS);
+
+        let chunk_id = ChunkId::parse(&add_response.chunk_id).unwrap();
+        let resolved = store
+            .get_with_lifecycle(&tenant, &chunk_id)
+            .await
+            .unwrap()
+            .expect("trace chunk should be stored");
+        assert_eq!(resolved.lifecycle.expires_at_ms, Some(expires_at));
+        assert_eq!(resolved.lifecycle.review_after_ms, Some(expires_at));
+        assert_eq!(resolved.lifecycle.tier, MemoryTier::LongTerm);
+    }
+
+    #[tokio::test]
+    async fn memory_add_keeps_evidence_trace_durable() {
+        let (store, _dir) = make_persistent_store();
+        let tenant = TenantId::new("run_trace_evidence").unwrap();
+
+        let add_result = handle_memory_add(
+            &store,
+            None,
+            AddParams {
+                tenant_id: tenant.to_string(),
+                text: "Command: cargo test -p memd passed and supports the release gate."
+                    .to_string(),
+                chunk_type: "trace".to_string(),
+                tags: vec!["kind:run".to_string(), "kind:evidence".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let text = add_result["content"][0]["text"].as_str().unwrap();
+        let add_response: AddResult = serde_json::from_str(text).unwrap();
+        assert_eq!(add_response.expires_at_ms, None);
+        assert_eq!(add_response.review_after_ms, None);
+
+        let chunk_id = ChunkId::parse(&add_response.chunk_id).unwrap();
+        let resolved = store
+            .get_with_lifecycle(&tenant, &chunk_id)
+            .await
+            .unwrap()
+            .expect("evidence trace chunk should be stored");
+        assert_eq!(resolved.lifecycle.expires_at_ms, None);
+        assert_eq!(resolved.lifecycle.review_after_ms, None);
+        assert_eq!(resolved.lifecycle.tier, MemoryTier::LongTerm);
+    }
+
+    #[tokio::test]
+    async fn memory_add_batch_reports_admission_decisions() {
+        let (store, _dir) = make_persistent_store();
+        let tenant = TenantId::new("quality_gate_batch").unwrap();
+
+        let result = handle_memory_add_batch(
+            &store,
+            None,
+            AddBatchParams {
+                tenant_id: tenant.to_string(),
+                chunks: vec![
+                    BatchChunkParams {
+                        text: "Validation: cargo test -p memd passed.".to_string(),
+                        chunk_type: "summary".to_string(),
+                        tags: vec!["kind:progress".to_string()],
+                        ..Default::default()
+                    },
+                    BatchChunkParams {
+                        text: "starting to inspect the files".to_string(),
+                        chunk_type: "summary".to_string(),
+                        tags: vec!["kind:progress".to_string()],
+                        mode: Some("conversation".to_string()),
+                        ..Default::default()
+                    },
+                ],
+                supersede_near_duplicates: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let response: AddBatchResult = serde_json::from_str(text).unwrap();
+        assert_eq!(response.chunk_ids.len(), 2);
+        assert_eq!(
+            response.admission_decisions.unwrap(),
+            vec!["durable".to_string(), "ephemeral".to_string()]
+        );
+
+        let ephemeral_id = ChunkId::parse(&response.chunk_ids[1]).unwrap();
+        let resolved = store
+            .get_with_lifecycle(&tenant, &ephemeral_id)
+            .await
+            .unwrap()
+            .expect("ephemeral batch chunk should be stored");
+        assert_eq!(resolved.lifecycle.tier, MemoryTier::History);
+    }
+
+    #[tokio::test]
+    async fn memory_add_batch_applies_run_trace_retention_per_chunk() {
+        let (store, _dir) = make_persistent_store();
+        let tenant = TenantId::new("run_trace_batch_ttl").unwrap();
+
+        let result = handle_memory_add_batch(
+            &store,
+            None,
+            AddBatchParams {
+                tenant_id: tenant.to_string(),
+                chunks: vec![
+                    BatchChunkParams {
+                        text: "Command: cargo test -p memd ordinary trace.".to_string(),
+                        chunk_type: "trace".to_string(),
+                        tags: vec!["kind:run".to_string()],
+                        ..Default::default()
+                    },
+                    BatchChunkParams {
+                        text: "Command: cargo test -p memd evidence trace passed.".to_string(),
+                        chunk_type: "trace".to_string(),
+                        tags: vec!["kind:run".to_string(), "kind:evidence".to_string()],
+                        ..Default::default()
+                    },
+                ],
+                supersede_near_duplicates: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let response: AddBatchResult = serde_json::from_str(text).unwrap();
+        assert_eq!(response.chunk_ids.len(), 2);
+
+        let ordinary_id = ChunkId::parse(&response.chunk_ids[0]).unwrap();
+        let ordinary = store
+            .get_with_lifecycle(&tenant, &ordinary_id)
+            .await
+            .unwrap()
+            .expect("ordinary run trace should be stored");
+        assert!(
+            ordinary.lifecycle.expires_at_ms.is_some(),
+            "ordinary batch run trace should get a medium TTL"
+        );
+        assert_eq!(
+            ordinary.lifecycle.review_after_ms,
+            ordinary.lifecycle.expires_at_ms
+        );
+
+        let evidence_id = ChunkId::parse(&response.chunk_ids[1]).unwrap();
+        let evidence = store
+            .get_with_lifecycle(&tenant, &evidence_id)
+            .await
+            .unwrap()
+            .expect("evidence run trace should be stored");
+        assert_eq!(evidence.lifecycle.expires_at_ms, None);
+        assert_eq!(evidence.lifecycle.review_after_ms, None);
     }
 
     #[tokio::test]
@@ -11673,6 +12748,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_search_rescues_project_scoped_signal_terms_when_indexes_miss() {
+        let tenant = TenantId::new("memd").unwrap();
+        let target = MemoryChunk::new(
+            tenant.clone(),
+            "Phase 4 purge-side physical segment rewrite copied live chunks into fresh segments, removed hidden payload bytes, kept durable payloads readable, and reported bytes reclaimed after metadata hard-delete.",
+            ChunkType::Summary,
+        )
+        .with_project(ProjectId::new(Some("memd".to_string())))
+        .with_tags(vec![
+            "kind:progress".to_string(),
+            "phase:4".to_string(),
+            "priority:8".to_string(),
+        ]);
+        let decoy = MemoryChunk::new(
+            tenant,
+            "Token savings benchmark evidence for agent retrieval payload accounting.",
+            ChunkType::Research,
+        )
+        .with_project(ProjectId::new(Some("memd".to_string())));
+        let store = SearchMissStore::new(vec![decoy, target.clone()]);
+
+        let result = handle_memory_search(
+            &store,
+            SearchParams {
+                tenant_id: "memd".to_string(),
+                query: "purge rewrite segments physical segment payload bytes reclaimed hard delete hidden durable remains".to_string(),
+                project_id: Some("memd".to_string()),
+                k: 5,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let payload: SearchResult = parse_tool_payload(&result);
+        assert_eq!(payload.results.len(), 1);
+        assert_eq!(payload.results[0].chunk_id, target.chunk_id.to_string());
+    }
+
+    #[test]
+    fn merge_preferred_and_raw_orders_by_boosted_score() {
+        let tenant = TenantId::new("memd").unwrap();
+        let preferred = MemoryChunk::new(
+            tenant.clone(),
+            "older preferred project summary",
+            ChunkType::Summary,
+        );
+        let raw = MemoryChunk::new(tenant, "strong raw lexical match", ChunkType::Summary);
+
+        let merged = merge_preferred_and_raw(vec![(preferred, 1.0)], vec![(raw.clone(), 20.0)], 2);
+
+        assert_eq!(merged[0].0.chunk_id, raw.chunk_id);
+        assert_eq!(merged[0].1, 20.0);
+    }
+
+    #[tokio::test]
     async fn project_alias_search_is_explicit_and_annotates_origin() {
         let _flag_guard = with_fallback_flag();
         let _reset = ProjectAliasResetGuard;
@@ -11784,6 +12915,102 @@ mod tests {
                 .all(|result| result.tenant_id != "other"),
             "explicit alias must not widen to every tenant with the same project_id"
         );
+    }
+
+    #[tokio::test]
+    async fn project_alias_search_can_target_different_project_id_in_same_tenant() {
+        let _flag_guard = with_fallback_flag();
+        let _reset = ProjectAliasResetGuard;
+        set_cross_tenant_project_fallback(false);
+        set_project_aliases(Vec::new());
+
+        let store = make_store();
+        handle_memory_add(
+            &store,
+            None,
+            AddParams {
+                tenant_id: "fschulz".to_string(),
+                text: "Bester restore lesson: Tailscale gateway came back after route proxy readiness loop.".to_string(),
+                chunk_type: "summary".to_string(),
+                project_id: Some("bester-hosting".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let isolated = handle_memory_search(
+            &store,
+            SearchParams {
+                tenant_id: "fschulz".to_string(),
+                query: "Bester restore lesson".to_string(),
+                project_id: Some("bester_hosting".to_string()),
+                k: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let isolated_payload: SearchResult = parse_tool_payload(&isolated);
+        assert!(
+            isolated_payload.results.iter().all(|result| {
+                result.project_id.as_deref() != Some("bester-hosting")
+                    && !result.text.contains("Bester restore lesson")
+            }),
+            "without an explicit alias, underscore scope must not silently merge with hyphen scope; got {}",
+            serde_json::to_string_pretty(&isolated_payload).unwrap()
+        );
+
+        set_project_aliases(vec![ProjectAliasConfig {
+            tenant_id: "fschulz".to_string(),
+            project_id: "bester_hosting".to_string(),
+            aliases: vec![ProjectAliasScopeConfig {
+                tenant_id: "fschulz".to_string(),
+                project_id: Some("bester-hosting".to_string()),
+                reason: Some("project_id_separator_drift".to_string()),
+            }],
+        }]);
+
+        let aliased = handle_memory_search(
+            &store,
+            SearchParams {
+                tenant_id: "fschulz".to_string(),
+                query: "Bester restore lesson".to_string(),
+                project_id: Some("bester_hosting".to_string()),
+                k: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let aliased_payload: SearchResult = parse_tool_payload(&aliased);
+        let hit = aliased_payload
+            .results
+            .iter()
+            .find(|result| {
+                result.project_id.as_deref() == Some("bester-hosting")
+                    && result.text.contains("Tailscale gateway")
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "alias should retrieve the concrete hyphenated project memory; got {}",
+                    serde_json::to_string_pretty(&aliased_payload).unwrap()
+                )
+            });
+        let origin = hit
+            .origin
+            .as_ref()
+            .expect("same-tenant project rename alias should still carry origin metadata");
+        assert_eq!(origin.requested_tenant_id, "fschulz");
+        assert_eq!(origin.origin_tenant_id, "fschulz");
+        assert_eq!(origin.origin_project_id.as_deref(), Some("bester-hosting"));
+        assert_eq!(origin.alias_reason, "project_id_separator_drift");
+        let expansion = aliased_payload
+            .scope_expansion
+            .as_ref()
+            .expect("alias search should report scope expansion");
+        assert_eq!(expansion.requested_project_id, "bester_hosting");
+        assert_eq!(expansion.aliases.len(), 1);
     }
 
     #[tokio::test]
@@ -14148,6 +15375,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_project_brief_digest_is_not_persisted() {
+        let (store, _dir) = make_persistent_store();
+        let tenant = TenantId::new("tenant_empty_project_brief").unwrap();
+
+        let (artifact, brief) =
+            ensure_project_brief_digest(&store, &tenant, "proj_empty_brief", true)
+                .await
+                .unwrap();
+
+        assert!(brief.active_tasks.is_empty());
+        assert!(brief.recent_completed_tasks.is_empty());
+        assert!(brief.recent_failures.is_empty());
+        assert!(brief.recent_decisions.is_empty());
+        assert!(brief.evidence_highlights.is_empty());
+        assert!(is_empty_generated_digest_artifact(&artifact));
+        assert!(store
+            .get_task_artifact(&tenant, &artifact.artifact_id)
+            .await
+            .unwrap()
+            .is_none());
+
+        let links = store
+            .search_task_projection_chunk_ids(
+                &tenant,
+                &TaskSearchFilters {
+                    artifact_kind: Some(ArtifactKind::Digest),
+                    artifact_role: Some(DIGEST_ROLE_PROJECT_BRIEF.to_string()),
+                    project_id: Some("proj_empty_brief".to_string()),
+                    ..Default::default()
+                },
+                20,
+            )
+            .await
+            .unwrap();
+        assert!(links.is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_library_digest_is_not_persisted() {
+        let (store, _dir) = make_persistent_store();
+        let tenant = TenantId::new("tenant_empty_library").unwrap();
+
+        let (artifact, failures) =
+            ensure_failure_library_digest(&store, &tenant, Some("proj_empty_library"))
+                .await
+                .unwrap();
+
+        assert!(failures.is_empty());
+        assert!(is_empty_generated_digest_artifact(&artifact));
+        assert!(store
+            .get_task_artifact(&tenant, &artifact.artifact_id)
+            .await
+            .unwrap()
+            .is_none());
+
+        let links = store
+            .search_task_projection_chunk_ids(
+                &tenant,
+                &TaskSearchFilters {
+                    artifact_kind: Some(ArtifactKind::Digest),
+                    artifact_role: Some(DIGEST_ROLE_FAILURE_LIBRARY.to_string()),
+                    project_id: Some("proj_empty_library".to_string()),
+                    ..Default::default()
+                },
+                20,
+            )
+            .await
+            .unwrap();
+        assert!(links.is_empty());
+    }
+
+    #[tokio::test]
     async fn artifact_find_failures_returns_library_and_failure_hits() {
         let store = make_store();
 
@@ -14245,6 +15544,7 @@ mod tests {
         .await
         .unwrap();
         let first_payload: TaskArtifactResult = parse_tool_payload(&first);
+        let first_task_id = first_payload.task_id.clone();
 
         handle_task_finish(
             &store,
@@ -14296,6 +15596,7 @@ mod tests {
         .await
         .unwrap();
         let second_payload: TaskArtifactResult = parse_tool_payload(&second);
+        let second_task_id = second_payload.task_id.clone();
 
         handle_task_finish(
             &store,
@@ -14372,6 +15673,13 @@ mod tests {
             .summary
             .contains("digest persistence idempotence"));
         assert_eq!(first_payload.results[0].support_count, 2);
+        let summary = first_payload
+            .artifact
+            .summary
+            .as_deref()
+            .unwrap_or_default();
+        assert!(summary.contains(&format!("task:id:{}", first_task_id)));
+        assert!(summary.contains(&format!("task:id:{}", second_task_id)));
         assert_eq!(
             first_payload.artifact.timestamp_created,
             second_payload.artifact.timestamp_created

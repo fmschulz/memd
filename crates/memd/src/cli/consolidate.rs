@@ -607,9 +607,8 @@ async fn tombstone_sources<S: Store>(
 /// return immediately. The child runs the same scope without
 /// `--background`.
 fn spawn_background(options: &ConsolidateOptions) -> Result<Value> {
-    let exe = std::env::current_exe().map_err(|e| {
-        MemdError::ProtocolError(format!("cannot resolve current executable: {e}"))
-    })?;
+    let exe = std::env::current_exe()
+        .map_err(|e| MemdError::ProtocolError(format!("cannot resolve current executable: {e}")))?;
     let mut command = std::process::Command::new(exe);
     command.arg("consolidate");
     if let Some(tenant) = &options.tenant_id {
@@ -638,9 +637,9 @@ fn spawn_background(options: &ConsolidateOptions) -> Result<Value> {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let child = command
-        .spawn()
-        .map_err(|e| MemdError::ProtocolError(format!("failed to spawn background consolidate: {e}")))?;
+    let child = command.spawn().map_err(|e| {
+        MemdError::ProtocolError(format!("failed to spawn background consolidate: {e}"))
+    })?;
     Ok(json!({ "spawned_background": true, "pid": child.id() }))
 }
 
@@ -704,12 +703,8 @@ mod tests {
     #[test]
     fn resolve_scope_prefers_explicit_args() {
         let dir = tempdir().unwrap();
-        let (tenant, project) = resolve_scope(
-            dir.path(),
-            Some("t".to_string()),
-            Some("p".to_string()),
-        )
-        .unwrap();
+        let (tenant, project) =
+            resolve_scope(dir.path(), Some("t".to_string()), Some("p".to_string())).unwrap();
         assert_eq!(tenant, "t");
         assert_eq!(project.as_deref(), Some("p"));
     }
@@ -809,10 +804,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(consolidated
-            .tags
-            .iter()
-            .any(|t| t == "kind:consolidated"));
+        assert!(consolidated.tags.iter().any(|t| t == "kind:consolidated"));
         assert!(consolidated
             .tags
             .iter()
