@@ -101,7 +101,8 @@ Then read `memory.md` before implementation and before task-specific
 `agent-context` retrieval. The file contains:
 
 - up to 10 highest-priority project takeaways
-- up to 10 highest-priority machine-wide takeaways in the selected tenant
+- optional machine-wide takeaways in the selected tenant when `--global-limit`
+  is set above 0
 - source chunk IDs, tags, and computed priority scores
 
 The priority score is computed from explicit `priority:N` / `importance:N` tags,
@@ -216,6 +217,38 @@ Adds a `## Cross-Tenant Takeaways` section sourced from
 `kind:consolidated, priority>=8` chunks across every other tenant under
 the store data root, deduped by a normalised first-100-char key. OFF by
 default — the cross-tenant read only happens when the flag is passed.
+
+## Write Quality Contract
+
+Keep durable memory small and useful. A normal single task should leave fewer
+than 10 durable chunks; most tasks need only a decision, a concrete run/evidence
+record, and a finish summary.
+
+Write durable records when they contain one of these signals:
+
+- decision plus rationale
+- validated fix or result
+- root cause of a failure
+- command, path, parameter, metric, or version needed to reproduce work
+- evidence that supports or contradicts a claim
+- durable follow-up with enough context to resume safely
+
+Avoid transcript-like memory:
+
+- no full chat logs or play-by-play tool transcripts
+- no "starting to inspect files" or "made progress" notes without outcomes
+- no broad claims without validation or uncertainty
+- no secrets, credentials, private account data, or sensitive log values
+- no duplicate summaries unless they add new evidence, tags, or provenance
+
+Use `priority:8` or `priority:9` only for lessons that should plausibly appear
+in future `memory.md` refreshes. If startup context looks noisy, run:
+
+```bash
+memd eval-memory-md --project-dir . --min-useful-ratio 0.8 --max-generated-wrappers 0
+memd memory-md --project-dir . --output memory.md --explain-output .memd/memory-explain.json
+memd audit --tenant-id "$TENANT_ID" --project-id "$PROJECT_ID" --format markdown
+```
 
 ## Retrieve Context
 

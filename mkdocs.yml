@@ -74,6 +74,7 @@ nav:
   - Quick start: quickstart.md
   - Concepts:
       - Architecture: architecture.md
+      - Comparison: comparison.md
       - Trust boundary: trust-boundary.md
       - Data layout: data-layout.md
       - Shared topology: shared-topology.md
@@ -81,6 +82,7 @@ nav:
       - CLI reference: cli-reference.md
       - Configuration: configuration.md
       - Observability: observability.md
+      - Operational contract: operational-contract.md
       - OMF (memory interchange): omf.md
   - Task memory:
       - Schema: scientific-task-memory/schema/README.md

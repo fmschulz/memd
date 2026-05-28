@@ -190,18 +190,22 @@ impl CompactionRunner {
             .unwrap_or(0);
 
         let metrics = CompactionMetrics::gather(metadata, hnsw_stats, segment_count, tenant_id)?;
+        let hidden_index_entries_present =
+            dense_searcher.has_valid_embeddings_for_chunks(tenant_id, &deleted_chunk_ids_set);
+        let hnsw_staleness_exceeded =
+            metrics.exceeds_hnsw_staleness_threshold(self.config.thresholds.hnsw_staleness_pct);
 
         // THROTTLE between gathering and rebuild
         self.throttle.delay_sync();
 
-        // 3. HNSW Rebuild (if staleness exceeds threshold)
-        let hnsw_rebuild = if metrics
-            .exceeds_hnsw_staleness_threshold(self.config.thresholds.hnsw_staleness_pct)
-        {
+        // 3. HNSW Rebuild (if stale, or hidden rows still have live dense embeddings)
+        let hnsw_rebuild = if hnsw_staleness_exceeded || hidden_index_entries_present {
             tracing::info!(
                 tenant_id = %tenant_id,
                 staleness = metrics.hnsw_staleness,
                 threshold = self.config.thresholds.hnsw_staleness_pct,
+                hnsw_staleness_exceeded,
+                hidden_index_entries_present,
                 "triggering HNSW rebuild"
             );
 
@@ -231,6 +235,7 @@ impl CompactionRunner {
                 tenant_id = %tenant_id,
                 staleness = metrics.hnsw_staleness,
                 threshold = self.config.thresholds.hnsw_staleness_pct,
+                hidden_index_entries_present,
                 "HNSW rebuild not needed"
             );
             None

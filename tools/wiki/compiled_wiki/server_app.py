@@ -39,6 +39,7 @@ from .containment import (
     normalize_absolute,
     reject_if_any_symlink_inside_outdir,
 )
+from . import __version__
 from .html_render import make_link_rewriter, render_page
 
 HTML_CONTENT_TYPE = "text/html; charset=utf-8"
@@ -208,7 +209,7 @@ def make_handler(outdir: Path, *, quiet: bool = False) -> type:
     project_slugs = discover_project_slugs(outdir_abs)
 
     class WikiRequestHandler(BaseHTTPRequestHandler):
-        server_version = "memd-wiki-serve/0.30.0"
+        server_version = f"memd-wiki-serve/{__version__}"
 
         def do_GET(self) -> None:  # noqa: N802 — http.server API.
             url_path = self.path.split("?", 1)[0]

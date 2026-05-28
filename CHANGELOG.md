@@ -6,6 +6,44 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [0.60.0] - 2026-05-28
+
+### Added
+
+- Added write-admission guardrails for public memory writes so obvious
+  low-signal progress chatter and generated digest wrappers do not become
+  durable memory by default, while explicit priority / importance tags and
+  concrete evidence, decisions, commands, paths, fixes, and validation results
+  remain durable.
+- Added `memd eval-retrieval` and `memd eval-write-quality` gates for checking
+  retrieval quality, known-useful recall, admission behavior, dedupe behavior,
+  storage growth, and generated-digest suppression with machine-readable
+  reports.
+- Added `memd audit`, `memd cleanup-plan`, `memd purge`, and
+  `memd purge-archive` operations for measuring memory bloat, producing
+  approval-first cleanup plans, archiving purge candidates, and verifying purge
+  archives.
+- Added operational documentation for useful memory writes, cleanup safety,
+  archive-first purge workflows, and memd-vs-alternative positioning.
+
+### Changed
+
+- `memd memory-md`, `memd search`, and session-start context now bias more
+  strongly toward durable, project-scoped, non-generated lessons and suppress
+  low-value generated digest noise unless explicitly requested.
+- Cleanup plans now include estimated purge batches plus exact destructive and
+  archive-verification command previews so large stores can be cleaned in
+  reviewable chunks.
+- `memd purge --apply` now verifies the written archive before mutating the
+  store and reports the verification result in the completed purge response.
+
+### Verified
+
+- Re-ran the release BEIR retrieval benchmark gate with the CI-pinned fiqa +
+  scidocs parameters. Candidate normalized `nDCG@10` was 0.571, and the paired
+  regression gate passed against `evals/bench/baselines/beir_v1.json`
+  (`candidate_mean=0.536`, `baseline_mean=0.417`, 47 paired queries).
+
 ## [0.51.0] - 2026-05-23
 
 ### Added

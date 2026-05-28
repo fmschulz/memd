@@ -60,11 +60,12 @@ pub struct ServerConfig {
     /// auth if you need multi-user isolation.
     #[serde(default)]
     pub allow_cross_tenant_project_fallback: bool,
-    /// Explicit project aliases for intentional cross-tenant retrieval.
+    /// Explicit project aliases for intentional cross-scope retrieval.
     ///
     /// Each rule says: when the requested `(tenant_id, project_id)` matches,
-    /// also search the listed alias scopes. Unlike the legacy fallback, this
-    /// does not widen to every tenant that happens to share the project name.
+    /// also search the listed alias scopes. An alias may point at another
+    /// tenant and/or another project ID. Unlike the legacy fallback, this does
+    /// not widen to every tenant that happens to share the project name.
     #[serde(default)]
     pub project_aliases: Vec<ProjectAliasConfig>,
 }
@@ -159,15 +160,6 @@ impl Config {
                 {
                     return Err(MemdError::ConfigError(
                         "server.project_aliases aliases cannot use an empty project_id".to_string(),
-                    ));
-                }
-                if alias
-                    .project_id
-                    .as_deref()
-                    .is_some_and(|project_id| project_id != rule.project_id)
-                {
-                    return Err(MemdError::ConfigError(
-                        "server.project_aliases aliases currently require project_id to match the parent rule; omit alias project_id for the same project".to_string(),
                     ));
                 }
             }
@@ -380,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn project_aliases_reject_project_renames() {
+    fn project_aliases_allow_project_renames() {
         let toml = r#"
             [server]
 
@@ -393,12 +385,13 @@ mod tests {
             project_id = "old_memd"
         "#;
 
-        let result = load_from_str(toml);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("aliases currently require project_id to match the parent rule"));
+        let config = load_from_str(toml).unwrap();
+        assert_eq!(
+            config.server.project_aliases[0].aliases[0]
+                .project_id
+                .as_deref(),
+            Some("old_memd")
+        );
     }
 
     #[test]

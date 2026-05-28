@@ -315,8 +315,9 @@ pub enum CliCommand {
     /// Refresh a project `memory.md` file with the highest-priority takeaways.
     ///
     /// This is intended for agent session startup. It distills up to 10
-    /// project-scoped takeaways and up to 10 machine-wide takeaways from memd,
-    /// writes them to `memory.md`, and prints a JSON summary.
+    /// project-scoped takeaways from memd, writes them to `memory.md`,
+    /// and prints a JSON summary. Machine-wide takeaways are opt-in via
+    /// `--global-limit`.
     MemoryMd {
         /// Tenant identifier. Defaults to `.memd/project_scope.json` when present.
         #[arg(long)]
@@ -338,8 +339,8 @@ pub enum CliCommand {
         #[arg(long, default_value_t = 10)]
         project_limit: usize,
 
-        /// Maximum machine-wide takeaways to keep, capped at 10
-        #[arg(long, default_value_t = 10)]
+        /// Maximum machine-wide takeaways to keep, capped at 10. Defaults to 0.
+        #[arg(long, default_value_t = 0)]
         global_limit: usize,
 
         /// Candidate memories to retrieve per query before scoring
@@ -351,6 +352,116 @@ pub enum CliCommand {
         /// tenant under the data root.
         #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
         cross_tenant: bool,
+
+        /// Optional JSON report explaining retrieved candidates,
+        /// priority score components, and display/filter decisions.
+        #[arg(long)]
+        explain_output: Option<PathBuf>,
+    },
+
+    /// Evaluate default `memory.md` startup quality against fixed thresholds.
+    EvalMemoryMd {
+        /// Tenant identifier. Defaults to `.memd/project_scope.json` when present.
+        #[arg(long)]
+        tenant_id: Option<String>,
+
+        /// Optional project identifier. Defaults to `.memd/project_scope.json`.
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Project directory containing `.memd/project_scope.json`.
+        #[arg(long, default_value = ".")]
+        project_dir: PathBuf,
+
+        /// Output path for the generated memory.md under evaluation.
+        #[arg(long, default_value = "memory.md")]
+        output: PathBuf,
+
+        /// Maximum project-specific takeaways to evaluate, capped at 10.
+        #[arg(long, default_value_t = 10)]
+        project_limit: usize,
+
+        /// Candidate memories to retrieve per query before scoring.
+        #[arg(long, default_value_t = 40)]
+        candidate_k: usize,
+
+        /// Number of displayed project takeaways included in useful-ratio scoring.
+        #[arg(long, default_value_t = 10)]
+        top_n: usize,
+
+        /// Minimum useful displayed-item ratio required for success.
+        #[arg(long, default_value_t = 0.8)]
+        min_useful_ratio: f64,
+
+        /// Maximum generated wrapper records allowed in displayed project items.
+        #[arg(long, default_value_t = 0)]
+        max_generated_wrappers: usize,
+    },
+
+    /// Evaluate fixed retrieval queries with known useful chunk IDs.
+    EvalRetrieval {
+        /// Tenant identifier.
+        #[arg(long)]
+        tenant_id: String,
+
+        /// Optional project identifier.
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Project directory (resolves default queries and reports).
+        #[arg(long, default_value = ".")]
+        project_dir: PathBuf,
+
+        /// Path to JSONL queries with `query` and `useful_chunk_ids`.
+        #[arg(long)]
+        queries: Option<PathBuf>,
+
+        /// Top-k retrieval cutoff for precision and hit-rate metrics.
+        #[arg(long, default_value_t = 5)]
+        k: usize,
+
+        /// Minimum mean precision@k required for success.
+        #[arg(long, default_value_t = 0.6)]
+        min_precision_at_k: f64,
+
+        /// Minimum fraction of queries with at least one useful hit.
+        #[arg(long, default_value_t = 1.0)]
+        min_hit_rate_at_k: f64,
+
+        /// Minimum mean recall over known useful chunk IDs.
+        #[arg(long, default_value_t = 0.0)]
+        min_known_recall_at_k: f64,
+
+        /// Minimum mean reciprocal rank of the first useful hit.
+        #[arg(long, default_value_t = 0.0)]
+        min_mrr: f64,
+    },
+
+    /// Evaluate synthetic write admission, dedupe, and storage-growth behavior.
+    EvalWriteQuality {
+        /// Project directory used only for the eval report output path.
+        #[arg(long, default_value = ".")]
+        project_dir: PathBuf,
+
+        /// Minimum low-value write rejection/downgrade rate.
+        #[arg(long, default_value_t = 1.0)]
+        min_rejection_or_downgrade_rate: f64,
+
+        /// Minimum exact duplicate reuse rate.
+        #[arg(long, default_value_t = 1.0)]
+        min_duplicate_reuse_rate: f64,
+
+        /// Maximum chunks a synthetic session may leave in its isolated store.
+        #[arg(long, default_value_t = 5)]
+        max_total_chunks: usize,
+
+        /// Maximum isolated persistent-store byte growth for the synthetic session.
+        #[arg(long, default_value_t = 5_000_000)]
+        max_disk_bytes: u64,
+
+        /// Require the synthetic retention/compaction stage to expire at least one row.
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        require_retention_compaction: bool,
     },
 
     /// Consolidate recent memory chunks into deduplicated lessons.
@@ -529,6 +640,157 @@ pub enum CliCommand {
         /// Tenant identifier
         #[arg(long)]
         tenant_id: String,
+    },
+
+    /// Audit memory storage and signal quality by tenant/project.
+    ///
+    /// Reports storage footprint, scope distribution, generated-digest
+    /// noise, duplicate health, age buckets, and project-id alias
+    /// candidates. Use this before cleanup or retention changes.
+    Audit {
+        /// Optional tenant identifier. Omit to scan every known tenant.
+        #[arg(long)]
+        tenant_id: Option<String>,
+
+        /// Optional project identifier filter.
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Output format.
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: ExportFormat,
+
+        /// Output file path (defaults to stdout).
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Pagination size for chunk scans.
+        #[arg(long, default_value_t = 1000)]
+        page_size: usize,
+
+        /// Maximum duplicate examples to request from persistent health snapshots.
+        #[arg(long, default_value_t = 5)]
+        duplicate_examples: usize,
+
+        /// Maximum project rows to render per tenant.
+        #[arg(long, default_value_t = 15)]
+        top_projects: usize,
+    },
+
+    /// Build a non-destructive cleanup approval plan.
+    ///
+    /// Classifies tenants/projects for archive review, hidden-row purge
+    /// readiness, high generated-digest noise, and missing project scope.
+    /// Emits command previews only; it never deletes or rewrites data.
+    CleanupPlan {
+        /// Optional tenant identifier. Omit to scan every known tenant.
+        #[arg(long)]
+        tenant_id: Option<String>,
+
+        /// Optional project identifier filter.
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Output format.
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: ExportFormat,
+
+        /// Output file path (defaults to stdout).
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Archive directory shown in generated command previews.
+        #[arg(long, default_value = "tasks/memd-cleanup-archive")]
+        archive_dir: PathBuf,
+
+        /// Only suggest hard-purge commands for hidden rows older than this grace period.
+        #[arg(long, default_value_t = 30)]
+        older_than_days: u64,
+
+        /// Maximum hidden-row purge candidates to inspect per tenant.
+        #[arg(long, default_value_t = 1000)]
+        candidate_limit: usize,
+
+        /// Pagination size for active chunk scans.
+        #[arg(long, default_value_t = 1000)]
+        page_size: usize,
+
+        /// Maximum project rows to render per tenant.
+        #[arg(long, default_value_t = 15)]
+        top_projects: usize,
+    },
+
+    /// Archive and hard-purge old hidden chunks from metadata and indexes.
+    ///
+    /// Defaults to dry-run. Destructive cleanup requires `--apply` and
+    /// `--archive`; eligible rows are soft-deleted and index-pruned before
+    /// metadata rows are physically removed.
+    Purge {
+        /// Tenant identifier.
+        #[arg(long)]
+        tenant_id: String,
+
+        /// Optional project identifier filter.
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Only purge hidden rows older than this grace period.
+        #[arg(long, default_value_t = 30)]
+        older_than_days: u64,
+
+        /// Maximum candidate rows to process in this run.
+        #[arg(long, default_value_t = 1000)]
+        limit: usize,
+
+        /// Also include live metadata rows whose segment payload cannot be read.
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        include_unreadable_active: bool,
+
+        /// Archive path written before any destructive `--apply` mutation.
+        #[arg(long)]
+        archive: Option<PathBuf>,
+
+        /// Apply the purge. Omit for dry-run.
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        apply: bool,
+
+        /// Run SQLite metadata VACUUM after metadata rows are removed.
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        vacuum_metadata: bool,
+
+        /// Rewrite finalized segment files after metadata purge to reclaim tombstoned payload bytes.
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        rewrite_segments: bool,
+    },
+
+    /// Inspect and verify a purge archive without writing to the store.
+    ///
+    /// Use this after `memd purge --apply --archive <path>` writes an
+    /// archive and before trusting any destructive cleanup result.
+    PurgeArchive {
+        /// Archive path written by `memd purge --archive`.
+        #[arg(long)]
+        archive: PathBuf,
+
+        /// Optional tenant id that the archive must contain.
+        #[arg(long)]
+        expect_tenant_id: Option<String>,
+
+        /// Optional project id that the archive must contain.
+        #[arg(long)]
+        expect_project_id: Option<String>,
+
+        /// Optional minimum number of records required in the archive.
+        #[arg(long)]
+        min_records: Option<usize>,
+
+        /// Output format.
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: ExportFormat,
+
+        /// Output file path (defaults to stdout).
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
 
     /// Export all tenant chunks in a human-readable or machine-readable format

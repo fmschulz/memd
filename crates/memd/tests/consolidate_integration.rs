@@ -71,7 +71,10 @@ async fn consolidate_replaces_raw_chunks_and_excludes_superseded() {
                     ChunkType::Summary,
                 )
                 .with_project(ProjectId::from(project))
-                .with_tags(vec!["kind:finish".to_string(), "ctx:subsystem:cache".to_string()]),
+                .with_tags(vec![
+                    "kind:finish".to_string(),
+                    "ctx:subsystem:cache".to_string(),
+                ]),
             )
             .await
             .unwrap();
@@ -185,8 +188,10 @@ async fn consolidate_replaces_raw_chunks_and_excludes_superseded() {
             "superseded source {id} must be excluded from retrieval"
         );
     }
-    let consolidated_ids: Vec<String> =
-        consolidated.iter().map(|c| c.chunk_id.to_string()).collect();
+    let consolidated_ids: Vec<String> = consolidated
+        .iter()
+        .map(|c| c.chunk_id.to_string())
+        .collect();
     for cid in &consolidated_ids {
         assert!(hits.contains(cid), "consolidated chunk {cid} must surface");
     }

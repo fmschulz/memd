@@ -48,3 +48,20 @@ up to +8, chunks with no hits older than 30 days get −2.
 
 `memd eval-counterfactual` measures whether `kind:consolidated` chunks are
 actually moving ranks versus a same-pass filtered baseline.
+
+## Startup Memory Explanations
+
+When `memory.md` looks noisy, generate an explanation report:
+
+```bash
+memd memory-md \
+  --project-dir . \
+  --output memory.md \
+  --explain-output .memd/memory-explain.json
+```
+
+The JSON report lists each retrieved candidate with source query, raw rank,
+score components, tags, generated-digest status, matched sources, and the final
+display/filter decision. This is the fastest way to see whether generated
+wrappers, stale records, or below-threshold candidates are affecting startup
+context.

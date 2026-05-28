@@ -16,10 +16,10 @@ use memd::omf::import::{
 };
 use memd::omf::{OmfDocument, OmfItem, OmfSource, MEMD_EXT_VERSION, OMF_VERSION};
 use memd::store::metadata::MetadataStore;
-use memd::store::persistent::PersistentStore;
+use memd::store::persistent::{PersistentStore, PersistentStoreConfig};
 use memd::store::Store;
 use memd::types::lifecycle::{LifecycleDelta, MemoryTier};
-use memd::types::ProjectId;
+use memd::types::{ChunkType, MemoryChunk, ProjectId};
 use serde_json::json;
 
 #[tokio::test]
@@ -177,6 +177,69 @@ async fn export_omf_empty_tenant_returns_well_formed_envelope() {
     assert_eq!(doc.omf, OMF_VERSION);
     assert!(doc.memories.is_empty());
     assert_eq!(doc.source.as_ref().unwrap().app, "memd");
+}
+
+#[tokio::test]
+async fn export_omf_skips_unreadable_segment_payloads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = PersistentStoreConfig {
+        data_dir: tmp.path().to_path_buf(),
+        segment_max_chunks: 1,
+        enable_dense_search: false,
+        enable_hybrid_search: false,
+        backfill_hnsw_on_startup: false,
+        backfill_canonical_text_on_startup: false,
+        ..Default::default()
+    };
+    let store = PersistentStore::open(config.clone()).expect("persistent store");
+    let tenant_id = tenant("t");
+    let missing = store
+        .add(MemoryChunk::new(
+            tenant_id.clone(),
+            "payload whose finalized segment disappears",
+            ChunkType::Doc,
+        ))
+        .await
+        .unwrap();
+    store
+        .add(MemoryChunk::new(
+            tenant_id.clone(),
+            "payload that should still export",
+            ChunkType::Doc,
+        ))
+        .await
+        .unwrap();
+    let meta = store
+        .metadata()
+        .get(&tenant_id, &missing)
+        .unwrap()
+        .expect("metadata for missing chunk");
+    drop(store);
+
+    let reopened = PersistentStore::open(config).expect("reopen store");
+    let conn = rusqlite::Connection::open(tmp.path().join("metadata.db")).unwrap();
+    conn.execute(
+        "UPDATE chunks SET segment_id = ?1 WHERE tenant_id = ?2 AND chunk_id = ?3",
+        rusqlite::params![
+            (meta.segment_id + 10_000) as i64,
+            tenant_id.as_str(),
+            missing.to_string()
+        ],
+    )
+    .unwrap();
+    drop(conn);
+
+    let doc = export_omf(&reopened, &tenant_id, ExportOptions::default())
+        .await
+        .expect("export should skip unreadable row");
+
+    let exported = doc
+        .memories
+        .iter()
+        .map(|item| item.content.as_str())
+        .collect::<Vec<_>>();
+    assert!(!exported.contains(&"payload whose finalized segment disappears"));
+    assert!(exported.contains(&"payload that should still export"));
 }
 
 #[tokio::test]
