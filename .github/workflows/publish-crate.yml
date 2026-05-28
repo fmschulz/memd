@@ -78,7 +78,7 @@ jobs:
         run: |
           set -euo pipefail
           URL="https://crates.io/api/v1/crates/memd/${{ steps.ver.outputs.version }}"
-          if curl -fsS "${URL}" >/dev/null; then
+          if curl -fsS -H "User-Agent: fmschulz/memd publish-crate workflow" "${URL}" >/dev/null; then
             echo "memd ${{ steps.ver.outputs.version }} is already published; skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
