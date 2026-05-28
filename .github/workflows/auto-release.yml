@@ -1,17 +1,25 @@
 name: Auto-release on version bump
 
-# Tags and creates a GitHub Release the moment a commit lands on main with a
-# bumped workspace Cargo.toml [workspace.package].version. Idempotent: if the
-# tag already exists, the workflow is a no-op. Release body is the matching
-# section from CHANGELOG.md (the section header line is stripped).
+# Pushes a vX.Y.Z tag the moment a commit lands on main with a bumped workspace
+# Cargo.toml [workspace.package].version. Idempotent: if the tag already exists,
+# the workflow is a no-op.
 #
-# Pairs with version-consistency.yml (drift guard), publish-crate.yml
-# (publish memd to crates.io on tag push), and release-skill-binary.yml
-# (rebuild + PR the bundled skill binary on tag push).
+# This workflow ONLY pushes the tag — it does NOT create the GitHub Release.
+# cargo-dist's release.yml (triggered by the tag) builds the 4-platform binaries
+# and creates the Release with notes pulled from CHANGELOG.md.
 #
-# Why this exists: between v0.40.0 and v0.50.0 the workspace version bumped
-# on main but no tag was ever pushed, so GitHub's "latest release" sidebar
-# stayed at v0.40.0 for weeks. This workflow makes that state impossible.
+# CRITICAL: the tag must be pushed with a PAT (secrets.RELEASE_PAT), NOT the
+# default GITHUB_TOKEN. GitHub suppresses workflow triggers for events created by
+# GITHUB_TOKEN (anti-recursion), so a GITHUB_TOKEN-pushed tag would never start
+# the cargo-dist build. RELEASE_PAT = a fine-grained PAT with contents:write on
+# this repo (one-time secret; see tasks/2026-05-28-cargo-dist-distribution.md).
+#
+# Pairs with version-consistency.yml (drift guard), publish-crate.yml (publish to
+# crates.io on tag push), and release.yml (cargo-dist: build + release on tag push).
+#
+# Why this exists: between v0.40.0 and v0.50.0 the workspace version bumped on main
+# but no tag was ever pushed, so GitHub's "latest release" sidebar stayed at v0.40.0
+# for weeks. This workflow makes that state impossible.
 
 on:
   push:
@@ -37,6 +45,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # full tag history
+          # Persisted credentials use this PAT, so the `git push` below is
+          # authenticated as a real user and DOES trigger cargo-dist's release.yml.
+          # (A GITHUB_TOKEN-pushed tag is suppressed by GitHub anti-recursion.)
+          token: ${{ secrets.RELEASE_PAT }}
 
       - name: Extract canonical version
         id: ver
@@ -64,37 +76,31 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Extract CHANGELOG section
+      # Guard: refuse to tag a release whose notes are missing. cargo-dist pulls
+      # THIS same CHANGELOG section into the GitHub Release body.
+      - name: Validate CHANGELOG section exists
         if: steps.exists.outputs.skip == 'false'
         run: |
           set -euo pipefail
           V="${{ steps.ver.outputs.version }}"
-          awk -v v="${V}" '
-            $0 ~ "^## \\[" v "\\]" { flag=1; next }
-            flag && /^## \[/ { exit }
-            flag { print }
-          ' CHANGELOG.md > /tmp/release-notes.md
-          if [[ ! -s /tmp/release-notes.md ]]; then
+          if ! awk -v v="${V}" '
+            $0 ~ "^## \\[" v "\\]" { found=1 }
+            END { exit !found }
+          ' CHANGELOG.md; then
             echo "::error::no CHANGELOG.md section found for ${V}"
             echo "Add an '## [${V}] - YYYY-MM-DD' entry before pushing the bump."
             exit 1
           fi
-          head -20 /tmp/release-notes.md
-          echo "..."
+          echo "CHANGELOG section for ${V} present."
 
-      - name: Tag and release
+      - name: Tag (cargo-dist release.yml builds + publishes the release)
         if: steps.exists.outputs.skip == 'false'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           TAG="${{ steps.ver.outputs.tag }}"
-          V="${{ steps.ver.outputs.version }}"
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "${TAG}" -m "memd ${TAG}"
           git push origin "${TAG}"
-          gh release create "${TAG}" \
-            --title "memd ${TAG}" \
-            --notes-file /tmp/release-notes.md
-          echo "Released ${TAG}: https://github.com/${{ github.repository }}/releases/tag/${TAG}"
+          echo "Pushed ${TAG} with RELEASE_PAT. cargo-dist (release.yml) will build the"
+          echo "4-platform artifacts and create the GitHub Release with CHANGELOG notes."
