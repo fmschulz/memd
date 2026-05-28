@@ -16,7 +16,7 @@ uuid = { version = "1.0", features = ["v7", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 clap = { version = "4.0", features = ["derive"] }
-tokio = { version = "1.0", features = ["full"] }
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "time", "sync", "net", "io-util", "process"] }
 async-trait = "0.1"
 sha2 = "0.10"
 tempfile = "3.10"
@@ -56,3 +56,12 @@ tree-sitter-cpp = "0.23"
 regex = "1.10"
 flate2 = "1.0"
 tar = "0.4"
+
+# Distribution profile: smaller, faster binary for releases.
+# strip removes symbols; thin LTO + single codegen unit maximize
+# optimization (at the cost of slower release builds — debug/test
+# builds are unaffected).
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
