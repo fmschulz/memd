@@ -561,6 +561,7 @@ pub async fn run_cli<S: Store>(
         CliCommand::CleanupPlan {
             tenant_id,
             project_id,
+            project_dir,
             format,
             output,
             archive_dir,
@@ -575,6 +576,7 @@ pub async fn run_cli<S: Store>(
                 CleanupPlanOptions {
                     tenant_id,
                     project_id,
+                    project_dir,
                     archive_dir,
                     older_than_days,
                     candidate_limit,

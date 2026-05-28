@@ -103,6 +103,8 @@ A normal single task should leave fewer than 10 durable chunks; most tasks need
 only a decision, a concrete run/evidence record, and a finish summary. See the
 [Operational contract](operational-contract.md) for the full write-quality
 rules.
+Routine `kind:progress` summaries like this are short-lived active handoff
+context unless you add durable category tags or explicit priority.
 
 ```bash
 ./target/release/memd add \

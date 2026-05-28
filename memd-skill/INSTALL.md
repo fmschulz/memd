@@ -195,7 +195,14 @@ memd add \
 
 Keep writes concise and reusable. `memd` is for durable facts, decisions,
 evidence, commands, parameters, validation, and follow-ups; it is not a place
-to archive full chat logs or sensitive credentials.
+to archive full chat logs or sensitive credentials. Routine `kind:progress`
+summaries are short-lived by default; use `kind:evidence`, `kind:decision`,
+`kind:finish`, `priority:N`, or `retention:durable` when a result should
+survive as project knowledge.
+
+Use `memd audit` or `memd cleanup-plan` when checking older stores. They report
+legacy routine progress summaries without expiry and keep the generated
+retention-review action non-destructive.
 
 ## Repository Guardrails
 

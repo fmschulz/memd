@@ -4,17 +4,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use super::args::ExportFormat;
+use super::args::{ExportFormat, ProjectScopeConfig};
+use super::paths::absolutize_project_dir;
 use crate::error::Result;
+use crate::store::metadata::MetadataStore;
 use crate::store::{Store, StoreStats, TenantManager};
-use crate::types::{MemoryChunk, TenantId};
+use crate::types::{ChunkType, MemoryChunk, TenantId};
 
 const PURGE_COMMAND_LIMIT: usize = 10_000;
+const RETRIEVAL_QUERIES_PATH: &str = "evals/bench/queries/retrieval_queries.jsonl";
 
 #[derive(Debug, Clone)]
 pub(super) struct CleanupPlanOptions {
     pub(super) tenant_id: Option<String>,
     pub(super) project_id: Option<String>,
+    pub(super) project_dir: PathBuf,
     pub(super) archive_dir: PathBuf,
     pub(super) older_than_days: u64,
     pub(super) candidate_limit: usize,
@@ -32,6 +36,7 @@ pub(super) struct CleanupPlanReport {
     safety: CleanupSafety,
     totals: CleanupTotals,
     approval_summary: ApprovalSummary,
+    post_cleanup_verification: PostCleanupVerification,
     approval_items: Vec<ApprovalItem>,
     tenants: Vec<TenantCleanupPlan>,
 }
@@ -52,6 +57,9 @@ struct CleanupTotals {
     deleted_chunks: usize,
     scanned_chunks: usize,
     unreadable_active_chunks: usize,
+    routine_progress_chunks: usize,
+    unbounded_progress_chunks: usize,
+    unbounded_progress_older_30d: usize,
     hidden_purge_candidates: usize,
     estimated_purge_payload_bytes: usize,
 }
@@ -64,6 +72,7 @@ struct ApprovalSummary {
     destructive_command_previews: usize,
     verification_command_previews: usize,
     estimated_batches: usize,
+    batch_command_previews: usize,
     unreadable_active_rows_in_purge_previews: usize,
 }
 
@@ -81,11 +90,27 @@ struct ApprovalActionSummary {
     scope_chunks: usize,
     metadata_active_chunks: usize,
     unreadable_active_chunks: usize,
+    generated_digest_chunks: usize,
+    generated_wrapper_chunks: usize,
     hidden_purge_candidates: usize,
     destructive_command_previews: usize,
     verification_command_previews: usize,
     estimated_batches: usize,
+    batch_command_previews: usize,
     example_approval_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PostCleanupVerification {
+    note: String,
+    commands: Vec<PostCleanupVerificationCommand>,
+}
+
+#[derive(Debug, Serialize)]
+struct PostCleanupVerificationCommand {
+    label: String,
+    command: String,
+    pass_criteria: String,
 }
 
 #[derive(Debug, Default)]
@@ -95,10 +120,13 @@ struct ApprovalActionAccumulator {
     scope_chunks: usize,
     metadata_active_chunks: usize,
     unreadable_active_chunks: usize,
+    generated_digest_chunks: usize,
+    generated_wrapper_chunks: usize,
     hidden_purge_candidates: usize,
     destructive_command_previews: usize,
     verification_command_previews: usize,
     estimated_batches: usize,
+    batch_command_previews: usize,
     example_approval_ids: Vec<String>,
 }
 
@@ -116,6 +144,9 @@ struct TenantCleanupPlan {
     generated_digest_ratio: f64,
     generated_wrapper_chunks: usize,
     generated_wrapper_ratio: f64,
+    routine_progress_chunks: usize,
+    unbounded_progress_chunks: usize,
+    unbounded_progress_older_30d: usize,
     unscoped_chunks: usize,
     hidden_purge_candidates: usize,
     estimated_purge_payload_bytes: usize,
@@ -132,6 +163,9 @@ struct ProjectCleanupPlan {
     chunks: usize,
     generated_digest_chunks: usize,
     generated_wrapper_chunks: usize,
+    routine_progress_chunks: usize,
+    unbounded_progress_chunks: usize,
+    unbounded_progress_older_30d: usize,
     classification: Vec<String>,
     reasons: Vec<String>,
     export_command: String,
@@ -156,6 +190,8 @@ struct ApprovalItem {
     metadata_active_chunks: usize,
     unreadable_active_chunks: usize,
     tenant_disk_total_bytes: Option<u64>,
+    generated_digest_chunks: usize,
+    generated_wrapper_chunks: usize,
     generated_digest_ratio: f64,
     generated_wrapper_ratio: f64,
     hidden_purge_candidates: usize,
@@ -169,6 +205,18 @@ struct ApprovalItem {
     verification_command_preview: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     estimated_batches: Option<usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    batch_command_previews: Vec<CleanupBatchCommandPreview>,
+}
+
+#[derive(Debug, Serialize)]
+struct CleanupBatchCommandPreview {
+    batch: usize,
+    limit: usize,
+    archive: String,
+    dry_run_command: String,
+    destructive_command: String,
+    verification_command: String,
 }
 
 #[derive(Debug, Default)]
@@ -176,6 +224,9 @@ struct ChunkSummary {
     scanned_chunks: usize,
     generated_digest_chunks: usize,
     generated_wrapper_chunks: usize,
+    routine_progress_chunks: usize,
+    unbounded_progress_chunks: usize,
+    unbounded_progress_older_30d: usize,
     unscoped_chunks: usize,
     projects: HashMap<Option<String>, ProjectAccumulator>,
 }
@@ -185,6 +236,15 @@ struct ProjectAccumulator {
     chunks: usize,
     generated_digest_chunks: usize,
     generated_wrapper_chunks: usize,
+    routine_progress_chunks: usize,
+    unbounded_progress_chunks: usize,
+    unbounded_progress_older_30d: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ScannedChunk {
+    chunk: MemoryChunk,
+    expires_at_ms: Option<i64>,
 }
 
 pub(super) async fn run_cleanup_plan<S: Store>(
@@ -199,7 +259,9 @@ pub(super) async fn run_cleanup_plan<S: Store>(
     let tenants = resolve_tenants(store, tenant_manager, options.tenant_id.as_deref()).await?;
     let data_dir = tenant_manager.map(|tm| tm.data_dir().display().to_string());
     let archive_dir = options.archive_dir.display().to_string();
-    let cutoff_ms = now_ms().saturating_sub((older_than_days as i64).saturating_mul(86_400_000));
+    let generated_unix_ms = now_ms();
+    let cutoff_ms =
+        generated_unix_ms.saturating_sub((older_than_days as i64).saturating_mul(86_400_000));
     let mut tenant_plans = Vec::with_capacity(tenants.len());
     let mut totals = CleanupTotals {
         tenants_scanned: tenants.len(),
@@ -212,8 +274,9 @@ pub(super) async fn run_cleanup_plan<S: Store>(
             .and_then(|tm| tm.tenant_disk_stats(&tenant).ok())
             .map(|stats| stats.total_bytes);
         let chunks =
-            collect_chunks(store, &tenant, options.project_id.as_deref(), page_size).await?;
-        let summary = summarize_chunks(&chunks);
+            collect_scanned_chunks(store, &tenant, options.project_id.as_deref(), page_size)
+                .await?;
+        let summary = summarize_chunks(&chunks, generated_unix_ms);
         let metadata_active_chunks = scoped_metadata_active_chunks(
             store,
             &tenant,
@@ -264,6 +327,9 @@ pub(super) async fn run_cleanup_plan<S: Store>(
         totals.metadata_active_chunks += metadata_active_chunks;
         totals.scanned_chunks += summary.scanned_chunks;
         totals.unreadable_active_chunks += unreadable_active_chunks;
+        totals.routine_progress_chunks += summary.routine_progress_chunks;
+        totals.unbounded_progress_chunks += summary.unbounded_progress_chunks;
+        totals.unbounded_progress_older_30d += summary.unbounded_progress_older_30d;
         totals.hidden_purge_candidates += purge.candidate_count;
         totals.estimated_purge_payload_bytes += purge.estimated_payload_bytes;
 
@@ -283,6 +349,9 @@ pub(super) async fn run_cleanup_plan<S: Store>(
                 summary.generated_wrapper_chunks,
                 summary.scanned_chunks,
             ),
+            routine_progress_chunks: summary.routine_progress_chunks,
+            unbounded_progress_chunks: summary.unbounded_progress_chunks,
+            unbounded_progress_older_30d: summary.unbounded_progress_older_30d,
             unscoped_chunks: summary.unscoped_chunks,
             hidden_purge_candidates: purge.candidate_count,
             estimated_purge_payload_bytes: purge.estimated_payload_bytes,
@@ -318,8 +387,11 @@ pub(super) async fn run_cleanup_plan<S: Store>(
         })
         .count();
 
+    let verification_project_scope = read_project_scope_for_verification(&options.project_dir);
+    let has_retrieval_queries = retrieval_queries_available(&options.project_dir);
+
     Ok(CleanupPlanReport {
-        generated_unix_ms: now_ms(),
+        generated_unix_ms,
         data_dir,
         archive_dir,
         older_than_days,
@@ -331,6 +403,18 @@ pub(super) async fn run_cleanup_plan<S: Store>(
         },
         totals,
         approval_summary: approval_summary(&approval_items),
+        post_cleanup_verification: post_cleanup_verification_commands(
+            options.tenant_id.as_deref(),
+            options.project_id.as_deref(),
+            &options.project_dir,
+            &options.archive_dir,
+            older_than_days,
+            candidate_limit,
+            page_size,
+            top_projects,
+            verification_project_scope.as_ref(),
+            has_retrieval_queries,
+        ),
         approval_items,
         tenants: tenant_plans,
     })
@@ -375,18 +459,43 @@ async fn resolve_tenants<S: Store>(
     Ok(tenants.into_values().collect())
 }
 
-async fn collect_chunks<S: Store>(
+async fn collect_scanned_chunks<S: Store>(
     store: &S,
     tenant: &TenantId,
     project_id: Option<&str>,
     page_size: usize,
-) -> Result<Vec<MemoryChunk>> {
+) -> Result<Vec<ScannedChunk>> {
     let mut chunks = Vec::new();
     let mut offset = 0usize;
     loop {
-        let page = store
-            .list_chunks_for_project(tenant, project_id, page_size, offset)
-            .await?;
+        let page = if let Some(persistent) = store.as_persistent() {
+            let metadata_rows = persistent
+                .metadata()
+                .list_for_project(tenant, project_id, page_size, offset)?;
+            let mut rows = Vec::with_capacity(metadata_rows.len());
+            for meta in metadata_rows {
+                if let Some(chunk) = persistent
+                    .get_chunk_for_retrieval(tenant, &meta.chunk_id, "cleanup_plan")
+                    .await?
+                {
+                    rows.push(ScannedChunk {
+                        chunk,
+                        expires_at_ms: meta.lifecycle.expires_at_ms,
+                    });
+                }
+            }
+            rows
+        } else {
+            store
+                .list_chunks_for_project(tenant, project_id, page_size, offset)
+                .await?
+                .into_iter()
+                .map(|chunk| ScannedChunk {
+                    chunk,
+                    expires_at_ms: None,
+                })
+                .collect()
+        };
         if page.is_empty() {
             break;
         }
@@ -417,9 +526,10 @@ async fn scoped_metadata_active_chunks<S: Store>(
     }
 }
 
-fn summarize_chunks(chunks: &[MemoryChunk]) -> ChunkSummary {
+fn summarize_chunks(chunks: &[ScannedChunk], now_ms: i64) -> ChunkSummary {
     let mut summary = ChunkSummary::default();
-    for chunk in chunks {
+    for scanned in chunks {
+        let chunk = &scanned.chunk;
         summary.scanned_chunks += 1;
         let project_id = chunk.project_id.as_option().map(str::to_string);
         if project_id.is_none() {
@@ -433,6 +543,17 @@ fn summarize_chunks(chunks: &[MemoryChunk]) -> ChunkSummary {
         if generated_wrapper {
             summary.generated_wrapper_chunks += 1;
         }
+        let routine_progress = is_routine_progress_summary(chunk);
+        if routine_progress {
+            summary.routine_progress_chunks += 1;
+            if scanned.expires_at_ms.is_none() {
+                summary.unbounded_progress_chunks += 1;
+                if is_older_than_days(chunk.timestamp_created, now_ms, 30) {
+                    summary.unbounded_progress_older_30d += 1;
+                }
+            }
+        }
+
         let project = summary.projects.entry(project_id).or_default();
         project.chunks += 1;
         if generated_digest {
@@ -440,6 +561,15 @@ fn summarize_chunks(chunks: &[MemoryChunk]) -> ChunkSummary {
         }
         if generated_wrapper {
             project.generated_wrapper_chunks += 1;
+        }
+        if routine_progress {
+            project.routine_progress_chunks += 1;
+            if scanned.expires_at_ms.is_none() {
+                project.unbounded_progress_chunks += 1;
+                if is_older_than_days(chunk.timestamp_created, now_ms, 30) {
+                    project.unbounded_progress_older_30d += 1;
+                }
+            }
         }
     }
     summary
@@ -493,6 +623,9 @@ fn render_project_plans(
                 chunks: acc.chunks,
                 generated_digest_chunks: acc.generated_digest_chunks,
                 generated_wrapper_chunks: acc.generated_wrapper_chunks,
+                routine_progress_chunks: acc.routine_progress_chunks,
+                unbounded_progress_chunks: acc.unbounded_progress_chunks,
+                unbounded_progress_older_30d: acc.unbounded_progress_older_30d,
                 classification,
                 reasons,
                 export_command: export_command(tenant_id, project_id.as_deref(), archive_dir),
@@ -551,10 +684,17 @@ fn classify_tenant(
             ));
         }
     }
+    if summary.unbounded_progress_older_30d > 0 {
+        classes.push("legacy_progress_retention_review".to_string());
+        reasons.push(format!(
+            "{} routine progress summaries older than 30 days have no retention deadline",
+            summary.unbounded_progress_older_30d
+        ));
+    }
     if classes.is_empty() {
         classes.push("keep_by_default".to_string());
         reasons.push(
-            "no throwaway pattern, hidden purge candidates, or high generated-noise ratio detected"
+            "no throwaway pattern, hidden purge candidates, high generated-noise ratio, or legacy unbounded progress detected"
                 .to_string(),
         );
     }
@@ -591,10 +731,17 @@ fn classify_project(
             ));
         }
     }
+    if acc.unbounded_progress_older_30d > 0 {
+        classes.push("legacy_progress_retention_review".to_string());
+        reasons.push(format!(
+            "{} routine progress summaries older than 30 days have no retention deadline",
+            acc.unbounded_progress_older_30d
+        ));
+    }
     if classes.is_empty() {
         classes.push("keep_by_default".to_string());
         reasons.push(
-            "no throwaway pattern, missing scope, or high generated-noise ratio detected"
+            "no throwaway pattern, missing scope, high generated-noise ratio, or legacy unbounded progress detected"
                 .to_string(),
         );
     }
@@ -630,6 +777,8 @@ fn approval_items(tenants: &[TenantCleanupPlan], archive_dir: &Path) -> Vec<Appr
                     metadata_active_chunks: tenant.metadata_active_chunks,
                     unreadable_active_chunks: tenant.unreadable_active_chunks,
                     tenant_disk_total_bytes: tenant.disk_total_bytes,
+                    generated_digest_chunks: tenant.generated_digest_chunks,
+                    generated_wrapper_chunks: tenant.generated_wrapper_chunks,
                     generated_digest_ratio: tenant.generated_digest_ratio,
                     generated_wrapper_ratio: tenant.generated_wrapper_ratio,
                     hidden_purge_candidates: tenant.hidden_purge_candidates,
@@ -649,6 +798,7 @@ fn approval_items(tenants: &[TenantCleanupPlan], archive_dir: &Path) -> Vec<Appr
                         1,
                     )),
                     estimated_batches: Some(1),
+                    batch_command_previews: Vec::new(),
                 });
             }
         }
@@ -657,6 +807,15 @@ fn approval_items(tenants: &[TenantCleanupPlan], archive_dir: &Path) -> Vec<Appr
             .iter()
             .any(|class| class == "payload_integrity_review")
         {
+            let first_batch_limit = tenant
+                .unreadable_active_chunks
+                .clamp(1, PURGE_COMMAND_LIMIT);
+            let batch_previews = unreadable_purge_batch_previews(
+                &tenant.tenant_id,
+                tenant.project_id_filter.as_deref(),
+                tenant.unreadable_active_chunks,
+                archive_dir,
+            );
             items.push(ApprovalItem {
                 approval_id: approval_id(
                     "review_payload_integrity_tenant",
@@ -672,6 +831,8 @@ fn approval_items(tenants: &[TenantCleanupPlan], archive_dir: &Path) -> Vec<Appr
                 metadata_active_chunks: tenant.metadata_active_chunks,
                 unreadable_active_chunks: tenant.unreadable_active_chunks,
                 tenant_disk_total_bytes: tenant.disk_total_bytes,
+                generated_digest_chunks: tenant.generated_digest_chunks,
+                generated_wrapper_chunks: tenant.generated_wrapper_chunks,
                 generated_digest_ratio: tenant.generated_digest_ratio,
                 generated_wrapper_ratio: tenant.generated_wrapper_ratio,
                 hidden_purge_candidates: tenant.hidden_purge_candidates,
@@ -694,13 +855,15 @@ fn approval_items(tenants: &[TenantCleanupPlan], archive_dir: &Path) -> Vec<Appr
                     &unreadable_purge_archive_path(
                         &tenant.tenant_id,
                         tenant.project_id_filter.as_deref(),
+                        1,
                         archive_dir,
                     ),
                     &tenant.tenant_id,
                     tenant.project_id_filter.as_deref(),
-                    1,
+                    first_batch_limit,
                 )),
                 estimated_batches: Some(estimated_batches(tenant.unreadable_active_chunks)),
+                batch_command_previews: batch_previews,
             });
         }
         if tenant
@@ -723,6 +886,8 @@ fn approval_items(tenants: &[TenantCleanupPlan], archive_dir: &Path) -> Vec<Appr
                 metadata_active_chunks: tenant.metadata_active_chunks,
                 unreadable_active_chunks: tenant.unreadable_active_chunks,
                 tenant_disk_total_bytes: tenant.disk_total_bytes,
+                generated_digest_chunks: tenant.generated_digest_chunks,
+                generated_wrapper_chunks: tenant.generated_wrapper_chunks,
                 generated_digest_ratio: tenant.generated_digest_ratio,
                 generated_wrapper_ratio: tenant.generated_wrapper_ratio,
                 hidden_purge_candidates: tenant.hidden_purge_candidates,
@@ -734,6 +899,50 @@ fn approval_items(tenants: &[TenantCleanupPlan], archive_dir: &Path) -> Vec<Appr
                 destructive_command_preview: None,
                 verification_command_preview: None,
                 estimated_batches: None,
+                batch_command_previews: Vec::new(),
+            });
+        }
+        if tenant
+            .classification
+            .iter()
+            .any(|class| class == "legacy_progress_retention_review")
+            && !tenant
+                .classification
+                .iter()
+                .any(|class| class == "archive_delete_candidate")
+        {
+            items.push(ApprovalItem {
+                approval_id: approval_id(
+                    "review_legacy_progress_retention",
+                    &tenant.tenant_id,
+                    tenant.project_id_filter.as_deref(),
+                ),
+                action: "review_legacy_progress_retention".to_string(),
+                tenant_id: tenant.tenant_id.clone(),
+                project_id: tenant.project_id_filter.clone(),
+                command_kind: "export_review".to_string(),
+                command_is_destructive: false,
+                scope_chunks: tenant.unbounded_progress_older_30d,
+                metadata_active_chunks: tenant.metadata_active_chunks,
+                unreadable_active_chunks: tenant.unreadable_active_chunks,
+                tenant_disk_total_bytes: tenant.disk_total_bytes,
+                generated_digest_chunks: tenant.generated_digest_chunks,
+                generated_wrapper_chunks: tenant.generated_wrapper_chunks,
+                generated_digest_ratio: tenant.generated_digest_ratio,
+                generated_wrapper_ratio: tenant.generated_wrapper_ratio,
+                hidden_purge_candidates: tenant.hidden_purge_candidates,
+                estimated_payload_bytes: 0,
+                risk: "medium: active legacy progress rows need review before expiry, consolidation, or deletion".to_string(),
+                reason: format!(
+                    "{} routine progress summaries older than 30 days have no retention deadline ({} total unbounded routine progress summaries)",
+                    tenant.unbounded_progress_older_30d,
+                    tenant.unbounded_progress_chunks
+                ),
+                command_preview: tenant.export_command.clone(),
+                destructive_command_preview: None,
+                verification_command_preview: None,
+                estimated_batches: None,
+                batch_command_previews: Vec::new(),
             });
         }
         if tenant
@@ -760,6 +969,8 @@ fn approval_items(tenants: &[TenantCleanupPlan], archive_dir: &Path) -> Vec<Appr
                 metadata_active_chunks: tenant.metadata_active_chunks,
                 unreadable_active_chunks: tenant.unreadable_active_chunks,
                 tenant_disk_total_bytes: tenant.disk_total_bytes,
+                generated_digest_chunks: tenant.generated_digest_chunks,
+                generated_wrapper_chunks: tenant.generated_wrapper_chunks,
                 generated_digest_ratio: tenant.generated_digest_ratio,
                 generated_wrapper_ratio: tenant.generated_wrapper_ratio,
                 hidden_purge_candidates: tenant.hidden_purge_candidates,
@@ -770,6 +981,7 @@ fn approval_items(tenants: &[TenantCleanupPlan], archive_dir: &Path) -> Vec<Appr
                 destructive_command_preview: None,
                 verification_command_preview: None,
                 estimated_batches: None,
+                batch_command_previews: Vec::new(),
             });
         }
         for project in &tenant.projects {
@@ -795,6 +1007,8 @@ fn approval_items(tenants: &[TenantCleanupPlan], archive_dir: &Path) -> Vec<Appr
                     metadata_active_chunks: project.chunks,
                     unreadable_active_chunks: 0,
                     tenant_disk_total_bytes: tenant.disk_total_bytes,
+                    generated_digest_chunks: project.generated_digest_chunks,
+                    generated_wrapper_chunks: project.generated_wrapper_chunks,
                     generated_digest_ratio: ratio(project.generated_digest_chunks, project.chunks),
                     generated_wrapper_ratio: ratio(
                         project.generated_wrapper_chunks,
@@ -810,13 +1024,14 @@ fn approval_items(tenants: &[TenantCleanupPlan], archive_dir: &Path) -> Vec<Appr
                     destructive_command_preview: None,
                     verification_command_preview: None,
                     estimated_batches: None,
+                    batch_command_previews: Vec::new(),
                 });
             }
-            if project
-                .classification
-                .iter()
-                .any(|class| class == "high_noise_review" || class == "scope_review")
-                && !project_scope_is_already_represented
+            if project.classification.iter().any(|class| {
+                class == "high_noise_review"
+                    || class == "scope_review"
+                    || class == "legacy_progress_retention_review"
+            }) && !project_scope_is_already_represented
                 && !project
                     .classification
                     .iter()
@@ -837,6 +1052,8 @@ fn approval_items(tenants: &[TenantCleanupPlan], archive_dir: &Path) -> Vec<Appr
                     metadata_active_chunks: project.chunks,
                     unreadable_active_chunks: 0,
                     tenant_disk_total_bytes: tenant.disk_total_bytes,
+                    generated_digest_chunks: project.generated_digest_chunks,
+                    generated_wrapper_chunks: project.generated_wrapper_chunks,
                     generated_digest_ratio: ratio(project.generated_digest_chunks, project.chunks),
                     generated_wrapper_ratio: ratio(
                         project.generated_wrapper_chunks,
@@ -851,6 +1068,7 @@ fn approval_items(tenants: &[TenantCleanupPlan], archive_dir: &Path) -> Vec<Appr
                     destructive_command_preview: None,
                     verification_command_preview: None,
                     estimated_batches: None,
+                    batch_command_previews: Vec::new(),
                 });
             }
         }
@@ -864,6 +1082,7 @@ fn approval_summary(items: &[ApprovalItem]) -> ApprovalSummary {
     let mut destructive_command_previews = 0usize;
     let mut verification_command_previews = 0usize;
     let mut estimated_batches = 0usize;
+    let mut batch_command_previews = 0usize;
     let mut unreadable_active_rows_in_purge_previews = 0usize;
 
     for item in items {
@@ -877,6 +1096,8 @@ fn approval_summary(items: &[ApprovalItem]) -> ApprovalSummary {
         action.scope_chunks += item.scope_chunks;
         action.metadata_active_chunks += item.metadata_active_chunks;
         action.unreadable_active_chunks += item.unreadable_active_chunks;
+        action.generated_digest_chunks += item.generated_digest_chunks;
+        action.generated_wrapper_chunks += item.generated_wrapper_chunks;
         action.hidden_purge_candidates += item.hidden_purge_candidates;
         if action.example_approval_ids.len() < 3 {
             action.example_approval_ids.push(item.approval_id.clone());
@@ -891,6 +1112,8 @@ fn approval_summary(items: &[ApprovalItem]) -> ApprovalSummary {
         }
         estimated_batches += item.estimated_batches.unwrap_or(0);
         action.estimated_batches += item.estimated_batches.unwrap_or(0);
+        batch_command_previews += item.batch_command_previews.len();
+        action.batch_command_previews += item.batch_command_previews.len();
         if item.command_kind == "dry_run_unreadable_purge" {
             unreadable_active_rows_in_purge_previews += item.unreadable_active_chunks;
         }
@@ -921,16 +1144,20 @@ fn approval_summary(items: &[ApprovalItem]) -> ApprovalSummary {
                 scope_chunks: acc.scope_chunks,
                 metadata_active_chunks: acc.metadata_active_chunks,
                 unreadable_active_chunks: acc.unreadable_active_chunks,
+                generated_digest_chunks: acc.generated_digest_chunks,
+                generated_wrapper_chunks: acc.generated_wrapper_chunks,
                 hidden_purge_candidates: acc.hidden_purge_candidates,
                 destructive_command_previews: acc.destructive_command_previews,
                 verification_command_previews: acc.verification_command_previews,
                 estimated_batches: acc.estimated_batches,
+                batch_command_previews: acc.batch_command_previews,
                 example_approval_ids: acc.example_approval_ids,
             })
             .collect(),
         destructive_command_previews,
         verification_command_previews,
         estimated_batches,
+        batch_command_previews,
         unreadable_active_rows_in_purge_previews,
     }
 }
@@ -945,6 +1172,154 @@ fn approval_id(action: &str, tenant_id: &str, project_id: Option<&str>) -> Strin
         ),
         None => format!("{}:{}", action, sanitize_filename(tenant_id)),
     }
+}
+
+fn post_cleanup_verification_commands(
+    tenant_id: Option<&str>,
+    project_id: Option<&str>,
+    project_dir: &Path,
+    archive_dir: &Path,
+    older_than_days: u64,
+    candidate_limit: usize,
+    page_size: usize,
+    top_projects: usize,
+    project_scope: Option<&ProjectScopeConfig>,
+    has_retrieval_queries: bool,
+) -> PostCleanupVerification {
+    let scope = scoped_cli_flags(tenant_id, project_id);
+    let memory_scope = scoped_project_verification_flags(tenant_id, project_id, project_scope);
+    let retrieval_scope = retrieval_verification_scope(tenant_id, project_id, project_scope);
+    let project_dir_arg = shell_quote_path(project_dir);
+    let mut commands = vec![
+        PostCleanupVerificationCommand {
+            label: "audit_after_cleanup".to_string(),
+            command: format!(
+                "memd audit{} --format markdown --output {} --page-size {} --top-projects {}",
+                scope,
+                shell_quote_path(Path::new("tasks/memd-post-cleanup-audit.md")),
+                page_size,
+                top_projects,
+            ),
+            pass_criteria: "Audit completes and approved scopes show lower unreadable_active_chunks, hidden_purge_candidates, or disk bytes without unexpected new high-risk classifications.".to_string(),
+        },
+        PostCleanupVerificationCommand {
+            label: "cleanup_plan_rerun".to_string(),
+            command: format!(
+                "memd cleanup-plan{} --project-dir {} --format markdown --output {} --archive-dir {} --older-than-days {} --candidate-limit {} --page-size {} --top-projects {}",
+                scope,
+                project_dir_arg,
+                shell_quote_path(Path::new("tasks/memd-cleanup-plan-after.md")),
+                shell_quote_path(archive_dir),
+                older_than_days,
+                candidate_limit,
+                page_size,
+                top_projects,
+            ),
+            pass_criteria: "Rerun plan no longer proposes already-approved purge batches, and any remaining approval items have new explicit approval IDs for separate review.".to_string(),
+        },
+    ];
+
+    if has_retrieval_queries {
+        if let Some((retrieval_tenant, retrieval_project)) = retrieval_scope {
+            commands.push(PostCleanupVerificationCommand {
+                label: "retrieval_quality".to_string(),
+                command: eval_retrieval_command(
+                    &retrieval_tenant,
+                    retrieval_project.as_deref(),
+                    project_dir,
+                ),
+                pass_criteria: "Command exits 0 with hit_rate_at_k >= 0.8, known_recall_at_k >= 0.6, and MRR >= 0.35 for the fixed sparse-judgment retrieval queries.".to_string(),
+            });
+        }
+    }
+
+    commands.extend([
+        PostCleanupVerificationCommand {
+            label: "startup_memory_quality".to_string(),
+            command: format!(
+                "memd eval-memory-md{} --project-dir {} --output {} --min-useful-ratio 0.8 --max-generated-wrappers 0",
+                memory_scope,
+                project_dir_arg,
+                shell_quote_path(Path::new("tasks/memory-post-cleanup.md")),
+            ),
+            pass_criteria: "Command exits 0 with useful_ratio >= 0.8, generated_wrapper_count == 0, and no displayed items missing reason metadata.".to_string(),
+        },
+        PostCleanupVerificationCommand {
+            label: "refresh_project_memory".to_string(),
+            command: format!(
+                "memd memory-md{} --project-dir {} --output {} --explain-output {}",
+                memory_scope,
+                project_dir_arg,
+                shell_quote_path(Path::new("tasks/memory.md")),
+                shell_quote_path(Path::new("tasks/memory-post-cleanup-explain.json")),
+            ),
+            pass_criteria: "tasks/memory.md refreshes successfully and the explain report shows displayed records are project-relevant durable takeaways rather than generated wrappers.".to_string(),
+        },
+        PostCleanupVerificationCommand {
+            label: "host_wiring".to_string(),
+            command: format!(
+                "memd doctor --project-dir {} --format markdown",
+                project_dir_arg
+            ),
+            pass_criteria: "Doctor report keeps binary, data directory, project scope, and agent-rule wiring in ok or explicitly understood states.".to_string(),
+        },
+    ]);
+
+    PostCleanupVerification {
+        note: "Run these non-destructive checks after any approved purge/archive cleanup and before considering storage reduction complete.".to_string(),
+        commands,
+    }
+}
+
+fn read_project_scope_for_verification(project_dir: &Path) -> Option<ProjectScopeConfig> {
+    let project_dir = absolutize_project_dir(project_dir).ok()?;
+    let path = project_dir.join(".memd/project_scope.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn retrieval_queries_available(project_dir: &Path) -> bool {
+    absolutize_project_dir(project_dir)
+        .map(|project_dir| project_dir.join(RETRIEVAL_QUERIES_PATH).is_file())
+        .unwrap_or(false)
+}
+
+fn scoped_project_verification_flags(
+    tenant_id: Option<&str>,
+    project_id: Option<&str>,
+    project_scope: Option<&ProjectScopeConfig>,
+) -> String {
+    if project_id.is_some() {
+        return scoped_cli_flags(tenant_id, project_id);
+    }
+    if let Some(scope) = project_scope {
+        return scoped_cli_flags(Some(&scope.tenant_id), scope.project_id.as_deref());
+    }
+    String::new()
+}
+
+fn retrieval_verification_scope(
+    tenant_id: Option<&str>,
+    project_id: Option<&str>,
+    project_scope: Option<&ProjectScopeConfig>,
+) -> Option<(String, Option<String>)> {
+    if let Some(project_id) = project_id {
+        return tenant_id.map(|tenant_id| (tenant_id.to_string(), Some(project_id.to_string())));
+    }
+    project_scope.map(|scope| (scope.tenant_id.clone(), scope.project_id.clone()))
+}
+
+fn eval_retrieval_command(tenant_id: &str, project_id: Option<&str>, project_dir: &Path) -> String {
+    let mut command = format!("memd eval-retrieval --tenant-id {}", shell_quote(tenant_id));
+    if let Some(project_id) = project_id {
+        command.push_str(&format!(" --project-id {}", shell_quote(project_id)));
+    }
+    command.push_str(&format!(
+        " --project-dir {} --queries {} --k 5 --min-hit-rate-at-k 0.8 --min-known-recall-at-k 0.6 --min-mrr 0.35",
+        shell_quote_path(project_dir),
+        shell_quote(RETRIEVAL_QUERIES_PATH)
+    ));
+    command
 }
 
 fn hidden_purge_archive_path(
@@ -968,17 +1343,21 @@ fn hidden_purge_archive_path(
 fn unreadable_purge_archive_path(
     tenant_id: &str,
     project_id: Option<&str>,
+    batch: usize,
     archive_dir: &Path,
 ) -> PathBuf {
+    let batch = batch.max(1);
     match project_id {
         Some(project_id) => archive_dir.join(format!(
-            "{}__{}__unreadable_active_batch001_archive.json",
+            "{}__{}__unreadable_active_batch{:03}_archive.json",
             sanitize_filename(tenant_id),
-            sanitize_filename(project_id)
+            sanitize_filename(project_id),
+            batch
         )),
         None => archive_dir.join(format!(
-            "{}__unreadable_active_batch001_archive.json",
-            sanitize_filename(tenant_id)
+            "{}__unreadable_active_batch{:03}_archive.json",
+            sanitize_filename(tenant_id),
+            batch
         )),
     }
 }
@@ -1018,7 +1397,16 @@ fn unreadable_purge_apply_command(
     archive_dir: &Path,
 ) -> String {
     let limit = unreadable_active_chunks.clamp(1, PURGE_COMMAND_LIMIT);
-    let archive = unreadable_purge_archive_path(tenant_id, project_id, archive_dir);
+    let archive = unreadable_purge_archive_path(tenant_id, project_id, 1, archive_dir);
+    unreadable_purge_apply_command_with_archive(tenant_id, project_id, limit, &archive)
+}
+
+fn unreadable_purge_apply_command_with_archive(
+    tenant_id: &str,
+    project_id: Option<&str>,
+    limit: usize,
+    archive: &Path,
+) -> String {
     match project_id {
         Some(project_id) => format!(
             "memd purge --tenant-id {} --project-id {} --include-unreadable-active --limit {} --archive {} --apply --vacuum-metadata",
@@ -1034,6 +1422,35 @@ fn unreadable_purge_apply_command(
             shell_quote_path(&archive)
         ),
     }
+}
+
+fn unreadable_purge_batch_previews(
+    tenant_id: &str,
+    project_id: Option<&str>,
+    unreadable_active_chunks: usize,
+    archive_dir: &Path,
+) -> Vec<CleanupBatchCommandPreview> {
+    let batches = estimated_batches(unreadable_active_chunks);
+    let mut rows = Vec::with_capacity(batches);
+    for batch in 1..=batches {
+        let previous = (batch - 1).saturating_mul(PURGE_COMMAND_LIMIT);
+        let remaining = unreadable_active_chunks.saturating_sub(previous);
+        let limit = remaining.clamp(1, PURGE_COMMAND_LIMIT);
+        let archive = unreadable_purge_archive_path(tenant_id, project_id, batch, archive_dir);
+        rows.push(CleanupBatchCommandPreview {
+            batch,
+            limit,
+            archive: archive.display().to_string(),
+            dry_run_command: unreadable_purge_dry_run_command(tenant_id, project_id, limit),
+            destructive_command: unreadable_purge_apply_command_with_archive(
+                tenant_id, project_id, limit, &archive,
+            ),
+            verification_command: purge_archive_verify_command(
+                &archive, tenant_id, project_id, limit,
+            ),
+        });
+    }
+    rows
 }
 
 fn purge_archive_verify_command(
@@ -1067,7 +1484,10 @@ fn action_weight(classes: &[String]) -> usize {
         4
     } else if classes.iter().any(|class| class == "hard_purge_ready") {
         3
-    } else if classes.iter().any(|class| class == "high_noise_review") {
+    } else if classes
+        .iter()
+        .any(|class| class == "high_noise_review" || class == "legacy_progress_retention_review")
+    {
         2
     } else if classes.iter().any(|class| class == "scope_review") {
         1
@@ -1149,6 +1569,17 @@ fn purge_command(
     command
 }
 
+fn scoped_cli_flags(tenant_id: Option<&str>, project_id: Option<&str>) -> String {
+    let mut flags = String::new();
+    if let Some(tenant_id) = tenant_id {
+        flags.push_str(&format!(" --tenant-id {}", shell_quote(tenant_id)));
+    }
+    if let Some(project_id) = project_id {
+        flags.push_str(&format!(" --project-id {}", shell_quote(project_id)));
+    }
+    flags
+}
+
 fn sanitize_filename(value: &str) -> String {
     let sanitized = value
         .chars()
@@ -1203,6 +1634,39 @@ fn is_generated_wrapper_text(text: &str) -> bool {
         || lowered.contains("evidence library for ")
 }
 
+fn is_routine_progress_summary(chunk: &MemoryChunk) -> bool {
+    chunk.chunk_type == ChunkType::Summary
+        && chunk.tags.iter().any(|tag| tag == "kind:progress")
+        && !has_durable_progress_override(&chunk.tags)
+}
+
+fn has_durable_progress_override(tags: &[String]) -> bool {
+    tags.iter().any(|tag| {
+        tag.starts_with("priority:")
+            || tag.starts_with("importance:")
+            || matches!(
+                tag.as_str(),
+                "kind:evidence"
+                    | "kind:decision"
+                    | "kind:finish"
+                    | "kind:consolidated"
+                    | "retention:durable"
+                    | "validated:true"
+                    | "supports:true"
+            )
+            || tag.starts_with("evidence:")
+            || tag.starts_with("source:evidence")
+    })
+}
+
+fn is_older_than_days(timestamp_created: i64, now_ms: i64, days: i64) -> bool {
+    if timestamp_created <= 0 || now_ms <= 0 {
+        return false;
+    }
+    let age_ms = now_ms.saturating_sub(timestamp_created);
+    age_ms > days.saturating_mul(86_400_000)
+}
+
 fn render_markdown(report: &CleanupPlanReport) -> String {
     let mut out = String::new();
     out.push_str("# memd cleanup plan\n\n");
@@ -1220,24 +1684,37 @@ fn render_markdown(report: &CleanupPlanReport) -> String {
     ));
     out.push_str(&format!("- note: {}\n", report.safety.note));
     out.push_str(&format!(
-        "- tenants_scanned: `{}`; tenants_with_approval_items: `{}`; metadata_active_chunks: `{}`; scanned_chunks: `{}`; unreadable_active_chunks: `{}`; hidden_purge_candidates: `{}`; estimated_purge_payload_bytes: `{}`\n",
+        "- tenants_scanned: `{}`; tenants_with_approval_items: `{}`; metadata_active_chunks: `{}`; scanned_chunks: `{}`; unreadable_active_chunks: `{}`; routine_progress_chunks: `{}`; unbounded_progress_chunks: `{}`; unbounded_progress_older_30d: `{}`; hidden_purge_candidates: `{}`; estimated_purge_payload_bytes: `{}`\n",
         report.totals.tenants_scanned,
         report.totals.tenants_with_approval_items,
         report.totals.metadata_active_chunks,
         report.totals.scanned_chunks,
         report.totals.unreadable_active_chunks,
+        report.totals.routine_progress_chunks,
+        report.totals.unbounded_progress_chunks,
+        report.totals.unbounded_progress_older_30d,
         report.totals.hidden_purge_candidates,
         report.totals.estimated_purge_payload_bytes
     ));
 
+    out.push_str("\n## Post-Cleanup Verification\n\n");
+    out.push_str(&format!("{}\n\n", report.post_cleanup_verification.note));
+    for command in &report.post_cleanup_verification.commands {
+        out.push_str(&format!(
+            "- `{}`: `{}`\n  - pass: {}\n",
+            command.label, command.command, command.pass_criteria
+        ));
+    }
+
     if !report.approval_items.is_empty() {
         out.push_str("\n## Approval Summary\n\n");
         out.push_str(&format!(
-            "- total_items: `{}`; destructive_command_previews: `{}`; verification_command_previews: `{}`; estimated_batches: `{}`; unreadable_active_rows_in_purge_previews: `{}`\n",
+            "- total_items: `{}`; destructive_command_previews: `{}`; verification_command_previews: `{}`; estimated_batches: `{}`; batch_command_previews: `{}`; unreadable_active_rows_in_purge_previews: `{}`\n",
             report.approval_summary.total_items,
             report.approval_summary.destructive_command_previews,
             report.approval_summary.verification_command_previews,
             report.approval_summary.estimated_batches,
+            report.approval_summary.batch_command_previews,
             report.approval_summary.unreadable_active_rows_in_purge_previews
         ));
         for row in &report.approval_summary.command_kinds {
@@ -1262,17 +1739,20 @@ fn render_markdown(report: &CleanupPlanReport) -> String {
                         .join(", ")
                 };
                 out.push_str(&format!(
-                    "- `{}`: items=`{}`; command_kinds=`{}`; scope_chunks=`{}`; metadata_active_chunks=`{}`; unreadable_active_chunks=`{}`; hidden_purge_candidates=`{}`; destructive_previews=`{}`; verification_previews=`{}`; estimated_batches=`{}`; examples={}\n",
+                    "- `{}`: items=`{}`; command_kinds=`{}`; scope_chunks=`{}`; metadata_active_chunks=`{}`; unreadable_active_chunks=`{}`; generated_digest_chunks=`{}`; generated_wrapper_chunks=`{}`; hidden_purge_candidates=`{}`; destructive_previews=`{}`; verification_previews=`{}`; estimated_batches=`{}`; batch_command_previews=`{}`; examples={}\n",
                     row.action,
                     row.count,
                     command_kinds,
                     row.scope_chunks,
                     row.metadata_active_chunks,
                     row.unreadable_active_chunks,
+                    row.generated_digest_chunks,
+                    row.generated_wrapper_chunks,
                     row.hidden_purge_candidates,
                     row.destructive_command_previews,
                     row.verification_command_previews,
                     row.estimated_batches,
+                    row.batch_command_previews,
                     examples
                 ));
             }
@@ -1288,7 +1768,7 @@ fn render_markdown(report: &CleanupPlanReport) -> String {
                 out.push_str(&format!(" project=`{project_id}`"));
             }
             out.push_str(&format!(
-                "\n  - approval_id: `{}`\n  - command_kind: `{}`; command_is_destructive: `{}`\n  - scope_chunks: `{}`; metadata_active_chunks: `{}`; unreadable_active_chunks: `{}`; tenant_disk_total_bytes: `{}`\n  - generated_digest_ratio: `{:.3}`; generated_wrapper_ratio: `{:.3}`\n  - hidden_purge_candidates: `{}`; estimated_payload_bytes: `{}`\n  - risk: {}\n  - reason: {}\n  - command: `{}`\n",
+                "\n  - approval_id: `{}`\n  - command_kind: `{}`; command_is_destructive: `{}`\n  - scope_chunks: `{}`; metadata_active_chunks: `{}`; unreadable_active_chunks: `{}`; tenant_disk_total_bytes: `{}`\n  - generated_digest_chunks: `{}`; generated_wrapper_chunks: `{}`; generated_digest_ratio: `{:.3}`; generated_wrapper_ratio: `{:.3}`\n  - hidden_purge_candidates: `{}`; estimated_payload_bytes: `{}`\n  - risk: {}\n  - reason: {}\n  - command: `{}`\n",
                 item.approval_id,
                 item.command_kind,
                 item.command_is_destructive,
@@ -1298,6 +1778,8 @@ fn render_markdown(report: &CleanupPlanReport) -> String {
                 item.tenant_disk_total_bytes
                     .map(|bytes| bytes.to_string())
                     .unwrap_or_else(|| "unknown".to_string()),
+                item.generated_digest_chunks,
+                item.generated_wrapper_chunks,
                 item.generated_digest_ratio,
                 item.generated_wrapper_ratio,
                 item.hidden_purge_candidates,
@@ -1314,6 +1796,24 @@ fn render_markdown(report: &CleanupPlanReport) -> String {
             }
             if let Some(command) = &item.verification_command_preview {
                 out.push_str(&format!("  - verify_archive: `{command}`\n"));
+            }
+            if !item.batch_command_previews.is_empty() {
+                out.push_str("  - batch_commands:\n");
+                for batch in &item.batch_command_previews {
+                    out.push_str(&format!(
+                        "    - batch=`{}`; limit=`{}`; archive=`{}`\n",
+                        batch.batch, batch.limit, batch.archive
+                    ));
+                    out.push_str(&format!("      - dry_run: `{}`\n", batch.dry_run_command));
+                    out.push_str(&format!(
+                        "      - destructive_command: `{}`\n",
+                        batch.destructive_command
+                    ));
+                    out.push_str(&format!(
+                        "      - verify_archive: `{}`\n",
+                        batch.verification_command
+                    ));
+                }
             }
         }
     }
@@ -1347,6 +1847,12 @@ fn render_markdown(report: &CleanupPlanReport) -> String {
             tenant.unscoped_chunks
         ));
         out.push_str(&format!(
+            "- routine_progress: `{}`; unbounded_progress: `{}`; unbounded_progress_older_30d: `{}`\n",
+            tenant.routine_progress_chunks,
+            tenant.unbounded_progress_chunks,
+            tenant.unbounded_progress_older_30d
+        ));
+        out.push_str(&format!(
             "- hidden_purge_candidates: `{}`; estimated_purge_payload_bytes: `{}`\n",
             tenant.hidden_purge_candidates, tenant.estimated_purge_payload_bytes
         ));
@@ -1359,8 +1865,11 @@ fn render_markdown(report: &CleanupPlanReport) -> String {
             for project in &tenant.projects {
                 let label = project.project_id.as_deref().unwrap_or("<unscoped>");
                 out.push_str(&format!(
-                    "- `{label}`: chunks=`{}`, classification=`{}`, reasons={}\n",
+                    "- `{label}`: chunks=`{}`, routine_progress=`{}`, unbounded_progress=`{}`, unbounded_progress_older_30d=`{}`, classification=`{}`, reasons={}\n",
                     project.chunks,
+                    project.routine_progress_chunks,
+                    project.unbounded_progress_chunks,
+                    project.unbounded_progress_older_30d,
                     project.classification.join(", "),
                     project.reasons.join("; ")
                 ));
@@ -1418,21 +1927,57 @@ mod tests {
         chunk.with_tags(tags.into_iter().map(str::to_string).collect())
     }
 
+    fn chunk_at(
+        text: &str,
+        project_id: Option<&str>,
+        tags: Vec<&str>,
+        timestamp_created: i64,
+    ) -> MemoryChunk {
+        let mut chunk = chunk(text, project_id, tags);
+        chunk.timestamp_created = timestamp_created;
+        chunk
+    }
+
+    fn scanned(chunk: MemoryChunk, expires_at_ms: Option<i64>) -> ScannedChunk {
+        ScannedChunk {
+            chunk,
+            expires_at_ms,
+        }
+    }
+
+    fn project_scope(tenant_id: &str, project_id: Option<&str>) -> ProjectScopeConfig {
+        ProjectScopeConfig {
+            tenant_id: tenant_id.to_string(),
+            project_id: project_id.map(str::to_string),
+            read_tenants: vec![tenant_id.to_string()],
+            interface: "cli".to_string(),
+            cli_command: "memd".to_string(),
+            agent_context_output: ".memd/context.md".to_string(),
+            project_dir: ".".to_string(),
+        }
+    }
+
     #[test]
     fn classifier_marks_throwaway_and_generated_noise() {
         let chunks = vec![
-            chunk(
-                "Task digest status generated. Summary: Highlight library for smoke contains 0 ranked lessons.",
-                Some("smoke_project"),
-                vec!["task:status:generated", "task:role:highlight_library"],
+            scanned(
+                chunk(
+                    "Task digest status generated. Summary: Highlight library for smoke contains 0 ranked lessons.",
+                    Some("smoke_project"),
+                    vec!["task:status:generated", "task:role:highlight_library"],
+                ),
+                None,
             ),
-            chunk(
-                "Task digest status generated. Summary: Highlight library for smoke contains 0 ranked lessons.",
-                Some("smoke_project"),
-                vec!["task:status:generated", "task:role:highlight_library"],
+            scanned(
+                chunk(
+                    "Task digest status generated. Summary: Highlight library for smoke contains 0 ranked lessons.",
+                    Some("smoke_project"),
+                    vec!["task:status:generated", "task:role:highlight_library"],
+                ),
+                None,
             ),
         ];
-        let summary = summarize_chunks(&chunks);
+        let summary = summarize_chunks(&chunks, now_ms());
         let stats = StoreStats {
             total_chunks: 2,
             active_chunks: 2,
@@ -1477,6 +2022,70 @@ mod tests {
     }
 
     #[test]
+    fn classifier_marks_legacy_unbounded_progress_review() {
+        let now = 100 * 86_400_000;
+        let chunks = vec![
+            scanned(
+                chunk_at(
+                    "Mapped auth middleware touchpoints; next step is validation.",
+                    Some("auth"),
+                    vec!["kind:progress"],
+                    now - 40 * 86_400_000,
+                ),
+                None,
+            ),
+            scanned(
+                chunk_at(
+                    "Mapped API touchpoints; next step is validation.",
+                    Some("api"),
+                    vec!["kind:progress"],
+                    now - 2 * 86_400_000,
+                ),
+                Some(now + 14 * 86_400_000),
+            ),
+            scanned(
+                chunk_at(
+                    "Decision: keep the auth migration behind the existing flag.",
+                    Some("auth"),
+                    vec!["kind:progress", "kind:decision"],
+                    now - 40 * 86_400_000,
+                ),
+                None,
+            ),
+        ];
+
+        let summary = summarize_chunks(&chunks, now);
+        assert_eq!(summary.routine_progress_chunks, 2);
+        assert_eq!(summary.unbounded_progress_chunks, 1);
+        assert_eq!(summary.unbounded_progress_older_30d, 1);
+        let auth = summary
+            .projects
+            .get(&Some("auth".to_string()))
+            .expect("auth project summary");
+        assert_eq!(auth.routine_progress_chunks, 1);
+        assert_eq!(auth.unbounded_progress_chunks, 1);
+        assert_eq!(auth.unbounded_progress_older_30d, 1);
+
+        let stats = StoreStats {
+            total_chunks: 3,
+            active_chunks: 3,
+            ..Default::default()
+        };
+        let purge = HiddenPurgeSummary::default();
+        let (classes, reasons) = classify_tenant("memd", &stats, &summary, &purge, 0);
+        assert!(classes.contains(&"legacy_progress_retention_review".to_string()));
+        assert!(reasons
+            .iter()
+            .any(|reason| reason.contains("1 routine progress summaries older than 30 days")));
+
+        let (project_classes, project_reasons) = classify_project(Some("auth"), auth);
+        assert!(project_classes.contains(&"legacy_progress_retention_review".to_string()));
+        assert!(project_reasons
+            .iter()
+            .any(|reason| reason.contains("1 routine progress summaries older than 30 days")));
+    }
+
+    #[test]
     fn approval_items_include_unreadable_purge_dry_run() {
         let tenant = TenantCleanupPlan {
             tenant_id: "memd".to_string(),
@@ -1495,6 +2104,9 @@ mod tests {
             generated_digest_ratio: 0.0,
             generated_wrapper_chunks: 0,
             generated_wrapper_ratio: 0.0,
+            routine_progress_chunks: 0,
+            unbounded_progress_chunks: 0,
+            unbounded_progress_older_30d: 0,
             unscoped_chunks: 0,
             hidden_purge_candidates: 0,
             estimated_purge_payload_bytes: 0,
@@ -1518,14 +2130,114 @@ mod tests {
             "memd purge --tenant-id memd --project-id memd --include-unreadable-active --limit 17"
         );
         assert_eq!(item.estimated_batches, Some(1));
+        assert_eq!(item.batch_command_previews.len(), 1);
+        assert_eq!(item.batch_command_previews[0].batch, 1);
+        assert_eq!(item.batch_command_previews[0].limit, 17);
         assert_eq!(
             item.destructive_command_preview.as_deref(),
             Some("memd purge --tenant-id memd --project-id memd --include-unreadable-active --limit 17 --archive /tmp/archive/memd__memd__unreadable_active_batch001_archive.json --apply --vacuum-metadata")
         );
         assert_eq!(
             item.verification_command_preview.as_deref(),
-            Some("memd purge-archive --archive /tmp/archive/memd__memd__unreadable_active_batch001_archive.json --expect-tenant-id memd --min-records 1 --expect-project-id memd")
+            Some("memd purge-archive --archive /tmp/archive/memd__memd__unreadable_active_batch001_archive.json --expect-tenant-id memd --min-records 17 --expect-project-id memd")
         );
+    }
+
+    #[test]
+    fn approval_items_include_legacy_progress_retention_review() {
+        let tenant = TenantCleanupPlan {
+            tenant_id: "memd".to_string(),
+            project_id_filter: Some("memd".to_string()),
+            disk_total_bytes: Some(100),
+            stats: StoreStatsReport {
+                total_chunks: 20,
+                active_chunks: 20,
+                deleted_chunks: 0,
+            },
+            metadata_active_chunks: 20,
+            scanned_chunks: 20,
+            unreadable_active_chunks: 0,
+            readable_active_ratio: 1.0,
+            generated_digest_chunks: 0,
+            generated_digest_ratio: 0.0,
+            generated_wrapper_chunks: 0,
+            generated_wrapper_ratio: 0.0,
+            routine_progress_chunks: 9,
+            unbounded_progress_chunks: 9,
+            unbounded_progress_older_30d: 4,
+            unscoped_chunks: 0,
+            hidden_purge_candidates: 0,
+            estimated_purge_payload_bytes: 0,
+            classification: vec!["legacy_progress_retention_review".to_string()],
+            reasons: vec![
+                "4 routine progress summaries older than 30 days have no retention deadline"
+                    .to_string(),
+            ],
+            export_command: export_command("memd", Some("memd"), Path::new("/tmp/archive")),
+            purge_command_preview: None,
+            projects: Vec::new(),
+        };
+
+        let items = approval_items(&[tenant], Path::new("/tmp/archive"));
+        let item = items
+            .iter()
+            .find(|item| item.action == "review_legacy_progress_retention")
+            .expect("legacy progress approval item");
+        assert_eq!(item.command_kind, "export_review");
+        assert!(!item.command_is_destructive);
+        assert_eq!(item.scope_chunks, 4);
+        assert_eq!(item.metadata_active_chunks, 20);
+        assert_eq!(item.estimated_payload_bytes, 0);
+        assert_eq!(
+            item.command_preview,
+            "memd export-omf --tenant-id memd --project-id memd --include-history true --output /tmp/archive/memd__memd.omf.json"
+        );
+        assert!(item.destructive_command_preview.is_none());
+        assert!(item.verification_command_preview.is_none());
+        assert!(item
+            .reason
+            .contains("4 routine progress summaries older than 30 days"));
+        assert!(item
+            .reason
+            .contains("9 total unbounded routine progress summaries"));
+    }
+
+    #[test]
+    fn unreadable_purge_batch_previews_emit_unique_archives() {
+        let previews = unreadable_purge_batch_previews(
+            "memd",
+            Some("memd"),
+            PURGE_COMMAND_LIMIT * 2 + 17,
+            Path::new("/tmp/archive"),
+        );
+
+        assert_eq!(previews.len(), 3);
+        assert_eq!(previews[0].batch, 1);
+        assert_eq!(previews[0].limit, PURGE_COMMAND_LIMIT);
+        assert!(previews[0]
+            .archive
+            .ends_with("memd__memd__unreadable_active_batch001_archive.json"));
+        assert_eq!(previews[1].batch, 2);
+        assert_eq!(previews[1].limit, PURGE_COMMAND_LIMIT);
+        assert!(previews[1]
+            .archive
+            .ends_with("memd__memd__unreadable_active_batch002_archive.json"));
+        assert_eq!(previews[2].batch, 3);
+        assert_eq!(previews[2].limit, 17);
+        assert!(previews[2]
+            .archive
+            .ends_with("memd__memd__unreadable_active_batch003_archive.json"));
+        assert!(previews[2].dry_run_command.ends_with("--limit 17"));
+        assert!(previews[2].destructive_command.contains("--limit 17"));
+        assert!(previews[0]
+            .verification_command
+            .contains("--min-records 10000"));
+        assert!(previews[2]
+            .verification_command
+            .contains("--min-records 17"));
+        assert!(previews[2]
+            .verification_command
+            .contains("--expect-project-id memd"));
     }
 
     #[test]
@@ -1542,6 +2254,8 @@ mod tests {
                 metadata_active_chunks: 11,
                 unreadable_active_chunks: 10,
                 tenant_disk_total_bytes: None,
+                generated_digest_chunks: 2,
+                generated_wrapper_chunks: 1,
                 generated_digest_ratio: 0.0,
                 generated_wrapper_ratio: 0.0,
                 hidden_purge_candidates: 0,
@@ -1552,6 +2266,24 @@ mod tests {
                 destructive_command_preview: Some("apply".to_string()),
                 verification_command_preview: Some("verify".to_string()),
                 estimated_batches: Some(2),
+                batch_command_previews: vec![
+                    CleanupBatchCommandPreview {
+                        batch: 1,
+                        limit: 10,
+                        archive: "archive-1.json".to_string(),
+                        dry_run_command: "dry-run 1".to_string(),
+                        destructive_command: "apply 1".to_string(),
+                        verification_command: "verify 1".to_string(),
+                    },
+                    CleanupBatchCommandPreview {
+                        batch: 2,
+                        limit: 10,
+                        archive: "archive-2.json".to_string(),
+                        dry_run_command: "dry-run 2".to_string(),
+                        destructive_command: "apply 2".to_string(),
+                        verification_command: "verify 2".to_string(),
+                    },
+                ],
             },
             ApprovalItem {
                 approval_id: "review_high_noise_tenant:memd".to_string(),
@@ -1564,6 +2296,8 @@ mod tests {
                 metadata_active_chunks: 1,
                 unreadable_active_chunks: 0,
                 tenant_disk_total_bytes: None,
+                generated_digest_chunks: 3,
+                generated_wrapper_chunks: 2,
                 generated_digest_ratio: 0.0,
                 generated_wrapper_ratio: 0.0,
                 hidden_purge_candidates: 0,
@@ -1574,6 +2308,7 @@ mod tests {
                 destructive_command_preview: None,
                 verification_command_preview: None,
                 estimated_batches: None,
+                batch_command_previews: Vec::new(),
             },
         ];
 
@@ -1582,6 +2317,7 @@ mod tests {
         assert_eq!(summary.destructive_command_previews, 1);
         assert_eq!(summary.verification_command_previews, 1);
         assert_eq!(summary.estimated_batches, 2);
+        assert_eq!(summary.batch_command_previews, 2);
         assert_eq!(summary.unreadable_active_rows_in_purge_previews, 10);
         assert!(summary
             .command_kinds
@@ -1599,9 +2335,12 @@ mod tests {
         assert_eq!(purge_action.count, 1);
         assert_eq!(purge_action.metadata_active_chunks, 11);
         assert_eq!(purge_action.unreadable_active_chunks, 10);
+        assert_eq!(purge_action.generated_digest_chunks, 2);
+        assert_eq!(purge_action.generated_wrapper_chunks, 1);
         assert_eq!(purge_action.destructive_command_previews, 1);
         assert_eq!(purge_action.verification_command_previews, 1);
         assert_eq!(purge_action.estimated_batches, 2);
+        assert_eq!(purge_action.batch_command_previews, 2);
         assert_eq!(
             purge_action.example_approval_ids,
             vec!["review_payload_integrity_tenant:memd".to_string()]
@@ -1644,17 +2383,33 @@ mod tests {
                     scope_chunks: 0,
                     metadata_active_chunks: 0,
                     unreadable_active_chunks: 0,
+                    generated_digest_chunks: 0,
+                    generated_wrapper_chunks: 0,
                     hidden_purge_candidates: 1,
                     destructive_command_previews: 1,
                     verification_command_previews: 1,
                     estimated_batches: 1,
+                    batch_command_previews: 1,
                     example_approval_ids: vec!["hard_purge_hidden_rows:smoke".to_string()],
                 }],
                 destructive_command_previews: 1,
                 verification_command_previews: 1,
                 estimated_batches: 1,
+                batch_command_previews: 1,
                 unreadable_active_rows_in_purge_previews: 0,
             },
+            post_cleanup_verification: post_cleanup_verification_commands(
+                Some("smoke"),
+                None,
+                Path::new("."),
+                Path::new("/tmp/archive"),
+                30,
+                10,
+                1000,
+                15,
+                None,
+                false,
+            ),
             approval_items: vec![ApprovalItem {
                 approval_id: "hard_purge_hidden_rows:smoke".to_string(),
                 action: "hard_purge_hidden_rows".to_string(),
@@ -1666,6 +2421,8 @@ mod tests {
                 metadata_active_chunks: 0,
                 unreadable_active_chunks: 0,
                 tenant_disk_total_bytes: Some(100),
+                generated_digest_chunks: 0,
+                generated_wrapper_chunks: 0,
                 generated_digest_ratio: 0.0,
                 generated_wrapper_ratio: 0.0,
                 hidden_purge_candidates: 1,
@@ -1678,6 +2435,19 @@ mod tests {
                     "memd purge-archive --archive /tmp/archive/smoke__hidden_purge_archive.json --expect-tenant-id smoke --min-records 1".to_string(),
                 ),
                 estimated_batches: Some(1),
+                batch_command_previews: vec![CleanupBatchCommandPreview {
+                    batch: 1,
+                    limit: 1,
+                    archive: "/tmp/archive/smoke__hidden_purge_batch001_archive.json"
+                        .to_string(),
+                    dry_run_command: "memd purge --tenant-id smoke --limit 1".to_string(),
+                    destructive_command:
+                        "memd purge --tenant-id smoke --limit 1 --archive /tmp/archive/smoke__hidden_purge_batch001_archive.json --apply"
+                            .to_string(),
+                    verification_command:
+                        "memd purge-archive --archive /tmp/archive/smoke__hidden_purge_batch001_archive.json --expect-tenant-id smoke --min-records 1"
+                            .to_string(),
+                }],
             }],
             tenants: Vec::new(),
         };
@@ -1685,13 +2455,122 @@ mod tests {
         assert!(rendered.contains("# memd cleanup plan"));
         assert!(rendered.contains("Approval Summary"));
         assert!(rendered.contains("destructive_command_previews: `1`"));
+        assert!(rendered.contains("batch_command_previews: `1`"));
         assert!(rendered.contains("Action Rollups"));
+        assert!(rendered.contains("Post-Cleanup Verification"));
         assert!(rendered.contains("hard_purge_hidden_rows"));
         assert!(rendered.contains("Approval Items"));
         assert!(rendered.contains("approval_id"));
         assert!(rendered.contains("command_is_destructive: `true`"));
         assert!(rendered.contains("memd purge --tenant-id smoke"));
+        assert!(rendered.contains("memd audit --tenant-id smoke"));
+        assert!(rendered.contains("memd eval-memory-md --project-dir ."));
         assert!(rendered.contains("verify_archive"));
+        assert!(rendered.contains("batch_commands"));
+        assert!(rendered.contains("batch=`1`; limit=`1`"));
+        assert!(rendered.contains("dry_run: `memd purge --tenant-id smoke --limit 1`"));
+    }
+
+    #[test]
+    fn post_cleanup_verification_commands_include_scope_and_thresholds() {
+        let verification = post_cleanup_verification_commands(
+            Some("tenant 1"),
+            Some("project 2"),
+            Path::new("."),
+            Path::new("tasks/archive dir"),
+            45,
+            321,
+            2000,
+            7,
+            None,
+            true,
+        );
+
+        assert_eq!(verification.commands.len(), 6);
+        let cleanup = verification
+            .commands
+            .iter()
+            .find(|command| command.label == "cleanup_plan_rerun")
+            .expect("cleanup plan verification command");
+        assert!(cleanup
+            .command
+            .contains("memd cleanup-plan --tenant-id 'tenant 1' --project-id 'project 2'"));
+        assert!(cleanup.command.contains("--older-than-days 45"));
+        assert!(cleanup.command.contains("--candidate-limit 321"));
+        assert!(cleanup.command.contains("--page-size 2000"));
+        assert!(cleanup.command.contains("--top-projects 7"));
+        assert!(cleanup.command.contains("'tasks/archive dir'"));
+
+        let retrieval = verification
+            .commands
+            .iter()
+            .find(|command| command.label == "retrieval_quality")
+            .expect("retrieval verification command");
+        assert!(retrieval
+            .command
+            .contains("memd eval-retrieval --tenant-id 'tenant 1' --project-id 'project 2'"));
+        assert!(retrieval
+            .command
+            .contains("--queries evals/bench/queries/retrieval_queries.jsonl"));
+        assert!(retrieval.command.contains("--min-hit-rate-at-k 0.8"));
+        assert!(retrieval.command.contains("--min-known-recall-at-k 0.6"));
+        assert!(retrieval.command.contains("--min-mrr 0.35"));
+
+        let quality = verification
+            .commands
+            .iter()
+            .find(|command| command.label == "startup_memory_quality")
+            .expect("memory quality verification command");
+        assert!(quality.command.contains("--min-useful-ratio 0.8"));
+        assert!(quality.command.contains("--max-generated-wrappers 0"));
+        assert!(quality.pass_criteria.contains("useful_ratio >= 0.8"));
+    }
+
+    #[test]
+    fn post_cleanup_verification_uses_repo_memory_scope_for_tenant_only_plan() {
+        let verification = post_cleanup_verification_commands(
+            Some("advanced_benchmark"),
+            None,
+            Path::new("."),
+            Path::new("tasks/archive"),
+            30,
+            1000,
+            1000,
+            15,
+            Some(&project_scope("memd", Some("memd"))),
+            true,
+        );
+
+        let quality = verification
+            .commands
+            .iter()
+            .find(|command| command.label == "startup_memory_quality")
+            .expect("memory quality verification command");
+        assert_eq!(
+            quality.command,
+            "memd eval-memory-md --tenant-id memd --project-id memd --project-dir . --output tasks/memory-post-cleanup.md --min-useful-ratio 0.8 --max-generated-wrappers 0"
+        );
+
+        let retrieval = verification
+            .commands
+            .iter()
+            .find(|command| command.label == "retrieval_quality")
+            .expect("retrieval verification command");
+        assert!(retrieval
+            .command
+            .contains("memd eval-retrieval --tenant-id memd --project-id memd"));
+        assert!(!retrieval
+            .command
+            .contains("advanced_benchmark --project-id"));
+
+        let audit = verification
+            .commands
+            .iter()
+            .find(|command| command.label == "audit_after_cleanup")
+            .expect("audit verification command");
+        assert!(audit
+            .command
+            .contains("memd audit --tenant-id advanced_benchmark"));
     }
 
     #[test]
@@ -1713,6 +2592,9 @@ mod tests {
             generated_digest_ratio: 0.9,
             generated_wrapper_chunks: 1,
             generated_wrapper_ratio: 0.1,
+            routine_progress_chunks: 0,
+            unbounded_progress_chunks: 0,
+            unbounded_progress_older_30d: 0,
             unscoped_chunks: 0,
             hidden_purge_candidates: 0,
             estimated_purge_payload_bytes: 0,
@@ -1725,6 +2607,9 @@ mod tests {
                 chunks: 10,
                 generated_digest_chunks: 9,
                 generated_wrapper_chunks: 1,
+                routine_progress_chunks: 0,
+                unbounded_progress_chunks: 0,
+                unbounded_progress_older_30d: 0,
                 classification: vec!["high_noise_review".to_string()],
                 reasons: vec!["generated digest ratio 90.0%".to_string()],
                 export_command: export_command("memd", Some("memd"), Path::new("/tmp/archive")),

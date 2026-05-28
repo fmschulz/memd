@@ -527,4 +527,16 @@ mod tests {
         assert_eq!(failures.len(), 1);
         assert!(failures[0].contains("max_possible_precision_at_5 0.200"));
     }
+
+    #[test]
+    fn precision_coverage_is_report_only_when_threshold_disabled() {
+        let eval = QueryEval {
+            label: Some("sparse_judgment".to_string()),
+            query: "alpha".to_string(),
+            useful_chunk_ids: vec!["a".to_string()],
+            variants: Vec::new(),
+        };
+        let failures = precision_judgment_coverage_failures(&[eval], 5, 0.0);
+        assert!(failures.is_empty());
+    }
 }

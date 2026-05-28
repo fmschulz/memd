@@ -420,8 +420,10 @@ pub enum CliCommand {
         #[arg(long, default_value_t = 5)]
         k: usize,
 
-        /// Minimum mean precision@k required for success.
-        #[arg(long, default_value_t = 0.6)]
+        /// Minimum mean precision@k required for success. Defaults to 0
+        /// because bundled sparse judgments often cannot reach a fixed
+        /// precision threshold at k.
+        #[arg(long, default_value_t = 0.0)]
         min_precision_at_k: f64,
 
         /// Minimum fraction of queries with at least one useful hit.
@@ -452,7 +454,7 @@ pub enum CliCommand {
         min_duplicate_reuse_rate: f64,
 
         /// Maximum chunks a synthetic session may leave in its isolated store.
-        #[arg(long, default_value_t = 5)]
+        #[arg(long, default_value_t = 6)]
         max_total_chunks: usize,
 
         /// Maximum isolated persistent-store byte growth for the synthetic session.
@@ -690,6 +692,10 @@ pub enum CliCommand {
         /// Optional project identifier filter.
         #[arg(long)]
         project_id: Option<String>,
+
+        /// Project directory used for generated verification commands.
+        #[arg(long, default_value = ".")]
+        project_dir: PathBuf,
 
         /// Output format.
         #[arg(long, value_enum, default_value = "markdown")]

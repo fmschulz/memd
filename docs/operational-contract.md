@@ -39,6 +39,10 @@ records:
 
 Do not write every tool call. Do not store chat history, play-by-play progress,
 large logs, secrets, credentials, private account data, or guessed conclusions.
+Concrete `kind:progress` summaries without explicit priority or durable
+category tags are retained as short-lived reviewable context rather than
+permanent memory. Add explicit priority only when the progress record is a
+durable lesson that should remain a candidate for future startup context.
 
 ## Durable Writes
 
@@ -84,6 +88,13 @@ Use `priority:8` or `priority:9` only for lessons that should plausibly appear
 in future `memory.md` refreshes. Lower-priority routine records remain
 searchable without dominating startup context.
 
+Routine `kind:progress` summaries without explicit priority, evidence,
+decision, finish, consolidated, or `retention:durable` tags receive a 14-day
+retention window by default. Use them for active handoff context, not permanent
+project knowledge. If the result should survive cleanup, tag it as
+`kind:evidence`, `kind:decision`, `kind:finish`, or add an explicit
+`priority:N`/`retention:durable` tag.
+
 ## Low-Value Writes
 
 These should be rejected, downgraded, or avoided:
@@ -94,6 +105,7 @@ These should be rejected, downgraded, or avoided:
 - generated digest wrapper text
 - duplicate summaries that add no new tags, evidence, or source provenance
 - broad claims without validation or uncertainty
+- routine progress summaries that should have been a short-lived handoff note
 
 If an intermediate note is needed for handoff, make it concrete: name the file,
 command, error, partial conclusion, and next check.
@@ -114,6 +126,14 @@ memd audit --tenant-id "$TENANT_ID" --project-id "$PROJECT_ID" --format markdown
 `memory-md --explain-output` is the first diagnostic when startup context looks
 bad. It shows which candidates were retrieved, score components, tags, whether
 they were generated digests, and why they were displayed or filtered.
+`audit` also reports routine progress summaries, unbounded routine progress
+without an expiry, and unbounded routine progress older than 30 days so legacy
+handoff records are visible before cleanup.
+`eval-retrieval` reports precision@k, hit-rate, known recall, and MRR. Its
+default sparse judgment set gates on hit-rate only unless stricter recall, MRR,
+or precision thresholds are supplied; use `--min-precision-at-k` only with a
+query file that has enough judged useful IDs to make the requested precision
+mathematically reachable.
 
 ## Cleanup Safety
 
@@ -125,6 +145,7 @@ approved.
 memd cleanup-plan \
   --tenant-id "$TENANT_ID" \
   --project-id "$PROJECT_ID" \
+  --project-dir . \
   --output tasks/memd-cleanup-plan.md \
   --archive-dir tasks/memd-cleanup-archive
 memd purge --tenant-id "$TENANT_ID" --project-id "$PROJECT_ID" --older-than-days 30
@@ -148,10 +169,12 @@ memd purge-archive \
 ```
 
 `cleanup-plan` is non-destructive. It classifies tenants and projects for
-archive/delete review, high generated-digest noise, missing scope, and
-hidden-row purge readiness, then emits command previews for the approved list.
+archive/delete review, high generated-digest noise, missing scope, legacy
+routine-progress rows without expiry, and hidden-row purge readiness, then
+emits command previews for the approved list.
 Each approval item has a stable `approval_id`, command kind, destructive flag,
-scope counts, generated-noise ratios, and payload-integrity counts. Treat
+scope counts, generated-noise counts and ratios, payload-integrity counts, and
+legacy progress-retention counts. Treat
 `unreadable_active_chunks > 0` as a dry-run item first: normal retrieval and
 export could not load every active metadata row, so run the generated
 `memd purge --include-unreadable-active` preview and inspect the candidate
@@ -160,22 +183,43 @@ cleanup still requires `--apply --archive <path>`; the archive records metadata,
 canonical text, candidate reason, and whether the segment payload was available.
 The `approval_summary` block rolls up command kinds, destructive-command
 preview coverage, archive-verifier coverage, estimated batch count, and the
-number of unreadable active rows covered by purge previews. It also includes
+number of concrete batch command previews generated for those estimates. It
+also reports the unreadable active rows covered by purge previews and includes
 action rollups so reviewers can see how many items are tenant archive/delete
 reviews, project archive/delete reviews, high-noise reviews, scope/noise
-reviews, or unreadable-active purge reviews before inspecting every item.
+reviews, legacy progress-retention reviews, or unreadable-active purge reviews
+before inspecting every item.
+`review_legacy_progress_retention` items are export-review prompts only. They
+mark active legacy progress summaries that predate the current default TTL and
+need consolidation, expiry, or deletion decisions before any destructive
+cleanup is considered.
 When cleanup-plan can derive the next step, it also prints
 `destructive_command`, `verify_archive`, and `estimated_batches` fields. These
 are approval aids only: run the dry-run command first, approve the exact
 destructive command and archive path, then run `memd purge-archive` against the
 written archive before considering the batch complete. Large unreadable
-metadata cleanups may need repeated batches with unique archive paths until the
-dry-run candidate count reaches zero.
+metadata cleanups also include `batch_command_previews` with unique archive
+paths for each estimated batch. These are an ordered sequence over the current
+candidate set, not offset-based pages: execute only the approved batch, verify
+its archive with the generated `--min-records` count, rerun the dry-run command,
+and continue with the next batch only while candidate counts remain consistent
+with the approved cleanup.
+Every cleanup plan also includes a `post_cleanup_verification` block with
+non-destructive commands and pass criteria. After any approved purge/archive
+cleanup, rerun the generated audit, cleanup-plan, startup-memory evaluation,
+memory refresh, and doctor commands. When the project directory has
+`evals/bench/queries/retrieval_queries.jsonl`, the block also includes a fixed
+`memd eval-retrieval` gate. Treat cleanup as incomplete unless those checks
+show reduced approved candidates without new unexplained high-risk
+classifications, retrieval hit-rate/known-recall/MRR pass the generated
+thresholds, `memd eval-memory-md` exits successfully with useful startup
+context, and host/project wiring remains valid.
 `memd purge --apply` verifies the archive before deleting rows and reports the
 verification summary in `archive_verification`. You can also run
 `memd purge-archive` against the exact archive path. Treat a verification
 failure, tenant/project mismatch, record-count mismatch, or payload flag
 mismatch as a failed cleanup run until explained.
 
-After cleanup, rerun `memd audit`, `memd eval-memory-md`, and representative
-searches before treating storage reduction as successful.
+For retrieval-sensitive projects without a checked-in retrieval fixture, add
+one or rerun representative `memd search` checks before treating storage
+reduction as successful.
