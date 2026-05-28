@@ -223,6 +223,10 @@ default — the cross-tenant read only happens when the flag is passed.
 Keep durable memory small and useful. A normal single task should leave fewer
 than 10 durable chunks; most tasks need only a decision, a concrete run/evidence
 record, and a finish summary.
+Concrete `kind:progress` summaries without explicit priority or durable
+category tags are retained as short-lived reviewable context rather than
+permanent memory. Add explicit priority only when the progress record is a
+durable lesson that should remain a candidate for future startup context.
 
 Write durable records when they contain one of these signals:
 
@@ -249,6 +253,12 @@ memd eval-memory-md --project-dir . --min-useful-ratio 0.8 --max-generated-wrapp
 memd memory-md --project-dir . --output memory.md --explain-output .memd/memory-explain.json
 memd audit --tenant-id "$TENANT_ID" --project-id "$PROJECT_ID" --format markdown
 ```
+
+`audit` and `cleanup-plan` report routine progress summaries that still lack an
+expiry, including the subset older than 30 days. Treat those as legacy handoff
+records that need consolidation, expiry, or deletion review; the generated
+`review_legacy_progress_retention` cleanup-plan item is non-destructive and
+exports the scope for inspection.
 
 ## Retrieve Context
 
@@ -333,8 +343,11 @@ Useful modes:
 
 ## Record Work
 
-Use `memd add` for durable records. Prefer concise, complete summaries over
-logging every shell command.
+Use `memd add` for reusable records. Prefer concise, complete summaries over
+logging every shell command. Routine `kind:progress` summaries are active
+handoff context and receive a short default retention window; tag durable
+outcomes as `kind:evidence`, `kind:decision`, `kind:finish`, or add explicit
+`priority:N`/`retention:durable`.
 
 Progress:
 

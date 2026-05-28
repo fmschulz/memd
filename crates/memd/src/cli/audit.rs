@@ -6,8 +6,9 @@ use serde::Serialize;
 
 use super::args::ExportFormat;
 use crate::error::{MemdError, Result};
+use crate::store::metadata::MetadataStore;
 use crate::store::{Store, StoreHealthSnapshot, StoreStats, TenantManager};
-use crate::types::{MemoryChunk, TenantId};
+use crate::types::{ChunkType, MemoryChunk, TenantId};
 
 #[derive(Debug, Clone)]
 pub(super) struct AuditOptions {
@@ -35,6 +36,9 @@ struct AuditTotals {
     unreadable_active_chunks: usize,
     generated_digest_chunks: usize,
     generated_wrapper_chunks: usize,
+    routine_progress_chunks: usize,
+    unbounded_progress_chunks: usize,
+    unbounded_progress_older_30d: usize,
     unscoped_chunks: usize,
 }
 
@@ -62,6 +66,9 @@ struct TenantAudit {
     generated_digest_ratio: f64,
     generated_wrapper_chunks: usize,
     generated_wrapper_ratio: f64,
+    routine_progress_chunks: usize,
+    unbounded_progress_chunks: usize,
+    unbounded_progress_older_30d: usize,
     unscoped_chunks: usize,
     age_buckets: AgeBuckets,
     chunk_types_scanned: BTreeMap<String, usize>,
@@ -101,6 +108,9 @@ struct ProjectAudit {
     chunks: usize,
     generated_digest_chunks: usize,
     generated_wrapper_chunks: usize,
+    routine_progress_chunks: usize,
+    unbounded_progress_chunks: usize,
+    unbounded_progress_older_30d: usize,
     unscoped: bool,
 }
 
@@ -121,6 +131,9 @@ struct ChunkSummary {
     scanned_chunks: usize,
     generated_digest_chunks: usize,
     generated_wrapper_chunks: usize,
+    routine_progress_chunks: usize,
+    unbounded_progress_chunks: usize,
+    unbounded_progress_older_30d: usize,
     unscoped_chunks: usize,
     age_buckets: AgeBuckets,
     chunk_types: BTreeMap<String, usize>,
@@ -133,6 +146,15 @@ struct ProjectAccumulator {
     chunks: usize,
     generated_digest_chunks: usize,
     generated_wrapper_chunks: usize,
+    routine_progress_chunks: usize,
+    unbounded_progress_chunks: usize,
+    unbounded_progress_older_30d: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ScannedChunk {
+    chunk: MemoryChunk,
+    expires_at_ms: Option<i64>,
 }
 
 pub(super) async fn run_audit<S: Store>(
@@ -171,7 +193,8 @@ pub(super) async fn run_audit<S: Store>(
                 segment_count: stats.segment_count,
             });
         let chunks =
-            collect_chunks(store, &tenant, options.project_id.as_deref(), page_size).await?;
+            collect_scanned_chunks(store, &tenant, options.project_id.as_deref(), page_size)
+                .await?;
         let summary = summarize_chunks(&chunks, now_ms);
         let metadata_active_chunks = health
             .as_ref()
@@ -191,6 +214,9 @@ pub(super) async fn run_audit<S: Store>(
         totals.unreadable_active_chunks += unreadable_active_chunks;
         totals.generated_digest_chunks += summary.generated_digest_chunks;
         totals.generated_wrapper_chunks += summary.generated_wrapper_chunks;
+        totals.routine_progress_chunks += summary.routine_progress_chunks;
+        totals.unbounded_progress_chunks += summary.unbounded_progress_chunks;
+        totals.unbounded_progress_older_30d += summary.unbounded_progress_older_30d;
         totals.unscoped_chunks += summary.unscoped_chunks;
 
         reports.push(TenantAudit {
@@ -210,6 +236,9 @@ pub(super) async fn run_audit<S: Store>(
                 summary.generated_wrapper_chunks,
                 summary.scanned_chunks,
             ),
+            routine_progress_chunks: summary.routine_progress_chunks,
+            unbounded_progress_chunks: summary.unbounded_progress_chunks,
+            unbounded_progress_older_30d: summary.unbounded_progress_older_30d,
             unscoped_chunks: summary.unscoped_chunks,
             age_buckets: summary.age_buckets,
             chunk_types_scanned: summary.chunk_types,
@@ -264,18 +293,43 @@ async fn resolve_tenants<S: Store>(
     Ok(tenants.into_values().collect())
 }
 
-async fn collect_chunks<S: Store>(
+async fn collect_scanned_chunks<S: Store>(
     store: &S,
     tenant: &TenantId,
     project_id: Option<&str>,
     page_size: usize,
-) -> Result<Vec<MemoryChunk>> {
+) -> Result<Vec<ScannedChunk>> {
     let mut chunks = Vec::new();
     let mut offset = 0usize;
     loop {
-        let page = store
-            .list_chunks_for_project(tenant, project_id, page_size, offset)
-            .await?;
+        let page = if let Some(persistent) = store.as_persistent() {
+            let metadata_rows = persistent
+                .metadata()
+                .list_for_project(tenant, project_id, page_size, offset)?;
+            let mut rows = Vec::with_capacity(metadata_rows.len());
+            for meta in metadata_rows {
+                if let Some(chunk) = persistent
+                    .get_chunk_for_retrieval(tenant, &meta.chunk_id, "audit")
+                    .await?
+                {
+                    rows.push(ScannedChunk {
+                        chunk,
+                        expires_at_ms: meta.lifecycle.expires_at_ms,
+                    });
+                }
+            }
+            rows
+        } else {
+            store
+                .list_chunks_for_project(tenant, project_id, page_size, offset)
+                .await?
+                .into_iter()
+                .map(|chunk| ScannedChunk {
+                    chunk,
+                    expires_at_ms: None,
+                })
+                .collect()
+        };
         if page.is_empty() {
             break;
         }
@@ -289,9 +343,10 @@ async fn collect_chunks<S: Store>(
     Ok(chunks)
 }
 
-fn summarize_chunks(chunks: &[MemoryChunk], now_ms: i64) -> ChunkSummary {
+fn summarize_chunks(chunks: &[ScannedChunk], now_ms: i64) -> ChunkSummary {
     let mut summary = ChunkSummary::default();
-    for chunk in chunks {
+    for scanned in chunks {
+        let chunk = &scanned.chunk;
         summary.scanned_chunks += 1;
         let project_id = chunk.project_id.as_option().map(str::to_string);
         if project_id.is_none() {
@@ -316,6 +371,16 @@ fn summarize_chunks(chunks: &[MemoryChunk], now_ms: i64) -> ChunkSummary {
             summary.generated_wrapper_chunks += 1;
         }
         record_age(&mut summary.age_buckets, chunk.timestamp_created, now_ms);
+        let routine_progress = is_routine_progress_summary(chunk);
+        if routine_progress {
+            summary.routine_progress_chunks += 1;
+            if scanned.expires_at_ms.is_none() {
+                summary.unbounded_progress_chunks += 1;
+                if is_older_than_days(chunk.timestamp_created, now_ms, 30) {
+                    summary.unbounded_progress_older_30d += 1;
+                }
+            }
+        }
 
         let project = summary.projects.entry(project_id.clone()).or_default();
         project.chunks += 1;
@@ -324,6 +389,15 @@ fn summarize_chunks(chunks: &[MemoryChunk], now_ms: i64) -> ChunkSummary {
         }
         if generated_wrapper {
             project.generated_wrapper_chunks += 1;
+        }
+        if routine_progress {
+            project.routine_progress_chunks += 1;
+            if scanned.expires_at_ms.is_none() {
+                project.unbounded_progress_chunks += 1;
+                if is_older_than_days(chunk.timestamp_created, now_ms, 30) {
+                    project.unbounded_progress_older_30d += 1;
+                }
+            }
         }
     }
     summary
@@ -347,6 +421,14 @@ fn record_age(buckets: &mut AgeBuckets, timestamp_created: i64, now_ms: i64) {
     }
 }
 
+fn is_older_than_days(timestamp_created: i64, now_ms: i64, days: i64) -> bool {
+    if timestamp_created <= 0 || now_ms <= 0 {
+        return false;
+    }
+    let age_ms = now_ms.saturating_sub(timestamp_created);
+    age_ms > days.saturating_mul(86_400_000)
+}
+
 fn is_generated_digest(tags: &[String]) -> bool {
     let generated = tags.iter().any(|tag| tag == "task:status:generated");
     let digest = tags
@@ -368,6 +450,31 @@ fn is_generated_wrapper_text(text: &str) -> bool {
         || lowered.contains("evidence library for ")
 }
 
+fn is_routine_progress_summary(chunk: &MemoryChunk) -> bool {
+    chunk.chunk_type == ChunkType::Summary
+        && chunk.tags.iter().any(|tag| tag == "kind:progress")
+        && !has_durable_progress_override(&chunk.tags)
+}
+
+fn has_durable_progress_override(tags: &[String]) -> bool {
+    tags.iter().any(|tag| {
+        tag.starts_with("priority:")
+            || tag.starts_with("importance:")
+            || matches!(
+                tag.as_str(),
+                "kind:evidence"
+                    | "kind:decision"
+                    | "kind:finish"
+                    | "kind:consolidated"
+                    | "retention:durable"
+                    | "validated:true"
+                    | "supports:true"
+            )
+            || tag.starts_with("evidence:")
+            || tag.starts_with("source:evidence")
+    })
+}
+
 fn render_project_rows(
     projects: HashMap<Option<String>, ProjectAccumulator>,
     top_projects: usize,
@@ -380,6 +487,9 @@ fn render_project_rows(
             chunks: acc.chunks,
             generated_digest_chunks: acc.generated_digest_chunks,
             generated_wrapper_chunks: acc.generated_wrapper_chunks,
+            routine_progress_chunks: acc.routine_progress_chunks,
+            unbounded_progress_chunks: acc.unbounded_progress_chunks,
+            unbounded_progress_older_30d: acc.unbounded_progress_older_30d,
         })
         .collect::<Vec<_>>();
     rows.sort_by(|left, right| {
@@ -487,13 +597,16 @@ fn render_markdown(report: &AuditReport) -> String {
         out.push_str(&format!("- data_dir: `{data_dir}`\n"));
     }
     out.push_str(&format!(
-        "- tenants: `{}`; metadata_active_chunks: `{}`; scanned_chunks: `{}`; unreadable_active_chunks: `{}`; generated_digest_chunks: `{}`; generated_wrapper_chunks: `{}`; unscoped_chunks: `{}`\n",
+        "- tenants: `{}`; metadata_active_chunks: `{}`; scanned_chunks: `{}`; unreadable_active_chunks: `{}`; generated_digest_chunks: `{}`; generated_wrapper_chunks: `{}`; routine_progress_chunks: `{}`; unbounded_progress_chunks: `{}`; unbounded_progress_older_30d: `{}`; unscoped_chunks: `{}`\n",
         report.totals.tenant_count,
         report.totals.metadata_active_chunks,
         report.totals.scanned_chunks,
         report.totals.unreadable_active_chunks,
         report.totals.generated_digest_chunks,
         report.totals.generated_wrapper_chunks,
+        report.totals.routine_progress_chunks,
+        report.totals.unbounded_progress_chunks,
+        report.totals.unbounded_progress_older_30d,
         report.totals.unscoped_chunks
     ));
     if let Some(storage) = &report.storage {
@@ -542,6 +655,12 @@ fn render_markdown(report: &AuditReport) -> String {
             tenant.unscoped_chunks
         ));
         out.push_str(&format!(
+            "- routine_progress: `{}`; unbounded_progress: `{}`; unbounded_progress_older_30d: `{}`\n",
+            tenant.routine_progress_chunks,
+            tenant.unbounded_progress_chunks,
+            tenant.unbounded_progress_older_30d
+        ));
+        out.push_str(&format!(
             "- age_buckets: last_24h=`{}`, last_7d=`{}`, last_30d=`{}`, older_30d=`{}`, missing=`{}`\n",
             tenant.age_buckets.last_24h,
             tenant.age_buckets.last_7d,
@@ -563,10 +682,13 @@ fn render_markdown(report: &AuditReport) -> String {
             for project in &tenant.projects {
                 let label = project.project_id.as_deref().unwrap_or("<unscoped>");
                 out.push_str(&format!(
-                    "- `{label}`: chunks=`{}`, generated_digest=`{}`, generated_wrappers=`{}`\n",
+                    "- `{label}`: chunks=`{}`, generated_digest=`{}`, generated_wrappers=`{}`, routine_progress=`{}`, unbounded_progress=`{}`, unbounded_progress_older_30d=`{}`\n",
                     project.chunks,
                     project.generated_digest_chunks,
-                    project.generated_wrapper_chunks
+                    project.generated_wrapper_chunks,
+                    project.routine_progress_chunks,
+                    project.unbounded_progress_chunks,
+                    project.unbounded_progress_older_30d
                 ));
             }
         }
@@ -634,28 +756,35 @@ mod tests {
         chunk.with_tags(tags.into_iter().map(str::to_string).collect())
     }
 
+    fn scanned(chunk: MemoryChunk, expires_at_ms: Option<i64>) -> ScannedChunk {
+        ScannedChunk {
+            chunk,
+            expires_at_ms,
+        }
+    }
+
     #[test]
     fn summary_counts_generated_digest_wrappers_and_aliases() {
         let now = 100 * 86_400_000;
         let chunks = vec![
-            chunk(
+            scanned(chunk(
                 "Task digest status generated for task digest_task_highlight_library::project_bester_hosting_highlight_library.\nArtifact role: highlight_library\nSummary: Highlight library for bester_hosting contains 0 ranked lessons.",
                 Some("bester_hosting"),
                 vec!["task:status:generated", "task:role:highlight_library"],
                 now - 1_000,
-            ),
-            chunk(
+            ), None),
+            scanned(chunk(
                 "Validation: tailscale status shows bester-server online.",
                 Some("bester-hosting"),
                 vec!["kind:evidence"],
                 now - 2 * 86_400_000,
-            ),
-            chunk(
+            ), None),
+            scanned(chunk(
                 "Decision: keep userspace tailscale with TS_EXTRA_ARGS.",
                 None,
                 vec!["kind:decision"],
                 now - 40 * 86_400_000,
-            ),
+            ), None),
         ];
 
         let summary = summarize_chunks(&chunks, now);
@@ -677,6 +806,58 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(variants.contains(&"bester-hosting"));
         assert!(variants.contains(&"bester_hosting"));
+    }
+
+    #[test]
+    fn summary_counts_unbounded_routine_progress_debt() {
+        let now = 100 * 86_400_000;
+        let chunks = vec![
+            scanned(
+                chunk(
+                    "Mapped auth middleware touchpoints; next step is validation.",
+                    Some("auth"),
+                    vec!["kind:progress"],
+                    now - 40 * 86_400_000,
+                ),
+                None,
+            ),
+            scanned(
+                chunk(
+                    "Mapped API touchpoints; next step is validation.",
+                    Some("api"),
+                    vec!["kind:progress"],
+                    now - 2 * 86_400_000,
+                ),
+                Some(now + 14 * 86_400_000),
+            ),
+            scanned(
+                chunk(
+                    "Validation: auth tests passed.",
+                    Some("auth"),
+                    vec!["kind:progress", "kind:evidence"],
+                    now - 40 * 86_400_000,
+                ),
+                None,
+            ),
+            scanned(
+                chunk(
+                    "Reusable progress lesson.",
+                    Some("auth"),
+                    vec!["kind:progress", "priority:8"],
+                    now - 40 * 86_400_000,
+                ),
+                None,
+            ),
+        ];
+
+        let summary = summarize_chunks(&chunks, now);
+        assert_eq!(summary.routine_progress_chunks, 2);
+        assert_eq!(summary.unbounded_progress_chunks, 1);
+        assert_eq!(summary.unbounded_progress_older_30d, 1);
+        let auth = summary.projects.get(&Some("auth".to_string())).unwrap();
+        assert_eq!(auth.routine_progress_chunks, 1);
+        assert_eq!(auth.unbounded_progress_chunks, 1);
+        assert_eq!(auth.unbounded_progress_older_30d, 1);
     }
 
     #[test]
@@ -702,6 +883,9 @@ mod tests {
             generated_digest_ratio: 1.0 / 3.0,
             generated_wrapper_chunks: 1,
             generated_wrapper_ratio: 1.0 / 3.0,
+            routine_progress_chunks: 2,
+            unbounded_progress_chunks: 1,
+            unbounded_progress_older_30d: 1,
             unscoped_chunks: 1,
             age_buckets: AgeBuckets {
                 last_24h: 1,
@@ -717,6 +901,9 @@ mod tests {
                 chunks: 2,
                 generated_digest_chunks: 1,
                 generated_wrapper_chunks: 1,
+                routine_progress_chunks: 2,
+                unbounded_progress_chunks: 1,
+                unbounded_progress_older_30d: 1,
                 unscoped: false,
             }],
             project_alias_groups: Vec::new(),
@@ -738,6 +925,9 @@ mod tests {
                 unreadable_active_chunks: 1,
                 generated_digest_chunks: 1,
                 generated_wrapper_chunks: 1,
+                routine_progress_chunks: 2,
+                unbounded_progress_chunks: 1,
+                unbounded_progress_older_30d: 1,
                 unscoped_chunks: 1,
             },
             tenants: vec![tenant],
@@ -748,7 +938,9 @@ mod tests {
         assert!(rendered.contains("unreadable_active_chunks: `1`"));
         assert!(rendered.contains("readable_active_ratio: `0.750`"));
         assert!(rendered.contains("generated_digest: `1`"));
+        assert!(rendered.contains("unbounded_progress_older_30d: `1`"));
         assert!(rendered.contains("## Tenant `tenant`"));
         assert!(rendered.contains("`proj`: chunks=`2`"));
+        assert!(rendered.contains("routine_progress=`2`"));
     }
 }

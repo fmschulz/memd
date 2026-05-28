@@ -9,6 +9,9 @@ Task tag: `indexing`
 
 ## Record Indexing Intent
 
+Indexing intent is short-lived by default; tag verified indexing results as
+`kind:evidence` or `kind:finish` if later agents should keep them.
+
 ```bash
 memd add \
   --tenant-id repo-memory \

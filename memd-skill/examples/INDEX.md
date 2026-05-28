@@ -46,7 +46,9 @@ Key commands:
 
 ## Choosing Chunk Types
 
-Use `summary` for task progress and finishes.
+Use `summary` for task progress and finishes; routine `kind:progress`
+summaries are short-lived by default, while `kind:finish` or explicit
+`priority:N` marks reusable outcomes.
 Use `trace` for commands, runs, logs, and tool outputs.
 Use `research` for evidence and analysis.
 Use `decision` for explicit choices and rationale.
