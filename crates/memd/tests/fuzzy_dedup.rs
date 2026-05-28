@@ -7,6 +7,7 @@ use common::*;
 
 use memd::store::metadata::MetadataStore;
 use memd::store::Store;
+use memd::types::ChunkType;
 
 #[tokio::test]
 async fn add_writes_canonical_text_and_find_by_canonical_returns_match() {
@@ -55,6 +56,204 @@ async fn add_persists_canonical_text_for_plain_inserts_without_lifecycle_fields(
         meta.canonical_text.as_deref(),
         Some("hello world"),
         "plain memory.add must persist canonical_text on every write"
+    );
+}
+
+#[tokio::test]
+async fn add_reuses_exact_content_duplicate_by_default() {
+    let (server, _tmp) = test_server().await;
+    let first = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "p1",
+            "text": "Default exact content hash sentinel.",
+            "type": "doc",
+        }),
+    )
+    .await;
+    let first_body = parse_result_text(&first);
+    let first_id = first_body["chunk_id"].as_str().expect("first id");
+
+    let second = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "p1",
+            "text": "Default exact content hash sentinel.",
+            "type": "doc",
+        }),
+    )
+    .await;
+    let second_body = parse_result_text(&second);
+    assert_eq!(second_body["chunk_id"].as_str(), Some(first_id));
+    assert_eq!(
+        second_body["dedupe_decision"].as_str(),
+        Some("reused_existing_exact_content")
+    );
+    assert_eq!(second_body["deduped_existing_id"].as_str(), Some(first_id));
+
+    let ps = server
+        .store()
+        .as_persistent()
+        .expect("test_server uses PersistentStore");
+    let first_chunk_id = memd::types::ChunkId::parse(first_id).expect("valid id");
+    let first_meta = ps
+        .metadata()
+        .get(&tenant("t"), &first_chunk_id)
+        .expect("metadata.get")
+        .expect("first row");
+    let matches = ps
+        .metadata()
+        .list_live_by_content_hash(
+            &tenant("t"),
+            Some("p1"),
+            ChunkType::Doc,
+            &first_meta.hash,
+            10,
+        )
+        .expect("content hash lookup");
+    assert_eq!(
+        matches.len(),
+        1,
+        "exact duplicate add should not create a second live row"
+    );
+}
+
+#[tokio::test]
+async fn default_content_dedupe_is_scoped_and_preserves_new_tags() {
+    let (server, _tmp) = test_server().await;
+    let text = "Scoped exact content hash sentinel.";
+    let first = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "p1",
+            "text": text,
+            "type": "doc",
+        }),
+    )
+    .await;
+    let first_id = parse_result_text(&first)["chunk_id"]
+        .as_str()
+        .expect("first id")
+        .to_string();
+
+    let other_project = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "p2",
+            "text": text,
+            "type": "doc",
+        }),
+    )
+    .await;
+    let other_project_id = parse_result_text(&other_project)["chunk_id"]
+        .as_str()
+        .expect("other project id")
+        .to_string();
+
+    let other_kind = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "p1",
+            "text": text,
+            "type": "code",
+        }),
+    )
+    .await;
+    let other_kind_id = parse_result_text(&other_kind)["chunk_id"]
+        .as_str()
+        .expect("other kind id")
+        .to_string();
+
+    let new_tag = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "p1",
+            "text": text,
+            "type": "doc",
+            "tags": ["kind:evidence"],
+        }),
+    )
+    .await;
+    let new_tag_body = parse_result_text(&new_tag);
+    let new_tag_id = new_tag_body["chunk_id"].as_str().expect("new tag id");
+
+    assert_ne!(first_id, other_project_id);
+    assert_ne!(first_id, other_kind_id);
+    assert_ne!(first_id, new_tag_id);
+    assert!(
+        new_tag_body.get("dedupe_decision").is_none(),
+        "new user tags should be preserved by writing a new row"
+    );
+}
+
+#[tokio::test]
+async fn add_batch_reuses_existing_and_within_batch_exact_duplicates() {
+    let (server, _tmp) = test_server().await;
+    let seed = call_tool(
+        &server,
+        "memory.add",
+        serde_json::json!({
+            "tenant_id": "t",
+            "project_id": "p1",
+            "text": "batch default dedupe alpha",
+            "type": "doc",
+        }),
+    )
+    .await;
+    let seed_id = parse_result_text(&seed)["chunk_id"]
+        .as_str()
+        .expect("seed id")
+        .to_string();
+
+    let batch = call_tool(
+        &server,
+        "memory.add_batch",
+        serde_json::json!({
+            "tenant_id": "t",
+            "chunks": [
+                { "project_id": "p1", "text": "batch default dedupe alpha", "type": "doc" },
+                { "project_id": "p1", "text": "batch default dedupe beta",  "type": "doc" },
+                { "project_id": "p1", "text": "batch default dedupe beta",  "type": "doc" }
+            ],
+        }),
+    )
+    .await;
+    let body = parse_result_text(&batch);
+    let ids = body["chunk_ids"]
+        .as_array()
+        .expect("chunk_ids")
+        .iter()
+        .map(|v| v.as_str().expect("id").to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(ids.len(), 3);
+    assert_eq!(ids[0], seed_id);
+    assert_eq!(ids[1], ids[2]);
+
+    let decisions = body["dedupe_decisions"]
+        .as_array()
+        .expect("dedupe decisions")
+        .iter()
+        .map(|v| v.as_str().expect("decision").to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        decisions,
+        vec![
+            "reused_existing_exact_content".to_string(),
+            "inserted".to_string(),
+            "reused_existing_exact_content".to_string(),
+        ]
     );
 }
 

@@ -23,6 +23,10 @@ upserts CLI guardrail blocks into `~/.codex/AGENTS.md` and
    logs.
 
 The installer does not register external client tools or wrap commands.
+The write-quality rules are documented in the
+[Operational contract](operational-contract.md): agents should write concise
+durable facts, avoid transcript-like process notes, and use audit/eval commands
+when startup context looks noisy.
 
 ## Install
 

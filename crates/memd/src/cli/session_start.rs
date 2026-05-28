@@ -150,9 +150,10 @@ pub(super) async fn run_session_start_inner<S: Store>(
             project_dir: project_dir.clone(),
             output: PathBuf::from("memory.md"),
             project_limit: 10,
-            global_limit: 10,
+            global_limit: 0,
             candidate_k: 40,
             cross_tenant: false,
+            explain_output: None,
         },
     )
     .await?;

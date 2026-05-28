@@ -176,7 +176,7 @@ async fn main() {
                 eprintln!("error: --warm required is not supported with --in-memory");
                 std::process::exit(1);
             }
-        } else {
+        } else if mode != memd::cli::WarmMode::Off {
             match try_run_warm_client(&warm_config, &cmd).await {
                 Ok(true) => return,
                 Ok(false) => {}

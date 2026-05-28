@@ -161,7 +161,10 @@ Mandatory `memd` CLI contract for substantive technical and scientific work:
 - Before saying the work is impossible, blocked, cannot be answered, or needs user context that might already exist in shared memory, run a relevant `memd` CLI search first. If no relevant record is found, say exactly what you checked.
 - If the work changes understanding, runs tools, produces findings, or could matter to later sessions, record it with `memd add` before the final answer.
 - Use `memd add --chunk-type summary|trace|decision|research|plan --tags kind:progress|run|evidence|decision|finish,priority:N,... --text "<summary>"`; include `--project-id` when known. Use `priority:N` for durable lessons that should be candidates for future `memory.md` refreshes.
-- Do not store full chat logs, play-by-play transcripts, or low-value temporary process notes. Store concise, durable facts that another agent is likely to reuse.
+- Keep durable writes bounded: a normal single task should leave fewer than 10 durable chunks, usually one decision, one evidence/run record, and one finish summary.
+- Durable writes should contain a decision+rationale, validated fix/result, root cause, command/path/parameter/metric/version, evidence for a claim, or durable follow-up. Avoid "starting", "looking", or "made progress" notes without concrete outcomes.
+- Do not store full chat logs, play-by-play transcripts, generated digest wrappers, or duplicate summaries that add no new evidence/tags/provenance. Store concise, durable facts that another agent is likely to reuse.
+- If startup memory looks noisy, inspect it with `memd eval-memory-md --project-dir . --min-useful-ratio 0.8 --max-generated-wrappers 0` and `memd memory-md --project-dir . --output memory.md --explain-output .memd/memory-explain.json`.
 - Do not store secrets or private credentials in `memd`: cookies, tokens, API keys, passwords, verification codes, ID numbers, bank cards, private contact details, third-party account configuration, or sensitive values copied from logs.
 - Do not provide a final substantive answer until the CLI retrieval and CLI write have both happened, unless `memd` is unavailable.
 - If `memd` is unavailable or misconfigured, treat that as a blocker and say so explicitly rather than silently skipping memory usage.

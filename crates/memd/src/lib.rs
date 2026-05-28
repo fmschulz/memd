@@ -23,6 +23,7 @@ pub mod task_memory;
 pub mod text;
 pub mod tiered;
 pub mod types;
+pub mod write_admission;
 
 pub use chunking::{chunk_text, Chunk, ChunkingConfig};
 pub use compaction::{

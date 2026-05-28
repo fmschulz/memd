@@ -17,15 +17,20 @@ use crate::store::{Store, TenantManager};
 use crate::types::{ChunkId, MemoryChunk, ProjectId, Source, TenantId};
 
 mod args;
+mod audit;
 mod batch;
 mod call;
+mod cleanup_plan;
 mod consolidate;
 mod doctor;
 mod eval_counterfactual;
+mod eval_retrieval;
+mod eval_write_quality;
 mod maintenance;
 mod memory_md;
 mod ops_bridge;
 mod paths;
+mod purge;
 mod render;
 mod search;
 mod session_start;
@@ -40,12 +45,16 @@ pub use args::{
     WarmProcessConfig,
 };
 use args::{ProjectScopeConfig, SearchRerankerOptions};
+use audit::{render_audit_report, run_audit, AuditOptions};
 use batch::{read_batch_input, run_batch_jsonl, stream_batch_jsonl};
 use call::parse_call_arguments;
+use cleanup_plan::{render_cleanup_plan, run_cleanup_plan, CleanupPlanOptions};
 use consolidate::{run_consolidate, ConsolidateOptions};
 use doctor::{run_doctor, DoctorOptions};
 use eval_counterfactual::{run_eval_counterfactual, EvalCounterfactualOptions};
-use memory_md::{refresh_memory_md, MemoryMdOptions};
+use eval_retrieval::{run_eval_retrieval, EvalRetrievalOptions};
+use eval_write_quality::{run_eval_write_quality, EvalWriteQualityOptions};
+use memory_md::{refresh_memory_md, run_memory_md_eval, MemoryMdEvalOptions, MemoryMdOptions};
 use ops_bridge::cli_call_tool;
 use paths::{
     absolutize_project_dir, build_tenant_scope_config, normalize_absolute, path_is_inside,
@@ -54,6 +63,10 @@ use paths::{
 };
 #[cfg(test)]
 use paths::{discover_project_data_dir_from, resolve_export_markdown_data_dirs_from};
+use purge::{
+    inspect_purge_archive, render_purge_archive_inspection, run_purge, PurgeArchiveInspectOptions,
+    PurgeOptions,
+};
 use render::{
     render_agent_context, render_export, render_guardrail_block, render_search_payload,
     unwrap_content_payload, upsert_guardrail_file, write_cli_log, write_rendered,
@@ -97,7 +110,21 @@ pub async fn run_cli<S: Store>(
             }
 
             let mut effective_tags = tags.unwrap_or_default();
-            crate::auto_priority::stamp_auto_priority(chunk_type, &text, &mut effective_tags);
+            let admission = crate::write_admission::classify_write(
+                chunk_type,
+                &text,
+                &effective_tags,
+                crate::types::IngestionMode::Document,
+            );
+            if admission.decision == crate::write_admission::AdmissionDecision::Reject {
+                return Err(crate::error::MemdError::ValidationError(format!(
+                    "memory.add rejected by quality gate: {}",
+                    admission.reason
+                )));
+            }
+            if admission.decision == crate::write_admission::AdmissionDecision::Durable {
+                crate::auto_priority::stamp_auto_priority(chunk_type, &text, &mut effective_tags);
+            }
             chunk = chunk.with_tags(effective_tags);
 
             if source_uri.is_some() || source_path.is_some() {
@@ -113,7 +140,9 @@ pub async fn run_cli<S: Store>(
             info!(chunk_id = %chunk_id, "chunk added");
 
             let output = json!({
-                "chunk_id": chunk_id.to_string()
+                "chunk_id": chunk_id.to_string(),
+                "admission_decision": admission.decision.as_str(),
+                "admission_reason": admission.reason,
             });
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
@@ -207,6 +236,7 @@ pub async fn run_cli<S: Store>(
             global_limit,
             candidate_k,
             cross_tenant,
+            explain_output,
         } => {
             let result = refresh_memory_md(
                 store,
@@ -219,8 +249,87 @@ pub async fn run_cli<S: Store>(
                     global_limit,
                     candidate_k,
                     cross_tenant,
+                    explain_output,
                 },
             )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+
+        CliCommand::EvalMemoryMd {
+            tenant_id,
+            project_id,
+            project_dir,
+            output,
+            project_limit,
+            candidate_k,
+            top_n,
+            min_useful_ratio,
+            max_generated_wrappers,
+        } => {
+            let result = run_memory_md_eval(
+                store,
+                MemoryMdEvalOptions {
+                    tenant_id,
+                    project_id,
+                    project_dir,
+                    output,
+                    project_limit,
+                    candidate_k,
+                    top_n,
+                    min_useful_ratio,
+                    max_generated_wrappers,
+                },
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+
+        CliCommand::EvalRetrieval {
+            tenant_id,
+            project_id,
+            project_dir,
+            queries,
+            k,
+            min_precision_at_k,
+            min_hit_rate_at_k,
+            min_known_recall_at_k,
+            min_mrr,
+        } => {
+            let result = run_eval_retrieval(
+                store,
+                EvalRetrievalOptions {
+                    tenant_id,
+                    project_id,
+                    project_dir,
+                    queries_path: queries,
+                    k,
+                    min_precision_at_k,
+                    min_hit_rate_at_k,
+                    min_known_recall_at_k,
+                    min_mrr,
+                },
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+
+        CliCommand::EvalWriteQuality {
+            project_dir,
+            min_rejection_or_downgrade_rate,
+            min_duplicate_reuse_rate,
+            max_total_chunks,
+            max_disk_bytes,
+            require_retention_compaction,
+        } => {
+            let result = run_eval_write_quality(EvalWriteQualityOptions {
+                project_dir,
+                min_rejection_or_downgrade_rate,
+                min_duplicate_reuse_rate,
+                max_total_chunks,
+                max_disk_bytes,
+                require_retention_compaction,
+            })
             .await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
@@ -282,10 +391,14 @@ pub async fn run_cli<S: Store>(
             project_dir,
             format,
         } => {
-            run_doctor(DoctorOptions {
-                project_dir,
-                format,
-            })?;
+            run_doctor(
+                store,
+                DoctorOptions {
+                    project_dir,
+                    format,
+                },
+            )
+            .await?;
         }
 
         CliCommand::Call {
@@ -419,6 +532,107 @@ pub async fn run_cli<S: Store>(
             }
 
             println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+
+        CliCommand::Audit {
+            tenant_id,
+            project_id,
+            format,
+            output,
+            page_size,
+            duplicate_examples,
+            top_projects,
+        } => {
+            let report = run_audit(
+                store,
+                tenant_manager,
+                AuditOptions {
+                    tenant_id,
+                    project_id,
+                    page_size,
+                    duplicate_examples,
+                    top_projects,
+                },
+            )
+            .await?;
+            write_rendered(output.as_deref(), &render_audit_report(&report, format)?)?;
+        }
+
+        CliCommand::CleanupPlan {
+            tenant_id,
+            project_id,
+            format,
+            output,
+            archive_dir,
+            older_than_days,
+            candidate_limit,
+            page_size,
+            top_projects,
+        } => {
+            let report = run_cleanup_plan(
+                store,
+                tenant_manager,
+                CleanupPlanOptions {
+                    tenant_id,
+                    project_id,
+                    archive_dir,
+                    older_than_days,
+                    candidate_limit,
+                    page_size,
+                    top_projects,
+                },
+            )
+            .await?;
+            write_rendered(output.as_deref(), &render_cleanup_plan(&report, format)?)?;
+        }
+
+        CliCommand::Purge {
+            tenant_id,
+            project_id,
+            older_than_days,
+            limit,
+            include_unreadable_active,
+            archive,
+            apply,
+            vacuum_metadata,
+            rewrite_segments,
+        } => {
+            let result = run_purge(
+                store,
+                PurgeOptions {
+                    tenant_id,
+                    project_id,
+                    older_than_days,
+                    limit,
+                    include_unreadable_active,
+                    archive,
+                    apply,
+                    vacuum_metadata,
+                    rewrite_segments,
+                },
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+
+        CliCommand::PurgeArchive {
+            archive,
+            expect_tenant_id,
+            expect_project_id,
+            min_records,
+            format,
+            output,
+        } => {
+            let report = inspect_purge_archive(PurgeArchiveInspectOptions {
+                archive,
+                expect_tenant_id,
+                expect_project_id,
+                min_records,
+            })?;
+            write_rendered(
+                output.as_deref(),
+                &render_purge_archive_inspection(&report, format)?,
+            )?;
         }
 
         CliCommand::Export {
@@ -798,9 +1012,12 @@ async fn collect_all_chunks<S: Store>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::persistent::{PersistentStore, PersistentStoreConfig};
     use crate::store::MemoryStore;
+    use std::collections::HashSet;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use tempfile::tempdir;
+    use tempfile::{tempdir, TempDir};
 
     #[test]
     fn parse_chunk_types() {
@@ -816,6 +1033,58 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("memd_export_test_{now}.{ext}"))
+    }
+
+    fn make_persistent_store() -> (PersistentStore, TempDir) {
+        let dir = tempdir().unwrap();
+        let store = PersistentStore::open(PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            segment_max_chunks: 100,
+            wal_checkpoint_interval: 10,
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            ..Default::default()
+        })
+        .unwrap();
+        (store, dir)
+    }
+
+    fn segment_payloads_contain(root: &std::path::Path, tenant: &TenantId, needle: &str) -> bool {
+        let segments_dir = root.join("tenants").join(tenant.as_str()).join("segments");
+        let Ok(entries) = std::fs::read_dir(segments_dir) else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            let payload = entry.path().join("payload.bin");
+            std::fs::read(payload)
+                .ok()
+                .map(|bytes| String::from_utf8_lossy(&bytes).contains(needle))
+                .unwrap_or(false)
+        })
+    }
+
+    #[tokio::test]
+    async fn cli_add_rejects_low_signal_progress_with_reason() {
+        let store = MemoryStore::new();
+        let result = run_cli(
+            &store,
+            None,
+            CliCommand::Add {
+                tenant_id: "quality_gate_cli".to_string(),
+                text: "starting to inspect the files".to_string(),
+                chunk_type: ChunkType::Summary,
+                project_id: None,
+                tags: Some(vec!["kind:progress".to_string()]),
+                source_uri: None,
+                source_path: None,
+            },
+        )
+        .await;
+
+        let err = result.expect_err("CLI add should reject low-signal progress");
+        assert!(err
+            .to_string()
+            .contains("memory.add rejected by quality gate"));
     }
 
     #[tokio::test]
@@ -930,7 +1199,8 @@ mod tests {
             .add(
                 MemoryChunk::new(
                     tenant.clone(),
-                    "project takeaway decision: use project-scoped metadata before payload reads",
+                    "Project architecture configuration deployment key decisions tradeoffs: \
+                     use project-scoped metadata before payload reads.",
                     ChunkType::Decision,
                 )
                 .with_project(ProjectId::from("memory_md_project"))
@@ -942,7 +1212,8 @@ mod tests {
             .add(
                 MemoryChunk::new(
                     tenant,
-                    "machine wide reusable takeaway: stop stale warm workers before replacing the bundled binary",
+                    "Machine wide reusable takeaways best practices recurring issues important paths \
+                     how to solve: stop stale warm workers before replacing the bundled binary.",
                     ChunkType::Summary,
                 )
                 .with_tags(vec!["kind:finish".to_string(), "priority:7".to_string()]),
@@ -963,6 +1234,7 @@ mod tests {
                 global_limit: 10,
                 candidate_k: 10,
                 cross_tenant: false,
+                explain_output: None,
             },
         )
         .await
@@ -970,10 +1242,941 @@ mod tests {
 
         let content = std::fs::read_to_string(dir.path().join("memory.md")).unwrap();
         assert!(content.contains("## Project Takeaways"));
+        assert!(content.contains("use project-scoped metadata before payload reads"));
         assert!(content.contains("memory_md_project"));
         assert!(content.contains("## Machine-Wide Takeaways"));
-        assert!(content.contains("memory_md_tenant"));
+        assert!(content.contains("stop stale warm workers before replacing the bundled binary"));
         assert!(content.contains("priority:"));
+    }
+
+    #[tokio::test]
+    async fn memory_md_writes_candidate_explanation_report() {
+        let store = MemoryStore::new();
+        let tenant = TenantId::new("memory_md_explain_tenant").unwrap();
+        store
+            .add(
+                MemoryChunk::new(
+                    tenant,
+                    "Project architecture configuration deployment key decisions tradeoffs: \
+                     Decision: keep candidate explanations for memory.md auditability.",
+                    ChunkType::Decision,
+                )
+                .with_project(ProjectId::from("memory_md_explain_project"))
+                .with_tags(vec!["kind:decision".to_string(), "priority:9".to_string()]),
+            )
+            .await
+            .unwrap();
+
+        let dir = tempdir().unwrap();
+        run_cli(
+            &store,
+            None,
+            CliCommand::MemoryMd {
+                tenant_id: Some("memory_md_explain_tenant".to_string()),
+                project_id: Some("memory_md_explain_project".to_string()),
+                project_dir: dir.path().to_path_buf(),
+                output: PathBuf::from("memory.md"),
+                project_limit: 10,
+                global_limit: 0,
+                candidate_k: 10,
+                cross_tenant: false,
+                explain_output: Some(PathBuf::from("memory-explain.json")),
+            },
+        )
+        .await
+        .unwrap();
+
+        let report_path = dir.path().join("memory-explain.json");
+        let report: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(report_path).unwrap()).unwrap();
+        let project_rows = report["project"].as_array().unwrap();
+        let displayed = project_rows
+            .iter()
+            .find(|row| row["display_status"] == "displayed")
+            .expect("expected at least one displayed candidate explanation");
+        assert_eq!(displayed["display_rank"], 1);
+        assert_eq!(displayed["filter_reason"], serde_json::Value::Null);
+        assert!(displayed["priority_breakdown"]["total"].as_f64().unwrap() > 0.0);
+        assert!(displayed["source"]
+            .as_str()
+            .unwrap()
+            .starts_with("project_"));
+        assert!(displayed["query"].as_str().unwrap().contains("project"));
+    }
+
+    #[tokio::test]
+    async fn memory_md_omits_global_takeaways_when_limit_zero() {
+        let store = MemoryStore::new();
+        let tenant = TenantId::new("memory_md_default_tenant").unwrap();
+        store
+            .add(
+                MemoryChunk::new(
+                    tenant.clone(),
+                    "Project architecture configuration deployment key decisions tradeoffs: \
+                     keep session startup scoped to project lessons.",
+                    ChunkType::Decision,
+                )
+                .with_project(ProjectId::from("memory_md_default_project"))
+                .with_tags(vec!["kind:decision".to_string(), "priority:9".to_string()]),
+            )
+            .await
+            .unwrap();
+        store
+            .add(
+                MemoryChunk::new(
+                    tenant,
+                    "Machine wide reusable takeaways best practices recurring issues important paths \
+                     how to solve: this should require explicit global-limit.",
+                    ChunkType::Summary,
+                )
+                .with_tags(vec!["kind:finish".to_string(), "priority:9".to_string()]),
+            )
+            .await
+            .unwrap();
+
+        let dir = tempdir().unwrap();
+        run_cli(
+            &store,
+            None,
+            CliCommand::MemoryMd {
+                tenant_id: Some("memory_md_default_tenant".to_string()),
+                project_id: Some("memory_md_default_project".to_string()),
+                project_dir: dir.path().to_path_buf(),
+                output: PathBuf::from("memory.md"),
+                project_limit: 10,
+                global_limit: 0,
+                candidate_k: 10,
+                cross_tenant: false,
+                explain_output: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join("memory.md")).unwrap();
+        assert!(content.contains("## Project Takeaways"));
+        assert!(content.contains("keep session startup scoped to project lessons"));
+        assert!(content.contains("memory_md_default_project"));
+        assert!(!content.contains("## Machine-Wide Takeaways"));
+        assert!(!content.contains("this should require explicit global-limit"));
+    }
+
+    #[tokio::test]
+    async fn eval_memory_md_passes_actionable_fixture() {
+        let store = MemoryStore::new();
+        let tenant = TenantId::new("memory_md_eval_tenant").unwrap();
+        let project = ProjectId::from("memory_md_eval_project");
+        for (text, tags, chunk_type) in [
+            (
+                "Project architecture configuration deployment key decisions tradeoffs: \
+                 Decision: keep project scopes explicit. Rationale: aliases hide drift.",
+                vec!["kind:decision".to_string(), "priority:9".to_string()],
+                ChunkType::Decision,
+            ),
+            (
+                "Project recurring failures bugs timeouts blockers fixes how to solve: \
+                 Validation: cargo test -p memd passed after the memory-md evaluator.",
+                vec!["kind:finish".to_string(), "priority:8".to_string()],
+                ChunkType::Summary,
+            ),
+            (
+                "Project recurring failures bugs timeouts blockers fixes how to solve: \
+                 Root cause: generated wrappers used to occupy startup memory.",
+                vec!["kind:finish".to_string(), "priority:8".to_string()],
+                ChunkType::Summary,
+            ),
+            (
+                "Project takeaways best practices key decisions recurring issues important files paths \
+                 how to solve: Command: memd eval-memory-md --tenant-id t --project-id p.",
+                vec!["kind:run".to_string(), "priority:8".to_string()],
+                ChunkType::Trace,
+            ),
+            (
+                "Project takeaways best practices key decisions recurring issues important files paths \
+                 how to solve: Follow-up: keep the useful-top-10 threshold at 0.8.",
+                vec!["kind:finish".to_string(), "priority:8".to_string()],
+                ChunkType::Summary,
+            ),
+        ] {
+            store
+                .add(
+                    MemoryChunk::new(tenant.clone(), text.to_string(), chunk_type)
+                        .with_project(project.clone())
+                        .with_tags(tags),
+                )
+                .await
+                .unwrap();
+        }
+
+        let dir = tempdir().unwrap();
+        run_cli(
+            &store,
+            None,
+            CliCommand::EvalMemoryMd {
+                tenant_id: Some("memory_md_eval_tenant".to_string()),
+                project_id: Some("memory_md_eval_project".to_string()),
+                project_dir: dir.path().to_path_buf(),
+                output: PathBuf::from("memory.md"),
+                project_limit: 10,
+                candidate_k: 20,
+                top_n: 10,
+                min_useful_ratio: 0.8,
+                max_generated_wrappers: 0,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn eval_retrieval_passes_known_useful_fixture() {
+        let store = MemoryStore::new();
+        let tenant = TenantId::new("retrieval_eval_tenant").unwrap();
+        let project = ProjectId::from("retrieval_eval_project");
+        let useful_a = store
+            .add(
+                MemoryChunk::new(
+                    tenant.clone(),
+                    "alpha retrieval gate exactneedle decision: keep fixed useful chunk ids.",
+                    ChunkType::Decision,
+                )
+                .with_project(project.clone())
+                .with_tags(vec!["kind:decision".to_string(), "priority:9".to_string()]),
+            )
+            .await
+            .unwrap();
+        let useful_b = store
+            .add(
+                MemoryChunk::new(
+                    tenant.clone(),
+                    "alpha retrieval gate exactneedle validation: precision at k is measured.",
+                    ChunkType::Summary,
+                )
+                .with_project(project.clone())
+                .with_tags(vec!["kind:finish".to_string(), "priority:8".to_string()]),
+            )
+            .await
+            .unwrap();
+
+        let dir = tempdir().unwrap();
+        let queries = dir.path().join("retrieval_queries.jsonl");
+        std::fs::write(
+            &queries,
+            format!(
+                "{}\n",
+                json!({
+                    "label": "alpha_gate",
+                    "query": "alpha retrieval gate exactneedle",
+                    "useful_chunk_ids": [useful_a.to_string(), useful_b.to_string()],
+                })
+            ),
+        )
+        .unwrap();
+
+        run_cli(
+            &store,
+            None,
+            CliCommand::EvalRetrieval {
+                tenant_id: "retrieval_eval_tenant".to_string(),
+                project_id: Some("retrieval_eval_project".to_string()),
+                project_dir: dir.path().to_path_buf(),
+                queries: Some(queries),
+                k: 3,
+                min_precision_at_k: 0.6,
+                min_hit_rate_at_k: 1.0,
+                min_known_recall_at_k: 0.0,
+                min_mrr: 0.0,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn eval_retrieval_fails_when_precision_threshold_is_not_met() {
+        let store = MemoryStore::new();
+        let tenant = TenantId::new("retrieval_eval_fail_tenant").unwrap();
+        let project = ProjectId::from("retrieval_eval_fail_project");
+        let useful = store
+            .add(
+                MemoryChunk::new(
+                    tenant,
+                    "beta retrieval gate exactneedle useful decision.",
+                    ChunkType::Decision,
+                )
+                .with_project(project)
+                .with_tags(vec!["kind:decision".to_string(), "priority:9".to_string()]),
+            )
+            .await
+            .unwrap();
+
+        let dir = tempdir().unwrap();
+        let queries = dir.path().join("retrieval_queries.jsonl");
+        std::fs::write(
+            &queries,
+            format!(
+                "{}\n",
+                json!({
+                    "label": "beta_gate",
+                    "query": "beta retrieval gate exactneedle",
+                    "useful_chunk_ids": [useful.to_string()],
+                })
+            ),
+        )
+        .unwrap();
+
+        let err = run_cli(
+            &store,
+            None,
+            CliCommand::EvalRetrieval {
+                tenant_id: "retrieval_eval_fail_tenant".to_string(),
+                project_id: Some("retrieval_eval_fail_project".to_string()),
+                project_dir: dir.path().to_path_buf(),
+                queries: Some(queries),
+                k: 5,
+                min_precision_at_k: 1.0,
+                min_hit_rate_at_k: 1.0,
+                min_known_recall_at_k: 0.0,
+                min_mrr: 0.0,
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("max_possible_precision_at_5"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn generic_search_suppresses_generated_digest_wrappers() {
+        let store = MemoryStore::new();
+        let tenant = TenantId::new("search_digest_suppression_tenant").unwrap();
+        let project = ProjectId::from("search_digest_suppression_project");
+        let generated = store
+            .add(
+                MemoryChunk::new(
+                    tenant.clone(),
+                    "gamma exactneedle generated wrapper should not surface in generic search",
+                    ChunkType::Summary,
+                )
+                .with_project(project.clone())
+                .with_tags(vec![
+                    "task:status:generated".to_string(),
+                    "task:role:highlight_library".to_string(),
+                    "priority:9".to_string(),
+                ]),
+            )
+            .await
+            .unwrap();
+        let useful = store
+            .add(
+                MemoryChunk::new(
+                    tenant.clone(),
+                    "gamma exactneedle durable decision should surface in generic search",
+                    ChunkType::Decision,
+                )
+                .with_project(project.clone())
+                .with_tags(vec!["kind:decision".to_string(), "priority:8".to_string()]),
+            )
+            .await
+            .unwrap();
+
+        let payload = search::cli_search_payload_silent(
+            &store,
+            "search_digest_suppression_tenant".to_string(),
+            Some("search_digest_suppression_project".to_string()),
+            "gamma exactneedle".to_string(),
+            5,
+            true,
+            Some(4000),
+            CliQueryMode::Generic,
+            false,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        let ids = payload["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row["chunk_id"].as_str())
+            .collect::<Vec<_>>();
+        let generated = generated.to_string();
+        let useful = useful.to_string();
+        assert!(!ids.contains(&generated.as_str()), "{ids:?}");
+        assert!(ids.contains(&useful.as_str()), "{ids:?}");
+    }
+
+    #[tokio::test]
+    async fn purge_dry_run_reports_candidates_without_mutating() {
+        use crate::store::metadata::MetadataStore;
+
+        let (store, _dir) = make_persistent_store();
+        let tenant = TenantId::new("purge_dry_run_tenant").unwrap();
+        let project = ProjectId::from("purge_project");
+        let hidden = store
+            .add(
+                MemoryChunk::new(
+                    tenant.clone(),
+                    "expired progress that should be purge eligible",
+                    ChunkType::Summary,
+                )
+                .with_project(project.clone()),
+            )
+            .await
+            .unwrap();
+        let durable = store
+            .add(
+                MemoryChunk::new(
+                    tenant.clone(),
+                    "durable decision that must survive purge planning",
+                    ChunkType::Decision,
+                )
+                .with_project(project.clone()),
+            )
+            .await
+            .unwrap();
+        store
+            .metadata()
+            .update_lifecycle(
+                &tenant,
+                &hidden,
+                &crate::types::LifecycleDelta {
+                    status: Some(crate::types::ChunkStatus::Expired),
+                    lifecycle_updated_at_ms: Some(1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let report = purge::run_purge(
+            &store,
+            purge::PurgeOptions {
+                tenant_id: tenant.to_string(),
+                project_id: Some("purge_project".to_string()),
+                older_than_days: 1,
+                limit: 100,
+                include_unreadable_active: false,
+                archive: None,
+                apply: false,
+                vacuum_metadata: false,
+                rewrite_segments: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report["status"], "dry_run");
+        assert_eq!(report["candidate_count"], 1);
+        assert!(store.get(&tenant, &hidden).await.unwrap().is_some());
+        assert!(store.get(&tenant, &durable).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn purge_dry_run_can_include_unreadable_active_metadata() {
+        use crate::store::metadata::MetadataStore;
+
+        let (store, dir) = make_persistent_store();
+        let tenant = TenantId::new("purge_unreadable_dry_run_tenant").unwrap();
+        let project = ProjectId::from("purge_project");
+        let unreadable = store
+            .add(
+                MemoryChunk::new(
+                    tenant.clone(),
+                    "live metadata row whose segment payload disappeared",
+                    ChunkType::Summary,
+                )
+                .with_project(project.clone()),
+            )
+            .await
+            .unwrap();
+        let healthy = store
+            .add(
+                MemoryChunk::new(
+                    tenant.clone(),
+                    "healthy live payload must not be an unreadable purge candidate",
+                    ChunkType::Decision,
+                )
+                .with_project(project),
+            )
+            .await
+            .unwrap();
+        let meta = store
+            .metadata()
+            .get(&tenant, &unreadable)
+            .unwrap()
+            .expect("unreadable metadata");
+        let conn = rusqlite::Connection::open(dir.path().join("metadata.db")).unwrap();
+        conn.execute(
+            "UPDATE chunks SET segment_id = ?1 WHERE tenant_id = ?2 AND chunk_id = ?3",
+            rusqlite::params![
+                (meta.segment_id + 10_000) as i64,
+                tenant.as_str(),
+                unreadable.to_string()
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let default_report = purge::run_purge(
+            &store,
+            purge::PurgeOptions {
+                tenant_id: tenant.to_string(),
+                project_id: Some("purge_project".to_string()),
+                older_than_days: 1,
+                limit: 100,
+                include_unreadable_active: false,
+                archive: None,
+                apply: false,
+                vacuum_metadata: false,
+                rewrite_segments: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(default_report["candidate_count"], 0);
+
+        let report = purge::run_purge(
+            &store,
+            purge::PurgeOptions {
+                tenant_id: tenant.to_string(),
+                project_id: Some("purge_project".to_string()),
+                older_than_days: 1,
+                limit: 100,
+                include_unreadable_active: true,
+                archive: None,
+                apply: false,
+                vacuum_metadata: false,
+                rewrite_segments: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report["status"], "dry_run");
+        assert_eq!(report["candidate_count"], 1);
+        assert_eq!(report["hidden_candidate_count"], 0);
+        assert_eq!(report["unreadable_active_candidate_count"], 1);
+        assert_eq!(report["include_unreadable_active"], true);
+        assert!(report["candidate_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id.as_str() == Some(&unreadable.to_string())));
+        assert!(store.get(&tenant, &healthy).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn purge_apply_requires_archive_before_deleting() {
+        use crate::store::metadata::MetadataStore;
+
+        let (store, _dir) = make_persistent_store();
+        let tenant = TenantId::new("purge_archive_required_tenant").unwrap();
+        let hidden = store
+            .add(MemoryChunk::new(
+                tenant.clone(),
+                "expired chunk needs archive before purge",
+                ChunkType::Summary,
+            ))
+            .await
+            .unwrap();
+        store
+            .metadata()
+            .update_lifecycle(
+                &tenant,
+                &hidden,
+                &crate::types::LifecycleDelta {
+                    status: Some(crate::types::ChunkStatus::Expired),
+                    lifecycle_updated_at_ms: Some(1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let err = purge::run_purge(
+            &store,
+            purge::PurgeOptions {
+                tenant_id: tenant.to_string(),
+                project_id: None,
+                older_than_days: 1,
+                limit: 100,
+                include_unreadable_active: false,
+                archive: None,
+                apply: true,
+                vacuum_metadata: false,
+                rewrite_segments: false,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("requires --archive"),
+            "unexpected error: {err}"
+        );
+        assert!(store.get(&tenant, &hidden).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn purge_apply_archives_and_removes_unreadable_active_metadata() {
+        use crate::store::metadata::MetadataStore;
+
+        let (store, dir) = make_persistent_store();
+        let tenant = TenantId::new("purge_unreadable_apply_tenant").unwrap();
+        let project = ProjectId::from("purge_project");
+        let unreadable_text = "unreadable live payload should be represented by metadata archive";
+        let unreadable = store
+            .add(
+                MemoryChunk::new(tenant.clone(), unreadable_text, ChunkType::Summary)
+                    .with_project(project.clone()),
+            )
+            .await
+            .unwrap();
+        let healthy = store
+            .add(
+                MemoryChunk::new(
+                    tenant.clone(),
+                    "healthy live payload must survive unreadable purge",
+                    ChunkType::Decision,
+                )
+                .with_project(project),
+            )
+            .await
+            .unwrap();
+        let meta = store
+            .metadata()
+            .get(&tenant, &unreadable)
+            .unwrap()
+            .expect("unreadable metadata");
+        let conn = rusqlite::Connection::open(dir.path().join("metadata.db")).unwrap();
+        conn.execute(
+            "UPDATE chunks SET segment_id = ?1 WHERE tenant_id = ?2 AND chunk_id = ?3",
+            rusqlite::params![
+                (meta.segment_id + 10_000) as i64,
+                tenant.as_str(),
+                unreadable.to_string()
+            ],
+        )
+        .unwrap();
+        drop(conn);
+        let archive = dir.path().join("purge-unreadable-archive.json");
+
+        let report = purge::run_purge(
+            &store,
+            purge::PurgeOptions {
+                tenant_id: tenant.to_string(),
+                project_id: Some("purge_project".to_string()),
+                older_than_days: 1,
+                limit: 100,
+                include_unreadable_active: true,
+                archive: Some(archive.clone()),
+                apply: true,
+                vacuum_metadata: false,
+                rewrite_segments: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report["status"], "completed");
+        assert_eq!(report["candidate_count"], 1);
+        assert_eq!(report["unreadable_active_candidate_count"], 1);
+        assert_eq!(report["soft_deleted_before_purge"], 1);
+        assert_eq!(report["hard_deleted_metadata_rows"], 1);
+        assert_eq!(report["archive_verification"]["status"], "verified");
+        assert_eq!(report["archive_verification"]["record_count"], 1);
+        assert_eq!(report["archive_verification"]["payload_missing_count"], 1);
+        assert!(report["archive_verification"]["archive_sha256"]
+            .as_str()
+            .is_some_and(|hash| hash.len() == 64));
+        assert!(store
+            .metadata()
+            .get(&tenant, &unreadable)
+            .unwrap()
+            .is_none());
+        assert!(store.get(&tenant, &healthy).await.unwrap().is_some());
+
+        let archive_text = std::fs::read_to_string(&archive).unwrap();
+        assert!(archive_text.contains("memd_purge_archive_v1"));
+        assert!(archive_text.contains("unreadable_active_payload"));
+        assert!(archive_text.contains("\"payload_available\": false"));
+        assert!(archive_text.contains(unreadable_text));
+    }
+
+    #[tokio::test]
+    async fn purge_apply_archives_and_removes_hidden_metadata() {
+        use crate::store::metadata::MetadataStore;
+
+        let (store, dir) = make_persistent_store();
+        let tenant = TenantId::new("purge_apply_tenant").unwrap();
+        let project = ProjectId::from("purge_project");
+        let hidden = store
+            .add(
+                MemoryChunk::new(
+                    tenant.clone(),
+                    "expired chunk payload must be archived before purge",
+                    ChunkType::Summary,
+                )
+                .with_project(project.clone()),
+            )
+            .await
+            .unwrap();
+        let durable = store
+            .add(
+                MemoryChunk::new(
+                    tenant.clone(),
+                    "durable decision must remain searchable after purge",
+                    ChunkType::Decision,
+                )
+                .with_project(project),
+            )
+            .await
+            .unwrap();
+        store
+            .metadata()
+            .update_lifecycle(
+                &tenant,
+                &hidden,
+                &crate::types::LifecycleDelta {
+                    status: Some(crate::types::ChunkStatus::Expired),
+                    lifecycle_updated_at_ms: Some(1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let archive = dir.path().join("purge-archive.json");
+
+        let report = purge::run_purge(
+            &store,
+            purge::PurgeOptions {
+                tenant_id: tenant.to_string(),
+                project_id: Some("purge_project".to_string()),
+                older_than_days: 1,
+                limit: 100,
+                include_unreadable_active: false,
+                archive: Some(archive.clone()),
+                apply: true,
+                vacuum_metadata: true,
+                rewrite_segments: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report["status"], "completed");
+        assert_eq!(report["candidate_count"], 1);
+        assert_eq!(report["hard_deleted_metadata_rows"], 1);
+        assert_eq!(report["archive_verification"]["status"], "verified");
+        assert_eq!(
+            report["archive_verification"]["tenant_id"].as_str(),
+            Some(tenant.as_str())
+        );
+        assert_eq!(
+            report["archive_verification"]["project_id"].as_str(),
+            Some("purge_project")
+        );
+        assert_eq!(report["archive_verification"]["record_count"], 1);
+        assert_eq!(report["archive_verification"]["payload_available_count"], 1);
+        let archive_text = std::fs::read_to_string(&archive).unwrap();
+        assert!(archive_text.contains("memd_purge_archive_v1"));
+        assert!(archive_text.contains("expired chunk payload must be archived before purge"));
+        assert!(store.get(&tenant, &hidden).await.unwrap().is_none());
+        assert!(store.get(&tenant, &durable).await.unwrap().is_some());
+        let rows = store
+            .metadata()
+            .list_recent_for_project(&tenant, Some("purge_project"), 10)
+            .unwrap();
+        assert!(!rows.iter().any(|row| row.chunk_id == hidden));
+        assert!(rows.iter().any(|row| row.chunk_id == durable));
+    }
+
+    #[tokio::test]
+    async fn purge_apply_rebuilds_hnsw_for_hidden_dense_entries() {
+        use crate::embeddings::{Embedder, MockEmbedder};
+        use crate::store::dense::{DenseSearchConfig, DenseSearcher};
+        use crate::store::metadata::MetadataStore;
+
+        let dir = tempdir().unwrap();
+        let mut store = PersistentStore::open(PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            segment_max_chunks: 100,
+            wal_checkpoint_interval: 10,
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            enable_async_indexing: false,
+            ..Default::default()
+        })
+        .unwrap();
+        let embedder = Arc::new(MockEmbedder::new());
+        let dense = Arc::new(DenseSearcher::with_embedder(
+            Arc::clone(&embedder) as Arc<dyn Embedder>,
+            DenseSearchConfig {
+                persist: false,
+                ..Default::default()
+            },
+        ));
+        store.set_dense_searcher_for_tests(Arc::clone(&dense));
+
+        let tenant = TenantId::new("purge_hnsw_rebuild_tenant").unwrap();
+        let project = ProjectId::from("purge_project");
+        let hidden = store
+            .add(
+                MemoryChunk::new(
+                    tenant.clone(),
+                    "expired dense hnsw payload must be excluded during purge rebuild",
+                    ChunkType::Summary,
+                )
+                .with_project(project.clone()),
+            )
+            .await
+            .unwrap();
+        let durable = store
+            .add(
+                MemoryChunk::new(
+                    tenant.clone(),
+                    "durable dense hnsw payload must remain searchable after purge rebuild",
+                    ChunkType::Decision,
+                )
+                .with_project(project),
+            )
+            .await
+            .unwrap();
+        store
+            .metadata()
+            .update_lifecycle(
+                &tenant,
+                &hidden,
+                &crate::types::LifecycleDelta {
+                    status: Some(crate::types::ChunkStatus::Expired),
+                    lifecycle_updated_at_ms: Some(1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let hidden_set = HashSet::from([hidden.clone()]);
+        let durable_set = HashSet::from([durable.clone()]);
+        assert!(dense.has_valid_embeddings_for_chunks(&tenant, &hidden_set));
+        assert!(dense.has_valid_embeddings_for_chunks(&tenant, &durable_set));
+
+        let archive = dir.path().join("purge-hnsw-archive.json");
+        let report = purge::run_purge(
+            &store,
+            purge::PurgeOptions {
+                tenant_id: tenant.to_string(),
+                project_id: Some("purge_project".to_string()),
+                older_than_days: 1,
+                limit: 100,
+                include_unreadable_active: false,
+                archive: Some(archive),
+                apply: true,
+                vacuum_metadata: false,
+                rewrite_segments: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report["status"], "completed");
+        assert_eq!(report["candidate_count"], 1);
+        assert_eq!(report["compaction"]["hnsw_rebuilt"], true);
+        assert_eq!(
+            report["compaction"]["hnsw_rebuild"]["embeddings_excluded"],
+            1
+        );
+        assert!(!dense.has_valid_embeddings_for_chunks(&tenant, &hidden_set));
+        assert!(dense.has_valid_embeddings_for_chunks(&tenant, &durable_set));
+        assert!(store.get(&tenant, &hidden).await.unwrap().is_none());
+        assert!(store.get(&tenant, &durable).await.unwrap().is_some());
+
+        let dense_results = dense
+            .search(&tenant, "durable dense hnsw payload", 10)
+            .await
+            .unwrap();
+        assert!(dense_results
+            .iter()
+            .any(|result| result.chunk_id == durable));
+        assert!(!dense_results.iter().any(|result| result.chunk_id == hidden));
+    }
+
+    #[tokio::test]
+    async fn purge_apply_rewrites_segments_to_reclaim_hidden_payload_bytes() {
+        use crate::store::metadata::MetadataStore;
+
+        let (store, dir) = make_persistent_store();
+        let tenant = TenantId::new("purge_segment_rewrite_tenant").unwrap();
+        let project = ProjectId::from("purge_project");
+        let hidden_text = format!(
+            "expired segment rewrite payload unique_hidden_marker {}",
+            "x".repeat(900)
+        );
+        let durable_text = "durable segment rewrite payload unique_durable_marker";
+        let hidden = store
+            .add(
+                MemoryChunk::new(tenant.clone(), hidden_text.clone(), ChunkType::Summary)
+                    .with_project(project.clone()),
+            )
+            .await
+            .unwrap();
+        let durable = store
+            .add(
+                MemoryChunk::new(tenant.clone(), durable_text, ChunkType::Decision)
+                    .with_project(project),
+            )
+            .await
+            .unwrap();
+        store
+            .metadata()
+            .update_lifecycle(
+                &tenant,
+                &hidden,
+                &crate::types::LifecycleDelta {
+                    status: Some(crate::types::ChunkStatus::Expired),
+                    lifecycle_updated_at_ms: Some(1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let archive = dir.path().join("purge-segment-rewrite-archive.json");
+        let report = purge::run_purge(
+            &store,
+            purge::PurgeOptions {
+                tenant_id: tenant.to_string(),
+                project_id: Some("purge_project".to_string()),
+                older_than_days: 1,
+                limit: 100,
+                include_unreadable_active: false,
+                archive: Some(archive),
+                apply: true,
+                vacuum_metadata: false,
+                rewrite_segments: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report["status"], "completed");
+        assert_eq!(report["hard_deleted_metadata_rows"], 1);
+        assert_eq!(report["segment_rewrite"]["segments_rewritten"], 1);
+        assert_eq!(report["segment_rewrite"]["chunks_moved"], 1);
+        assert!(
+            report["segment_rewrite"]["bytes_reclaimed"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(store.get(&tenant, &hidden).await.unwrap().is_none());
+        assert!(store.get(&tenant, &durable).await.unwrap().is_some());
+        assert!(!segment_payloads_contain(
+            dir.path(),
+            &tenant,
+            "unique_hidden_marker"
+        ));
+        assert!(segment_payloads_contain(
+            dir.path(),
+            &tenant,
+            "unique_durable_marker"
+        ));
     }
 
     #[tokio::test]

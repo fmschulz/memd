@@ -99,6 +99,10 @@ must fail instead of falling back.
 
 The CLI write contract is intentionally simple. Store meaningful checkpoints
 with `memd add`, using chunk type and tags to preserve the shape of the work.
+A normal single task should leave fewer than 10 durable chunks; most tasks need
+only a decision, a concrete run/evidence record, and a finish summary. See the
+[Operational contract](operational-contract.md) for the full write-quality
+rules.
 
 ```bash
 ./target/release/memd add \

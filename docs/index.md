@@ -1,6 +1,6 @@
 # memd
 
-[![Version](https://img.shields.io/badge/version-0.51.0-blue)](https://github.com/fmschulz/memd/blob/main/CHANGELOG.md){ .md-button }
+[![Version](https://img.shields.io/badge/version-0.60.0-blue)](https://github.com/fmschulz/memd/blob/main/CHANGELOG.md){ .md-button }
 [![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust&logoColor=white)](https://github.com/fmschulz/memd/blob/main/Cargo.toml){ .md-button }
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/fmschulz/memd/blob/main/LICENSE){ .md-button }
 
@@ -49,6 +49,7 @@ notes, and the internal-corpus + Bright-Pro adapter results.
 ## Start here
 
 - [**Quick start**](quickstart.md) — install, store first memory, retrieve, build agent context.
+- [**Operational contract**](operational-contract.md) — what agents should write, avoid, verify, and clean up.
 - [**Architecture**](architecture.md) — hybrid retrieval, storage, trust boundary diagram.
 - [**CLI reference**](cli-reference.md) — every command and operation.
 - [**Agent skill**](agent-skill.md) — install `memd` into Claude Code / Codex with one command.

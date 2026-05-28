@@ -355,6 +355,38 @@ impl DenseSearcher {
         }
     }
 
+    /// Check whether any of the supplied chunks still have valid
+    /// embeddings in the tenant cache.
+    ///
+    /// HNSW compaction keeps the chunk-to-internal-id mapping stable
+    /// after rebuild, but invalidates excluded embeddings in the cache.
+    /// This helper distinguishes "known mapping" from "still live in the
+    /// dense rebuild source", which is the signal purge/compaction needs.
+    pub(crate) fn has_valid_embeddings_for_chunks(
+        &self,
+        tenant_id: &TenantId,
+        chunk_ids: &HashSet<ChunkId>,
+    ) -> bool {
+        if chunk_ids.is_empty() {
+            return false;
+        }
+
+        let indices = self.indices.read();
+        let tenant_str = tenant_id.to_string();
+        let Some(index) = indices.get(&tenant_str) else {
+            return false;
+        };
+
+        let mapping = index.get_mapping().read();
+        let cache = index.get_embedding_cache().read();
+        chunk_ids.iter().any(|chunk_id| {
+            mapping
+                .get_internal_id(chunk_id)
+                .and_then(|internal_id| cache.get(internal_id))
+                .is_some()
+        })
+    }
+
     /// Embed a query text (exposes embedder for tiered search)
     pub async fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
         self.embedder.embed_query(text).await

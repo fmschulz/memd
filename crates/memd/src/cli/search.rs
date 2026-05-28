@@ -130,12 +130,7 @@ async fn cli_search_payload_inner<S: Store>(
 /// Append one [`HitRecord`] per chunk in `payload["results"]` to the
 /// project-root hit log. Best-effort: every IO error inside
 /// `record_hits` is swallowed so retrieval never fails for this.
-fn log_search_hits(
-    payload: &Value,
-    tenant_id: &str,
-    project_id: Option<&str>,
-    mode: CliQueryMode,
-) {
+fn log_search_hits(payload: &Value, tenant_id: &str, project_id: Option<&str>, mode: CliQueryMode) {
     let Some(results) = payload.get("results").and_then(Value::as_array) else {
         return;
     };

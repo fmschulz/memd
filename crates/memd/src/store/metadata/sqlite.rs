@@ -10,7 +10,7 @@ use rusqlite::Connection;
 
 use super::pool::SqliteConnectionPool;
 use super::{ChunkMetadata, IndexState, MetadataStore};
-use crate::error::Result;
+use crate::error::{MemdError, Result};
 use crate::store::{
     normalize_query, DuplicateExample, DuplicateHealth, FeedbackEntry, HealthCounts,
     IndexCoverageHealth, PayloadHealth, RelevanceLabel, StoreHealthSnapshot,
@@ -75,6 +75,39 @@ impl SqliteMetadataStore {
         let conn = self.pool.get();
         conn.execute_batch("VACUUM")?;
         Ok(())
+    }
+
+    /// Return active chunk counts by project for a tenant.
+    pub fn project_counts(
+        &self,
+        tenant_id: &TenantId,
+        limit: usize,
+    ) -> Result<Vec<(Option<String>, usize)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.pool.get();
+        let mut stmt = conn.prepare(
+            "SELECT project_id, COUNT(*) AS active_chunks
+             FROM chunks
+             WHERE tenant_id = ?1 AND status != 'deleted'
+             GROUP BY project_id
+             ORDER BY active_chunks DESC
+             LIMIT ?2",
+        )?;
+
+        let rows = stmt.query_map(rusqlite::params![tenant_id.as_str(), limit as i64], |row| {
+            let project_id: Option<String> = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            Ok((project_id, count.max(0) as usize))
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
     }
 
     /// Initialize the database schema
@@ -607,6 +640,12 @@ impl SqliteMetadataStore {
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_chunks_canonical
              ON chunks(tenant_id, project_id, canonical_text) WHERE canonical_text IS NOT NULL",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunks_content_hash
+             ON chunks(tenant_id, project_id, chunk_type, hash, timestamp_created DESC)
+             WHERE status = 'final' AND tier != 'history'",
             [],
         )?;
 
@@ -1684,6 +1723,138 @@ impl SqliteMetadataStore {
             rusqlite::params![chunk_id.to_string()],
         )?;
         Ok(())
+    }
+
+    /// List lifecycle-hidden rows old enough for destructive purge.
+    ///
+    /// This intentionally includes already-deleted rows because those
+    /// rows have already gone through the soft-delete/tombstone path
+    /// and only metadata/link cleanup remains. History-tier rows are
+    /// eligible only after their explicit expiry has elapsed; a final
+    /// history row with no retention deadline is not purged here.
+    pub fn list_hard_purge_candidates(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        cutoff_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<ChunkMetadata>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.pool.get();
+        let sql = format!(
+            "SELECT {CHUNK_COLUMNS} FROM chunks
+             WHERE tenant_id = :tenant
+               AND (:project IS NULL OR project_id = :project)
+               AND (
+                    (
+                        status IN ('deleted', 'superseded', 'expired', 'error')
+                        AND COALESCE(NULLIF(lifecycle_updated_at_ms, 0), timestamp_created) <= :cutoff
+                    )
+                    OR (
+                        tier = 'history'
+                        AND expires_at_ms IS NOT NULL
+                        AND expires_at_ms <= :cutoff
+                    )
+               )
+             ORDER BY COALESCE(NULLIF(lifecycle_updated_at_ms, 0), timestamp_created) ASC
+             LIMIT :limit"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::named_params! {
+                ":tenant": tenant_id.as_str(),
+                ":project": project_id,
+                ":cutoff": cutoff_ms,
+                ":limit": limit as i64,
+            },
+            Self::row_to_metadata,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Physically remove metadata/link rows for chunks that have already
+    /// passed through the soft-delete path.
+    ///
+    /// The status guard prevents this method from orphaning live rows.
+    /// Callers that start with superseded/expired/history candidates
+    /// must first route them through `PersistentStore::delete_chunk`
+    /// so WAL, tombstone, sparse/hybrid index, and cache state are
+    /// updated before metadata disappears.
+    pub fn hard_delete_chunks(&self, tenant_id: &TenantId, chunk_ids: &[ChunkId]) -> Result<usize> {
+        if chunk_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.pool.get();
+        let tx = conn.transaction()?;
+        let mut deleted = 0usize;
+        {
+            let mut feedback_stmt =
+                tx.prepare("DELETE FROM feedback WHERE tenant_id = ?1 AND chunk_id = ?2")?;
+            let mut link_stmt = tx.prepare("DELETE FROM artifact_links WHERE chunk_id = ?1")?;
+            let mut chunk_stmt = tx.prepare(
+                "DELETE FROM chunks
+                 WHERE tenant_id = ?1 AND chunk_id = ?2 AND status = 'deleted'",
+            )?;
+            for chunk_id in chunk_ids {
+                let chunk_id_str = chunk_id.to_string();
+                feedback_stmt.execute(rusqlite::params![tenant_id.as_str(), chunk_id_str])?;
+                link_stmt.execute(rusqlite::params![chunk_id.to_string()])?;
+                deleted += chunk_stmt
+                    .execute(rusqlite::params![tenant_id.as_str(), chunk_id.to_string()])?;
+            }
+        }
+        tx.commit()?;
+        Ok(deleted)
+    }
+
+    /// Move live metadata rows to rewritten segment coordinates.
+    ///
+    /// Segment rewrite creates new immutable segment directories rather
+    /// than editing old payload files in place. This transaction flips
+    /// affected rows to their new `(segment_id, ordinal)` pairs after
+    /// the replacement segment has been finalized on disk.
+    pub fn update_chunk_locations(
+        &self,
+        tenant_id: &TenantId,
+        relocations: &[(ChunkId, u64, u32)],
+    ) -> Result<usize> {
+        if relocations.is_empty() {
+            return Ok(0);
+        }
+
+        let mut conn = self.pool.get();
+        let tx = conn.transaction()?;
+        let mut updated = 0usize;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE chunks
+                 SET segment_id = ?1, ordinal = ?2
+                 WHERE tenant_id = ?3 AND chunk_id = ?4 AND status != 'deleted'",
+            )?;
+            for (chunk_id, segment_id, ordinal) in relocations {
+                updated += stmt.execute(rusqlite::params![
+                    *segment_id as i64,
+                    *ordinal as i64,
+                    tenant_id.as_str(),
+                    chunk_id.to_string(),
+                ])?;
+            }
+        }
+        if updated != relocations.len() {
+            return Err(MemdError::StorageError(format!(
+                "segment rewrite location update matched {} of {} rows",
+                updated,
+                relocations.len()
+            )));
+        }
+        tx.commit()?;
+        Ok(updated)
     }
 
     /// Apply a lifecycle delta and return the number of rows affected.
@@ -2842,6 +3013,49 @@ impl MetadataStore for SqliteMetadataStore {
                 ":tenant": tenant_id.as_str(),
                 ":project": project_id,
                 ":canonical": canonical,
+            },
+            Self::row_to_metadata,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    fn list_live_by_content_hash(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        chunk_type: ChunkType,
+        hash: &str,
+        limit: usize,
+    ) -> Result<Vec<ChunkMetadata>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.pool.get();
+        let sql = format!(
+            "SELECT {CHUNK_COLUMNS} FROM chunks
+             WHERE tenant_id = :tenant
+               AND ((:project IS NULL AND project_id IS NULL) OR project_id = :project)
+               AND chunk_type = :chunk_type
+               AND hash = :hash
+               AND status = 'final'
+               AND tier != 'history'
+               AND superseded_by IS NULL
+             ORDER BY timestamp_created DESC
+             LIMIT :limit"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::named_params! {
+                ":tenant": tenant_id.as_str(),
+                ":project": project_id,
+                ":chunk_type": chunk_type.to_string(),
+                ":hash": hash,
+                ":limit": limit as i64,
             },
             Self::row_to_metadata,
         )?;

@@ -79,9 +79,7 @@ pub(crate) fn extract_codex_message(stdout: &str) -> Result<String> {
         }
     }
     last_message.ok_or_else(|| {
-        MemdError::ValidationError(
-            "codex JSON stream contained no agent message".to_string(),
-        )
+        MemdError::ValidationError("codex JSON stream contained no agent message".to_string())
     })
 }
 
