@@ -22,7 +22,7 @@ use crate::ops::{handle_memory_add, AddParams};
 use crate::store::dense::{DenseSearchConfig, DenseSearcher};
 use crate::store::persistent::{PersistentStore, PersistentStoreConfig};
 use crate::store::Store;
-use crate::types::{ChunkId, ChunkStatus, TenantId};
+use crate::types::{ChunkId, ChunkStatus, MemoryTier, TenantId};
 
 const REPORTS_DIR: &str = "evals/bench/reports";
 const SYNTHETIC_PROJECT_ID: &str = "synthetic_session";
@@ -80,6 +80,9 @@ struct AttemptReport {
     admission_decision: Option<String>,
     admission_reason: Option<String>,
     dedupe_decision: Option<String>,
+    lifecycle_tier: Option<String>,
+    expires_at_ms: Option<i64>,
+    review_after_ms: Option<i64>,
     error: Option<String>,
 }
 
@@ -127,6 +130,7 @@ pub(super) async fn run_eval_write_quality(options: EvalWriteQualityOptions) -> 
     let mut durable_chunk_ids = Vec::new();
     let mut ephemeral_chunk_ids = Vec::new();
     let mut expired_chunk_ids = Vec::new();
+    let mut progress_retention_chunk_ids = Vec::new();
 
     for write in writes {
         if write.expected.low_value() {
@@ -149,7 +153,7 @@ pub(super) async fn run_eval_write_quality(options: EvalWriteQualityOptions) -> 
         if expected == ExpectedOutcome::DuplicateReused && attempt.outcome == "duplicate_reused" {
             duplicate_reused += 1;
         }
-        if matches!(attempt.outcome.as_str(), "durable" | "duplicate_reused") {
+        if label == "durable_decision" && matches!(attempt.outcome.as_str(), "durable") {
             if let Some(chunk_id) = &attempt.chunk_id {
                 durable_chunk_ids.push(chunk_id.clone());
             }
@@ -162,6 +166,11 @@ pub(super) async fn run_eval_write_quality(options: EvalWriteQualityOptions) -> 
         if label == "expired_run_trace" {
             if let Some(chunk_id) = &attempt.chunk_id {
                 expired_chunk_ids.push(chunk_id.clone());
+            }
+        }
+        if label == "ordinary_progress_summary_ttl" {
+            if let Some(chunk_id) = &attempt.chunk_id {
+                progress_retention_chunk_ids.push(chunk_id.clone());
             }
         }
         if attempt.outcome != expected_outcome_name(expected) {
@@ -190,6 +199,8 @@ pub(super) async fn run_eval_write_quality(options: EvalWriteQualityOptions) -> 
         durable_retrieval_check(&store, &tenant, &durable_chunk_ids).await?;
     let ephemeral_hidden_from_default_search =
         ephemeral_hidden_check(&store, &tenant, &ephemeral_chunk_ids).await?;
+    let progress_summary_ttl_applied =
+        default_retention_check(&store, &tenant, &progress_retention_chunk_ids).await?;
     let retention_compaction = run_retention_compaction_check(
         &store,
         &tenant,
@@ -209,6 +220,7 @@ pub(super) async fn run_eval_write_quality(options: EvalWriteQualityOptions) -> 
         disk_bytes_delta,
         &retention_compaction,
         ephemeral_hidden_from_default_search,
+        progress_summary_ttl_applied,
     )?;
 
     let mut failures = expected_mismatches;
@@ -254,6 +266,10 @@ pub(super) async fn run_eval_write_quality(options: EvalWriteQualityOptions) -> 
     if !ephemeral_hidden_from_default_search {
         failures.push("ephemeral synthetic progress appeared in default search".to_string());
     }
+    if !progress_summary_ttl_applied {
+        failures
+            .push("ordinary synthetic progress summary did not receive default TTL".to_string());
+    }
 
     let payload = json!({
         "passed": failures.is_empty(),
@@ -277,6 +293,9 @@ pub(super) async fn run_eval_write_quality(options: EvalWriteQualityOptions) -> 
             "ephemeral_hidden_from_default_search": ephemeral_hidden_from_default_search,
             "expired_chunk_hidden_after_compaction": retention_compaction.expired_chunk_hidden_after_compaction,
             "expired_chunk_status_after_compaction": retention_compaction.expired_chunk_status_after_compaction,
+        },
+        "retention": {
+            "progress_summary_ttl_applied": progress_summary_ttl_applied,
         },
         "compaction": {
             "expired_count": retention_compaction.expired_count,
@@ -316,6 +335,12 @@ async fn run_write(store: &PersistentStore, write: SyntheticWrite) -> Result<Att
                 .get("dedupe_decision")
                 .and_then(Value::as_str)
                 .map(ToString::to_string);
+            let lifecycle_tier = payload
+                .get("lifecycle_tier")
+                .and_then(Value::as_str)
+                .map(ToString::to_string);
+            let expires_at_ms = payload.get("expires_at_ms").and_then(Value::as_i64);
+            let review_after_ms = payload.get("review_after_ms").and_then(Value::as_i64);
             let chunk_id = payload
                 .get("chunk_id")
                 .and_then(Value::as_str)
@@ -338,6 +363,9 @@ async fn run_write(store: &PersistentStore, write: SyntheticWrite) -> Result<Att
                     .and_then(Value::as_str)
                     .map(ToString::to_string),
                 dedupe_decision,
+                lifecycle_tier,
+                expires_at_ms,
+                review_after_ms,
                 error: None,
             })
         }
@@ -349,6 +377,9 @@ async fn run_write(store: &PersistentStore, write: SyntheticWrite) -> Result<Att
             admission_decision: Some("reject".to_string()),
             admission_reason: Some(err.message().to_string()),
             dedupe_decision: None,
+            lifecycle_tier: None,
+            expires_at_ms: None,
+            review_after_ms: None,
             error: Some(err.to_string()),
         }),
     }
@@ -377,6 +408,23 @@ async fn ephemeral_hidden_check(
     };
     let results = search_chunk_ids(store, tenant, "starting to inspect the files", 10).await?;
     Ok(results.iter().all(|chunk_id| chunk_id != ephemeral_id))
+}
+
+async fn default_retention_check(
+    store: &PersistentStore,
+    tenant: &TenantId,
+    chunk_ids: &[String],
+) -> Result<bool> {
+    let Some(chunk_id) = chunk_ids.first() else {
+        return Ok(false);
+    };
+    let chunk_id = ChunkId::parse(chunk_id)?;
+    let Some(resolved) = store.get_with_lifecycle(tenant, &chunk_id).await? else {
+        return Ok(false);
+    };
+    Ok(resolved.lifecycle.tier == MemoryTier::LongTerm
+        && resolved.lifecycle.expires_at_ms.is_some()
+        && resolved.lifecycle.review_after_ms == resolved.lifecycle.expires_at_ms)
 }
 
 async fn run_retention_compaction_check(
@@ -514,6 +562,17 @@ fn synthetic_writes() -> Vec<SyntheticWrite> {
             ),
         },
         SyntheticWrite {
+            label: "ordinary_progress_summary_ttl",
+            expected: ExpectedOutcome::Durable,
+            params: add_params(
+                "Mapped synthetic eval touchpoints; next step is validating bounded progress retention.",
+                "summary",
+                project_id.clone(),
+                vec!["kind:progress"],
+                None,
+            ),
+        },
+        SyntheticWrite {
             label: "durable_decision",
             expected: ExpectedOutcome::Durable,
             params: add_params(
@@ -631,6 +690,7 @@ fn write_report(
     disk_bytes_delta: u64,
     retention_compaction: &RetentionCompactionReport,
     ephemeral_hidden_from_default_search: bool,
+    progress_summary_ttl_applied: bool,
 ) -> Result<PathBuf> {
     let reports_dir = project_dir.join(REPORTS_DIR);
     fs::create_dir_all(&reports_dir)?;
@@ -650,6 +710,9 @@ fn write_report(
                 "admission_decision": attempt.admission_decision,
                 "admission_reason": attempt.admission_reason,
                 "dedupe_decision": attempt.dedupe_decision,
+                "lifecycle_tier": attempt.lifecycle_tier,
+                "expires_at_ms": attempt.expires_at_ms,
+                "review_after_ms": attempt.review_after_ms,
                 "error": attempt.error,
             })
         })
@@ -671,6 +734,9 @@ fn write_report(
                 "ephemeral_hidden_from_default_search": ephemeral_hidden_from_default_search,
                 "expired_chunk_hidden_after_compaction": retention_compaction.expired_chunk_hidden_after_compaction,
                 "expired_chunk_status_after_compaction": retention_compaction.expired_chunk_status_after_compaction,
+            },
+            "retention": {
+                "progress_summary_ttl_applied": progress_summary_ttl_applied,
             },
             "compaction": {
                 "expired_count": retention_compaction.expired_count,
@@ -732,7 +798,7 @@ mod tests {
             project_dir,
             min_rejection_or_downgrade_rate: 1.0,
             min_duplicate_reuse_rate: 1.0,
-            max_total_chunks: 5,
+            max_total_chunks: 6,
             max_disk_bytes: 5_000_000,
             require_retention_compaction: true,
         }
@@ -747,7 +813,8 @@ mod tests {
         assert_eq!(payload["passed"], true);
         assert_eq!(payload["rejection_or_downgrade_rate"], 1.0);
         assert_eq!(payload["duplicate_reuse_rate"], 1.0);
-        assert_eq!(payload["storage"]["total_chunks_delta"], 5);
+        assert_eq!(payload["storage"]["total_chunks_delta"], 6);
+        assert_eq!(payload["retention"]["progress_summary_ttl_applied"], true);
         assert_eq!(payload["retrieval"]["durable_retrieval_hit"], true);
         assert_eq!(
             payload["retrieval"]["post_compaction_durable_retrieval_hit"],

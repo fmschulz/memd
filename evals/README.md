@@ -26,11 +26,14 @@ memory-quality contract:
 - `memd eval-memory-md` checks default startup context usefulness and
   generated-wrapper suppression.
 - `memd eval-retrieval` checks fixed known-useful retrieval queries and
-  sparse-judgment metrics.
+  sparse-judgment metrics. It reports precision@k, but the default bundled
+  sparse judgments gate on hit-rate unless you pass explicit recall, MRR, or
+  precision thresholds.
 - `memd eval-write-quality` runs an isolated synthetic write session and
   checks low-value rejection/downgrade rate, exact duplicate reuse, bounded
-  chunk/disk growth, durable retrieval before/after retention compaction,
-  expired-row hiding, and hidden ephemeral progress.
+  chunk/disk growth, default TTL assignment for routine progress summaries,
+  durable retrieval before/after retention compaction, expired-row hiding, and
+  hidden ephemeral progress.
 
 ## Conventions
 

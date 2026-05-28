@@ -23,6 +23,10 @@ memd agent-context \
 
 ## Session 1: Record Progress
 
+Progress summaries are short-lived active handoff context. Promote validated
+results to `kind:evidence`, `kind:decision`, `kind:finish`, or explicit
+`priority:N` when they should survive as durable project knowledge.
+
 ```bash
 memd add \
   --tenant-id ecommerce-api \

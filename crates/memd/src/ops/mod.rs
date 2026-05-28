@@ -30,6 +30,7 @@ const LEXICAL_OVERLAP_PROJECT_SCAN_LIMIT: usize = 500;
 const LEXICAL_OVERLAP_SCORE_BOOST: f32 = 16.0;
 const LEXICAL_OVERLAP_MAX_CANDIDATES: usize = 100;
 const WRITE_ADMISSION_EPHEMERAL_TTL_MS: i64 = 14 * 24 * 60 * 60 * 1000;
+const WRITE_ADMISSION_PROGRESS_TTL_MS: i64 = 14 * 24 * 60 * 60 * 1000;
 const WRITE_ADMISSION_RUN_TRACE_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 /// Apply process-wide compatibility routing for operation handlers.
@@ -3210,6 +3211,7 @@ struct ResolvedAdmission {
     review_after_ms: Option<i64>,
     lifecycle_tier: Option<MemoryTier>,
     default_run_trace_retention: bool,
+    default_progress_retention: bool,
 }
 
 fn resolve_write_admission(
@@ -3232,6 +3234,7 @@ fn resolve_write_admission(
     let mut review_after_ms = apply_conversation_review_default(mode, requested_review_after_ms);
     let mut lifecycle_tier = None;
     let mut default_run_trace_retention = false;
+    let mut default_progress_retention = false;
     if outcome.decision == AdmissionDecision::Ephemeral {
         let default_expiry = current_time_ms() + WRITE_ADMISSION_EPHEMERAL_TTL_MS;
         expires_at_ms.get_or_insert(default_expiry);
@@ -3242,6 +3245,11 @@ fn resolve_write_admission(
         expires_at_ms.get_or_insert(default_expiry);
         review_after_ms.get_or_insert(default_expiry);
         default_run_trace_retention = true;
+    } else if should_apply_progress_summary_retention(chunk_type, tags) {
+        let default_expiry = current_time_ms() + WRITE_ADMISSION_PROGRESS_TTL_MS;
+        expires_at_ms.get_or_insert(default_expiry);
+        review_after_ms.get_or_insert(default_expiry);
+        default_progress_retention = true;
     }
 
     Ok(ResolvedAdmission {
@@ -3250,17 +3258,21 @@ fn resolve_write_admission(
         review_after_ms,
         lifecycle_tier,
         default_run_trace_retention,
+        default_progress_retention,
     })
 }
 
-fn drop_optional_run_trace_retention_for_in_memory_store<S: Store>(
+fn drop_optional_default_retention_for_in_memory_store<S: Store>(
     store: &S,
     admission: &mut ResolvedAdmission,
 ) {
-    if admission.default_run_trace_retention && store.as_persistent().is_none() {
+    if (admission.default_run_trace_retention || admission.default_progress_retention)
+        && store.as_persistent().is_none()
+    {
         admission.expires_at_ms = None;
         admission.review_after_ms = None;
         admission.default_run_trace_retention = false;
+        admission.default_progress_retention = false;
     }
 }
 
@@ -3305,7 +3317,23 @@ fn should_apply_run_trace_retention(chunk_type: ChunkType, tags: &[String]) -> b
         return false;
     }
 
-    !tags.iter().any(|tag| {
+    !has_durable_retention_override(tags)
+}
+
+fn should_apply_progress_summary_retention(chunk_type: ChunkType, tags: &[String]) -> bool {
+    if chunk_type != ChunkType::Summary || !tags.iter().any(|tag| tag == "kind:progress") {
+        return false;
+    }
+
+    if crate::auto_priority::has_explicit_priority(tags) {
+        return false;
+    }
+
+    !has_durable_retention_override(tags)
+}
+
+fn has_durable_retention_override(tags: &[String]) -> bool {
+    tags.iter().any(|tag| {
         matches!(
             tag.as_str(),
             "kind:evidence"
@@ -5782,7 +5810,7 @@ pub async fn handle_memory_add<S: Store>(
         params.expires_at_ms,
         params.review_after_ms,
     )?;
-    drop_optional_run_trace_retention_for_in_memory_store(store, &mut admission);
+    drop_optional_default_retention_for_in_memory_store(store, &mut admission);
     chunk = apply_admission_tags(chunk, &admission);
 
     // Phase 1: heuristic auto-priority stamp. No-op if caller already
@@ -6245,7 +6273,7 @@ pub async fn handle_memory_add_batch<S: Store>(
                     err.message()
                 ))
             })?;
-            drop_optional_run_trace_retention_for_in_memory_store(store, &mut admission);
+            drop_optional_default_retention_for_in_memory_store(store, &mut admission);
             chunk = apply_admission_tags(chunk, &admission);
             chunk = chunk.with_ingestion_mode(ingestion_mode);
             let delta = admission_lifecycle_delta(&admission);
@@ -6371,7 +6399,7 @@ pub async fn handle_memory_add_batch<S: Store>(
                 err.message()
             ))
         })?;
-        drop_optional_run_trace_retention_for_in_memory_store(store, &mut admission);
+        drop_optional_default_retention_for_in_memory_store(store, &mut admission);
         chunk = apply_admission_tags(chunk, &admission);
         chunk = chunk.with_ingestion_mode(ingestion_mode);
         let delta = admission_lifecycle_delta(&admission);
@@ -10805,6 +10833,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_add_applies_short_ttl_to_ordinary_progress_summary() {
+        let (store, _dir) = make_persistent_store();
+        let tenant = TenantId::new("progress_summary_ttl").unwrap();
+        let before_ms = current_time_ms();
+
+        let add_result = handle_memory_add(
+            &store,
+            None,
+            AddParams {
+                tenant_id: tenant.to_string(),
+                text: "Mapped auth middleware touchpoints; next step is validating RS256 issuance."
+                    .to_string(),
+                chunk_type: "summary".to_string(),
+                tags: vec!["kind:progress".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let text = add_result["content"][0]["text"].as_str().unwrap();
+        let add_response: AddResult = serde_json::from_str(text).unwrap();
+        assert_eq!(add_response.admission_decision.as_deref(), Some("durable"));
+        let expires_at = add_response
+            .expires_at_ms
+            .expect("ordinary progress summary should get a short TTL");
+        assert_eq!(add_response.review_after_ms, Some(expires_at));
+        assert_eq!(add_response.lifecycle_tier, None);
+        assert!(expires_at >= before_ms + WRITE_ADMISSION_PROGRESS_TTL_MS);
+        assert!(expires_at <= current_time_ms() + WRITE_ADMISSION_PROGRESS_TTL_MS);
+
+        let chunk_id = ChunkId::parse(&add_response.chunk_id).unwrap();
+        let resolved = store
+            .get_with_lifecycle(&tenant, &chunk_id)
+            .await
+            .unwrap()
+            .expect("progress chunk should be stored");
+        assert_eq!(resolved.lifecycle.expires_at_ms, Some(expires_at));
+        assert_eq!(resolved.lifecycle.review_after_ms, Some(expires_at));
+        assert_eq!(resolved.lifecycle.tier, MemoryTier::LongTerm);
+    }
+
+    #[tokio::test]
+    async fn memory_add_keeps_priority_progress_summary_durable() {
+        let (store, _dir) = make_persistent_store();
+        let tenant = TenantId::new("progress_summary_priority").unwrap();
+
+        let add_result = handle_memory_add(
+            &store,
+            None,
+            AddParams {
+                tenant_id: tenant.to_string(),
+                text: "Decision: keep RS256 validation result for future auth work.".to_string(),
+                chunk_type: "summary".to_string(),
+                tags: vec!["kind:progress".to_string(), "priority:8".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let text = add_result["content"][0]["text"].as_str().unwrap();
+        let add_response: AddResult = serde_json::from_str(text).unwrap();
+        assert_eq!(add_response.expires_at_ms, None);
+        assert_eq!(add_response.review_after_ms, None);
+
+        let chunk_id = ChunkId::parse(&add_response.chunk_id).unwrap();
+        let resolved = store
+            .get_with_lifecycle(&tenant, &chunk_id)
+            .await
+            .unwrap()
+            .expect("priority progress chunk should be stored");
+        assert_eq!(resolved.lifecycle.expires_at_ms, None);
+        assert_eq!(resolved.lifecycle.review_after_ms, None);
+    }
+
+    #[tokio::test]
     async fn memory_add_batch_reports_admission_decisions() {
         let (store, _dir) = make_persistent_store();
         let tenant = TenantId::new("quality_gate_batch").unwrap();
@@ -10907,6 +11010,67 @@ mod tests {
             .await
             .unwrap()
             .expect("evidence run trace should be stored");
+        assert_eq!(evidence.lifecycle.expires_at_ms, None);
+        assert_eq!(evidence.lifecycle.review_after_ms, None);
+    }
+
+    #[tokio::test]
+    async fn memory_add_batch_applies_progress_summary_retention_per_chunk() {
+        let (store, _dir) = make_persistent_store();
+        let tenant = TenantId::new("progress_summary_batch_ttl").unwrap();
+
+        let result = handle_memory_add_batch(
+            &store,
+            None,
+            AddBatchParams {
+                tenant_id: tenant.to_string(),
+                chunks: vec![
+                    BatchChunkParams {
+                        text: "Mapped auth middleware touchpoints; next step is RS256 validation."
+                            .to_string(),
+                        chunk_type: "summary".to_string(),
+                        tags: vec!["kind:progress".to_string()],
+                        ..Default::default()
+                    },
+                    BatchChunkParams {
+                        text: "Validation: RS256 auth tests passed after UTC claim normalization."
+                            .to_string(),
+                        chunk_type: "summary".to_string(),
+                        tags: vec!["kind:progress".to_string(), "kind:evidence".to_string()],
+                        ..Default::default()
+                    },
+                ],
+                supersede_near_duplicates: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let response: AddBatchResult = serde_json::from_str(text).unwrap();
+        assert_eq!(response.chunk_ids.len(), 2);
+
+        let ordinary_id = ChunkId::parse(&response.chunk_ids[0]).unwrap();
+        let ordinary = store
+            .get_with_lifecycle(&tenant, &ordinary_id)
+            .await
+            .unwrap()
+            .expect("ordinary progress summary should be stored");
+        assert!(
+            ordinary.lifecycle.expires_at_ms.is_some(),
+            "ordinary batch progress summary should get a short TTL"
+        );
+        assert_eq!(
+            ordinary.lifecycle.review_after_ms,
+            ordinary.lifecycle.expires_at_ms
+        );
+
+        let evidence_id = ChunkId::parse(&response.chunk_ids[1]).unwrap();
+        let evidence = store
+            .get_with_lifecycle(&tenant, &evidence_id)
+            .await
+            .unwrap()
+            .expect("evidence progress summary should be stored");
         assert_eq!(evidence.lifecycle.expires_at_ms, None);
         assert_eq!(evidence.lifecycle.review_after_ms, None);
     }
