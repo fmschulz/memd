@@ -15,7 +15,7 @@ Installs the skill + CLI memd workflow by:
       ~/.claude/CLAUDE.md
   - writing the Cursor user rule to ~/.cursor/rules/memd.mdc
   - wiring a Claude Code SessionStart hook in ~/.claude/settings.json
-  - optionally copying the bundled Linux memd binary into ~/.local/bin
+  - optionally installing the latest memd release binary into ~/.local/bin
 
 This script does not register external client tools and does not install wrappers
 or refusal guards.
@@ -91,18 +91,14 @@ PY
 }
 
 install_binary() {
-  local src="${SCRIPT_DIR}/bin/linux-x64/memd"
-  local target="${LOCAL_BIN}/memd"
-  if [[ ! -x "$src" ]]; then
-    echo "bundled memd binary not found or not executable: $src" >&2
-    exit 1
-  fi
-  mkdir -p "$LOCAL_BIN"
-  local tmp
-  tmp="$(mktemp "${target}.tmp.XXXXXX")"
-  cp "$src" "$tmp"
-  chmod +x "$tmp"
-  mv "$tmp" "$target"
+  require_cmd curl
+  # Download the latest prebuilt binary via the cargo-dist installer. Linux
+  # builds are static musl (no glibc-version errors); macOS arm64/x64 supported.
+  # Installs to ~/.local/bin (the dist install-path). Requires a published dist
+  # release (memd >= the first release built by .github/workflows/release.yml).
+  echo "Installing latest memd via the cargo-dist installer..." >&2
+  curl --proto '=https' --tlsv1.2 -LsSf \
+    https://github.com/fmschulz/memd/releases/latest/download/memd-installer.sh | sh
 }
 
 # Idempotently wire a Claude Code SessionStart hook that refreshes

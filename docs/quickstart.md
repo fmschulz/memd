@@ -144,27 +144,24 @@ See:
 - [memd-skill/INSTALL.md](https://github.com/fmschulz/memd/blob/main/memd-skill/INSTALL.md)
 - [memd-skill/SKILL.md](https://github.com/fmschulz/memd/blob/main/memd-skill/SKILL.md)
 
-The skill includes a bundled Linux binary:
+Install the `memd` binary (static musl on Linux — no glibc errors):
 
-- [memd-skill/bin/linux-x64/memd](https://github.com/fmschulz/memd/blob/main/memd-skill/bin/linux-x64/memd)
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/fmschulz/memd/releases/latest/download/memd-installer.sh | sh
+```
 
 For instruction-level enforcement in Codex CLI, Claude Code, and Cursor:
 
 ```bash
-./memd-skill/install_memd_enforcement.sh --install-binary
+./memd-skill/install_memd_enforcement.sh
 ```
 
-The installer copies the bundled CLI binary when requested, upserts rules that
-make CLI retrieval and CLI writes mandatory for substantive work, writes the
-Cursor rule, and wires the Claude Code `SessionStart` hook. On first
-SessionStart in an unscoped repo, `memd session-start` auto-creates a minimal
+`--install-binary` runs the installer above for you. It upserts rules that make
+CLI retrieval and CLI writes mandatory for substantive work, writes the Cursor
+rule, and wires the Claude Code `SessionStart` hook. On first SessionStart in an
+unscoped repo, `memd session-start` auto-creates a minimal
 `.memd/project_scope.json`; use `memd init` when you want the full per-repo
 guardrail files.
-
-If the bundled binary fails with a `GLIBC_... not found` error on an older
-Linux host, build locally with `cargo build --release -p memd`, install
-`target/release/memd` into `~/.local/bin/memd`, then rerun the installer
-without `--install-binary`.
 
 ## 7. Verify the CLI Workflow
 
