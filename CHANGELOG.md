@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [0.61.0] - 2026-05-28
+
 ### Added
 
 - Cross-platform prebuilt release binaries via cargo-dist: macOS (arm64,
