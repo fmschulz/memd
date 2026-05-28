@@ -6,6 +6,34 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Added
+
+- Cross-platform prebuilt release binaries via cargo-dist: macOS (arm64,
+  x86_64) and Linux (x86_64, aarch64) built as **static musl**, published as
+  GitHub Release assets with a one-line `curl … | sh` installer
+  (`memd-installer.sh`). Static musl eliminates `GLIBC_… not found` errors on
+  older and HPC Linux hosts.
+
+### Changed
+
+- Releases are now built and published by cargo-dist
+  (`.github/workflows/release.yml`, tag-triggered): it builds the four
+  platform archives and creates the GitHub Release with notes from this
+  changelog. `auto-release.yml` now only pushes the `vX.Y.Z` tag — via a
+  `RELEASE_PAT` secret so the cargo-dist build is triggered — and no longer
+  creates the Release itself.
+- The skill installer (`install_memd_enforcement.sh --install-binary`) now
+  downloads the latest release binary instead of copying an in-repo blob.
+  README, INSTALL, SKILL, and the docs site document the one-line installer,
+  with `cargo binstall memd` (best-effort) and `cargo install memd` (from
+  source) as alternatives.
+
+### Removed
+
+- Removed the ~30 MB Linux binary committed at `memd-skill/bin/linux-x64/memd`
+  and the `release-skill-binary.yml` workflow; cargo-dist release assets
+  replace both.
+
 ## [0.60.0] - 2026-05-28
 
 ### Added
