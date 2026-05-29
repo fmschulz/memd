@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Evaluation harness for memd CLI contract and retrieval tests"
 
+# Internal-only eval harness: never ship it as a release artifact. Only `memd` is dist'd.
+[package.metadata.dist]
+dist = false
+
 [dependencies]
 tokio = { workspace = true }
 serde = { workspace = true }

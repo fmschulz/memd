@@ -19,9 +19,8 @@ It covers:
 - how to require a CLI memory check before agents say work is impossible or
   blocked
 
-It also includes a bundled Linux binary:
-
-- [bin/linux-x64/memd](bin/linux-x64/memd)
+The `memd` binary is installed from prebuilt releases (static musl on Linux) —
+see [INSTALL.md](INSTALL.md).
 
 Start with:
 
