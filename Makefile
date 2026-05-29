@@ -1,0 +1,147 @@
+# memd installer
+#
+# One command to build and install memd so the copy on your PATH stays current,
+# and to install/uninstall the agent skill into the standard skill directories.
+# Modeled on ../omics-skills/Makefile (symlink-by-default = always up to date).
+# No assumptions about any private meta-repo: everything targets standard paths.
+#
+# Staleness problem this solves: memd ends up copied to ~/.local/bin and the
+# skill vendored into several places, and those copies drift. Here the repo is
+# the single source of truth; symlinks keep the installed copies current.
+
+.PHONY: help build install install-binary install-skill install-enforcement \
+        install-all menu uninstall uninstall-binary uninstall-skill status clean
+
+REPO        := $(CURDIR)
+RELEASE_BIN := $(REPO)/target/release/memd
+
+PREFIX  ?= $(HOME)/.local
+BIN_DIR := $(PREFIX)/bin
+BIN     := $(BIN_DIR)/memd
+
+# symlink (default: installed copies track the repo) or copy (standalone).
+INSTALL_METHOD ?= symlink
+
+# Skill source + the three standard skill directories. ~/.agents/skills is the
+# shared canonical location; ~/.claude/skills and ~/.codex/skills are where
+# Claude Code and Codex look (often themselves symlinks to ~/.agents/skills).
+SKILL_NAME    := memd
+SKILL_SRC     := $(REPO)/memd-skill
+AGENTS_SKILLS := $(HOME)/.agents/skills
+CLAUDE_SKILLS := $(HOME)/.claude/skills
+CODEX_SKILLS  := $(HOME)/.codex/skills
+
+# Colors (disabled if NO_COLOR is set or stdout is not a TTY).
+ifeq ($(NO_COLOR),)
+  ifeq ($(shell test -t 1 && echo 1),1)
+    GREEN  := \033[0;32m
+    YELLOW := \033[0;33m
+    BLUE   := \033[0;34m
+    RED    := \033[0;31m
+    NC     := \033[0m
+  endif
+endif
+
+##@ General
+
+help: ## Display this help
+	@echo "$(BLUE)memd installer$(NC)"
+	@echo ""
+	@echo "Usage: make <target> [INSTALL_METHOD=copy] [PREFIX=$(HOME)/.local]"
+	@echo ""
+	@awk 'BEGIN {FS = ":.*##"} \
+		/^[a-zA-Z_-]+:.*?##/ { printf "  $(GREEN)%-18s$(NC) %s\n", $$1, $$2 } \
+		/^##@/ { printf "\n$(YELLOW)%s$(NC)\n", substr($$0, 5) }' $(MAKEFILE_LIST)
+
+menu: ## Interactive TUI to select components to install or uninstall
+	@python3 "$(REPO)/scripts/install_tui.py" --repo "$(REPO)" \
+		--make-program "$(MAKE)" --install-method "$(INSTALL_METHOD)"
+
+##@ Install
+
+build: ## Build the release binary (cargo build --release -p memd)
+	@echo "$(BLUE)Building memd (release)...$(NC)"
+	@cargo build --release -p memd
+
+install: build install-binary ## Build, then install memd onto PATH (default target)
+	@$(MAKE) --no-print-directory status
+
+install-binary: ## Install/refresh the already-built binary at $(BIN)
+	@if [ ! -x "$(RELEASE_BIN)" ]; then \
+		echo "$(RED)✗$(NC) $(RELEASE_BIN) not found — run 'make build' first"; exit 1; fi
+	@mkdir -p $(BIN_DIR)
+	@command -v memd >/dev/null 2>&1 && memd warm stop >/dev/null 2>&1 || true
+	@if [ "$(INSTALL_METHOD)" = "copy" ]; then \
+		tmp="$$(mktemp "$(BIN).tmp.XXXXXX")"; cp "$(RELEASE_BIN)" "$$tmp"; chmod 0755 "$$tmp"; mv -f "$$tmp" "$(BIN)"; \
+		echo "  $(GREEN)✓$(NC) copied to $(BIN)"; \
+	else \
+		ln -sfn "$(RELEASE_BIN)" "$(BIN)"; \
+		echo "  $(GREEN)✓$(NC) $(BIN) -> $(RELEASE_BIN)"; \
+	fi
+	@hash -r 2>/dev/null || true
+	@echo "  $(GREEN)✓$(NC) $$("$(BIN)" --version)"
+
+install-skill: ## Install the skill into ~/.agents, ~/.claude, ~/.codex skills
+	@mkdir -p "$(AGENTS_SKILLS)"
+	@target="$(AGENTS_SKILLS)/$(SKILL_NAME)"; \
+	if [ -L "$$target" ]; then rm -f "$$target"; \
+	elif [ -e "$$target" ]; then mv "$$target" "$$target.bak.$$(date +%s)"; echo "  $(YELLOW)backed up real $$target$(NC)"; fi; \
+	if [ "$(INSTALL_METHOD)" = "copy" ]; then cp -r "$(SKILL_SRC)" "$$target"; else ln -sfn "$(SKILL_SRC)" "$$target"; fi; \
+	echo "  $(GREEN)✓$(NC) $$target -> $(SKILL_SRC)"
+	@for d in "$(CLAUDE_SKILLS)" "$(CODEX_SKILLS)"; do \
+		if [ "$$(readlink -f "$$d" 2>/dev/null)" = "$$(readlink -f "$(AGENTS_SKILLS)" 2>/dev/null)" ]; then \
+			echo "  $(GREEN)✓$(NC) $$d/$(SKILL_NAME) (inherited: $$d -> ~/.agents/skills)"; \
+		else \
+			mkdir -p "$$d"; t="$$d/$(SKILL_NAME)"; \
+			if [ -L "$$t" ]; then rm -f "$$t"; \
+			elif [ -e "$$t" ]; then mv "$$t" "$$t.bak.$$(date +%s)"; echo "  $(YELLOW)backed up real $$t$(NC)"; fi; \
+			ln -sfn "$(AGENTS_SKILLS)/$(SKILL_NAME)" "$$t"; \
+			echo "  $(GREEN)✓$(NC) $$t -> $(AGENTS_SKILLS)/$(SKILL_NAME)"; \
+		fi; \
+	done
+
+install-enforcement: ## Wire CLI-first agent rules + SessionStart hook (skill installer)
+	@"$(SKILL_SRC)/install_memd_enforcement.sh"
+
+install-all: install install-skill install-enforcement ## Binary + skill + enforcement
+	@echo "$(GREEN)✓ memd fully installed$(NC)"
+
+##@ Uninstall
+
+uninstall: uninstall-binary uninstall-skill ## Remove the binary and the skill from all dirs
+	@echo "$(GREEN)✓ uninstalled$(NC)"
+
+uninstall-binary: ## Remove the installed binary from PATH
+	@if [ -e "$(BIN)" ] || [ -L "$(BIN)" ]; then rm -f "$(BIN)"; echo "  removed $(BIN)"; \
+	else echo "  $(YELLOW)○$(NC) $(BIN) not present"; fi
+
+uninstall-skill: ## Remove the skill from ~/.agents, ~/.claude, ~/.codex skills
+	@removed=0; for d in "$(AGENTS_SKILLS)" "$(CLAUDE_SKILLS)" "$(CODEX_SKILLS)"; do \
+		t="$$d/$(SKILL_NAME)"; \
+		if [ -L "$$t" ] || [ -e "$$t" ]; then rm -rf "$$t"; echo "  removed $$t"; removed=1; fi; \
+	done; \
+	[ "$$removed" = "0" ] && echo "  $(YELLOW)○$(NC) skill not installed" || true
+
+##@ Status & maintenance
+
+status: ## Show built/installed version, PATH location, and skill links
+	@echo "$(BLUE)memd install status$(NC)"
+	@printf "  repo build:    "; [ -x "$(RELEASE_BIN)" ] && "$(RELEASE_BIN)" --version || echo "$(YELLOW)not built (run 'make build')$(NC)"
+	@printf "  on PATH:       "; command -v memd >/dev/null 2>&1 && memd --version || echo "$(RED)memd not on PATH$(NC)"
+	@printf "  PATH location: "; command -v memd 2>/dev/null || echo "-"
+	@if [ -x "$(RELEASE_BIN)" ] && command -v memd >/dev/null 2>&1; then \
+		rv="$$("$(RELEASE_BIN)" --version)"; pv="$$(memd --version)"; \
+		if [ "$$rv" != "$$pv" ]; then echo "  $(YELLOW)⚠ PATH memd ($$pv) != repo build ($$rv) — run 'make install'$(NC)"; \
+		else echo "  $(GREEN)✓ PATH memd matches the repo build$(NC)"; fi; \
+	fi
+	@echo "  skill ($(SKILL_NAME)):"
+	@for d in "$(AGENTS_SKILLS)" "$(CLAUDE_SKILLS)" "$(CODEX_SKILLS)"; do \
+		t="$$d/$(SKILL_NAME)"; printf "    %-28s " "$$t:"; \
+		if [ -L "$$t" ]; then echo "-> $$(readlink "$$t")"; \
+		elif [ -d "$$t" ]; then echo "(copy)"; \
+		else echo "-"; fi; \
+	done
+
+clean: ## Remove skill .bak backups created by install-skill
+	@find "$(AGENTS_SKILLS)" "$(CLAUDE_SKILLS)" "$(CODEX_SKILLS)" -maxdepth 1 -name '$(SKILL_NAME).bak.*' -exec rm -rf {} + 2>/dev/null || true
+	@echo "$(GREEN)✓ removed skill backups$(NC)"
