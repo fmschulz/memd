@@ -25,17 +25,6 @@ require_cmd() {
 
 require_cmd memd
 
-BUNDLED_MEMD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bin/linux-x64/memd"
-if [[ -x "${BUNDLED_MEMD}" ]]; then
-  BUNDLED_VERSION="$("${BUNDLED_MEMD}" --version)"
-  PATH_VERSION="$(memd --version)"
-  if [[ "${PATH_VERSION}" != "${BUNDLED_VERSION}" ]]; then
-    echo "installed memd version mismatch: PATH has ${PATH_VERSION}, bundled skill has ${BUNDLED_VERSION}" >&2
-    echo "run memd-skill/install_memd_enforcement.sh --install-binary" >&2
-    exit 1
-  fi
-fi
-
 if ! grep -Fq "<!-- memd-enforcement:start -->" "${HOME}/.codex/AGENTS.md"; then
   echo "missing memd enforcement block in ~/.codex/AGENTS.md" >&2
   exit 1

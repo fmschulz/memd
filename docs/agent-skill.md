@@ -2,8 +2,8 @@
 
 The agent skill lives in
 [memd-skill/](https://github.com/fmschulz/memd/tree/main/memd-skill).
-It ships with a bundled Linux binary at
-[memd-skill/bin/linux-x64/memd](https://github.com/fmschulz/memd/tree/main/memd-skill/bin/linux-x64).
+The `memd` binary is distributed as prebuilt release artifacts (macOS arm64/x64,
+Linux x86_64/aarch64 as static musl) built by cargo-dist.
 
 ## What it does
 
@@ -31,27 +31,18 @@ when startup context looks noisy.
 ## Install
 
 ```bash
-./memd-skill/install_memd_enforcement.sh --install-binary
-```
-
-If the bundled binary fails with a `GLIBC_... not found` error, the host is
-older than the release build environment. Build a host-compatible binary from
-the checkout instead:
-
-```bash
-cargo build --release -p memd
-install -m 0755 target/release/memd ~/.local/bin/memd
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/fmschulz/memd/releases/latest/download/memd-installer.sh | sh
 ./memd-skill/install_memd_enforcement.sh
-memd doctor
 ```
 
-Run the installer without `--install-binary` after a local build; otherwise it
-will replace the host-built binary with the bundled one again.
+Linux releases are static musl, so there is no `GLIBC_... not found` pitfall.
+`--install-binary` runs the one-line installer for you. Rust users can instead
+`cargo binstall memd` (best-effort) or `cargo install memd` (from source).
 
 What the script does:
 
 1. Stops any running warm worker.
-2. Copies the bundled binary into `~/.local/bin/memd` (only when
+2. Installs the latest release binary into `~/.local/bin/memd` (only when
    `--install-binary` is passed).
 3. Upserts a CLI-first instruction block into:
     - `~/.codex/AGENTS.md`
@@ -94,5 +85,5 @@ memd doctor
 - [memd-skill/INSTALL.md](https://github.com/fmschulz/memd/blob/main/memd-skill/INSTALL.md)
 - [Codex session-start hook example](https://github.com/fmschulz/memd/blob/main/memd-skill/examples/codex_session_start_hook.json)
 
-The bundled binary is refreshed automatically on every release tag — see the
-[release workflow](https://github.com/fmschulz/memd/blob/main/.github/workflows/release-skill-binary.yml).
+Release binaries are built for macOS and Linux (static musl) on every release
+tag — see the [release workflow](https://github.com/fmschulz/memd/blob/main/.github/workflows/release.yml).

@@ -28,9 +28,8 @@ memd warm stop
 This worker is only a local CLI acceleration layer over a Unix socket. It is
 not HTTP and is not an agent-visible integration surface.
 
-Bundled binary:
-
-- [bin/linux-x64/memd](bin/linux-x64/memd)
+Binary: install the latest prebuilt release (static musl on Linux) — see
+[INSTALL.md](INSTALL.md).
 
 Installer:
 

@@ -3,9 +3,9 @@
 This skill makes `memd` a skill + CLI workflow. Agents retrieve context with
 `memd agent-context` or `memd search` and record durable memory with `memd add`.
 
-It ships with a bundled Linux binary:
-
-- [bin/linux-x64/memd](bin/linux-x64/memd)
+The `memd` binary is distributed as prebuilt release artifacts (macOS arm64/x64,
+Linux x86_64/aarch64 as static musl) built by cargo-dist — see "Install the
+Binary" below.
 
 ## Install the Skill Files
 
@@ -30,17 +30,19 @@ ln -s /path/to/memd/memd-skill ~/.claude/skills/memd
 ln -s /path/to/memd/memd-skill ~/.codex/skills/memd
 ```
 
-## Install the Bundled Binary
+## Install the Binary
 
-If `memd` is not already on `PATH`, use the bundled binary.
+If `memd` is not already on `PATH`, install a prebuilt release binary. Linux
+builds are **static musl**, so there are no `GLIBC_... not found` errors on old
+or HPC hosts.
 
 ```bash
-mkdir -p ~/.local/bin
-cp ~/.claude/skills/memd/bin/linux-x64/memd ~/.local/bin/memd
-chmod +x ~/.local/bin/memd
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/fmschulz/memd/releases/latest/download/memd-installer.sh | sh
 ```
 
-Or use the installer:
+Rust users can instead use `cargo binstall memd` (prebuilt, best-effort) or
+`cargo install memd` (builds from source). The enforcement installer can run the
+one-liner for you:
 
 ```bash
 ./memd-skill/install_memd_enforcement.sh --install-binary
@@ -53,28 +55,9 @@ which memd
 memd --version
 ```
 
-On older enterprise or HPC Linux hosts, the bundled binary can fail before it
-prints a version, with an error like:
-
-```text
-memd: /lib64/libc.so.6: version `GLIBC_2.xx' not found
-```
-
-That means the release binary was built against a newer glibc than the host
-provides. Build and install a host-compatible binary from the checkout instead:
-
-```bash
-cargo build --release -p memd
-install -m 0755 target/release/memd ~/.local/bin/memd
-hash -r
-memd --version
-./memd-skill/install_memd_enforcement.sh
-memd doctor
-```
-
-After a local build, run the installer without `--install-binary`; passing
-`--install-binary` again will overwrite the host-built binary with the bundled
-one.
+> Note: the prebuilt installer requires a published cargo-dist release (the first
+> release produced by `.github/workflows/release.yml`). Until that exists, use
+> `cargo install memd` or build from source with `cargo build --release -p memd`.
 
 ## Install CLI Enforcement Instructions
 
@@ -260,26 +243,22 @@ That verifier checks:
 
 ### `memd` is not found
 
-Install the bundled binary:
+Install a prebuilt release binary:
 
 ```bash
 ./memd-skill/install_memd_enforcement.sh --install-binary
 ```
 
-Then make sure `~/.local/bin` is on `PATH`.
-
-If that command installs a binary that fails with `GLIBC_... not found`, build
-from source on the target host instead:
+Then make sure `~/.local/bin` is on `PATH`. Linux releases are static musl, so
+there is no glibc-version pitfall. If no prebuilt release exists yet, build from
+source on the target host instead:
 
 ```bash
-cargo build --release -p memd
-install -m 0755 target/release/memd ~/.local/bin/memd
+cargo install memd
+# or: cargo build --release -p memd && install -m 0755 target/release/memd ~/.local/bin/memd
 ./memd-skill/install_memd_enforcement.sh
 memd doctor
 ```
-
-Do not rerun the installer with `--install-binary` on that host unless the
-bundled binary has been rebuilt for its glibc version.
 
 ### Agents are not sharing memory
 

@@ -9,7 +9,6 @@
 #   - README.md                           shields.io version badge
 #   - docs/index.md                       shields.io version badge
 #   - CHANGELOG.md                        top "## [X.Y.Z]" header
-#   - memd-skill/bin/linux-x64/memd       --version output
 #   - (advisory) latest git tag           must be >= canonical
 #
 # Exit codes:
@@ -56,18 +55,6 @@ report "docs/index.md (shields.io badge)" "${index_version}"
 # CHANGELOG.md top entry — "## [X.Y.Z] - YYYY-MM-DD"
 changelog_version="$(awk '/^## \[[0-9]+\.[0-9]+\.[0-9]+\]/ {match($0,/[0-9]+\.[0-9]+\.[0-9]+/); print substr($0,RSTART,RLENGTH); exit}' CHANGELOG.md)"
 report "CHANGELOG.md (top entry)" "${changelog_version}"
-
-# Bundled skill binary — skip if not executable on this host.
-skill_bin="memd-skill/bin/linux-x64/memd"
-if [[ -x "${skill_bin}" ]]; then
-  if skill_version="$("${skill_bin}" --version 2>/dev/null | awk '{print $2; exit}')"; then
-    report "${skill_bin} (--version)" "${skill_version}"
-  else
-    echo "  ! ${skill_bin}: --version failed; skipping" >&2
-  fi
-else
-  echo "  - ${skill_bin}: not executable on this host; skipping"
-fi
 
 # Advisory: latest git tag.
 if latest_tag="$(git tag --sort=-creatordate | head -1)"; then

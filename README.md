@@ -1,6 +1,6 @@
 # memd
 
-[![Version](https://img.shields.io/badge/version-0.60.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.61.0-blue)](CHANGELOG.md)
 [![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust&logoColor=white)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-fmschulz.github.io%2Fmemd-blue)](https://fmschulz.github.io/memd/)
@@ -141,26 +141,28 @@ and reproducibility notes are documented at
 
 ## Agent skill
 
-The agent skill is the default way to make agents use `memd` correctly. It
-ships with a bundled Linux binary kept in sync with releases by GitHub
-Actions.
+The agent skill is the default way to make agents use `memd` correctly.
+
+Install the binary on any macOS or Linux machine — Linux builds are **static
+musl**, so there are no `GLIBC_... not found` errors on older or HPC hosts:
 
 ```bash
-./memd-skill/install_memd_enforcement.sh --install-binary
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/fmschulz/memd/releases/latest/download/memd-installer.sh | sh
 ```
 
-The installer copies the bundled binary into `~/.local/bin/memd`, upserts
-CLI-first instruction blocks into `~/.codex/AGENTS.md` and
+Rust users can instead use `cargo binstall memd` (prebuilt, best-effort) or
+`cargo install memd` (from source). Then wire up the agent enforcement:
+
+```bash
+./memd-skill/install_memd_enforcement.sh
+```
+
+`--install-binary` runs the one-line installer above for you. The script
+upserts CLI-first instruction blocks into `~/.codex/AGENTS.md` and
 `~/.claude/CLAUDE.md`, writes the matching Cursor rule to
 `~/.cursor/rules/memd.mdc`, and wires a Claude Code `SessionStart` hook in
 `~/.claude/settings.json`. It also injects a pre-refusal rule: agents must
 check `memd` before declaring a task impossible, blocked, or unknowable.
-
-On older enterprise or HPC Linux hosts, the bundled binary may fail with a
-`GLIBC_... not found` error. In that case, build `memd` locally with
-`cargo build --release -p memd`, install `target/release/memd` into
-`~/.local/bin/memd`, and run `./memd-skill/install_memd_enforcement.sh`
-without `--install-binary` so the working host-built binary is not replaced.
 
 Run `memd doctor` after installation to verify the binary, data directory,
 global rules, SessionStart hook, and current project scope.
