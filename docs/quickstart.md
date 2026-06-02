@@ -156,6 +156,11 @@ For instruction-level enforcement in Codex CLI, Claude Code, and Cursor:
 ./memd-skill/install_memd_enforcement.sh
 ```
 
+When developing from this repo, use `make install-skill` for symlinked skill
+installs. Use `make install-skill-bundle` to copy the current skill plus the
+repo-built binary into each unique existing standard skill directory among
+`~/.agents/skills`, `~/.claude/skills`, and `~/.codex/skills`.
+
 `--install-binary` runs the installer above for you. It upserts rules that make
 CLI retrieval and CLI writes mandatory for substantive work, writes the Cursor
 rule, and wires the Claude Code `SessionStart` hook. On first SessionStart in an

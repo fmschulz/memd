@@ -23,6 +23,7 @@ private CLI-managed warm worker driven by ordinary CLI commands.
 | --- | --- | --- |
 | Raw memory | Store and search chunks: code, docs, notes, traces, decisions | `memd add`, `memd search`, `memd get`, `memd stats` |
 | Agent context | Bounded pre-work context + JSON audit logs | `memd agent-context --output .memd/context.md` |
+| Startup memory | Refresh project `memory.md` with ranked takeaways and concrete `agent action` guidance | `memd memory-md`, `memd eval-memory-md` |
 | Warm CLI | Keep store/index state hot for repeated local calls | `memd warm start`, `memd warm status` |
 | Batch CLI | Many structured operations in one loaded process | `memd batch --jsonl requests.jsonl` |
 | Export/import | Move local memory to portable formats | `memd export-omf`, `memd import-omf` |
@@ -32,6 +33,9 @@ private CLI-managed warm worker driven by ordinary CLI commands.
 Use `memd search --mode brief-project|resume-task|find-failures|find-decisions|find-evidence|find-highlights`
 when retrieval should bias toward persisted digests and canonical summaries.
 Use `--compact` and `--token-budget` to keep agent context small.
+High-priority durable writes (`priority:8+` or `importance:8+`) must include
+a concrete `Agent action:` sentence so generated startup memory tells agents
+what to do, check, prefer, avoid, verify, reuse, or resolve.
 
 ## 30-second quickstart
 
@@ -156,6 +160,11 @@ Rust users can instead use `cargo binstall memd` (prebuilt, best-effort) or
 ```bash
 ./memd-skill/install_memd_enforcement.sh
 ```
+
+For local repo installs, `make install-skill` installs the skill as symlinks.
+Use `make install-skill-bundle` to copy the current skill plus the repo-built
+binary into each unique existing standard skill directory among
+`~/.agents/skills`, `~/.claude/skills`, and `~/.codex/skills`.
 
 `--install-binary` runs the one-line installer above for you. The script
 upserts CLI-first instruction blocks into `~/.codex/AGENTS.md` and

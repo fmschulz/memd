@@ -70,6 +70,7 @@ def non_tty_status(make: str) -> int:
         print(f"  [{box}] {label}  ({status_line(key)})")
     print("\nNot a TTY. Run one of:")
     print(f"  {make} install-all   # binary + skill + enforcement")
+    print(f"  {make} install-skill-bundle   # copy skill + built binary into existing skill dirs")
     print(f"  {make} uninstall     # binary + skill")
     print(f"  {make} status")
     return 0

@@ -178,6 +178,7 @@ struct MemoryMdQualityReport {
     useful_count: usize,
     generated_wrapper_count: usize,
     missing_reason_count: usize,
+    missing_action_count: usize,
     useful_ratio: f64,
 }
 
@@ -367,6 +368,12 @@ pub(super) async fn run_memory_md_eval<S: Store>(
             report.missing_reason_count
         ));
     }
+    if report.missing_action_count > 0 {
+        failures.push(format!(
+            "{} displayed items are missing concrete agent action guidance",
+            report.missing_action_count
+        ));
+    }
 
     let payload = json!({
         "passed": failures.is_empty(),
@@ -377,6 +384,7 @@ pub(super) async fn run_memory_md_eval<S: Store>(
         "useful_ratio": report.useful_ratio,
         "generated_wrapper_count": report.generated_wrapper_count,
         "missing_reason_count": report.missing_reason_count,
+        "missing_action_count": report.missing_action_count,
         "thresholds": {
             "min_useful_ratio": min_useful_ratio,
             "max_generated_wrappers": options.max_generated_wrappers,
@@ -438,8 +446,8 @@ async fn collect_ranked_takeaways_with_explanations<S: Store>(
             project_id.map(str::to_string),
             (*query).to_string(),
             candidate_k,
-            true,
-            Some(6_000),
+            false,
+            None,
             *mode,
             false,
             false,
@@ -1041,6 +1049,9 @@ fn render_memory_md(
     out.push_str("- Read this file before task-specific retrieval.\n");
     out.push_str("- Refresh it at the start of substantive sessions with `memd memory-md`.\n");
     out.push_str("- Then run task-specific `memd agent-context` or `memd search`.\n\n");
+    out.push_str("## Agent Guidance\n\n");
+    out.push_str("- Each displayed takeaway includes `agent action`: a concrete instruction derived from the stored memory.\n");
+    out.push_str("- Treat the action as a starting rule, then verify it against current files, logs, or tests before applying it.\n\n");
     out.push_str("## Scoring\n\n");
     out.push_str("- Explicit `priority:N` or `importance:N` tags dominate when present.\n");
     out.push_str("- Decisions, finishes, evidence, recurring tags, multi-query matches, and search score increase priority.\n");
@@ -1117,6 +1128,10 @@ fn render_takeaway(out: &mut String, idx: usize, takeaway: &Takeaway, reason: &s
     }
     out.push('\n');
     out.push_str(&format!("   - reason: `{reason}`\n"));
+    out.push_str(&format!(
+        "   - agent action: `{}`\n",
+        inline_code_text(&agent_action_for_takeaway(takeaway, reason))
+    ));
     if !takeaway.tags.is_empty() {
         out.push_str(&format!(
             "   - tags: `{}`\n",
@@ -1140,6 +1155,137 @@ fn render_takeaway(out: &mut String, idx: usize, takeaway: &Takeaway, reason: &s
                 .join(", ")
         ));
     }
+}
+
+fn agent_action_for_takeaway(takeaway: &Takeaway, reason: &str) -> String {
+    if let Some(action) = explicit_agent_action(&takeaway.text) {
+        return summarize_text(&action, 240);
+    }
+
+    let evidence = summarize_text(&takeaway.text, 180);
+    match reason {
+        "decision or rationale" => {
+            format!("Apply this decision when the same scope appears: {evidence}")
+        }
+        "validated fix or result" => {
+            format!("Reuse this validated fix when the same failure appears: {evidence}")
+        }
+        "failure or root-cause evidence" => {
+            format!("Check for this known failure before retrying and avoid repeating it: {evidence}")
+        }
+        "command, path, or parameter evidence" => {
+            format!("Use or verify this command/path exactly when relevant: {evidence}")
+        }
+        "explicit follow-up" => {
+            format!("Treat this as pending work and resolve it before claiming completion: {evidence}")
+        }
+        "evidence or run result" => {
+            format!("Use this as evidence only after confirming it still matches current files or tests: {evidence}")
+        }
+        _ => format!("Translate this takeaway into a task-specific rule before acting: {evidence}"),
+    }
+}
+
+fn explicit_agent_action(text: &str) -> Option<String> {
+    const MARKERS: &[(&str, &str)] = &[
+        ("agent action:", ""),
+        ("action:", ""),
+        ("rule:", ""),
+        ("do:", "Do "),
+        ("use:", "Use "),
+        ("avoid:", "Avoid "),
+        ("prefer:", "Prefer "),
+        ("check:", "Check "),
+        ("verify:", "Verify "),
+        ("next step:", "Do next: "),
+        ("follow-up:", "Follow up: "),
+        ("followup:", "Follow up: "),
+    ];
+
+    for marker in explicit_action_markers(text, MARKERS) {
+        let body = explicit_action_body(text, marker.start, marker.marker);
+        if body.is_empty() {
+            continue;
+        }
+        let candidate = format!("{}{}", marker.prefix, body);
+        if is_concrete_agent_action_text(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExplicitActionMarker<'a> {
+    start: usize,
+    marker: &'a str,
+    prefix: &'a str,
+}
+
+fn explicit_action_markers<'a>(
+    text: &str,
+    markers: &'a [(&'a str, &'a str)],
+) -> Vec<ExplicitActionMarker<'a>> {
+    let lowered = text.to_ascii_lowercase();
+    let mut found = Vec::new();
+    for (marker, prefix) in markers {
+        let mut search_start = 0;
+        while let Some(relative_start) = lowered[search_start..].find(marker) {
+            let start = search_start + relative_start;
+            found.push(ExplicitActionMarker {
+                start,
+                marker,
+                prefix,
+            });
+            search_start = start + marker.len();
+        }
+    }
+    found.sort_by(|left, right| {
+        left.start
+            .cmp(&right.start)
+            .then_with(|| right.marker.len().cmp(&left.marker.len()))
+    });
+    found
+}
+
+fn explicit_action_body<'a>(text: &'a str, marker_start: usize, marker: &str) -> &'a str {
+    let body_start = marker_start + marker.len();
+    let lowered_tail = text[body_start..].to_ascii_lowercase();
+    let line_end = text[body_start..]
+        .find(|ch| matches!(ch, '\n' | '\r'))
+        .map(|offset| body_start + offset)
+        .unwrap_or(text.len());
+    let next_marker = [
+        "agent action:",
+        "action:",
+        "rule:",
+        "do:",
+        "use:",
+        "avoid:",
+        "prefer:",
+        "check:",
+        "verify:",
+        "next step:",
+        "follow-up:",
+        "followup:",
+    ]
+    .iter()
+    .filter_map(|candidate| {
+        lowered_tail
+            .find(candidate)
+            .map(|offset| body_start + offset)
+    })
+    .min()
+    .unwrap_or(text.len());
+    let body_end = line_end.min(next_marker);
+    text[body_start..body_end]
+        .trim()
+        .trim_end_matches(|ch| matches!(ch, '.' | ';'))
+        .trim_end()
+}
+
+fn inline_code_text(text: &str) -> String {
+    text.replace('`', "'")
 }
 
 fn takeaway_category(takeaway: &Takeaway) -> TakeawayCategory {
@@ -1237,6 +1383,10 @@ fn evaluate_memory_md_quality(content: &str, top_n: usize) -> MemoryMdQualityRep
         .iter()
         .filter(|item| !item.details.iter().any(|line| line.contains("reason: `")))
         .count();
+    let missing_action_count = items
+        .iter()
+        .filter(|item| !has_concrete_agent_action(item))
+        .count();
     let useful_ratio = if displayed_count == 0 {
         0.0
     } else {
@@ -1248,6 +1398,7 @@ fn evaluate_memory_md_quality(content: &str, top_n: usize) -> MemoryMdQualityRep
         useful_count,
         generated_wrapper_count,
         missing_reason_count,
+        missing_action_count,
         useful_ratio,
     }
 }
@@ -1324,6 +1475,9 @@ fn is_useful_display_item(item: &DisplayedMemoryMdItem) -> bool {
     if is_generated_wrapper_display_item(item) {
         return false;
     }
+    if !has_concrete_agent_action(item) {
+        return false;
+    }
 
     matches!(
         item.category.as_str(),
@@ -1345,6 +1499,47 @@ fn is_useful_display_item(item: &DisplayedMemoryMdItem) -> bool {
             || lowered.contains("follow-up:")
             || lowered.contains("next step:")
     }
+}
+
+fn has_concrete_agent_action(item: &DisplayedMemoryMdItem) -> bool {
+    item.details.iter().any(|line| {
+        let lowered = line.to_ascii_lowercase();
+        let Some(action) = lowered.strip_prefix("- agent action: `") else {
+            return false;
+        };
+        let action = action.trim_end_matches('`').trim();
+        is_concrete_agent_action_text(action)
+            && !action.contains("translate this takeaway into a task-specific rule")
+    })
+}
+
+fn is_concrete_agent_action_text(action: &str) -> bool {
+    action.chars().count() >= 24 && contains_action_verb(action)
+}
+
+fn contains_action_verb(text: &str) -> bool {
+    text.split(|ch: char| !ch.is_ascii_alphabetic())
+        .any(|word| {
+            matches!(
+                word.to_ascii_lowercase().as_str(),
+                "apply"
+                    | "avoid"
+                    | "check"
+                    | "confirm"
+                    | "do"
+                    | "follow"
+                    | "include"
+                    | "prefer"
+                    | "record"
+                    | "resolve"
+                    | "reuse"
+                    | "run"
+                    | "treat"
+                    | "use"
+                    | "verify"
+                    | "write"
+            )
+        })
 }
 
 fn is_generated_wrapper_display_item(item: &DisplayedMemoryMdItem) -> bool {
@@ -1422,6 +1617,8 @@ mod tests {
         };
         let rendered = render_memory_md("tenant-a", Some("project-a"), &[takeaway], &[], &[]);
         assert!(rendered.contains("## Project Takeaways"));
+        assert!(rendered.contains("## Agent Guidance"));
+        assert!(rendered.contains("agent action: `Use this as evidence only after confirming"));
         assert!(rendered.contains("chunk-a"));
         assert!(rendered.contains("..."));
     }
@@ -1487,6 +1684,9 @@ mod tests {
         assert!(rendered.contains("reason: `decision or rationale`"));
         assert!(rendered.contains("reason: `validated fix or result`"));
         assert!(rendered.contains("reason: `command, path, or parameter evidence`"));
+        assert!(rendered.contains("agent action: `Apply this decision"));
+        assert!(rendered.contains("agent action: `Reuse this validated fix"));
+        assert!(rendered.contains("agent action: `Use or verify this command/path"));
         assert!(rendered.contains("created_unix_ms: `42`"));
     }
 
@@ -1500,6 +1700,7 @@ mod tests {
 
 1. Decision: keep project aliases explicit.
    - reason: `decision or rationale`
+   - agent action: `Apply this decision when the same scope appears: keep project aliases explicit.`
 
 ### Other Takeaways
 
@@ -1519,7 +1720,56 @@ mod tests {
         assert_eq!(report.useful_count, 1);
         assert_eq!(report.generated_wrapper_count, 1);
         assert_eq!(report.missing_reason_count, 1);
+        assert_eq!(report.missing_action_count, 2);
         assert!((report.useful_ratio - (1.0 / 3.0)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn explicit_agent_action_overrides_category_template() {
+        let takeaway = make_takeaway(
+            "action",
+            "Decision: keep cache keys scoped. Agent action: Verify tenant and project are present before reusing cached retrieval results.",
+            vec!["kind:decision"],
+            "summary",
+        );
+
+        let rendered = render_memory_md("tenant-a", Some("project-a"), &[takeaway], &[], &[]);
+
+        assert!(rendered.contains(
+            "agent action: `Verify tenant and project are present before reusing cached retrieval results`"
+        ));
+    }
+
+    #[test]
+    fn explicit_agent_action_skips_explanatory_marker_mentions() {
+        let takeaway = make_takeaway(
+            "action",
+            "Validation: memory quality gate passed. Docs mention Agent action: sentence. Agent action: Write every high-priority durable memory with a concrete action sentence that tells future agents what to verify or reuse.",
+            vec!["kind:finish"],
+            "summary",
+        );
+
+        let rendered = render_memory_md("tenant-a", Some("project-a"), &[takeaway], &[], &[]);
+
+        assert!(rendered.contains(
+            "agent action: `Write every high-priority durable memory with a concrete action sentence that tells future agents what to verify or reuse`"
+        ));
+    }
+
+    #[test]
+    fn explicit_agent_action_keeps_paths_and_versions() {
+        let takeaway = make_takeaway(
+            "action",
+            "Installed skill bundle. Agent action: Verify future agent sessions read the refreshed ~/.agents/skills/memd skill and use memd 0.61.0 before diagnosing memory-quality behavior.",
+            vec!["kind:finish"],
+            "summary",
+        );
+
+        let rendered = render_memory_md("tenant-a", Some("project-a"), &[takeaway], &[], &[]);
+
+        assert!(rendered.contains(
+            "agent action: `Verify future agent sessions read the refreshed ~/.agents/skills/memd skill and use memd 0.61.0 before diagnosing memory-quality behavior`"
+        ));
     }
 
     fn make_takeaway(chunk_id: &str, text: &str, tags: Vec<&str>, chunk_type: &str) -> Takeaway {

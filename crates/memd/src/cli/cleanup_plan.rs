@@ -1242,7 +1242,7 @@ fn post_cleanup_verification_commands(
                 project_dir_arg,
                 shell_quote_path(Path::new("tasks/memory-post-cleanup.md")),
             ),
-            pass_criteria: "Command exits 0 with useful_ratio >= 0.8, generated_wrapper_count == 0, and no displayed items missing reason metadata.".to_string(),
+            pass_criteria: "Command exits 0 with useful_ratio >= 0.8, generated_wrapper_count == 0, and no displayed items missing reason metadata or concrete agent action guidance.".to_string(),
         },
         PostCleanupVerificationCommand {
             label: "refresh_project_memory".to_string(),
