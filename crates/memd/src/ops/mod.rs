@@ -10653,7 +10653,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_add_allows_explicit_priority_override_for_progress() {
+    async fn memory_add_rejects_explicit_high_priority_without_agent_action() {
         let store = make_store();
 
         let add_result = handle_memory_add(
@@ -10662,6 +10662,26 @@ mod tests {
             AddParams {
                 tenant_id: "quality_gate_override".to_string(),
                 text: "starting".to_string(),
+                chunk_type: "summary".to_string(),
+                tags: vec!["kind:progress".to_string(), "priority:9".to_string()],
+                ..Default::default()
+            },
+        )
+        .await;
+        let err = add_result.expect_err("high-priority memory without action should reject");
+        assert!(err.message().contains("Agent action"));
+    }
+
+    #[tokio::test]
+    async fn memory_add_allows_explicit_high_priority_with_agent_action() {
+        let store = make_store();
+
+        let add_result = handle_memory_add(
+            &store,
+            None,
+            AddParams {
+                tenant_id: "quality_gate_override_action".to_string(),
+                text: "Validation: startup memory passed after action guidance. Agent action: Verify the action guidance gate before promoting high-priority memory.".to_string(),
                 chunk_type: "summary".to_string(),
                 tags: vec!["kind:progress".to_string(), "priority:9".to_string()],
                 ..Default::default()
@@ -10884,7 +10904,7 @@ mod tests {
             None,
             AddParams {
                 tenant_id: tenant.to_string(),
-                text: "Decision: keep RS256 validation result for future auth work.".to_string(),
+                text: "Decision: keep RS256 validation result for future auth work. Agent action: Reuse the validated RS256 result when debugging future auth validation work.".to_string(),
                 chunk_type: "summary".to_string(),
                 tags: vec!["kind:progress".to_string(), "priority:8".to_string()],
                 ..Default::default()

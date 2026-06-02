@@ -63,6 +63,12 @@ For a repo-local install (writes `.memd/` plus per-repo `AGENTS.md` and
 memd init --tenant-id <tenant> --project-id <project>
 ```
 
+During local development, `make install-skill` installs the skill as symlinks.
+Use `make install-skill-bundle` when you need copied skill directories that
+also carry the current repo-built binary at `bin/linux-x64/memd`; it updates
+only unique existing standard skill directories among `~/.agents/skills`,
+`~/.claude/skills`, and `~/.codex/skills`.
+
 ## Verify
 
 ```bash

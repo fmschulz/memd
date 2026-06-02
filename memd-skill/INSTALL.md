@@ -30,6 +30,24 @@ ln -s /path/to/memd/memd-skill ~/.claude/skills/memd
 ln -s /path/to/memd/memd-skill ~/.codex/skills/memd
 ```
 
+From the repository root, this keeps the installed skill as symlinks:
+
+```bash
+make install-skill
+```
+
+To materialize the current skill plus the locally built `target/release/memd`
+binary into each unique existing standard skill directory among
+`~/.agents/skills`, `~/.claude/skills`, and `~/.codex/skills`, run:
+
+```bash
+make install-skill-bundle
+```
+
+That command skips missing parent skill directories and duplicate directories
+that resolve to the same path, then writes the bundled binary as
+`bin/linux-x64/memd` inside each copied `memd` skill.
+
 ## Install the Binary
 
 If `memd` is not already on `PATH`, install a prebuilt release binary. Linux

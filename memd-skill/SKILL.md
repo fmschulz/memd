@@ -115,7 +115,21 @@ memd add \
   --project-id "$PROJECT_ID" \
   --chunk-type summary \
   --tags kind:finish,priority:8,task:"$TASK_ID" \
-  --text "Reusable lesson, path, decision, or recurring failure and how to solve it."
+  --text "Reusable lesson, path, decision, or recurring failure and how to solve it. Agent action: Verify the current files, logs, or tests before applying this lesson."
+```
+
+`memory.md` renders an `agent action` line for each displayed takeaway. Make
+durable writes actionable by including an explicit `Agent action:` sentence.
+For `priority:8+` or `importance:8+` writes, this sentence is required by the
+write-quality gate:
+
+```bash
+memd add \
+  --tenant-id "$TENANT_ID" \
+  --project-id "$PROJECT_ID" \
+  --chunk-type summary \
+  --tags kind:finish,priority:8,task:"$TASK_ID" \
+  --text "Validated fix: cache keys must include tenant_id and project_id. Agent action: Verify both fields before reusing cached retrieval results."
 ```
 
 Use higher priority for general, repeatedly useful lessons; lower priority for
@@ -236,6 +250,12 @@ Write durable records when they contain one of these signals:
 - evidence that supports or contradicts a claim
 - durable follow-up with enough context to resume safely
 
+For high-priority records with `priority:8+` or `importance:8+`, include a
+concrete `Agent action:` sentence; the write-quality gate requires it. The
+sentence should tell the next agent what to do, check, prefer, avoid, verify,
+reuse, or resolve. Avoid vague labels such as "benchmark state" unless they are
+followed by the action rule and evidence that make them useful.
+
 Avoid transcript-like memory:
 
 - no full chat logs or play-by-play tool transcripts
@@ -245,7 +265,8 @@ Avoid transcript-like memory:
 - no duplicate summaries unless they add new evidence, tags, or provenance
 
 Use `priority:8` or `priority:9` only for lessons that should plausibly appear
-in future `memory.md` refreshes. If startup context looks noisy, run:
+in future `memory.md` refreshes. If startup context looks noisy or displayed
+items lack concrete `agent action` lines, run:
 
 ```bash
 memd eval-memory-md --project-dir . --min-useful-ratio 0.8 --max-generated-wrappers 0

@@ -9,8 +9,9 @@
 # skill vendored into several places, and those copies drift. Here the repo is
 # the single source of truth; symlinks keep the installed copies current.
 
-.PHONY: help build install install-binary install-skill install-enforcement \
-        install-all menu uninstall uninstall-binary uninstall-skill status clean
+.PHONY: help build install install-binary install-skill install-skill-bundle \
+        install-skill-copy install-enforcement install-all menu uninstall \
+        uninstall-binary uninstall-skill status clean
 
 REPO        := $(CURDIR)
 RELEASE_BIN := $(REPO)/target/release/memd
@@ -27,6 +28,7 @@ INSTALL_METHOD ?= symlink
 # Claude Code and Codex look (often themselves symlinks to ~/.agents/skills).
 SKILL_NAME    := memd
 SKILL_SRC     := $(REPO)/memd-skill
+SKILL_BIN_REL := bin/linux-x64/memd
 AGENTS_SKILLS := $(HOME)/.agents/skills
 CLAUDE_SKILLS := $(HOME)/.claude/skills
 CODEX_SKILLS  := $(HOME)/.codex/skills
@@ -99,6 +101,36 @@ install-skill: ## Install the skill into ~/.agents, ~/.claude, ~/.codex skills
 			echo "  $(GREEN)✓$(NC) $$t -> $(AGENTS_SKILLS)/$(SKILL_NAME)"; \
 		fi; \
 	done
+
+install-skill-bundle: build ## Copy skill + built binary into existing skill dirs only
+	@if [ ! -x "$(RELEASE_BIN)" ]; then \
+		echo "$(RED)✗$(NC) $(RELEASE_BIN) not found — run 'make build' first"; exit 1; fi
+	@found=0; seen=""; \
+	for d in "$(AGENTS_SKILLS)" "$(CLAUDE_SKILLS)" "$(CODEX_SKILLS)"; do \
+		if [ ! -d "$$d" ]; then \
+			echo "  $(YELLOW)○$(NC) skipped $$d (missing)"; continue; fi; \
+		real="$$(readlink -f "$$d" 2>/dev/null || printf '%s' "$$d")"; \
+		case " $$seen " in *" $$real "*) \
+			echo "  $(YELLOW)○$(NC) skipped $$d (same directory as an earlier skill dir)"; continue ;; \
+		esac; \
+		seen="$$seen $$real"; found=1; target="$$d/$(SKILL_NAME)"; \
+		if [ -L "$$target" ]; then rm -f "$$target"; \
+		elif [ -e "$$target" ]; then \
+			backup="$$target.bak.$$(date +%s)"; mv "$$target" "$$backup"; \
+			echo "  $(YELLOW)backed up real $$target to $$backup$(NC)"; \
+		fi; \
+		mkdir -p "$$target"; \
+		cp -a "$(SKILL_SRC)/." "$$target/"; \
+		mkdir -p "$$target/$$(dirname "$(SKILL_BIN_REL)")"; \
+		install -m 0755 "$(RELEASE_BIN)" "$$target/$(SKILL_BIN_REL)"; \
+		echo "  $(GREEN)✓$(NC) copied skill bundle to $$target"; \
+		echo "  $(GREEN)✓$(NC) $$target/$(SKILL_BIN_REL): $$("$$target/$(SKILL_BIN_REL)" --version)"; \
+	done; \
+	if [ "$$found" = "0" ]; then \
+		echo "$(RED)✗$(NC) none of $(AGENTS_SKILLS), $(CLAUDE_SKILLS), or $(CODEX_SKILLS) exists"; exit 1; \
+	fi
+
+install-skill-copy: install-skill-bundle ## Alias for install-skill-bundle
 
 install-enforcement: ## Wire CLI-first agent rules + SessionStart hook (skill installer)
 	@"$(SKILL_SRC)/install_memd_enforcement.sh"

@@ -70,6 +70,12 @@ pub fn classify_write(
         );
     }
 
+    if explicit_high_priority(tags) && !has_concrete_agent_action(trimmed) {
+        return AdmissionOutcome::reject(
+            "priority:8+ or importance:8+ memories require a concrete Agent action: sentence",
+        );
+    }
+
     let explicit_priority = has_explicit_priority(tags);
     if explicit_priority {
         return AdmissionOutcome::durable("explicit priority or importance tag");
@@ -130,6 +136,77 @@ fn is_low_signal_progress(text: &str) -> bool {
             && !lowered.contains("http")
             && !lowered.contains("validated")
             && !lowered.contains("root cause"))
+}
+
+fn explicit_high_priority(tags: &[String]) -> bool {
+    tags.iter().any(|tag| {
+        tag.strip_prefix("priority:")
+            .or_else(|| tag.strip_prefix("importance:"))
+            .and_then(|value| value.parse::<f32>().ok())
+            .map(|value| value >= 8.0)
+            .unwrap_or(false)
+    })
+}
+
+fn has_concrete_agent_action(text: &str) -> bool {
+    concrete_agent_action_candidates(text, "agent action:").any(is_concrete_agent_action)
+}
+
+fn concrete_agent_action_candidates<'a>(
+    text: &'a str,
+    marker: &'static str,
+) -> impl Iterator<Item = &'a str> {
+    let lowered = text.to_ascii_lowercase();
+    let mut marker_starts = Vec::new();
+    let mut search_start = 0;
+    while let Some(relative_start) = lowered[search_start..].find(marker) {
+        let marker_start = search_start + relative_start;
+        marker_starts.push(marker_start);
+        search_start = marker_start + marker.len();
+    }
+
+    marker_starts.into_iter().map(move |marker_start| {
+        let body_start = marker_start + marker.len();
+        let line_end = text[body_start..]
+            .find(|ch| matches!(ch, '\n' | '\r'))
+            .map(|offset| body_start + offset)
+            .unwrap_or(text.len());
+        let next_marker = lowered[body_start..]
+            .find(marker)
+            .map(|offset| body_start + offset)
+            .unwrap_or(text.len());
+        let body_end = line_end.min(next_marker);
+        text[body_start..body_end].trim()
+    })
+}
+
+fn is_concrete_agent_action(action: &str) -> bool {
+    action.chars().count() >= 24 && contains_action_verb(action)
+}
+
+fn contains_action_verb(text: &str) -> bool {
+    text.split(|ch: char| !ch.is_ascii_alphabetic())
+        .any(|word| {
+            matches!(
+                word.to_ascii_lowercase().as_str(),
+                "apply"
+                    | "avoid"
+                    | "check"
+                    | "confirm"
+                    | "do"
+                    | "follow"
+                    | "include"
+                    | "prefer"
+                    | "record"
+                    | "resolve"
+                    | "reuse"
+                    | "run"
+                    | "treat"
+                    | "use"
+                    | "verify"
+                    | "write"
+            )
+        })
 }
 
 fn durable_signal_reason(
@@ -321,11 +398,45 @@ mod tests {
     }
 
     #[test]
-    fn explicit_priority_overrides_short_progress() {
+    fn rejects_high_priority_without_agent_action() {
         let outcome = classify_write(
             ChunkType::Summary,
             "starting",
             &tags(&["kind:progress", "priority:9"]),
+            IngestionMode::Document,
+        );
+        assert_eq!(outcome.decision, AdmissionDecision::Reject);
+        assert!(outcome.reason.contains("Agent action"));
+    }
+
+    #[test]
+    fn accepts_high_priority_with_agent_action() {
+        let outcome = classify_write(
+            ChunkType::Summary,
+            "Validation: cache key fix passed. Agent action: Verify tenant_id and project_id before reusing cached retrieval results.",
+            &tags(&["kind:progress", "priority:9"]),
+            IngestionMode::Document,
+        );
+        assert_eq!(outcome.decision, AdmissionDecision::Durable);
+    }
+
+    #[test]
+    fn accepts_high_priority_when_marker_is_explained_before_action() {
+        let outcome = classify_write(
+            ChunkType::Summary,
+            "Validation: memory quality gate passed. High-priority records mention Agent action: in documentation. Agent action: Write every high-priority durable memory with a concrete action sentence that tells future agents what to verify or reuse.",
+            &tags(&["kind:finish", "priority:9"]),
+            IngestionMode::Document,
+        );
+        assert_eq!(outcome.decision, AdmissionDecision::Durable);
+    }
+
+    #[test]
+    fn accepts_high_priority_action_with_path_punctuation() {
+        let outcome = classify_write(
+            ChunkType::Summary,
+            "Validation: installed skill bundle. Agent action: Verify future agent sessions read the refreshed ~/.agents/skills/memd skill and use memd 0.61.0 before diagnosing memory-quality behavior.",
+            &tags(&["kind:finish", "priority:9"]),
             IngestionMode::Document,
         );
         assert_eq!(outcome.decision, AdmissionDecision::Durable);

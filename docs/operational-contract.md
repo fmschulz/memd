@@ -63,7 +63,7 @@ memd add \
   --project-id "$PROJECT_ID" \
   --chunk-type decision \
   --tags kind:decision,task:"$TASK_ID",priority:8 \
-  --text "Decision: use tenant/project-scoped retrieval. Rationale: global summaries hid project-specific failures."
+  --text "Decision: use tenant/project-scoped retrieval. Rationale: global summaries hid project-specific failures. Agent action: Verify tenant_id and project_id before reusing retrieval results."
 ```
 
 ```bash
@@ -81,7 +81,7 @@ memd add \
   --project-id "$PROJECT_ID" \
   --chunk-type summary \
   --tags kind:finish,task:"$TASK_ID",priority:8 \
-  --text "Implemented memory-md candidate explanations. Validation: live explain report filtered generated wrappers and cargo test -p memd passed."
+  --text "Implemented memory-md candidate explanations. Validation: live explain report filtered generated wrappers and cargo test -p memd passed. Agent action: Run eval-memory-md before claiming startup memory quality is fixed."
 ```
 
 Use `priority:8` or `priority:9` only for lessons that should plausibly appear
@@ -109,6 +109,12 @@ These should be rejected, downgraded, or avoided:
 
 If an intermediate note is needed for handoff, make it concrete: name the file,
 command, error, partial conclusion, and next check.
+
+High-priority durable records with `priority:8+` or `importance:8+` must
+include a concrete `Agent action:` sentence. It should tell the next agent what
+to do, check, prefer, avoid, verify, reuse, or resolve. `memory.md` renders
+this action guidance for each displayed takeaway, and `memd eval-memory-md`
+fails when displayed project takeaways lack concrete action guidance.
 
 ## Inspect Quality
 
@@ -213,7 +219,8 @@ memory refresh, and doctor commands. When the project directory has
 show reduced approved candidates without new unexplained high-risk
 classifications, retrieval hit-rate/known-recall/MRR pass the generated
 thresholds, `memd eval-memory-md` exits successfully with useful startup
-context, and host/project wiring remains valid.
+context that includes concrete action guidance, and host/project wiring remains
+valid.
 `memd purge --apply` verifies the archive before deleting rows and reports the
 verification summary in `archive_verification`. You can also run
 `memd purge-archive` against the exact archive path. Treat a verification
