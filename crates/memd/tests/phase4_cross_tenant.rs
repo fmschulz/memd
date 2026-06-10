@@ -241,6 +241,7 @@ async fn shared_promotion_requires_explicit_opt_in() {
             background: false,
             force: false,
             promote_to_shared: false,
+            warm: memd::cli::WarmMode::Off,
         },
     )
     .await
@@ -319,7 +320,17 @@ async fn cross_tenant_dedup_removes_near_duplicates() {
     .await
     .unwrap();
     let content = std::fs::read_to_string(md_dir.path().join("memory.md")).unwrap();
-    let occurrences = content.matches("Cross-tenant lesson").count();
+    // Count rendered list items only: generated `agent action:` lines echo the
+    // chunk text, so a raw substring count would tally one entry twice.
+    let occurrences = content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            trimmed.split_once(". ").is_some_and(|(n, rest)| {
+                n.chars().all(|c| c.is_ascii_digit()) && rest.contains("Cross-tenant lesson")
+            })
+        })
+        .count();
     assert_eq!(
         occurrences, 1,
         "near-duplicate cross-tenant lessons must be deduped, got {occurrences}:\n{content}"
@@ -349,6 +360,7 @@ async fn run_consolidate(
             background: false,
             force: false,
             promote_to_shared: true,
+            warm: memd::cli::WarmMode::Off,
         },
     )
     .await

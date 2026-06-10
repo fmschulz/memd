@@ -70,8 +70,8 @@ records; nothing in the store assumes an LLM was involved.
 ### Hybrid retrieval, not vector-only
 
 Most of the systems above default to dense vector search. Dense is good at
-paraphrase but bad at the lookup shapes agents actually generate often:
-function names, file paths, error strings, ticket IDs, commit hashes,
+paraphrase but bad at the lookup shapes agents often generate: function names,
+file paths, error strings, ticket IDs, commit hashes,
 parameter values. `memd` runs dense (HNSW) and sparse (BM25 over tantivy)
 in parallel and fuses the results. The cross-system LoCoMo gap (+14% MRR@10
 over the lexical-only `superlocalmemory`, +19% over the dense-only `mem0`)

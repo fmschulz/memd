@@ -3,6 +3,19 @@
 This skill makes `memd` a skill + CLI workflow. Agents retrieve context with
 `memd agent-context` or `memd search` and record durable memory with `memd add`.
 
+## Quick Install (repo checkout)
+
+From the repository root:
+
+```bash
+make install
+memd doctor
+```
+
+`make install` installs the binary, skill, and enforcement wiring in one
+idempotent command. Use `make install-binary` for the binary only. The sections
+below are the piecewise/advanced path.
+
 The `memd` binary is distributed as prebuilt release artifacts (macOS arm64/x64,
 Linux x86_64/aarch64 as static musl) built by cargo-dist — see "Install the
 Binary" below.
@@ -36,8 +49,9 @@ From the repository root, this keeps the installed skill as symlinks:
 make install-skill
 ```
 
-To materialize the current skill plus the locally built `target/release/memd`
-binary into each unique existing standard skill directory among
+For the advanced/offline variant, materialize the current skill plus the
+locally built `target/release/memd` binary into each unique existing standard
+skill directory among
 `~/.agents/skills`, `~/.claude/skills`, and `~/.codex/skills`, run:
 
 ```bash
@@ -100,6 +114,9 @@ The script:
   values in `memd`
 
 It does not register external client tools and does not install wrapper guards.
+
+After upgrading memd, re-run this script (or `make install-enforcement`) so the
+installed contract matches the new binary.
 
 After the installer runs, verify the wiring:
 
@@ -252,10 +269,34 @@ That verifier checks:
   `~/.claude/CLAUDE.md`
 - both blocks describe the CLI contract
 - `~/.cursor/rules/memd.mdc` exists and carries the CLI contract
-- `memd doctor --format json` runs cleanly
+- the Claude `SessionStart` hook is wired in `~/.claude/settings.json`
+- `memd session-start` creates a project scope in a temp project
+- `memd doctor --strict --format json` passes against a temp project scope
 - `memd add` stores a test memory
+- `memd memory-md` renders a `Memory health` header
 - `memd search` recovers it
 - `memd agent-context` writes a CLI-only context file and JSONL audit log
+
+## Uninstall
+
+```bash
+make uninstall
+```
+
+This removes the binary (stopping the warm worker first), the skill from all
+three skill dirs, and the enforcement wiring via
+`memd-skill/uninstall_memd_enforcement.sh`: rule blocks in
+`~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`, the Cursor rule, and the
+Claude `SessionStart` hook. It keeps `~/.memd` (the global memory store) and
+per-project `.memd/` directories — delete those manually for a clean slate.
+
+Granular targets:
+
+```bash
+make uninstall-binary
+make uninstall-skill
+make uninstall-enforcement
+```
 
 ## Troubleshooting
 

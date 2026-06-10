@@ -2,9 +2,11 @@
 //!
 //! Downloads embedding model to ~/.cache/memd/ on first use.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use sha2::{Digest, Sha256};
 
 use super::traits::PoolingStrategy;
 use crate::error::{MemdError, Result};
@@ -44,24 +46,32 @@ impl EmbeddingModel {
     /// Get model ONNX file URL
     pub fn model_url(&self) -> &'static str {
         match self {
-            Self::AllMiniLmL6V2 => {
-                "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model_quantized.onnx"
-            }
-            Self::Qwen3Embedding0_6B => {
-                "https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/resolve/main/onnx/model_int8.onnx"
-            }
+            Self::AllMiniLmL6V2 => ALL_MINILM_MODEL_URL,
+            Self::Qwen3Embedding0_6B => QWEN3_MODEL_URL,
         }
     }
 
     /// Get tokenizer URL
     pub fn tokenizer_url(&self) -> &'static str {
         match self {
-            Self::AllMiniLmL6V2 => {
-                "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
-            }
-            Self::Qwen3Embedding0_6B => {
-                "https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/resolve/main/tokenizer.json"
-            }
+            Self::AllMiniLmL6V2 => ALL_MINILM_TOKENIZER_URL,
+            Self::Qwen3Embedding0_6B => QWEN3_TOKENIZER_URL,
+        }
+    }
+
+    /// Get expected model ONNX sha256 for fresh downloads
+    pub fn model_sha256(&self) -> &'static str {
+        match self {
+            Self::AllMiniLmL6V2 => ALL_MINILM_MODEL_SHA256,
+            Self::Qwen3Embedding0_6B => QWEN3_MODEL_SHA256,
+        }
+    }
+
+    /// Get expected tokenizer sha256 for fresh downloads
+    pub fn tokenizer_sha256(&self) -> &'static str {
+        match self {
+            Self::AllMiniLmL6V2 => ALL_MINILM_TOKENIZER_SHA256,
+            Self::Qwen3Embedding0_6B => QWEN3_TOKENIZER_SHA256,
         }
     }
 
@@ -147,12 +157,29 @@ pub struct KvCacheConfig {
     pub head_dim: usize,
 }
 
+const ALL_MINILM_MODEL_URL: &str =
+    "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/751bff37182d3f1213fa05d7196b954e230abad9/onnx/model_quantized.onnx";
+const ALL_MINILM_MODEL_SHA256: &str =
+    "afdb6f1a0e45b715d0bb9b11772f032c399babd23bfc31fed1c170afc848bdb1";
+const ALL_MINILM_TOKENIZER_URL: &str =
+    "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/751bff37182d3f1213fa05d7196b954e230abad9/tokenizer.json";
+const ALL_MINILM_TOKENIZER_SHA256: &str =
+    "da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0";
+
+const QWEN3_MODEL_URL: &str =
+    "https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/resolve/c25a394dd583836952667c12f008335071b3f43d/onnx/model_int8.onnx";
+const QWEN3_MODEL_SHA256: &str = "6d0ea863f78b4a84afa3c7fcba1ec341572b5e28121aef77b7092b1dfdf679c7";
+const QWEN3_TOKENIZER_URL: &str =
+    "https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/resolve/c25a394dd583836952667c12f008335071b3f43d/tokenizer.json";
+const QWEN3_TOKENIZER_SHA256: &str =
+    "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a";
+
 // Legacy constants for backward compatibility (used by existing get_model_path/get_tokenizer_path)
-const MODEL_URL: &str =
-    "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model_quantized.onnx";
+const MODEL_URL: &str = ALL_MINILM_MODEL_URL;
+const MODEL_SHA256: &str = ALL_MINILM_MODEL_SHA256;
 const MODEL_FILENAME: &str = "all-MiniLM-L6-v2-quantized.onnx";
-const TOKENIZER_URL: &str =
-    "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json";
+const TOKENIZER_URL: &str = ALL_MINILM_TOKENIZER_URL;
+const TOKENIZER_SHA256: &str = ALL_MINILM_TOKENIZER_SHA256;
 const TOKENIZER_FILENAME: &str = "tokenizer.json";
 const MIN_MODEL_SIZE: u64 = 20_000_000;
 const MIN_TOKENIZER_SIZE: u64 = 500_000;
@@ -161,21 +188,26 @@ const MIN_TOKENIZER_SIZE: u64 = 500_000;
 // These URLs are fetched with plain ureq, which follows huggingface.co's
 // relative 307 Location headers correctly. Prior versions used hf-hub 0.3.2,
 // which mishandled those redirects and failed with RelativeUrlWithoutBase.
-// `resolve/main` tracks the repo's head ref — same mutable ref hf-hub 0.3.2
-// resolved to by default, so this preserves the prior trust posture rather
-// than introducing a stronger (commit-hash) pin.
+// URLs are pinned to immutable revisions and fresh downloads verify sha256;
+// bumping a model means updating the revision and sha256 constants together.
 const CANDLE_BERT_CONFIG_URL: &str =
-    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/config.json";
+    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/config.json";
+const CANDLE_BERT_CONFIG_SHA256: &str =
+    "953f9c0d463486b10a6871cc2fd59f223b2c70184f49815e7efbcab5d8908b41";
 const CANDLE_BERT_CONFIG_FILENAME: &str = "sentence-transformers-all-MiniLM-L6-v2-config.json";
 const CANDLE_BERT_TOKENIZER_URL: &str =
-    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json";
+    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/tokenizer.json";
+const CANDLE_BERT_TOKENIZER_SHA256: &str =
+    "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037";
 const CANDLE_BERT_TOKENIZER_FILENAME: &str =
     "sentence-transformers-all-MiniLM-L6-v2-tokenizer.json";
 const CANDLE_BERT_WEIGHTS_URL: &str =
-    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors";
+    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/model.safetensors";
+const CANDLE_BERT_WEIGHTS_SHA256: &str =
+    "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db";
 const CANDLE_BERT_WEIGHTS_FILENAME: &str = "sentence-transformers-all-MiniLM-L6-v2.safetensors";
 const MIN_CANDLE_BERT_CONFIG_SIZE: u64 = 100; // config.json is ~600 bytes
-const MIN_CANDLE_BERT_TOKENIZER_SIZE: u64 = 100_000; // tokenizer.json is ~470KB at main today
+const MIN_CANDLE_BERT_TOKENIZER_SIZE: u64 = 100_000; // tokenizer.json is ~470KB
 const MIN_CANDLE_BERT_WEIGHTS_SIZE: u64 = 80_000_000; // safetensors is ~90MB
 
 /// Get the cache directory for memd models
@@ -262,13 +294,23 @@ fn verify_tokenizer_exists(path: &PathBuf) -> Result<()> {
 /// Download the embedding model
 pub fn download_model(cache_dir: &PathBuf) -> Result<()> {
     let model_path = cache_dir.join(MODEL_FILENAME);
-    download_file(MODEL_URL, &model_path, "embedding model")
+    download_file(
+        MODEL_URL,
+        &model_path,
+        "embedding model",
+        Some(MODEL_SHA256),
+    )
 }
 
 /// Download the tokenizer (legacy, uses default model)
 fn download_tokenizer(cache_dir: &PathBuf) -> Result<()> {
     let tokenizer_path = cache_dir.join(TOKENIZER_FILENAME);
-    download_file(TOKENIZER_URL, &tokenizer_path, "tokenizer")
+    download_file(
+        TOKENIZER_URL,
+        &tokenizer_path,
+        "tokenizer",
+        Some(TOKENIZER_SHA256),
+    )
 }
 
 // =============================================================================
@@ -281,7 +323,12 @@ pub fn get_model_path_for(model: EmbeddingModel) -> Result<PathBuf> {
     let model_path = cache_dir.join(model.model_filename());
 
     if !model_path.exists() {
-        download_file(model.model_url(), &model_path, model.model_filename())?;
+        download_file(
+            model.model_url(),
+            &model_path,
+            model.model_filename(),
+            Some(model.model_sha256()),
+        )?;
     }
 
     // Verify model exists and has expected size
@@ -300,6 +347,7 @@ pub fn get_tokenizer_path_for(model: EmbeddingModel) -> Result<PathBuf> {
             model.tokenizer_url(),
             &tokenizer_path,
             model.tokenizer_filename(),
+            Some(model.tokenizer_sha256()),
         )?;
     }
 
@@ -325,7 +373,12 @@ pub fn get_tokenizer_path_for(model: EmbeddingModel) -> Result<PathBuf> {
 /// mid-stream, or two racing processes can never leave a half-written
 /// file at the canonical cache path where `verify_file_size` would
 /// either wedge boot or (worse) let a truncated model through.
-fn download_file(url: &str, path: &PathBuf, name: &str) -> Result<()> {
+fn download_file(
+    url: &str,
+    path: &PathBuf,
+    name: &str,
+    expected_sha256: Option<&str>,
+) -> Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -388,8 +441,20 @@ fn download_file(url: &str, path: &PathBuf, name: &str) -> Result<()> {
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
     let mut file = std::fs::File::create(&tmp_path)?;
-    let copy_result =
-        std::io::copy(&mut response.into_reader(), &mut file).and_then(|_| file.sync_all());
+    let mut reader = response.into_reader();
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 16 * 1024];
+    let copy_result = (|| -> std::io::Result<()> {
+        loop {
+            let read = reader.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            file.write_all(&buffer[..read])?;
+        }
+        file.sync_all()
+    })();
     if let Err(e) = copy_result {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(MemdError::StorageError(format!(
@@ -397,7 +462,15 @@ fn download_file(url: &str, path: &PathBuf, name: &str) -> Result<()> {
             name, tmp_path, e
         )));
     }
+    let actual_sha256 = format!("{:x}", hasher.finalize());
     drop(file);
+
+    if let Some(expected) = expected_sha256 {
+        if let Err(error) = enforce_sha256(&actual_sha256, expected, name) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(error);
+        }
+    }
 
     // First-writer-wins publish: hard_link is atomic and fails with
     // AlreadyExists if target already exists. Loser cleans up its tmp
@@ -428,6 +501,31 @@ fn download_file(url: &str, path: &PathBuf, name: &str) -> Result<()> {
 
     tracing::info!("{} downloaded successfully", name);
     Ok(())
+}
+
+#[cfg(test)]
+fn sha256_hex_of_file(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn enforce_sha256(actual: &str, expected: &str, name: &str) -> Result<()> {
+    if actual.eq_ignore_ascii_case(expected) {
+        return Ok(());
+    }
+    Err(MemdError::StorageError(format!(
+        "{} sha256 mismatch: expected {}, actual {}; corrupt partial download was deleted",
+        name, expected, actual
+    )))
 }
 
 /// Best-effort fsync of the parent directory of ``path``.
@@ -672,13 +770,23 @@ pub fn get_candle_bert_paths() -> Result<(PathBuf, PathBuf, PathBuf)> {
 
     let config_path = cache_dir.join(CANDLE_BERT_CONFIG_FILENAME);
     if !config_path.exists() {
-        download_file(CANDLE_BERT_CONFIG_URL, &config_path, "BERT config")?;
+        download_file(
+            CANDLE_BERT_CONFIG_URL,
+            &config_path,
+            "BERT config",
+            Some(CANDLE_BERT_CONFIG_SHA256),
+        )?;
     }
     verify_file_size(&config_path, MIN_CANDLE_BERT_CONFIG_SIZE, "BERT config")?;
 
     let tokenizer_path = cache_dir.join(CANDLE_BERT_TOKENIZER_FILENAME);
     if !tokenizer_path.exists() {
-        download_file(CANDLE_BERT_TOKENIZER_URL, &tokenizer_path, "BERT tokenizer")?;
+        download_file(
+            CANDLE_BERT_TOKENIZER_URL,
+            &tokenizer_path,
+            "BERT tokenizer",
+            Some(CANDLE_BERT_TOKENIZER_SHA256),
+        )?;
     }
     verify_file_size(
         &tokenizer_path,
@@ -688,7 +796,12 @@ pub fn get_candle_bert_paths() -> Result<(PathBuf, PathBuf, PathBuf)> {
 
     let weights_path = cache_dir.join(CANDLE_BERT_WEIGHTS_FILENAME);
     if !weights_path.exists() {
-        download_file(CANDLE_BERT_WEIGHTS_URL, &weights_path, "BERT weights")?;
+        download_file(
+            CANDLE_BERT_WEIGHTS_URL,
+            &weights_path,
+            "BERT weights",
+            Some(CANDLE_BERT_WEIGHTS_SHA256),
+        )?;
     }
     verify_file_size(&weights_path, MIN_CANDLE_BERT_WEIGHTS_SIZE, "BERT weights")?;
 
@@ -720,6 +833,19 @@ fn verify_file_size(path: &PathBuf, min_size: u64, file_type: &str) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn loopback_listener_or_skip(test_name: &str) -> Option<std::net::TcpListener> {
+        match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => Some(listener),
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!(
+                    "skipping {test_name}: loopback bind is not permitted in this environment"
+                );
+                None
+            }
+            Err(err) => panic!("bind loopback listener for {test_name}: {err}"),
+        }
+    }
 
     #[test]
     fn test_cache_dir() {
@@ -767,30 +893,213 @@ mod tests {
             .contains("Qwen3-Embedding"));
     }
 
+    fn assert_pinned_hf_url(url: &str) {
+        let marker = "/resolve/";
+        let start = url
+            .find(marker)
+            .expect("url should contain revision marker")
+            + marker.len();
+        let rest = &url[start..];
+        let revision = rest.split('/').next().expect("revision segment");
+        assert_eq!(
+            revision.len(),
+            40,
+            "revision should be a commit hash: {url}"
+        );
+        assert!(
+            revision.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "revision should be ascii hex: {url}"
+        );
+        let mutable_ref = ["resolve", "main"].join("/");
+        assert!(
+            !url.contains(&mutable_ref),
+            "url should not use a mutable ref: {url}"
+        );
+    }
+
+    fn assert_sha256_constant(hash: &str) {
+        assert_eq!(hash.len(), 64, "sha256 should be 64 hex chars: {hash}");
+        assert!(
+            hash.bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+            "sha256 should be lowercase hex: {hash}"
+        );
+    }
+
+    fn sha256_hex_of_bytes(bytes: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        format!("{:x}", hasher.finalize())
+    }
+
+    #[test]
+    fn test_all_download_urls_are_revision_pinned() {
+        let urls = [
+            ALL_MINILM_MODEL_URL,
+            ALL_MINILM_TOKENIZER_URL,
+            QWEN3_MODEL_URL,
+            QWEN3_TOKENIZER_URL,
+            MODEL_URL,
+            TOKENIZER_URL,
+            CANDLE_BERT_CONFIG_URL,
+            CANDLE_BERT_TOKENIZER_URL,
+            CANDLE_BERT_WEIGHTS_URL,
+            EmbeddingModel::AllMiniLmL6V2.model_url(),
+            EmbeddingModel::AllMiniLmL6V2.tokenizer_url(),
+            EmbeddingModel::Qwen3Embedding0_6B.model_url(),
+            EmbeddingModel::Qwen3Embedding0_6B.tokenizer_url(),
+        ];
+        for url in urls {
+            assert_pinned_hf_url(url);
+        }
+    }
+
+    #[test]
+    fn test_sha256_constants_are_lowercase_hex() {
+        let hashes = [
+            ALL_MINILM_MODEL_SHA256,
+            ALL_MINILM_TOKENIZER_SHA256,
+            QWEN3_MODEL_SHA256,
+            QWEN3_TOKENIZER_SHA256,
+            MODEL_SHA256,
+            TOKENIZER_SHA256,
+            CANDLE_BERT_CONFIG_SHA256,
+            CANDLE_BERT_TOKENIZER_SHA256,
+            CANDLE_BERT_WEIGHTS_SHA256,
+        ];
+        for hash in hashes {
+            assert_sha256_constant(hash);
+        }
+    }
+
     #[test]
     fn test_candle_bert_constants() {
-        // Contract (repo + file + path, not revision): the Candle BERT embedder
-        // pulls config/tokenizer/weights from sentence-transformers/all-MiniLM-L6-v2
-        // at the `main` ref, same mutable ref hf-hub 0.3.2 resolved to by default.
-        // These asserts lock in the URL shape that plain ureq follows correctly,
-        // preventing a silent refactor from reintroducing the RelativeUrlWithoutBase
-        // regression. Revision pinning (commit hash) would be a stronger
-        // provenance guarantee and is deliberately out of scope here.
+        // Contract: Candle BERT assets are fetched from an immutable
+        // sentence-transformers revision and verified by sha256. Bumping
+        // these files must update the revision and hash constants together.
         assert_eq!(
             CANDLE_BERT_CONFIG_URL,
-            "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/config.json"
+            "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/config.json"
         );
         assert_eq!(
             CANDLE_BERT_TOKENIZER_URL,
-            "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
+            "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/tokenizer.json"
         );
         assert_eq!(
             CANDLE_BERT_WEIGHTS_URL,
-            "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors"
+            "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/model.safetensors"
         );
         assert!(CANDLE_BERT_CONFIG_URL.starts_with("https://"));
         assert!(CANDLE_BERT_TOKENIZER_URL.starts_with("https://"));
         assert!(CANDLE_BERT_WEIGHTS_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn test_sha256_verification_reports_expected_and_actual() {
+        let tmp_dir = unique_tmp_dir("hash-verify");
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let file = tmp_dir.join("wrong.bin");
+        std::fs::write(&file, b"wrong content").unwrap();
+
+        let actual = sha256_hex_of_file(&file).unwrap();
+        let expected = sha256_hex_of_bytes(b"expected content");
+        let err = enforce_sha256(&actual, &expected, "wrong test file").unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains(&expected));
+        assert!(message.contains(&actual));
+
+        std::fs::remove_dir_all(&tmp_dir).ok();
+    }
+
+    #[test]
+    fn test_download_file_rejects_corrupt_hash_without_publish() {
+        use std::io::{Read, Write};
+
+        let body = b"wrong loopback bytes".to_vec();
+        let Some(listener) =
+            loopback_listener_or_skip("test_download_file_rejects_corrupt_hash_without_publish")
+        else {
+            return;
+        };
+        let addr = listener.local_addr().unwrap();
+        let body_for_server = body.clone();
+        let server_thread = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body_for_server.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(&body_for_server);
+            }
+        });
+
+        let tmp_dir = unique_tmp_dir("download-hash-reject");
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let target = tmp_dir.join("corrupt.bin");
+        let expected = sha256_hex_of_bytes(b"different expected bytes");
+
+        let url = format!("http://{}/x", addr);
+        let result = download_file(&url, &target, "corrupt test", Some(&expected));
+        server_thread.join().ok();
+
+        assert!(result.is_err(), "hash mismatch should fail");
+        assert!(!target.exists(), "mismatched download must not publish");
+        let leftovers: Vec<_> = std::fs::read_dir(&tmp_dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("partial"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no partial tmp files should remain, found: {:?}",
+            leftovers
+        );
+
+        std::fs::remove_dir_all(&tmp_dir).ok();
+    }
+
+    #[test]
+    fn test_download_file_accepts_matching_hash_and_publishes() {
+        use std::io::{Read, Write};
+
+        let body = b"known loopback bytes".to_vec();
+        let Some(listener) =
+            loopback_listener_or_skip("test_download_file_accepts_matching_hash_and_publishes")
+        else {
+            return;
+        };
+        let addr = listener.local_addr().unwrap();
+        let body_for_server = body.clone();
+        let server_thread = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body_for_server.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(&body_for_server);
+            }
+        });
+
+        let tmp_dir = unique_tmp_dir("download-hash-ok");
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let target = tmp_dir.join("pinned.bin");
+        let expected = sha256_hex_of_bytes(&body);
+
+        let url = format!("http://{}/x", addr);
+        let result = download_file(&url, &target, "pinned test", Some(&expected));
+        server_thread.join().ok();
+
+        assert!(result.is_ok(), "matching hash should succeed: {:?}", result);
+        assert_eq!(std::fs::read(&target).unwrap(), body);
+
+        std::fs::remove_dir_all(&tmp_dir).ok();
     }
 
     #[test]
@@ -821,7 +1130,7 @@ mod tests {
         std::fs::create_dir_all(&tmp_dir).unwrap();
         let target = tmp_dir.join("atomic-test.bin");
 
-        let result = download_file("http://127.0.0.1:1/never", &target, "test file");
+        let result = download_file("http://127.0.0.1:1/never", &target, "test file", None);
         assert!(result.is_err(), "expected download to error");
         assert!(
             !target.exists(),
@@ -880,10 +1189,13 @@ mod tests {
         // post-publish invariants hold: file present, sized, no stray
         // `.partial.*` siblings left behind.
         use std::io::{Read, Write};
-        use std::net::TcpListener;
 
         let body = b"candle-fsync-payload".to_vec();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) =
+            loopback_listener_or_skip("test_download_file_fsyncs_parent_on_publish")
+        else {
+            return;
+        };
         let addr = listener.local_addr().unwrap();
         let body_for_server = body.clone();
         let server_thread = std::thread::spawn(move || {
@@ -911,7 +1223,7 @@ mod tests {
         let target = tmp_dir.join("candle.bin");
 
         let url = format!("http://{}/x", addr);
-        let result = download_file(&url, &target, "fsync test");
+        let result = download_file(&url, &target, "fsync test", None);
         server_thread.join().ok();
 
         assert!(result.is_ok(), "download_file should succeed: {:?}", result);
@@ -961,7 +1273,12 @@ mod tests {
         std::fs::create_dir_all(&tmp_dir).unwrap();
         let target = tmp_dir.join(CANDLE_BERT_CONFIG_FILENAME);
 
-        let result = download_file(CANDLE_BERT_CONFIG_URL, &target, "BERT config");
+        let result = download_file(
+            CANDLE_BERT_CONFIG_URL,
+            &target,
+            "BERT config",
+            Some(CANDLE_BERT_CONFIG_SHA256),
+        );
         assert!(
             result.is_ok(),
             "HF config download should succeed (network required): {:?}",
@@ -1004,10 +1321,12 @@ mod tests {
         // assert the target's original bytes are intact and no `.partial.*`
         // sibling is left behind.
         use std::io::{Read, Write};
-        use std::net::TcpListener;
 
         let body = b"fresh-download-payload".to_vec();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = loopback_listener_or_skip("test_download_file_is_first_writer_wins")
+        else {
+            return;
+        };
         let addr = listener.local_addr().unwrap();
         let body_for_server = body.clone();
         let server_thread = std::thread::spawn(move || {
@@ -1039,7 +1358,7 @@ mod tests {
         std::fs::write(&target, &sentinel).unwrap();
 
         let url = format!("http://{}/x", addr);
-        let result = download_file(&url, &target, "race test");
+        let result = download_file(&url, &target, "race test", None);
         server_thread.join().ok();
 
         assert!(result.is_ok(), "download_file should succeed: {:?}", result);
@@ -1294,10 +1613,13 @@ mod tests {
         // the writer's sleep yields the thread to let the waiter enter
         // the Contended branch.
         use std::io::{Read, Write};
-        use std::net::TcpListener;
 
         let body = b"one-download-shared".to_vec();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) =
+            loopback_listener_or_skip("test_download_file_waiter_reuses_publication")
+        else {
+            return;
+        };
         let addr = listener.local_addr().unwrap();
         let body_for_server = body.clone();
         let server_thread = std::thread::spawn(move || {
@@ -1330,14 +1652,14 @@ mod tests {
         let target_for_writer = target.clone();
 
         let writer = std::thread::spawn(move || {
-            download_file(&url, &target_for_writer, "cooperative writer")
+            download_file(&url, &target_for_writer, "cooperative writer", None)
         });
 
         // Give the writer a head-start to acquire the lock.
         std::thread::sleep(Duration::from_millis(20));
 
         let waiter = std::thread::spawn(move || {
-            download_file(&url_clone, &target_clone, "cooperative waiter")
+            download_file(&url_clone, &target_clone, "cooperative waiter", None)
         });
 
         let writer_res = writer.join().unwrap();

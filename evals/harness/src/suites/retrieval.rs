@@ -5,7 +5,7 @@
 //! Phase 4+: Expand with benchmark datasets (RepoBench-R, LongMemEval).
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Instant;
 
 use serde::Deserialize;
@@ -73,7 +73,7 @@ fn extract_content_text(response: &Value) -> Option<&str> {
 }
 
 /// Run retrieval quality tests
-pub fn run_retrieval_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestResult> {
+pub fn run_retrieval_tests(memd_path: &Path, embedding_model: &str) -> Vec<TestResult> {
     let mut results = Vec::new();
 
     // Load dataset
@@ -134,7 +134,7 @@ fn load_dataset(path: &std::path::Path) -> Result<Dataset, String> {
 }
 
 fn run_b1_index_documents(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     dataset: &Dataset,
     embedding_model: &str,
 ) -> TestResult {
@@ -198,7 +198,7 @@ fn run_b1_index_documents(
 }
 
 fn run_b2_retrieval_quality(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     dataset: &Dataset,
     embedding_model: &str,
 ) -> (TestResult, RetrievalMetrics) {

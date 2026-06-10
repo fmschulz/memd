@@ -61,7 +61,7 @@ memd search \
   --tenant-id microservices-platform \
   --project-id platform-architecture \
   --query "event bus replay throughput decision" \
-  --mode find-decisions \
+  --mode find_decisions \
   --compact \
   --token-budget 2000 \
   --format markdown

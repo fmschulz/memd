@@ -4,7 +4,7 @@
 //! Validates that the tiered architecture provides expected speedups.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde::Deserialize;
@@ -120,7 +120,7 @@ fn extract_content_text(response: &Value) -> Option<&str> {
 }
 
 /// Run tiered evaluation tests
-pub fn run_tiered_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestResult> {
+pub fn run_tiered_tests(memd_path: &Path, embedding_model: &str) -> Vec<TestResult> {
     let mut results = Vec::new();
 
     // Load dataset
@@ -214,7 +214,7 @@ fn load_dataset(path: &PathBuf) -> Result<TieredDataset, String> {
 }
 
 fn run_d1_index_and_warmup(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     dataset: &TieredDataset,
     config: &TieredEvalConfig,
     embedding_model: &str,
@@ -296,7 +296,7 @@ fn run_d1_index_and_warmup(
 }
 
 fn run_d2_cache_hit_tests(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     dataset: &TieredDataset,
     _config: &TieredEvalConfig,
     embedding_model: &str,
@@ -451,7 +451,7 @@ fn run_d2_cache_hit_tests(
 }
 
 fn run_d3_hot_tier_tests(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     dataset: &TieredDataset,
     config: &TieredEvalConfig,
     embedding_model: &str,
@@ -620,7 +620,7 @@ fn run_d3_hot_tier_tests(
 }
 
 fn run_d4_warm_tier_tests(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     dataset: &TieredDataset,
     _config: &TieredEvalConfig,
     embedding_model: &str,

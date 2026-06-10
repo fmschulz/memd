@@ -7,6 +7,7 @@ use tracing::info;
 use crate::error::{MemdError, Result};
 use crate::hit_stats::{query_mode_label, record_hits, HitRecord};
 use crate::mcp::handlers::{handle_memory_search, SearchParams};
+use crate::store::usage::{UsageEvent, UsageOp};
 use crate::store::Store;
 
 use super::args::{CliQueryMode, ExportFormat, SearchReranker, SearchRerankerOptions};
@@ -47,6 +48,7 @@ pub(super) async fn cli_search_payload<S: Store>(
         include_artifact,
         include_superseded,
         true,
+        false,
     )
     .await
 }
@@ -82,6 +84,7 @@ pub(super) async fn cli_search_payload_silent<S: Store>(
         include_artifact,
         include_superseded,
         false,
+        true,
     )
     .await
 }
@@ -100,6 +103,7 @@ async fn cli_search_payload_inner<S: Store>(
     include_artifact: bool,
     include_superseded: bool,
     log_hits: bool,
+    suppress_usage_event: bool,
 ) -> Result<Value> {
     let payload = direct_memory_search_payload(
         store,
@@ -113,6 +117,7 @@ async fn cli_search_payload_inner<S: Store>(
         no_text,
         include_artifact,
         include_superseded,
+        suppress_usage_event,
     )
     .await?;
     let result_count = payload
@@ -518,6 +523,7 @@ pub(super) async fn cli_agent_context_payload<S: Store>(
             no_text,
             include_artifact,
             false,
+            true,
         )
         .await?;
         log_search_hits(&payload, tenant_id, project_id, mode);
@@ -540,6 +546,21 @@ pub(super) async fn cli_agent_context_payload<S: Store>(
             "budget_info": payload.get("budget_info").cloned().unwrap_or(Value::Null),
         }));
     }
+
+    let n = merged_results.len();
+    store.record_usage_event(UsageEvent {
+        op: UsageOp::AgentContext,
+        tenant: Some(tenant_id.to_string()),
+        project: project_id.map(ToString::to_string),
+        outcome: if n == 0 {
+            "zero_hits".to_string()
+        } else {
+            format!("hits:{n}")
+        },
+        chunk_count: Some(n as i64),
+        bytes: None,
+        detail: Some(json!({"queries": queries.len(), "k": k}).to_string()),
+    });
 
     Ok(json!({
         "tool": "memd.agent_context",
@@ -568,6 +589,7 @@ pub(super) async fn direct_memory_search_payload<S: Store>(
     no_text: bool,
     include_artifact: bool,
     include_superseded: bool,
+    suppress_usage_event: bool,
 ) -> Result<Value> {
     let params = SearchParams {
         tenant_id: tenant_id.to_string(),
@@ -580,6 +602,7 @@ pub(super) async fn direct_memory_search_payload<S: Store>(
         include_text: no_text.then_some(false),
         include_artifact: include_artifact.then_some(true),
         include_superseded: include_superseded.then_some(true),
+        suppress_usage_event,
         ..Default::default()
     };
     let mcp_value = handle_memory_search(store, params)

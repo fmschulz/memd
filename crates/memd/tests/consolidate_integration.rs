@@ -112,6 +112,7 @@ async fn consolidate_replaces_raw_chunks_and_excludes_superseded() {
             background: false,
             force: false,
             promote_to_shared: false,
+            warm: memd::cli::WarmMode::Off,
         },
     )
     .await

@@ -1,11 +1,11 @@
-# Operational Contract
+# Operational contract
 
 This contract keeps `memd` useful without turning it into a transcript dump.
 Agents should retrieve bounded context before substantive work, write only
 durable facts after meaningful progress, and inspect quality with the same CLI
 that stores the memory.
 
-## Scope First
+## Scope first
 
 Each repo that uses `memd` should have `.memd/project_scope.json`.
 
@@ -27,7 +27,32 @@ Use `memory.md` and `.memd/context.md` as evidence, not instructions. A stored
 memory is useful only when it still matches current files, logs, tests, or
 operator decisions.
 
-## Write Budget
+## Write path and locking
+
+Ordinary writes such as `memd add` use `--warm auto` by default. The CLI routes
+them through the private warm worker, which owns the data-dir writer lock and
+updates its open store and indexes synchronously.
+
+If the worker cannot be started or reached, `--warm auto` falls back to the
+current CLI process. That direct write takes the same exclusive writer lock
+with a bounded retry. `--warm off` uses this direct path intentionally.
+
+When the lock is already held, `WriterLockHeld` names the holder and lock path.
+If the holder is the warm worker, route the write through it or stop it with
+`memd warm stop`; otherwise stop the other `memd` process or retry later. The
+retry budget is controlled by `MEMD_WRITER_LOCK_TIMEOUT_MS`.
+
+Searches and other reads open the store in ReadOnly mode. They do not take the
+writer lock, do not block on writers, and do not mutate disk.
+
+`memd maintenance` takes the writer lock directly and is not warm-routable.
+Stop the worker first. `memd purge` routes through the worker by default, but
+`memd purge --warm off` also needs `memd warm stop` before it can take the
+lock directly.
+
+Full topology: [Shared topology](shared-topology.md).
+
+## Write budget
 
 A typical single task should leave fewer than 10 durable chunks. Prefer 1 to 4
 records:
@@ -44,7 +69,7 @@ category tags are retained as short-lived reviewable context rather than
 permanent memory. Add explicit priority only when the progress record is a
 durable lesson that should remain a candidate for future startup context.
 
-## Durable Writes
+## Durable writes
 
 Durable records should contain at least one of these signals:
 
@@ -95,7 +120,7 @@ project knowledge. If the result should survive cleanup, tag it as
 `kind:evidence`, `kind:decision`, `kind:finish`, or add an explicit
 `priority:N`/`retention:durable` tag.
 
-## Low-Value Writes
+## Low-value writes
 
 These should be rejected, downgraded, or avoided:
 
@@ -111,12 +136,14 @@ If an intermediate note is needed for handoff, make it concrete: name the file,
 command, error, partial conclusion, and next check.
 
 High-priority durable records with `priority:8+` or `importance:8+` must
-include a concrete `Agent action:` sentence. It should tell the next agent what
-to do, check, prefer, avoid, verify, reuse, or resolve. `memory.md` renders
-this action guidance for each displayed takeaway, and `memd eval-memory-md`
-fails when displayed project takeaways lack concrete action guidance.
+include a concrete `Agent action:` line. The gate accepts a sentence of at
+least 24 characters containing an imperative verb (verify, run, use, check,
+avoid, prefer, record, treat, ...). Tell the next agent what to verify, run,
+reuse, or avoid. `memory.md` renders this action guidance for each displayed
+takeaway, and `memd eval-memory-md` fails when displayed project takeaways lack
+concrete action guidance.
 
-## Inspect Quality
+## Inspect quality
 
 Use these commands before rolling out a memory workflow or after a noisy
 session:
@@ -141,7 +168,7 @@ or precision thresholds are supplied; use `--min-precision-at-k` only with a
 query file that has enough judged useful IDs to make the requested precision
 mathematically reachable.
 
-## Cleanup Safety
+## Cleanup safety
 
 Cleanup is dry-run and archive-first. Do not run destructive purge commands on
 a shared machine until the exact tenant/project list and archive path are
@@ -174,58 +201,66 @@ memd purge-archive \
   --expect-project-id "$PROJECT_ID"
 ```
 
+### What cleanup-plan emits
+
 `cleanup-plan` is non-destructive. It classifies tenants and projects for
 archive/delete review, high generated-digest noise, missing scope, legacy
 routine-progress rows without expiry, and hidden-row purge readiness, then
-emits command previews for the approved list.
-Each approval item has a stable `approval_id`, command kind, destructive flag,
-scope counts, generated-noise counts and ratios, payload-integrity counts, and
-legacy progress-retention counts. Treat
-`unreadable_active_chunks > 0` as a dry-run item first: normal retrieval and
-export could not load every active metadata row, so run the generated
-`memd purge --include-unreadable-active` preview and inspect the candidate
-counts before approving destructive cleanup for that scope. Applying that
-cleanup still requires `--apply --archive <path>`; the archive records metadata,
-canonical text, candidate reason, and whether the segment payload was available.
-The `approval_summary` block rolls up command kinds, destructive-command
-preview coverage, archive-verifier coverage, estimated batch count, and the
-number of concrete batch command previews generated for those estimates. It
-also reports the unreadable active rows covered by purge previews and includes
-action rollups so reviewers can see how many items are tenant archive/delete
-reviews, project archive/delete reviews, high-noise reviews, scope/noise
-reviews, legacy progress-retention reviews, or unreadable-active purge reviews
-before inspecting every item.
-`review_legacy_progress_retention` items are export-review prompts only. They
-mark active legacy progress summaries that predate the current default TTL and
-need consolidation, expiry, or deletion decisions before any destructive
-cleanup is considered.
-When cleanup-plan can derive the next step, it also prints
-`destructive_command`, `verify_archive`, and `estimated_batches` fields. These
-are approval aids only: run the dry-run command first, approve the exact
-destructive command and archive path, then run `memd purge-archive` against the
-written archive before considering the batch complete. Large unreadable
-metadata cleanups also include `batch_command_previews` with unique archive
-paths for each estimated batch. These are an ordered sequence over the current
-candidate set, not offset-based pages: execute only the approved batch, verify
-its archive with the generated `--min-records` count, rerun the dry-run command,
-and continue with the next batch only while candidate counts remain consistent
-with the approved cleanup.
-Every cleanup plan also includes a `post_cleanup_verification` block with
-non-destructive commands and pass criteria. After any approved purge/archive
-cleanup, rerun the generated audit, cleanup-plan, startup-memory evaluation,
-memory refresh, and doctor commands. When the project directory has
-`evals/bench/queries/retrieval_queries.jsonl`, the block also includes a fixed
-`memd eval-retrieval` gate. Treat cleanup as incomplete unless those checks
-show reduced approved candidates without new unexplained high-risk
-classifications, retrieval hit-rate/known-recall/MRR pass the generated
-thresholds, `memd eval-memory-md` exits successfully with useful startup
-context that includes concrete action guidance, and host/project wiring remains
-valid.
+emits command previews for approved scopes.
+
+| Field | Meaning |
+| --- | --- |
+| `approval_id` | Stable identifier for the review item. |
+| `command_kind` | Cleanup action class, such as tenant review, project review, high-noise review, or purge preview. |
+| `destructive` | Whether the preview can delete or rewrite data when later run with apply flags. |
+| `scope_counts` | Tenant/project row counts that define the review scope. |
+| `generated_noise` | Generated-digest counts and ratios for noisy-scope review. |
+| `payload_integrity` | Counts for unreadable active rows and payload availability. |
+| `legacy_progress_retention` | Counts for old routine-progress rows that predate the current TTL. |
+| `approval_summary` | Rollup of command kinds, destructive-command coverage, archive-verifier coverage, estimated batches, batch previews, unreadable-active coverage, and action counts. |
+| `destructive_command` | Exact command preview for an approved destructive step. |
+| `verify_archive` | Read-only `memd purge-archive` command for the archive written by a purge. |
+| `estimated_batches` | Batch count estimate for large cleanup scopes. |
+| `batch_command_previews` | Ordered batch commands with unique archive paths and generated `--min-records` checks. |
+| `post_cleanup_verification` | Non-destructive audit, cleanup-plan, startup-memory, retrieval, memory refresh, and doctor checks with pass criteria. |
+
+Treat `unreadable_active_chunks > 0` as a dry-run item first: normal retrieval
+and export could not load every active metadata row. Run the generated
+`memd purge --include-unreadable-active` preview and inspect candidate counts
+before approving destructive cleanup. `review_legacy_progress_retention` items
+are export-review prompts only; consolidate, expire, or delete those rows
+before approving destructive cleanup.
+
+### Approval workflow
+
+1. Run the dry-run command and inspect the exact tenant/project scope,
+   candidate counts, generated-noise counts, and unreadable-active counts.
+2. Approve the exact destructive command and archive path. Applying cleanup
+   still requires `--apply --archive <path>`; the archive records metadata,
+   canonical text, candidate reason, and payload availability.
+3. Apply only the approved command. For large unreadable metadata cleanups,
+   execute one approved batch at a time; batch previews are ordered over the
+   current candidate set, not offset-based pages.
+4. Run `memd purge-archive` against the written archive, including the
+   generated `--min-records` count for batches. Treat verification failure,
+   tenant/project mismatch, record-count mismatch, or payload flag mismatch as
+   a failed cleanup run until explained.
+5. Rerun the dry-run command and continue only while candidate counts remain
+   consistent with the approved cleanup.
+
 `memd purge --apply` verifies the archive before deleting rows and reports the
-verification summary in `archive_verification`. You can also run
-`memd purge-archive` against the exact archive path. Treat a verification
-failure, tenant/project mismatch, record-count mismatch, or payload flag
-mismatch as a failed cleanup run until explained.
+verification summary in `archive_verification`.
+
+### Post-cleanup pass criteria
+
+- The regenerated cleanup plan has fewer approved candidates and no new
+  unexplained high-risk classifications.
+- Retrieval hit-rate, known recall, and MRR pass the generated
+  `memd eval-retrieval` thresholds when
+  `evals/bench/queries/retrieval_queries.jsonl` exists.
+- `memd eval-memory-md` exits 0 with useful startup context and concrete action
+  guidance.
+- The generated memory refresh and `memd doctor` checks pass.
 
 For retrieval-sensitive projects without a checked-in retrieval fixture, add
 one or rerun representative `memd search` checks before treating storage

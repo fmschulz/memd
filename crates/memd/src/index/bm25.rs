@@ -68,7 +68,7 @@ pub struct Bm25Index {
     /// Index reader for search operations
     reader: IndexReader,
     /// Index writer for insert/delete (mutex for thread safety)
-    writer: Mutex<IndexWriter>,
+    writer: Option<Mutex<IndexWriter>>,
     /// Schema for document structure (kept for potential future use)
     #[allow(dead_code)]
     schema: Schema,
@@ -84,6 +84,38 @@ pub struct Bm25Index {
     dirty: AtomicBool,
 }
 
+struct Bm25SchemaFields {
+    schema: Schema,
+    tenant_field: Field,
+    chunk_field: Field,
+    sentence_field: Field,
+    text_field: Field,
+}
+
+fn build_schema_fields() -> Bm25SchemaFields {
+    let mut schema_builder = Schema::builder();
+
+    let tenant_field = schema_builder.add_text_field("tenant_id", STRING | STORED);
+    let chunk_field = schema_builder.add_text_field("chunk_id", STRING | STORED);
+    let sentence_field = schema_builder.add_u64_field("sentence_idx", STORED);
+
+    let text_indexing = TextFieldIndexing::default()
+        .set_tokenizer("code")
+        .set_index_option(IndexRecordOption::WithFreqsAndPositions);
+    let text_options = TextOptions::default()
+        .set_indexing_options(text_indexing)
+        .set_stored();
+    let text_field = schema_builder.add_text_field("text", text_options);
+
+    Bm25SchemaFields {
+        schema: schema_builder.build(),
+        tenant_field,
+        chunk_field,
+        sentence_field,
+        text_field,
+    }
+}
+
 impl Bm25Index {
     /// Create a new in-memory BM25 index.
     pub fn new() -> Result<Self> {
@@ -95,28 +127,7 @@ impl Bm25Index {
     /// If path is None, creates an in-memory index.
     /// If path is Some, creates a persistent index at the given directory.
     pub fn with_path(path: Option<PathBuf>) -> Result<Self> {
-        // Build schema
-        let mut schema_builder = Schema::builder();
-
-        // Tenant ID: stored and indexed as exact string
-        let tenant_field = schema_builder.add_text_field("tenant_id", STRING | STORED);
-
-        // Chunk ID: stored and indexed as exact string
-        let chunk_field = schema_builder.add_text_field("chunk_id", STRING | STORED);
-
-        // Sentence index: stored for result metadata
-        let sentence_field = schema_builder.add_u64_field("sentence_idx", STORED);
-
-        // Text field: indexed with code tokenizer for BM25 search
-        let text_indexing = TextFieldIndexing::default()
-            .set_tokenizer("code")
-            .set_index_option(IndexRecordOption::WithFreqsAndPositions);
-        let text_options = TextOptions::default()
-            .set_indexing_options(text_indexing)
-            .set_stored();
-        let text_field = schema_builder.add_text_field("text", text_options);
-
-        let schema = schema_builder.build();
+        let fields = build_schema_fields();
 
         // Create or reopen the index. `Index::create_in_dir` fails when the
         // directory already contains a tantivy index, which would silently
@@ -128,22 +139,47 @@ impl Bm25Index {
                 std::fs::create_dir_all(&p)?;
                 let directory = MmapDirectory::open(&p)
                     .map_err(|e| MemdError::StorageError(format!("open index directory: {}", e)))?;
-                Index::open_or_create(directory, schema.clone())
+                Index::open_or_create(directory, fields.schema.clone())
                     .map_err(|e| MemdError::StorageError(format!("open_or_create index: {}", e)))?
             }
-            None => Index::create_in_ram(schema.clone()),
+            None => Index::create_in_ram(fields.schema.clone()),
         };
-
-        // Register code tokenizer
-        let code_tokenizer = TextAnalyzer::builder(CodeTokenizer::new()).build();
-        index.tokenizers().register("code", code_tokenizer);
 
         // Create writer
         let writer = index
             .writer(DEFAULT_WRITER_MEMORY_BYTES)
             .map_err(|e| MemdError::StorageError(format!("create writer: {}", e)))?;
 
-        // Create reader with automatic reload
+        Self::from_index(index, fields, Some(writer))
+    }
+
+    /// Open an existing persistent BM25 index without creating a writer.
+    pub fn with_path_read_only(path: PathBuf) -> Result<Option<Self>> {
+        if !path.exists() {
+            tracing::debug!(
+                path = %path.display(),
+                "sparse index directory missing; read-only sparse search unavailable"
+            );
+            return Ok(None);
+        }
+
+        let fields = build_schema_fields();
+        let directory = MmapDirectory::open(&path)
+            .map_err(|e| MemdError::StorageError(format!("open index directory: {}", e)))?;
+        let index = Index::open(directory)
+            .map_err(|e| MemdError::StorageError(format!("open read-only index: {}", e)))?;
+
+        Ok(Some(Self::from_index(index, fields, None)?))
+    }
+
+    fn from_index(
+        index: Index,
+        fields: Bm25SchemaFields,
+        writer: Option<IndexWriter>,
+    ) -> Result<Self> {
+        let code_tokenizer = TextAnalyzer::builder(CodeTokenizer::new()).build();
+        index.tokenizers().register("code", code_tokenizer);
+
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::OnCommitWithDelay)
@@ -153,20 +189,22 @@ impl Bm25Index {
         Ok(Self {
             index,
             reader,
-            writer: Mutex::new(writer),
-            schema,
-            tenant_field,
-            chunk_field,
-            sentence_field,
-            text_field,
+            writer: writer.map(Mutex::new),
+            schema: fields.schema,
+            tenant_field: fields.tenant_field,
+            chunk_field: fields.chunk_field,
+            sentence_field: fields.sentence_field,
+            text_field: fields.text_field,
             dirty: AtomicBool::new(false),
         })
     }
 
     /// Commit pending writes if needed.
     fn commit_if_dirty(&self) -> Result<()> {
-        let mut writer = self
-            .writer
+        let Some(writer) = self.writer.as_ref() else {
+            return Ok(());
+        };
+        let mut writer = writer
             .lock()
             .map_err(|e| MemdError::StorageError(format!("lock writer: {}", e)))?;
         if self.dirty.swap(false, Ordering::AcqRel) {
@@ -223,8 +261,12 @@ impl SparseIndex for Bm25Index {
             return Ok(());
         }
 
-        let writer = self
-            .writer
+        let Some(writer) = self.writer.as_ref() else {
+            return Err(MemdError::ReadOnlyStore {
+                op: "bm25_insert_batch".to_string(),
+            });
+        };
+        let writer = writer
             .lock()
             .map_err(|e| MemdError::StorageError(format!("lock writer: {}", e)))?;
 
@@ -312,8 +354,12 @@ impl SparseIndex for Bm25Index {
     fn delete(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<bool> {
         self.commit_if_dirty()?;
 
-        let writer = self
-            .writer
+        let Some(writer) = self.writer.as_ref() else {
+            return Err(MemdError::ReadOnlyStore {
+                op: "bm25_delete".to_string(),
+            });
+        };
+        let writer = writer
             .lock()
             .map_err(|e| MemdError::StorageError(format!("lock writer: {}", e)))?;
 

@@ -1,4 +1,6 @@
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -8,19 +10,25 @@ use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use crate::error::{MemdError, Result};
-use crate::store::{Store, TenantManager};
+use crate::store::{RywProbeStats, Store, TenantManager};
+use crate::types::ChunkType;
 
 use super::args::{
-    CliCommand, CliQueryMode, ExportFormat, SearchRerankerOptions, WarmCommand, WarmMode,
-    WarmProcessConfig,
+    CliCommand, CliQueryMode, ExportFormat, ReportFormat, SearchRerankerOptions, WarmCommand,
+    WarmMode, WarmProcessConfig,
 };
+use super::batch::{read_batch_input, run_batch_jsonl};
+use super::consolidate::{run_consolidate, ConsolidateOptions};
+use super::purge::{run_purge, PurgeOptions};
+use super::report::{cli_report_rendered, ReportOptions};
 use super::{
-    apply_search_reranker, cli_agent_context_payload, cli_call_tool, cli_search_payload,
-    parse_call_arguments, render_agent_context, render_search_payload, unwrap_content_payload,
-    write_cli_log, write_rendered,
+    apply_search_reranker, cli_add_rendered, cli_agent_context_payload, cli_call_tool,
+    cli_delete_rendered, cli_import_omf_rendered, cli_search_payload, parse_call_arguments,
+    render_agent_context, render_search_payload, unwrap_content_payload, write_cli_log,
+    write_rendered, CliAddRenderOptions,
 };
 
-const WARM_WIRE_PROTOCOL: &str = "2";
+const WARM_WIRE_PROTOCOL: &str = "3";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -49,9 +57,61 @@ enum WarmWireCommand {
         include_artifact: bool,
         format: ExportFormat,
     },
+    Report {
+        tenant_id: Option<String>,
+        project_id: Option<String>,
+        since: String,
+        top: usize,
+        format: ReportFormat,
+    },
     Call {
         tool: String,
         arguments: Value,
+    },
+    Add {
+        tenant_id: String,
+        text: String,
+        chunk_type: ChunkType,
+        project_id: Option<String>,
+        tags: Option<Vec<String>>,
+        source_uri: Option<String>,
+        source_path: Option<String>,
+    },
+    Delete {
+        tenant_id: String,
+        chunk_id: String,
+    },
+    ImportOmf {
+        tenant_id: String,
+        document_json: String,
+        include_archived: bool,
+        fuzzy_threshold: Option<f32>,
+        dry_run: bool,
+    },
+    Purge {
+        tenant_id: String,
+        project_id: Option<String>,
+        older_than_days: u64,
+        limit: usize,
+        include_unreadable_active: bool,
+        archive: Option<PathBuf>,
+        apply: bool,
+        vacuum_metadata: bool,
+        rewrite_segments: bool,
+    },
+    Consolidate {
+        tenant_id: Option<String>,
+        project_id: Option<String>,
+        project_dir: PathBuf,
+        max_region: usize,
+        dry_run: bool,
+        background: bool,
+        force: bool,
+        promote_to_shared: bool,
+    },
+    Batch {
+        jsonl_content: String,
+        continue_on_error: bool,
     },
 }
 
@@ -143,11 +203,92 @@ pub fn warm_socket_path(config: &WarmProcessConfig) -> PathBuf {
 }
 
 fn warm_pid_path(config: &WarmProcessConfig) -> PathBuf {
-    warm_socket_path(config).with_file_name("memd.pid")
+    warm_pid_path_for_socket(&warm_socket_path(config))
+}
+
+fn warm_pid_path_for_socket(socket: &Path) -> PathBuf {
+    socket.with_file_name("memd.pid")
 }
 
 fn warm_log_path(config: &WarmProcessConfig) -> PathBuf {
     warm_socket_path(config).with_file_name("worker.log")
+}
+
+#[cfg(unix)]
+fn warm_temp_socket_path(socket: &Path, pid: u32) -> PathBuf {
+    let file_name = socket
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "memd.sock".into());
+    socket.with_file_name(format!("{file_name}.tmp-{pid}"))
+}
+
+#[cfg(unix)]
+fn remove_stale_warm_socket_temps(socket: &Path) {
+    let Some(parent) = socket.parent() else {
+        return;
+    };
+    let Some(file_name) = socket.file_name() else {
+        return;
+    };
+    let prefix = format!("{}.tmp-", file_name.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn warm_routable(cmd: &CliCommand) -> bool {
+    matches!(
+        cmd,
+        CliCommand::Search {
+            include_superseded: false,
+            ..
+        } | CliCommand::AgentContext { .. }
+            | CliCommand::Report { .. }
+            | CliCommand::Call { .. }
+            | CliCommand::Add { .. }
+            | CliCommand::Delete { .. }
+            | CliCommand::ImportOmf { .. }
+            | CliCommand::Purge { .. }
+            | CliCommand::Consolidate { .. }
+            | CliCommand::Batch { stream: false, .. }
+    )
+}
+
+fn describe_unroutable(cmd: &CliCommand) -> &'static str {
+    match cmd {
+        CliCommand::Search {
+            include_superseded: true,
+            ..
+        } => "search --include-superseded",
+        CliCommand::Batch { stream: true, .. } => "batch --stream",
+        _ => "this command variant",
+    }
+}
+
+fn warm_unroutable_required_error(cmd: &CliCommand) -> MemdError {
+    MemdError::ProtocolError(format!(
+        "{} always runs on the cold path and cannot be routed through the warm worker; re-run with --warm auto for silent local fallback or --warm off",
+        describe_unroutable(cmd)
+    ))
+}
+
+fn warm_client_log_name(cmd: &CliCommand) -> &'static str {
+    match cmd {
+        CliCommand::Search { .. } => "memd_search",
+        // Cold agent-context also logs under memd_search; keep warm parity.
+        CliCommand::AgentContext { .. } => "memd_search",
+        CliCommand::Report { .. } => "memd_report",
+        // Future warm-routed commands get a neutral name instead of
+        // being silently mislabeled as search logs.
+        _ => "memd_cli",
+    }
 }
 
 fn warm_wire_command_from_cli(
@@ -179,7 +320,7 @@ fn warm_wire_command_from_cli(
             warm: _,
         } => (
             WarmWireCommand::Search {
-                tenant_id: tenant_id.clone(),
+                tenant_id: super::scope::require_tenant(tenant_id.clone())?,
                 query: query.clone(),
                 k: *k,
                 project_id: project_id.clone(),
@@ -218,7 +359,7 @@ fn warm_wire_command_from_cli(
             warm: _,
         } => (
             WarmWireCommand::AgentContext {
-                tenant_id: tenant_id.clone(),
+                tenant_id: super::scope::require_tenant(tenant_id.clone())?,
                 project_id: project_id.clone(),
                 query: query.clone(),
                 k: *k,
@@ -243,6 +384,162 @@ fn warm_wire_command_from_cli(
             WarmWireCommand::Call {
                 tool: tool.clone(),
                 arguments: parse_call_arguments(json.as_deref(), input.as_deref())?,
+            },
+            WarmLocalOutputs {
+                output: output.clone(),
+                log_dir: None,
+            },
+        ),
+        CliCommand::Report {
+            tenant_id,
+            project_id,
+            since,
+            format,
+            strict: _,
+            top,
+            output,
+            warm: _,
+        } => (
+            WarmWireCommand::Report {
+                tenant_id: tenant_id.clone(),
+                project_id: project_id.clone(),
+                since: since.clone(),
+                top: *top,
+                format: *format,
+            },
+            WarmLocalOutputs {
+                output: output.clone(),
+                log_dir: None,
+            },
+        ),
+        CliCommand::Add {
+            tenant_id,
+            text,
+            chunk_type,
+            project_id,
+            tags,
+            source_uri,
+            source_path,
+            warm: _,
+        } => (
+            WarmWireCommand::Add {
+                tenant_id: super::scope::require_tenant(tenant_id.clone())?,
+                text: text.clone(),
+                chunk_type: *chunk_type,
+                project_id: project_id.clone(),
+                tags: tags.clone(),
+                source_uri: source_uri.clone(),
+                source_path: source_path.clone(),
+            },
+            WarmLocalOutputs {
+                output: None,
+                log_dir: None,
+            },
+        ),
+        CliCommand::Delete {
+            tenant_id,
+            chunk_id,
+            warm: _,
+        } => (
+            WarmWireCommand::Delete {
+                tenant_id: super::scope::require_tenant(tenant_id.clone())?,
+                chunk_id: chunk_id.clone(),
+            },
+            WarmLocalOutputs {
+                output: None,
+                log_dir: None,
+            },
+        ),
+        CliCommand::ImportOmf {
+            tenant_id,
+            input,
+            include_archived,
+            fuzzy_threshold,
+            dry_run,
+            warm: _,
+        } => (
+            WarmWireCommand::ImportOmf {
+                tenant_id: super::scope::require_tenant(tenant_id.clone())?,
+                document_json: super::paths::read_omf_input(input.as_deref())?,
+                include_archived: *include_archived,
+                fuzzy_threshold: *fuzzy_threshold,
+                dry_run: *dry_run,
+            },
+            WarmLocalOutputs {
+                output: None,
+                log_dir: None,
+            },
+        ),
+        CliCommand::Purge {
+            tenant_id,
+            project_id,
+            older_than_days,
+            limit,
+            include_unreadable_active,
+            archive,
+            apply,
+            vacuum_metadata,
+            rewrite_segments,
+            warm: _,
+        } => (
+            WarmWireCommand::Purge {
+                tenant_id: tenant_id.clone(),
+                project_id: project_id.clone(),
+                older_than_days: *older_than_days,
+                limit: *limit,
+                include_unreadable_active: *include_unreadable_active,
+                archive: archive.as_ref().map(|path| {
+                    if path.is_absolute() {
+                        path.clone()
+                    } else {
+                        super::paths::normalize_absolute(path)
+                    }
+                }),
+                apply: *apply,
+                vacuum_metadata: *vacuum_metadata,
+                rewrite_segments: *rewrite_segments,
+            },
+            WarmLocalOutputs {
+                output: None,
+                log_dir: None,
+            },
+        ),
+        CliCommand::Consolidate {
+            tenant_id,
+            project_id,
+            project_dir,
+            max_region,
+            dry_run,
+            background,
+            force,
+            promote_to_shared,
+            warm: _,
+        } => (
+            WarmWireCommand::Consolidate {
+                tenant_id: tenant_id.clone(),
+                project_id: project_id.clone(),
+                project_dir: super::paths::absolutize_project_dir(project_dir)?,
+                max_region: *max_region,
+                dry_run: *dry_run,
+                background: *background,
+                force: *force,
+                promote_to_shared: *promote_to_shared,
+            },
+            WarmLocalOutputs {
+                output: None,
+                log_dir: None,
+            },
+        ),
+        CliCommand::Batch {
+            jsonl,
+            stream: false,
+            continue_on_error,
+            output,
+            warm: _,
+        } => (
+            WarmWireCommand::Batch {
+                jsonl_content: read_batch_input(jsonl.as_deref())?,
+                continue_on_error: *continue_on_error,
             },
             WarmLocalOutputs {
                 output: output.clone(),
@@ -323,6 +620,161 @@ async fn execute_warm_wire_command<S: Store>(
             let payload = unwrap_content_payload(value.clone()).unwrap_or(value);
             Ok((serde_json::to_string_pretty(&payload)? + "\n", None))
         }
+        WarmWireCommand::Report {
+            tenant_id,
+            project_id,
+            since,
+            top,
+            format,
+        } => {
+            let (rendered, warn_count) = cli_report_rendered(
+                store,
+                tenant_manager,
+                ReportOptions {
+                    tenant_id,
+                    project_id,
+                    since,
+                    top,
+                    format,
+                    served_via_worker: true,
+                },
+            )
+            .await?;
+            Ok((rendered, Some(json!({ "report_warn_count": warn_count }))))
+        }
+        WarmWireCommand::Add {
+            tenant_id,
+            text,
+            chunk_type,
+            project_id,
+            tags,
+            source_uri,
+            source_path,
+        } => {
+            let rendered = cli_add_rendered(
+                store,
+                tenant_manager,
+                CliAddRenderOptions {
+                    tenant_id,
+                    text,
+                    chunk_type,
+                    project_id,
+                    tags,
+                    source_uri,
+                    source_path,
+                },
+            )
+            .await?;
+            Ok((rendered, None))
+        }
+        WarmWireCommand::Delete {
+            tenant_id,
+            chunk_id,
+        } => Ok((
+            cli_delete_rendered(store, &tenant_id, &chunk_id).await?,
+            None,
+        )),
+        WarmWireCommand::ImportOmf {
+            tenant_id,
+            document_json,
+            include_archived,
+            fuzzy_threshold,
+            dry_run,
+        } => Ok((
+            cli_import_omf_rendered(
+                store,
+                tenant_manager,
+                &tenant_id,
+                &document_json,
+                include_archived,
+                fuzzy_threshold,
+                dry_run,
+            )
+            .await?,
+            None,
+        )),
+        WarmWireCommand::Purge {
+            tenant_id,
+            project_id,
+            older_than_days,
+            limit,
+            include_unreadable_active,
+            archive,
+            apply,
+            vacuum_metadata,
+            rewrite_segments,
+        } => {
+            let result = run_purge(
+                store,
+                PurgeOptions {
+                    tenant_id,
+                    project_id,
+                    older_than_days,
+                    limit,
+                    include_unreadable_active,
+                    archive,
+                    apply,
+                    vacuum_metadata,
+                    rewrite_segments,
+                },
+            )
+            .await?;
+            Ok((serde_json::to_string_pretty(&result)? + "\n", None))
+        }
+        WarmWireCommand::Consolidate {
+            tenant_id,
+            project_id,
+            project_dir,
+            max_region,
+            dry_run,
+            background,
+            force,
+            promote_to_shared,
+        } => {
+            let result = run_consolidate(
+                store,
+                ConsolidateOptions {
+                    tenant_id,
+                    project_id,
+                    project_dir,
+                    max_region,
+                    dry_run,
+                    background,
+                    force,
+                    promote_to_shared,
+                },
+            )
+            .await?;
+            Ok((serde_json::to_string_pretty(&result)? + "\n", None))
+        }
+        WarmWireCommand::Batch {
+            jsonl_content,
+            continue_on_error,
+        } => Ok((
+            run_batch_jsonl(store, tenant_manager, &jsonl_content, continue_on_error).await?,
+            None,
+        )),
+    }
+}
+
+async fn ensure_warm_worker(
+    config: &WarmProcessConfig,
+) -> std::result::Result<(), (MemdError, MemdError)> {
+    match warm_ping(config).await {
+        Ok(_) => Ok(()),
+        Err(error) if warm_worker_needs_replacement(&error) => {
+            match replace_incompatible_warm_worker(config).await {
+                Ok(_) => match warm_ping(config).await {
+                    Ok(_) => Ok(()),
+                    Err(retry_error) => Err((error, retry_error)),
+                },
+                Err(start_error) => Err((error, start_error)),
+            }
+        }
+        Err(error) => match warm_start(config).await {
+            Ok(_) => Ok(()),
+            Err(start_error) => Err((error, start_error)),
+        },
     }
 }
 
@@ -333,29 +785,33 @@ pub async fn try_run_warm_client(config: &WarmProcessConfig, cmd: &CliCommand) -
     if mode == WarmMode::Off {
         return Ok(false);
     }
+    if !warm_routable(cmd) {
+        if mode == WarmMode::Required {
+            return Err(warm_unroutable_required_error(cmd));
+        }
+        return Ok(false);
+    }
+
+    if let Err((error, start_error)) = ensure_warm_worker(config).await {
+        if mode == WarmMode::Auto {
+            warn!(
+                error = %error,
+                start_error = %start_error,
+                "warm worker unavailable; falling back to cold CLI"
+            );
+            return Ok(false);
+        }
+        return Err(MemdError::ProtocolError(format!(
+            "warm worker required but unavailable: {error}; start failed: {start_error}"
+        )));
+    }
+
     let Some((wire_command, local_outputs)) = warm_wire_command_from_cli(cmd)? else {
+        if mode == WarmMode::Required {
+            return Err(warm_unroutable_required_error(cmd));
+        }
         return Ok(false);
     };
-
-    match warm_ping(config).await {
-        Ok(_) => {}
-        Err(error) => match warm_start(config).await {
-            Ok(_) => {}
-            Err(start_error) if mode == WarmMode::Auto => {
-                warn!(
-                    error = %error,
-                    start_error = %start_error,
-                    "warm worker unavailable; falling back to cold CLI"
-                );
-                return Ok(false);
-            }
-            Err(start_error) => {
-                return Err(MemdError::ProtocolError(format!(
-                    "warm worker required but unavailable: {error}; start failed: {start_error}"
-                )));
-            }
-        },
-    }
 
     let response = warm_request(
         &warm_socket_path(config),
@@ -372,10 +828,25 @@ pub async fn try_run_warm_client(config: &WarmProcessConfig, cmd: &CliCommand) -
         ));
     }
     if let Some(payload) = response.log_payload.as_ref() {
-        write_cli_log(local_outputs.log_dir.as_deref(), "memd_search", payload)?;
+        write_cli_log(
+            local_outputs.log_dir.as_deref(),
+            warm_client_log_name(cmd),
+            payload,
+        )?;
     }
     let output = response.output.unwrap_or_default();
     write_rendered(local_outputs.output.as_deref(), &output)?;
+    if let CliCommand::Report { strict: true, .. } = cmd {
+        let warns = response
+            .log_payload
+            .as_ref()
+            .and_then(|payload| payload.get("report_warn_count"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if warns > 0 {
+            std::process::exit(2);
+        }
+    }
     Ok(true)
 }
 
@@ -447,6 +918,11 @@ async fn wait_for_warm_pid_exit(pid: Option<u32>, timeout: Duration) -> bool {
     }
 }
 
+fn warm_pid_from_file(config: &WarmProcessConfig) -> Option<u32> {
+    let text = std::fs::read_to_string(warm_pid_path(config)).ok()?;
+    text.lines().next()?.trim().parse::<u32>().ok()
+}
+
 fn warm_pid_is_running(pid: u32) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -459,22 +935,42 @@ fn warm_pid_is_running(pid: u32) -> bool {
     }
 }
 
+async fn shutdown_existing_warm_worker_best_effort(config: &WarmProcessConfig) {
+    let _ = warm_request(&warm_socket_path(config), &WarmWireRequest::Shutdown).await;
+    let pid = warm_pid_from_file(config);
+    let _ = wait_for_warm_pid_exit(pid, Duration::from_secs(10)).await;
+    let _ = std::fs::remove_file(warm_socket_path(config));
+}
+
+fn warm_worker_needs_replacement(error: &MemdError) -> bool {
+    matches!(error, MemdError::IncompatibleWarmWorker { .. })
+}
+
+async fn replace_incompatible_warm_worker(config: &WarmProcessConfig) -> Result<Value> {
+    shutdown_existing_warm_worker_best_effort(config).await;
+    warm_start(config).await
+}
+
 async fn warm_start(config: &WarmProcessConfig) -> Result<Value> {
-    if let Ok(result) = warm_ping(config).await {
-        return Ok(json!({
-            "status": "already_running",
-            "socket": warm_socket_path(config),
-            "result": result,
-        }));
+    match warm_ping(config).await {
+        Ok(result) => {
+            return Ok(json!({
+                "status": "already_running",
+                "socket": warm_socket_path(config),
+                "result": result,
+            }));
+        }
+        Err(error) if warm_worker_needs_replacement(&error) => {
+            shutdown_existing_warm_worker_best_effort(config).await;
+        }
+        Err(_) => {}
     }
 
     let socket = warm_socket_path(config);
     if let Some(parent) = socket.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    if socket.exists() {
-        std::fs::remove_file(&socket)?;
-    }
+    // Stale sockets are replaced atomically by the next worker bind+rename; client unlink can orphan a live worker that just bound.
 
     let log_path = warm_log_path(config);
     let stdout = std::fs::OpenOptions::new()
@@ -507,7 +1003,6 @@ async fn warm_start(config: &WarmProcessConfig) -> Result<Value> {
 
     let mut child = command.spawn()?;
     let pid = child.id();
-    std::fs::write(warm_pid_path(config), format!("{pid}\n"))?;
 
     let start = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -516,9 +1011,14 @@ async fn warm_start(config: &WarmProcessConfig) -> Result<Value> {
     for _ in 0..300 {
         match warm_ping(config).await {
             Ok(result) => {
+                let serving_pid = result
+                    .get("pid")
+                    .and_then(Value::as_u64)
+                    .and_then(|pid| u32::try_from(pid).ok())
+                    .unwrap_or(pid);
                 return Ok(json!({
                     "status": "started",
-                    "pid": pid,
+                    "pid": serving_pid,
                     "socket": socket,
                     "log": log_path,
                     "startup_ms": SystemTime::now()
@@ -561,13 +1061,21 @@ async fn warm_ping(config: &WarmProcessConfig) -> Result<Value> {
     Ok(result)
 }
 
-fn warm_worker_identity(socket: &Path) -> Value {
-    json!({
+fn warm_worker_identity(socket: &Path, ryw_probe_stats: Option<RywProbeStats>) -> Value {
+    let mut identity = json!({
         "pid": std::process::id(),
         "socket": socket,
         "memd_version": env!("CARGO_PKG_VERSION"),
         "warm_wire_protocol": WARM_WIRE_PROTOCOL,
-    })
+    });
+    if let Some(stats) = ryw_probe_stats {
+        identity["ryw_probe"] = json!({
+            "checks": stats.checks,
+            "external_detected": stats.external_detected,
+            "repairs": stats.repairs,
+        });
+    }
+    identity
 }
 
 fn validate_warm_worker_identity(result: &Value) -> Result<()> {
@@ -580,11 +1088,12 @@ fn validate_warm_worker_identity(result: &Value) -> Result<()> {
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     if worker_version != env!("CARGO_PKG_VERSION") || worker_protocol != WARM_WIRE_PROTOCOL {
-        return Err(MemdError::ProtocolError(format!(
-            "warm worker is incompatible: worker version {worker_version}, protocol {worker_protocol}; CLI version {}, protocol {}",
-            env!("CARGO_PKG_VERSION"),
-            WARM_WIRE_PROTOCOL
-        )));
+        return Err(MemdError::IncompatibleWarmWorker {
+            worker_version: worker_version.to_string(),
+            worker_protocol: worker_protocol.to_string(),
+            cli_version: env!("CARGO_PKG_VERSION").to_string(),
+            cli_protocol: WARM_WIRE_PROTOCOL.to_string(),
+        });
     }
     Ok(())
 }
@@ -617,52 +1126,209 @@ pub(super) async fn run_warm_worker<S: Store>(
     tenant_manager: Option<&TenantManager>,
     socket: &Path,
 ) -> Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use futures_util::stream::{FuturesUnordered, StreamExt};
+    use std::os::unix::fs::PermissionsExt;
     use tokio::net::UnixListener;
+    use tokio::sync::Semaphore;
 
     if let Some(parent) = socket.parent() {
         std::fs::create_dir_all(parent)?;
+        // The socket dir is private to the owning user; this also tightens
+        // pre-existing dirs created by older versions with umask defaults.
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
     }
-    if socket.exists() {
-        std::fs::remove_file(socket)?;
-    }
-    let listener = UnixListener::bind(socket)?;
+    let pid = std::process::id();
+    remove_stale_warm_socket_temps(socket);
+    let tmp_socket = warm_temp_socket_path(socket, pid);
+    let _ = std::fs::remove_file(&tmp_socket);
+    let listener = UnixListener::bind(&tmp_socket)?;
+    // Chmod the temp name before the atomic rename publishes it, so the
+    // socket is never reachable at the published path with permissive bits.
+    // rename(2) preserves the mode.
+    std::fs::set_permissions(&tmp_socket, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::rename(&tmp_socket, socket)?;
+    let pid_path = warm_pid_path_for_socket(socket);
+    let pid_tmp_path = socket.with_file_name(format!("memd.pid.tmp-{pid}"));
+    std::fs::write(&pid_tmp_path, format!("{pid}\n"))?;
+    std::fs::rename(&pid_tmp_path, &pid_path)?;
     info!(socket = %socket.display(), "memd warm worker listening");
 
+    const MAX_INFLIGHT_CONNECTIONS: usize = 16;
+    const MAX_CONCURRENT_COMMANDS: usize = 4;
+
+    let semaphore = Semaphore::new(MAX_CONCURRENT_COMMANDS);
+    // Keep connection futures in this task instead of tokio::spawn:
+    // execute_warm_wire_command is currently !Send because ops/mod.rs
+    // holds MutexGuards across await points.
+    let mut inflight: FuturesUnordered<Pin<Box<dyn Future<Output = bool> + '_>>> =
+        FuturesUnordered::new();
+    let mut shutting_down = false;
+
     loop {
-        let (mut stream, _) = listener.accept().await?;
-        let mut bytes = Vec::new();
-        stream.read_to_end(&mut bytes).await?;
-        let mut shutdown = false;
-        let response = match serde_json::from_slice::<WarmWireRequest>(&bytes) {
-            Ok(WarmWireRequest::Ping) => WarmWireResponse::ok_result(warm_worker_identity(socket)),
-            Ok(WarmWireRequest::Shutdown) => {
-                shutdown = true;
-                WarmWireResponse::ok_result(warm_worker_identity(socket))
-            }
-            Ok(WarmWireRequest::Command { command }) => {
-                match execute_warm_wire_command(store, tenant_manager, command).await {
-                    Ok((output, log_payload)) => WarmWireResponse::ok_output(output, log_payload),
-                    Err(error) => WarmWireResponse::error(error),
+        if shutting_down && inflight.is_empty() {
+            break;
+        }
+
+        tokio::select! {
+            accepted = listener.accept(), if !shutting_down && inflight.len() < MAX_INFLIGHT_CONNECTIONS => {
+                match accepted {
+                    Ok((stream, _)) => {
+                        inflight.push(Box::pin(handle_warm_connection(
+                            store,
+                            tenant_manager,
+                            socket,
+                            &semaphore,
+                            stream,
+                        )));
+                    }
+                    Err(error) => {
+                        warn!(error = %error, "warm worker accept failed");
+                    }
                 }
             }
-            Err(error) => WarmWireResponse::error(format!("invalid warm request: {error}")),
-        };
-        let body = serde_json::to_vec(&response)?;
-        stream.write_all(&body).await?;
-        stream.shutdown().await?;
-        if shutdown {
-            break;
+
+            completed = inflight.next(), if !inflight.is_empty() => {
+                if let Some(shutdown_requested) = completed {
+                    if shutdown_requested {
+                        shutting_down = true;
+                    }
+                }
+            }
         }
     }
 
     let _ = std::fs::remove_file(socket);
+    let _ = std::fs::remove_file(warm_pid_path_for_socket(socket));
     Ok(())
+}
+
+#[cfg(unix)]
+async fn handle_warm_connection<S: Store>(
+    store: &S,
+    tenant_manager: Option<&TenantManager>,
+    socket: &Path,
+    semaphore: &tokio::sync::Semaphore,
+    mut stream: tokio::net::UnixStream,
+) -> bool {
+    use tokio::io::AsyncReadExt;
+
+    let mut bytes = Vec::new();
+    if let Err(error) = stream.read_to_end(&mut bytes).await {
+        warn!(error = %error, "failed to read warm request");
+        return false;
+    }
+
+    let mut shutdown = false;
+    let response = match serde_json::from_slice::<WarmWireRequest>(&bytes) {
+        Ok(WarmWireRequest::Ping) => {
+            WarmWireResponse::ok_result(warm_worker_identity(socket, store.ryw_probe_stats()))
+        }
+        Ok(WarmWireRequest::Shutdown) => {
+            shutdown = true;
+            WarmWireResponse::ok_result(warm_worker_identity(socket, store.ryw_probe_stats()))
+        }
+        Ok(WarmWireRequest::Command { command }) => {
+            let permit = match semaphore.acquire().await {
+                Ok(permit) => permit,
+                Err(error) => {
+                    let _ = write_warm_response(
+                        &mut stream,
+                        WarmWireResponse::error(format!(
+                            "warm worker command semaphore closed: {error}"
+                        )),
+                    )
+                    .await;
+                    return false;
+                }
+            };
+            let _ = store.probe_external_mutation().await;
+            let response = match execute_warm_wire_command(store, tenant_manager, command).await {
+                Ok((output, log_payload)) => WarmWireResponse::ok_output(output, log_payload),
+                Err(error) => WarmWireResponse::error(error),
+            };
+            drop(permit);
+            response
+        }
+        Err(error) => WarmWireResponse::error(format!("invalid warm request: {error}")),
+    };
+
+    let _ = write_warm_response(&mut stream, response).await;
+    shutdown
+}
+
+#[cfg(unix)]
+async fn write_warm_response(
+    stream: &mut tokio::net::UnixStream,
+    response: WarmWireResponse,
+) -> bool {
+    use tokio::io::AsyncWriteExt;
+
+    let body = match serde_json::to_vec(&response) {
+        Ok(body) => body,
+        Err(error) => {
+            warn!(error = %error, "failed to serialize warm response");
+            return false;
+        }
+    };
+    if let Err(error) = stream.write_all(&body).await {
+        warn!(error = %error, "failed to write warm response");
+        return false;
+    }
+    if let Err(error) = stream.shutdown().await {
+        warn!(error = %error, "failed to shutdown warm response stream");
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::SearchReranker;
+    use tempfile::tempdir;
+
+    fn test_warm_config(data_dir: PathBuf) -> WarmProcessConfig {
+        WarmProcessConfig {
+            data_dir,
+            config_path: None,
+            embedding_model: "all-minilm".to_string(),
+            search_variant: "hybrid-feature".to_string(),
+        }
+    }
+
+    fn search_command(include_superseded: bool, warm: WarmMode) -> CliCommand {
+        CliCommand::Search {
+            tenant_id: Some("t".to_string()),
+            query: "q".to_string(),
+            k: 1,
+            project_id: None,
+            compact: false,
+            token_budget: None,
+            mode: CliQueryMode::Generic,
+            no_text: false,
+            include_artifact: false,
+            include_superseded,
+            format: ExportFormat::Json,
+            output: None,
+            reranker: SearchReranker::None,
+            reranker_model: "model".to_string(),
+            reranker_device: "cpu".to_string(),
+            reranker_batch_size: 1,
+            reranker_timeout_seconds: 1,
+            reranker_python: "python3".to_string(),
+            warm,
+        }
+    }
+
+    fn batch_command(stream: bool, warm: WarmMode) -> CliCommand {
+        CliCommand::Batch {
+            jsonl: None,
+            stream,
+            continue_on_error: false,
+            output: None,
+            warm,
+        }
+    }
 
     #[test]
     fn warm_worker_identity_validation_rejects_legacy_ping_payload() {
@@ -677,9 +1343,354 @@ mod tests {
 
     #[test]
     fn warm_worker_identity_validation_accepts_current_payload() {
-        let payload = warm_worker_identity(Path::new("/tmp/memd.sock"));
+        let payload = warm_worker_identity(Path::new("/tmp/memd.sock"), None);
 
         validate_warm_worker_identity(&payload).unwrap();
+    }
+
+    #[test]
+    fn warm_worker_identity_includes_probe_stats_when_available() {
+        let payload = warm_worker_identity(
+            Path::new("/tmp/memd.sock"),
+            Some(crate::store::RywProbeStats {
+                checks: 3,
+                external_detected: 1,
+                repairs: 1,
+            }),
+        );
+
+        assert_eq!(
+            payload.pointer("/ryw_probe/checks").and_then(Value::as_u64),
+            Some(3)
+        );
+        assert_eq!(
+            payload
+                .pointer("/ryw_probe/external_detected")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            payload
+                .pointer("/ryw_probe/repairs")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        validate_warm_worker_identity(&payload).unwrap();
+    }
+
+    #[test]
+    fn incompatible_identity_is_typed_and_needs_replacement() {
+        let payload = json!({
+            "pid": 1234,
+            "socket": "/tmp/memd.sock",
+            "memd_version": "0.0.1",
+            "warm_wire_protocol": "1",
+        });
+
+        let err = validate_warm_worker_identity(&payload).unwrap_err();
+        assert!(matches!(
+            &err,
+            MemdError::IncompatibleWarmWorker {
+                worker_version,
+                worker_protocol,
+                ..
+            } if worker_version == "0.0.1" && worker_protocol == "1"
+        ));
+        assert!(warm_worker_needs_replacement(&err));
+    }
+
+    #[test]
+    fn warm_worker_replacement_predicate_rejects_other_errors() {
+        assert!(!warm_worker_needs_replacement(&MemdError::ProtocolError(
+            "x".to_string()
+        )));
+        assert!(!warm_worker_needs_replacement(&MemdError::IoError(
+            std::io::Error::other("x")
+        )));
+    }
+
+    #[test]
+    fn warm_wire_request_command_variants_round_trip_through_json() {
+        let reranker = SearchRerankerOptions {
+            reranker: SearchReranker::None,
+            model: "model".to_string(),
+            device: "cpu".to_string(),
+            batch_size: 1,
+            timeout_seconds: 1,
+            python: "python3".to_string(),
+        };
+        let commands = vec![
+            WarmWireCommand::Search {
+                tenant_id: "t".to_string(),
+                query: "q".to_string(),
+                k: 3,
+                project_id: Some("p".to_string()),
+                compact: true,
+                token_budget: Some(100),
+                mode: CliQueryMode::Generic,
+                no_text: false,
+                include_artifact: true,
+                format: ExportFormat::Json,
+                reranker: reranker.clone(),
+            },
+            WarmWireCommand::AgentContext {
+                tenant_id: "t".to_string(),
+                project_id: Some("p".to_string()),
+                query: vec!["q".to_string()],
+                k: 2,
+                token_budget: 700,
+                mode: CliQueryMode::FindDecisions,
+                no_text: true,
+                include_artifact: false,
+                format: ExportFormat::Markdown,
+            },
+            WarmWireCommand::Report {
+                tenant_id: Some("t".to_string()),
+                project_id: Some("p".to_string()),
+                since: "24h".to_string(),
+                top: 5,
+                format: ReportFormat::Json,
+            },
+            WarmWireCommand::Call {
+                tool: "memory.search".to_string(),
+                arguments: json!({"query": "q"}),
+            },
+            WarmWireCommand::Add {
+                tenant_id: "t".to_string(),
+                text: "hello".to_string(),
+                chunk_type: ChunkType::Summary,
+                project_id: Some("p".to_string()),
+                tags: Some(vec!["kind:note".to_string()]),
+                source_uri: Some("memd://source".to_string()),
+                source_path: Some("notes.md".to_string()),
+            },
+            WarmWireCommand::Delete {
+                tenant_id: "t".to_string(),
+                chunk_id: "019e6d12-c1a7-7330-8bd8-4c9cdb45bc3c".to_string(),
+            },
+            WarmWireCommand::ImportOmf {
+                tenant_id: "t".to_string(),
+                document_json: "{}".to_string(),
+                include_archived: true,
+                fuzzy_threshold: Some(0.8),
+                dry_run: true,
+            },
+            WarmWireCommand::Purge {
+                tenant_id: "t".to_string(),
+                project_id: Some("p".to_string()),
+                older_than_days: 30,
+                limit: 100,
+                include_unreadable_active: true,
+                archive: Some(PathBuf::from("archive.json")),
+                apply: false,
+                vacuum_metadata: false,
+                rewrite_segments: true,
+            },
+            WarmWireCommand::Consolidate {
+                tenant_id: Some("t".to_string()),
+                project_id: Some("p".to_string()),
+                project_dir: PathBuf::from("/tmp/project"),
+                max_region: 50,
+                dry_run: true,
+                background: false,
+                force: true,
+                promote_to_shared: false,
+            },
+            WarmWireCommand::Batch {
+                jsonl_content: "{\"tool\":\"memory.stats\"}\n".to_string(),
+                continue_on_error: true,
+            },
+        ];
+
+        for command in commands {
+            let request = WarmWireRequest::Command { command };
+            let encoded = serde_json::to_string(&request).unwrap();
+            let decoded: WarmWireRequest = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(
+                serde_json::to_value(&decoded).unwrap(),
+                serde_json::to_value(&request).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn warm_routable_agrees_with_wire_mapping_for_representative_commands() {
+        let add = CliCommand::Add {
+            tenant_id: Some("t".to_string()),
+            text: "useful durable note".to_string(),
+            chunk_type: ChunkType::Summary,
+            project_id: None,
+            tags: Some(vec!["kind:note".to_string()]),
+            source_uri: None,
+            source_path: None,
+            warm: WarmMode::Auto,
+        };
+        assert_eq!(
+            warm_routable(&add),
+            warm_wire_command_from_cli(&add).unwrap().is_some()
+        );
+
+        let report = CliCommand::Report {
+            tenant_id: Some("t".to_string()),
+            project_id: Some("p".to_string()),
+            since: "24h".to_string(),
+            format: ReportFormat::Json,
+            strict: true,
+            top: 5,
+            output: None,
+            warm: WarmMode::Auto,
+        };
+        assert_eq!(
+            warm_routable(&report),
+            warm_wire_command_from_cli(&report).unwrap().is_some()
+        );
+
+        let batch_stream = CliCommand::Batch {
+            jsonl: None,
+            stream: true,
+            continue_on_error: false,
+            output: None,
+            warm: WarmMode::Auto,
+        };
+        assert_eq!(
+            warm_routable(&batch_stream),
+            warm_wire_command_from_cli(&batch_stream).unwrap().is_some()
+        );
+
+        let superseded_search = CliCommand::Search {
+            tenant_id: Some("t".to_string()),
+            query: "q".to_string(),
+            k: 1,
+            project_id: None,
+            compact: false,
+            token_budget: None,
+            mode: CliQueryMode::Generic,
+            no_text: false,
+            include_artifact: false,
+            include_superseded: true,
+            format: ExportFormat::Json,
+            output: None,
+            reranker: SearchReranker::None,
+            reranker_model: "model".to_string(),
+            reranker_device: "cpu".to_string(),
+            reranker_batch_size: 1,
+            reranker_timeout_seconds: 1,
+            reranker_python: "python3".to_string(),
+            warm: WarmMode::Auto,
+        };
+        assert_eq!(
+            warm_routable(&superseded_search),
+            warm_wire_command_from_cli(&superseded_search)
+                .unwrap()
+                .is_some()
+        );
+
+        let get = CliCommand::Get {
+            tenant_id: Some("t".to_string()),
+            chunk_id: "019e6d12-c1a7-7330-8bd8-4c9cdb45bc3c".to_string(),
+        };
+        assert!(get.warm_mode().is_none());
+        assert_eq!(
+            warm_routable(&get),
+            warm_wire_command_from_cli(&get).unwrap().is_some()
+        );
+
+        let stdin_import = CliCommand::ImportOmf {
+            tenant_id: Some("t".to_string()),
+            input: None,
+            include_archived: true,
+            fuzzy_threshold: None,
+            dry_run: true,
+            warm: WarmMode::Auto,
+        };
+        assert!(warm_routable(&stdin_import));
+    }
+
+    #[tokio::test]
+    async fn required_warm_rejects_search_include_superseded_before_worker_start() {
+        let dir = tempdir().unwrap();
+        let config = test_warm_config(dir.path().join("data"));
+        let cmd = search_command(true, WarmMode::Required);
+
+        let err = try_run_warm_client(&config, &cmd).await.unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("include-superseded"));
+        assert!(message.contains("--warm"));
+    }
+
+    #[tokio::test]
+    async fn required_warm_rejects_streaming_batch_before_worker_start() {
+        let dir = tempdir().unwrap();
+        let config = test_warm_config(dir.path().join("data"));
+        let cmd = batch_command(true, WarmMode::Required);
+
+        let err = try_run_warm_client(&config, &cmd).await.unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("stream"));
+        assert!(message.contains("--warm"));
+    }
+
+    #[tokio::test]
+    async fn auto_warm_preserves_local_fallback_for_unroutable_variants() {
+        let dir = tempdir().unwrap();
+        let config = test_warm_config(dir.path().join("data"));
+
+        assert!(
+            !try_run_warm_client(&config, &search_command(true, WarmMode::Auto))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !try_run_warm_client(&config, &batch_command(true, WarmMode::Auto))
+                .await
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn warm_client_log_name_tracks_command_kind() {
+        let search = search_command(false, WarmMode::Auto);
+        assert_eq!(warm_client_log_name(&search), "memd_search");
+
+        let agent_context = CliCommand::AgentContext {
+            tenant_id: Some("t".to_string()),
+            project_id: None,
+            query: vec!["q".to_string()],
+            k: 1,
+            token_budget: 100,
+            mode: CliQueryMode::Generic,
+            no_text: false,
+            include_artifact: false,
+            format: ExportFormat::Json,
+            output: None,
+            log_dir: None,
+            warm: WarmMode::Auto,
+        };
+        assert_eq!(warm_client_log_name(&agent_context), "memd_search");
+
+        let report = CliCommand::Report {
+            tenant_id: Some("t".to_string()),
+            project_id: Some("p".to_string()),
+            since: "24h".to_string(),
+            format: ReportFormat::Json,
+            strict: true,
+            top: 5,
+            output: None,
+            warm: WarmMode::Auto,
+        };
+        assert_eq!(warm_client_log_name(&report), "memd_report");
+
+        let add = CliCommand::Add {
+            tenant_id: Some("t".to_string()),
+            text: "useful durable note".to_string(),
+            chunk_type: ChunkType::Summary,
+            project_id: None,
+            tags: Some(vec!["kind:note".to_string()]),
+            source_uri: None,
+            source_path: None,
+            warm: WarmMode::Auto,
+        };
+        assert_eq!(warm_client_log_name(&add), "memd_cli");
     }
 }
 

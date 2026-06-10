@@ -788,7 +788,7 @@ async fn cli_export_markdown_writes_tree_under_outdir() {
         store.as_ref(),
         None,
         memd::cli::CliCommand::ExportMarkdown {
-            tenant_id: "t".to_string(),
+            tenant_id: Some("t".to_string()),
             outdir: outdir.path().to_path_buf(),
             project_id: None,
             include_history: false,
@@ -840,7 +840,7 @@ async fn cli_export_markdown_refuses_outdir_inside_data_dir() {
         store.as_ref(),
         None,
         memd::cli::CliCommand::ExportMarkdown {
-            tenant_id: "t".to_string(),
+            tenant_id: Some("t".to_string()),
             outdir: bad_outdir.clone(),
             project_id: None,
             include_history: false,
@@ -900,7 +900,7 @@ async fn cli_export_markdown_refuses_pre_existing_symlink_inside_outdir() {
         store.as_ref(),
         None,
         memd::cli::CliCommand::ExportMarkdown {
-            tenant_id: "t".to_string(),
+            tenant_id: Some("t".to_string()),
             outdir: outdir.clone(),
             project_id: None,
             include_history: false,
@@ -943,7 +943,7 @@ async fn cli_export_markdown_refuses_outdir_via_parent_traversal() {
         store.as_ref(),
         None,
         memd::cli::CliCommand::ExportMarkdown {
-            tenant_id: "t".to_string(),
+            tenant_id: Some("t".to_string()),
             outdir: tricky.clone(),
             project_id: None,
             include_history: false,
@@ -986,7 +986,7 @@ async fn cli_export_markdown_paginates_beyond_single_page_limit() {
         store.as_ref(),
         None,
         memd::cli::CliCommand::ExportMarkdown {
-            tenant_id: "t".to_string(),
+            tenant_id: Some("t".to_string()),
             outdir: outdir.path().to_path_buf(),
             project_id: None,
             include_history: false,
@@ -1053,7 +1053,7 @@ async fn cli_export_omf_writes_json_document_to_output_path() {
         store.as_ref(),
         None,
         memd::cli::CliCommand::ExportOmf {
-            tenant_id: "t".to_string(),
+            tenant_id: Some("t".to_string()),
             project_id: None,
             output: Some(out_path.clone()),
             include_history: false,
@@ -1104,11 +1104,12 @@ async fn cli_import_omf_reads_json_file_and_writes_chunks() {
         store.as_ref(),
         None,
         memd::cli::CliCommand::ImportOmf {
-            tenant_id: "t".to_string(),
+            tenant_id: Some("t".to_string()),
             input: Some(input_path),
             include_archived: true,
             fuzzy_threshold: None,
             dry_run: false,
+            warm: memd::cli::WarmMode::Off,
         },
     )
     .await
@@ -1144,11 +1145,12 @@ async fn cli_import_omf_dry_run_does_not_write() {
         store.as_ref(),
         None,
         memd::cli::CliCommand::ImportOmf {
-            tenant_id: "t".to_string(),
+            tenant_id: Some("t".to_string()),
             input: Some(input_path),
             include_archived: true,
             fuzzy_threshold: None,
             dry_run: true,
+            warm: memd::cli::WarmMode::Off,
         },
     )
     .await
@@ -1194,11 +1196,12 @@ async fn cli_import_omf_dry_run_does_not_create_tenant_dir() {
         store.as_ref(),
         Some(&tenant_manager),
         memd::cli::CliCommand::ImportOmf {
-            tenant_id: "preview_tenant".to_string(),
+            tenant_id: Some("preview_tenant".to_string()),
             input: Some(input_path),
             include_archived: true,
             fuzzy_threshold: None,
             dry_run: true,
+            warm: memd::cli::WarmMode::Off,
         },
     )
     .await
@@ -1224,11 +1227,12 @@ async fn cli_import_omf_rejects_malformed_json() {
         store.as_ref(),
         None,
         memd::cli::CliCommand::ImportOmf {
-            tenant_id: "t".to_string(),
+            tenant_id: Some("t".to_string()),
             input: Some(bad),
             include_archived: true,
             fuzzy_threshold: None,
             dry_run: true,
+            warm: memd::cli::WarmMode::Off,
         },
     )
     .await
@@ -1260,7 +1264,7 @@ async fn cli_export_omf_no_output_prints_to_stdout_roundtripable() {
         store.as_ref(),
         None,
         memd::cli::CliCommand::ExportOmf {
-            tenant_id: "t".to_string(),
+            tenant_id: Some("t".to_string()),
             project_id: None,
             output: None,
             include_history: false,

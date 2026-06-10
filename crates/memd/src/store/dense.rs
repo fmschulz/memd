@@ -63,6 +63,8 @@ pub struct DenseSearcher {
     indices: RwLock<HashMap<String, Arc<HnswIndex>>>,
     /// Base path for index persistence
     base_path: Option<PathBuf>,
+    /// Disable disk writes and index mutations.
+    read_only: bool,
     /// Configuration
     config: DenseSearchConfig,
 }
@@ -82,6 +84,7 @@ impl DenseSearcher {
             embedder,
             indices: RwLock::new(HashMap::new()),
             base_path: None,
+            read_only: false,
             config: updated_config,
         })
     }
@@ -92,6 +95,7 @@ impl DenseSearcher {
             embedder,
             indices: RwLock::new(HashMap::new()),
             base_path: None,
+            read_only: false,
             config,
         }
     }
@@ -99,6 +103,12 @@ impl DenseSearcher {
     /// Set base path for index persistence
     pub fn with_base_path(mut self, path: PathBuf) -> Self {
         self.base_path = Some(path);
+        self
+    }
+
+    /// Configure read-only mode for persisted warm indexes.
+    pub fn with_read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
         self
     }
 
@@ -128,7 +138,11 @@ impl DenseSearcher {
                     .join("tenants")
                     .join(&tenant_str)
                     .join("warm_index");
-                HnswIndex::with_persistence(self.config.hnsw.clone(), index_path)?
+                if self.read_only {
+                    HnswIndex::with_persistence_read_only(self.config.hnsw.clone(), index_path)?
+                } else {
+                    HnswIndex::with_persistence(self.config.hnsw.clone(), index_path)?
+                }
             } else {
                 HnswIndex::new(self.config.hnsw.clone())
             }
@@ -149,6 +163,11 @@ impl DenseSearcher {
         chunk_id: &ChunkId,
         text: &str,
     ) -> Result<()> {
+        if self.read_only {
+            return Err(MemdError::ReadOnlyStore {
+                op: "dense_index_chunk".to_string(),
+            });
+        }
         let embedding = self.embedder.embed_query(text).await?;
         let index = self.get_or_create_index(tenant_id)?;
         index.insert(chunk_id, &embedding)?;
@@ -168,6 +187,11 @@ impl DenseSearcher {
         tenant_id: &TenantId,
         chunks: &[(ChunkId, String)],
     ) -> Result<()> {
+        if self.read_only {
+            return Err(MemdError::ReadOnlyStore {
+                op: "dense_index_batch".to_string(),
+            });
+        }
         if chunks.is_empty() {
             return Ok(());
         }
@@ -292,6 +316,10 @@ impl DenseSearcher {
 
     /// Save all indices
     pub fn save_all(&self) -> Result<()> {
+        if self.read_only {
+            tracing::debug!("read-only dense searcher skips save_all");
+            return Ok(());
+        }
         let indices = self.indices.read();
         for (tenant_id, index) in indices.iter() {
             if let Err(e) = index.save() {

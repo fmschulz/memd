@@ -30,26 +30,41 @@ when startup context looks noisy.
 
 ## Install
 
+Option A (recommended): clone and install the binary, skill, and enforcement:
+
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/fmschulz/memd/releases/latest/download/memd-installer.sh | sh
-./memd-skill/install_memd_enforcement.sh
+git clone https://github.com/fmschulz/memd
+cd memd
+make install   # binary + agent skill + enforcement
+memd doctor
 ```
 
-Linux releases are static musl, so there is no `GLIBC_... not found` pitfall.
-`--install-binary` runs the one-line installer for you. Rust users can instead
-`cargo binstall memd` (best-effort) or `cargo install memd` (from source).
+Option B: prebuilt binary only (no clone):
 
-What the script does:
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/fmschulz/memd/releases/latest/download/memd-installer.sh | sh
+```
+
+The prebuilt installer installs only the binary. To install the skill and
+enforcement, use `make install` from a clone. `make install-binary` installs
+only the binary, `make menu` opens an interactive TUI to pick components, and
+`make uninstall` removes what `make install` installed.
+
+Linux releases are static musl, so there is no `GLIBC_... not found` pitfall.
+Rust users can use `cargo binstall memd` (best-effort) or `cargo install memd`
+as manual source-install paths.
+
+What `make install` does:
 
 1. Stops any running warm worker.
-2. Installs the latest release binary into `~/.local/bin/memd` (only when
-   `--install-binary` is passed).
-3. Upserts a CLI-first instruction block into:
+2. Builds and installs the binary on `PATH`.
+3. Installs the agent skill.
+4. Upserts a CLI-first instruction block into:
     - `~/.codex/AGENTS.md`
     - `~/.claude/CLAUDE.md`
-4. Writes the Cursor user rule at `~/.cursor/rules/memd.mdc`.
-5. Wires the Claude Code `SessionStart` hook.
-6. Prints a verification recipe.
+5. Writes the Cursor user rule at `~/.cursor/rules/memd.mdc`.
+6. Wires the Claude Code `SessionStart` hook.
+7. Prints a verification recipe.
 
 When the SessionStart hook fires in a repo without `.memd/project_scope.json`,
 `memd session-start` auto-creates a minimal scope from

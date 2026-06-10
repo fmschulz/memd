@@ -6,9 +6,7 @@ memd export and vice versa. Anything memd-specific lives inside a
 versioned `extensions.memd` namespace that third-party importers are free
 to ignore.
 
-This document is the source of truth for the wire format and trust
-semantics. See `docs/plans/active/2026-04-18-nanomem-inspired-features.md`
-§F for the implementation plan.
+This document is the source of truth for the wire format and trust semantics.
 
 ## Envelope
 
@@ -23,7 +21,7 @@ semantics. See `docs/plans/active/2026-04-18-nanomem-inspired-features.md`
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `omf` | string | yes | Wire version. memd 0.7.x produces and accepts `"1.0"`. Anything else fails validation. |
+| `omf` | string | yes | Wire version. Current memd releases produce and accept `"1.0"`. Anything else fails validation. |
 | `exported_at` | string | yes | RFC-3339 UTC (`YYYY-MM-DDTHH:MM:SSZ`, seconds precision). Not interpreted on import. |
 | `source` | object | no | Producer identity. See **Trust gate** below. Omitting it is equivalent to "untrusted source". |
 | `memories` | array | yes | Zero or more `OmfItem`s. An empty array is a valid "nothing to export" envelope. |
@@ -220,8 +218,8 @@ import fail-closed on a malformed lifecycle block.
 
 ## CLI
 
-Two subcommands ship with the memd binary (they run on the user's
-machine, outside the daemon trust boundary):
+Two subcommands ship with the memd binary. `import-omf` is worker-routed by
+default (`--warm auto`) while `export-omf` always runs cold:
 
 ```bash
 memd export-omf --tenant-id t [--project-id p] [--output PATH] \

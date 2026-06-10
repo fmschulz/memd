@@ -6,7 +6,7 @@ TMP_DIR="$(mktemp -d)"
 DATA_DIR="${TMP_DIR}/data"
 TENANT="memd_cli_enforcement_verify"
 PROJECT="verify"
-MARKER="verify memd cli enforcement 20260509"
+MARKER="verify memd cli enforcement 20260610"
 
 cleanup() {
   if command -v memd >/dev/null 2>&1; then
@@ -55,8 +55,18 @@ if ! grep -Fq "Mandatory \`memd\` CLI contract" "${HOME}/.cursor/rules/memd.mdc"
   exit 1
 fi
 
-# `memd doctor` should run and exit 0 on a wired host.
-memd doctor --format json >"${TMP_DIR}/doctor.json"
+if ! grep -Fq "memd session-start" "${HOME}/.claude/settings.json"; then
+  echo "missing memd SessionStart hook in ~/.claude/settings.json" >&2
+  exit 1
+fi
+
+PROJ_DIR="${TMP_DIR}/proj"
+mkdir -p "${PROJ_DIR}"
+memd --data-dir "${DATA_DIR}" session-start --project-dir "${PROJ_DIR}" >/dev/null
+test -f "${PROJ_DIR}/.memd/project_scope.json"
+
+# `memd doctor --strict` should run and exit 0 on a wired host with a project scope.
+memd doctor --strict --format json --project-dir "${PROJ_DIR}" >"${TMP_DIR}/doctor.json"
 grep -Fq '"binary"' "${TMP_DIR}/doctor.json"
 grep -Fq '"global_rules"' "${TMP_DIR}/doctor.json"
 
@@ -69,6 +79,14 @@ memd --data-dir "${DATA_DIR}" add \
   --chunk-type summary \
   --tags kind:verify,source:skill \
   --text "${MARKER}" >/dev/null
+
+memd --data-dir "${DATA_DIR}" memory-md \
+  --tenant-id "${TENANT}" \
+  --project-id "${PROJECT}" \
+  --output "${TMP_DIR}/memory.md" >/dev/null
+
+test -s "${TMP_DIR}/memory.md"
+grep -Fq "## Memory health" "${TMP_DIR}/memory.md"
 
 memd --data-dir "${DATA_DIR}" search \
   --tenant-id "${TENANT}" \

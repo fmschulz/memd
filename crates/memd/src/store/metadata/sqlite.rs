@@ -3,14 +3,16 @@
 //! Implements MetadataStore using SQLite with WAL mode for crash safety
 //! and tenant isolation via indexes.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::Connection;
 
 use super::pool::SqliteConnectionPool;
 use super::{ChunkMetadata, IndexState, MetadataStore};
 use crate::error::{MemdError, Result};
+use crate::store::usage::{UsageEvent, UsageEventRecord};
 use crate::store::{
     normalize_query, DuplicateExample, DuplicateHealth, FeedbackEntry, HealthCounts,
     IndexCoverageHealth, PayloadHealth, RelevanceLabel, StoreHealthSnapshot,
@@ -49,6 +51,24 @@ impl SqliteMetadataStore {
     /// to `MEMD_SQLITE_POOL_MAX` (default 16).
     pub fn open(path: &Path) -> Result<Self> {
         let pool = SqliteConnectionPool::open(path)?;
+        let store = Self { pool };
+        store.init_schema()?;
+        Ok(store)
+    }
+
+    /// Open a shared-cache in-memory metadata store and run normal migrations.
+    pub fn open_in_memory() -> Result<Self> {
+        static NEXT_IN_MEMORY_ID: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT_IN_MEMORY_ID.fetch_add(1, Ordering::Relaxed);
+        let uri = format!(
+            "file:memd_ro_missing_{}_{}?mode=memory&cache=shared",
+            std::process::id(),
+            id
+        );
+        let pool = SqliteConnectionPool::open_uri_with_max(
+            &uri,
+            crate::store::metadata::pool::DEFAULT_POOL_MAX_SIZE,
+        )?;
         let store = Self { pool };
         store.init_schema()?;
         Ok(store)
@@ -195,6 +215,30 @@ impl SqliteMetadataStore {
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_feedback_tenant_chunk
              ON feedback(tenant_id, chunk_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS usage_events (
+                id INTEGER PRIMARY KEY,
+                ts_unix_ms INTEGER NOT NULL,
+                op TEXT NOT NULL,
+                tenant TEXT,
+                project TEXT,
+                outcome TEXT NOT NULL,
+                chunk_count INTEGER,
+                bytes INTEGER,
+                detail TEXT
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_events_ts
+             ON usage_events(ts_unix_ms)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_events_op
+             ON usage_events(op)",
             [],
         )?;
 
@@ -820,6 +864,128 @@ impl SqliteMetadataStore {
             });
         }
         Ok(feedback)
+    }
+
+    /// Insert one usage ledger event.
+    pub fn insert_usage_event(&self, ts_unix_ms: i64, event: &UsageEvent) -> Result<()> {
+        let conn = self.pool.get();
+        conn.execute(
+            "INSERT INTO usage_events (
+                ts_unix_ms, op, tenant, project, outcome, chunk_count, bytes, detail
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                ts_unix_ms,
+                event.op.as_str(),
+                event.tenant.as_deref(),
+                event.project.as_deref(),
+                event.outcome.as_str(),
+                event.chunk_count,
+                event.bytes,
+                event.detail.as_deref(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn usage_events_since(
+        &self,
+        since_ms: i64,
+        tenant: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<Vec<UsageEventRecord>> {
+        let conn = self.pool.get();
+        let mut sql = String::from(
+            "SELECT ts_unix_ms, op, outcome, chunk_count, bytes, detail
+             FROM usage_events
+             WHERE ts_unix_ms >= ?1",
+        );
+        let mut params = vec![rusqlite::types::Value::Integer(since_ms)];
+        if let Some(tenant) = tenant {
+            sql.push_str(" AND tenant = ?");
+            params.push(rusqlite::types::Value::Text(tenant.to_string()));
+        }
+        if let Some(project) = project {
+            sql.push_str(" AND project = ?");
+            params.push(rusqlite::types::Value::Text(project.to_string()));
+        }
+        sql.push_str(" ORDER BY ts_unix_ms");
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            Ok(UsageEventRecord {
+                ts_unix_ms: row.get(0)?,
+                op: row.get(1)?,
+                outcome: row.get(2)?,
+                chunk_count: row.get(3)?,
+                bytes: row.get(4)?,
+                detail: row.get(5)?,
+            })
+        })?;
+
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row?);
+        }
+        Ok(events)
+    }
+
+    pub fn usage_ledger_stats(&self) -> Result<(i64, Option<i64>)> {
+        let conn = self.pool.get();
+        let (row_count, min_ts) = conn.query_row(
+            "SELECT COUNT(*), MIN(ts_unix_ms) FROM usage_events",
+            [],
+            |row| Ok((row.get::<usize, i64>(0)?, row.get::<usize, Option<i64>>(1)?)),
+        )?;
+        Ok((row_count, min_ts))
+    }
+
+    pub fn lifecycle_status_counts_since(
+        &self,
+        since_ms: i64,
+        tenant: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<BTreeMap<String, usize>> {
+        let conn = self.pool.get();
+        let mut sql = String::from(
+            "SELECT status, COUNT(*)
+             FROM chunks
+             WHERE lifecycle_updated_at_ms >= ?1
+               AND status IN ('expired', 'superseded')",
+        );
+        let mut params = vec![rusqlite::types::Value::Integer(since_ms)];
+        if let Some(tenant) = tenant {
+            sql.push_str(" AND tenant_id = ?");
+            params.push(rusqlite::types::Value::Text(tenant.to_string()));
+        }
+        if let Some(project) = project {
+            sql.push_str(" AND project_id = ?");
+            params.push(rusqlite::types::Value::Text(project.to_string()));
+        }
+        sql.push_str(" GROUP BY status");
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            let status: String = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            Ok((status, count.max(0) as usize))
+        })?;
+
+        let mut counts = BTreeMap::new();
+        for row in rows {
+            let (status, count) = row?;
+            counts.insert(status, count);
+        }
+        Ok(counts)
+    }
+
+    /// Delete usage ledger events older than `cutoff_ms`.
+    pub fn sweep_usage_events_before(&self, cutoff_ms: i64) -> Result<usize> {
+        let conn = self.pool.get();
+        Ok(conn.execute(
+            "DELETE FROM usage_events WHERE ts_unix_ms < ?1",
+            rusqlite::params![cutoff_ms],
+        )?)
     }
 
     /// Insert the canonical task artifact envelope plus normalized side rows.

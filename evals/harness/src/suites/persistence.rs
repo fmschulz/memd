@@ -5,7 +5,7 @@
 //! - A4_crash_recovery: Data survives daemon restart (WAL replay)
 //! - A5_soft_delete: Deleted chunks never returned
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -15,7 +15,7 @@ use crate::mcp_client::McpClient;
 use crate::TestResult;
 
 /// Run all persistence tests
-pub fn run_all(memd_binary: &PathBuf) -> Vec<TestResult> {
+pub fn run_all(memd_binary: &Path) -> Vec<TestResult> {
     vec![
         a3_tenant_isolation(memd_binary),
         a4_crash_recovery(memd_binary),
@@ -44,7 +44,7 @@ fn extract_chunk_id(response: &Value) -> Option<String> {
 }
 
 /// A3: Tenant B cannot see Tenant A's data
-fn a3_tenant_isolation(memd_binary: &PathBuf) -> TestResult {
+fn a3_tenant_isolation(memd_binary: &Path) -> TestResult {
     let test_name = "A3_tenant_isolation";
     let data_dir = match TempDir::new() {
         Ok(d) => d,
@@ -164,7 +164,7 @@ fn a3_tenant_isolation(memd_binary: &PathBuf) -> TestResult {
 }
 
 /// A4: Data survives daemon restart (WAL replay)
-fn a4_crash_recovery(memd_binary: &PathBuf) -> TestResult {
+fn a4_crash_recovery(memd_binary: &Path) -> TestResult {
     let test_name = "A4_crash_recovery";
     let data_dir = match TempDir::new() {
         Ok(d) => d,
@@ -261,7 +261,7 @@ fn a4_crash_recovery(memd_binary: &PathBuf) -> TestResult {
 }
 
 /// A5: Deleted chunks never returned
-fn a5_soft_delete(memd_binary: &PathBuf) -> TestResult {
+fn a5_soft_delete(memd_binary: &Path) -> TestResult {
     let test_name = "A5_soft_delete";
     let data_dir = match TempDir::new() {
         Ok(d) => d,

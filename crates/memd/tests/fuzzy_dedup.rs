@@ -412,7 +412,7 @@ async fn backfill_canonical_text_repopulates_legacy_null_rows() {
     );
 
     // Run backfill — the same call that startup schedules.
-    let stats = ps.backfill_canonical_text_for_legacy_chunks();
+    let stats = ps.backfill_canonical_text_for_legacy_chunks().unwrap();
     assert_eq!(
         stats.rows_backfilled, 1,
         "exactly one legacy row backfilled"
@@ -1370,7 +1370,7 @@ async fn backfill_canonical_text_repopulates_many_legacy_rows_in_one_pass() {
             .expect("force_clear_canonical_text");
     }
 
-    let stats = ps.backfill_canonical_text_for_legacy_chunks();
+    let stats = ps.backfill_canonical_text_for_legacy_chunks().unwrap();
     assert_eq!(
         stats.rows_backfilled,
         texts.len(),
@@ -1425,7 +1425,7 @@ async fn backfill_canonical_text_repopulates_many_rows_across_tenants() {
             .expect("force_clear_canonical_text");
     }
 
-    let stats = ps.backfill_canonical_text_for_legacy_chunks();
+    let stats = ps.backfill_canonical_text_for_legacy_chunks().unwrap();
     assert_eq!(
         stats.rows_backfilled,
         texts_a.len() + texts_b.len(),

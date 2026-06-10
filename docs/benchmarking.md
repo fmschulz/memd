@@ -52,7 +52,7 @@ excludes fresh indexing and reuses the already-built store.
 
 | Interface | Main purpose | Result summary |
 | --- | --- | --- |
-| `agent-context` prefetch | bounded context before the agent starts | retrieved 10/10 expected priors in the full suite5 CLI-prefetch run |
+| `agent-context` prefetch | bounded context before the agent starts | retrieved 10/10 expected priors in the full-suite CLI-prefetch run |
 | CLI search | retrieval by shell command during the solve | strongest token condition in the interface comparison, but slower for agents |
 | Warm and batch execution | reduce local retrieval overhead | preserve retrieval quality while avoiding repeated startup costs |
 
@@ -76,8 +76,8 @@ evidence IDs (MRR@10 over categories 1–4: 10 conversations, 5,882 turns,
 | `superlocalmemory` v3.4.46 (lexical) | 0.369 | 0.245 | 0.469 | 0.599 | 804.5 ms | 1.8 s |
 | `mem0` v2.0.2 (LLM-extracted) | 0.354 | 0.255 | 0.412 | 0.591 | 40.9 ms | 13,424 s |
 
-`memd` wins on every quality metric (+14% MRR@10 vs SuperLocalMemory, +19%
-vs Mem0) and is the fastest at search. Seeding cost trades off against
+`memd` leads on MRR@10 (+14% vs SuperLocalMemory, +19% vs Mem0), Hit@10, and
+search latency. Seeding cost trades off against
 quality — SuperLocalMemory has the cheapest seed (no embeddings in this
 configuration), Mem0 the most expensive (LLM extraction).
 

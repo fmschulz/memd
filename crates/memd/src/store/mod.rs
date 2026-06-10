@@ -14,7 +14,9 @@ pub mod shared_add;
 pub mod supersession;
 pub mod tenant;
 pub mod tombstone;
+pub mod usage;
 pub mod wal;
+pub mod writer_lock;
 
 use std::collections::HashMap;
 
@@ -105,6 +107,21 @@ pub struct StoreHealthSnapshot {
     pub duplicates: DuplicateHealth,
     pub index_coverage: IndexCoverageHealth,
     pub payload: PayloadHealth,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalMutationOutcome {
+    Unavailable,
+    Clean,
+    OwnWrites,
+    External { repaired: bool },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RywProbeStats {
+    pub checks: u64,
+    pub external_detected: u64,
+    pub repairs: u64,
 }
 
 pub(crate) fn score_candidate_chunk(query: &str, chunk: &MemoryChunk) -> f32 {
@@ -313,6 +330,21 @@ pub trait Store: Send + Sync {
     /// `PersistentStore`-specific APIs. Default returns `None`;
     /// `PersistentStore` overrides to `Some(self)`.
     fn as_persistent(&self) -> Option<&crate::store::persistent::PersistentStore> {
+        None
+    }
+
+    /// Best-effort usage-ledger recording. Never fails; implementations
+    /// must swallow all errors (debug log) and silently no-op when the
+    /// store cannot write (read-only mode, in-memory store).
+    fn record_usage_event(&self, _event: crate::store::usage::UsageEvent) {}
+
+    /// Best-effort external metadata mutation probe for warm workers.
+    async fn probe_external_mutation(&self) -> ExternalMutationOutcome {
+        ExternalMutationOutcome::Unavailable
+    }
+
+    /// Read-your-writes probe counters for warm-worker status payloads.
+    fn ryw_probe_stats(&self) -> Option<RywProbeStats> {
         None
     }
 

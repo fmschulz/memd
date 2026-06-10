@@ -4,7 +4,7 @@
 //! This suite evaluates semantic retrieval quality on domain-specific scientific text.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Instant;
 
 use serde::Deserialize;
@@ -101,7 +101,7 @@ fn extract_content_text(response: &Value) -> Option<&str> {
 }
 
 /// Run SciFact evaluation tests
-pub fn run_scifact_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestResult> {
+pub fn run_scifact_tests(memd_path: &Path, embedding_model: &str) -> Vec<TestResult> {
     let mut results = Vec::new();
 
     // Load dataset
@@ -174,7 +174,7 @@ fn load_dataset(path: &std::path::Path) -> Result<SciFactDataset, String> {
 
 /// Create a client, index documents, and optionally run queries
 fn create_indexed_client(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     dataset: &SciFactDataset,
     embedding_model: &str,
 ) -> Result<(McpClient, TempDir), String> {
@@ -213,7 +213,7 @@ fn create_indexed_client(
 }
 
 fn run_index_and_evaluate(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     dataset: &SciFactDataset,
     embedding_model: &str,
 ) -> (TestResult, Option<QualityMetrics>) {
@@ -300,7 +300,7 @@ fn check_quality_threshold(metrics: &QualityMetrics) -> TestResult {
 }
 
 fn run_performance_baseline(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     dataset: &SciFactDataset,
     embedding_model: &str,
 ) -> TestResult {

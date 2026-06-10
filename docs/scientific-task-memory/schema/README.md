@@ -1,4 +1,4 @@
-# Scientific Knowledge Artifact Schema
+# Scientific knowledge artifact schema
 
 This directory documents the task-oriented knowledge artifact schema used by `memd`.
 
@@ -22,9 +22,10 @@ The system is designed so later agents can reliably recover:
 - uncertainty
 - follow-up actions
 
-That consistency is the main reason the schema exists. It is not just a richer note format.
+That consistency is the main reason the schema exists. The schema adds
+recoverable task structure rather than a richer note format alone.
 
-## Canonical Artifact Envelope
+## Canonical artifact envelope
 
 The source of truth is the canonical task artifact envelope implemented in:
 
@@ -99,7 +100,7 @@ Important canonical fields include:
 - `timestamp_created`
 - `timestamp_observed`
 
-## Normalized Metadata Tables
+## Normalized metadata tables
 
 The canonical envelope is projected into normalized SQLite side tables in:
 
@@ -123,7 +124,7 @@ Current tables:
 
 These tables exist to support exact task-aware filters and joins without coupling retrieval to every schema field.
 
-## Retrieval Projection
+## Retrieval projection
 
 Canonical artifacts are projected into ordinary retrieval chunks. The projection layer lives in:
 
@@ -146,7 +147,7 @@ The projection layer is intentionally separate from the canonical envelope:
 - canonical artifact = source of truth
 - retrieval chunk = search-optimized derived text
 
-## Summary-First Digests
+## Summary-first digests
 
 Persisted digest artifacts currently use these `artifact_role` values:
 
@@ -167,7 +168,7 @@ The current implementation also tracks:
 
 `task.resume` reuses the real `task_id` for its digest so `resume_task` retrieval stays aligned with canonical task filters.
 
-## Trust Boundary
+## Trust boundary
 
 `memd` exposes an explicit trust vocabulary in local operation results:
 
@@ -183,7 +184,7 @@ The intended workflow is:
 3. use `artifact.verification` when a distinct agent needs to countersign a claim
 4. trust the supporting canonical artifact IDs, not digest text on its own
 
-## Exact Filters
+## Exact filters
 
 `task.search` currently supports exact filters over the normalized side tables for:
 
@@ -222,7 +223,7 @@ These filters are resolved first, then the candidate set is reranked for retriev
 
 `context.find_relevant_context` can prepend hot-context chunks, but the hot pre-scan is wall-clock bounded so broad lookups on large tenants still continue through normal retrieval. List-style retrieval scans skip stale unreadable segment rows with a warning; strict point reads through `memory.get` still surface storage errors.
 
-## Conversation Event Tags
+## Conversation event tags
 
 Raw conversational chunks can use ordinary tags for event binding without a
 schema migration:
@@ -248,7 +249,7 @@ Task artifacts are WAL-backed. The relevant implementation is in:
 
 This means canonical task side tables can be rebuilt during recovery, rather than depending on best-effort metadata writes.
 
-## Agent Guardrails
+## Agent guardrails
 
 Agents should follow this contract:
 
@@ -265,7 +266,7 @@ Agents should follow this contract:
 
 This is how `memd` enforces consistent reporting across agents in the same tenant. For one trusted machine or trust domain, agents should prefer a stable shared `tenant_id` and use `project_id`, `thread_id`, and `task_id` for narrower scopes. Cross-tenant project recovery is explicit: configure same-project compatibility aliases for known historical scopes and inspect `scope_expansion` plus per-hit `origin` metadata in search responses.
 
-## Documentation Status
+## Documentation status
 
 This README documents the implemented schema at a high level. It does not yet provide:
 

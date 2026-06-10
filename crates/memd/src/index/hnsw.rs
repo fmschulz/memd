@@ -195,19 +195,34 @@ impl HnswIndex {
     /// If a persisted mapping/cache exists at the path, attempt to load and
     /// rebuild the graph from cached embeddings.
     pub fn with_persistence(config: HnswConfig, path: impl AsRef<Path>) -> Result<Self> {
+        Self::with_persistence_mode(config, path, false)
+    }
+
+    /// Open a persisted index for read-only search without filesystem cleanup.
+    pub fn with_persistence_read_only(config: HnswConfig, path: impl AsRef<Path>) -> Result<Self> {
+        Self::with_persistence_mode(config, path, true)
+    }
+
+    fn with_persistence_mode(
+        config: HnswConfig,
+        path: impl AsRef<Path>,
+        read_only: bool,
+    ) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
 
-        // One-shot cleanup of orphan dumps from older memd versions.
-        // Safe to call every load: it only removes `graph-NNNN.hnsw.*`
-        // files that the loader never reads anyway.
-        let _ = Self::purge_orphan_dumps(&path);
+        if !read_only {
+            // One-shot cleanup of orphan dumps from older memd versions.
+            // Safe to call every load: it only removes `graph-NNNN.hnsw.*`
+            // files that the loader never reads anyway.
+            let _ = Self::purge_orphan_dumps(&path);
+        }
 
         // Accept either the new bincode mapping or the legacy JSON
         // mapping. Order matters only for layout discoverability; load()
         // itself prefers .bin.
         let has_mapping = path.join("mapping.bin").exists() || path.join("mapping.json").exists();
         if has_mapping {
-            match Self::load(&path, config.clone()) {
+            match Self::load_with_mode(&path, config.clone(), read_only) {
                 Ok(index) => {
                     tracing::info!("Loaded persisted HNSW index from {:?}", path);
                     return Ok(index);
@@ -223,7 +238,9 @@ impl HnswIndex {
         }
 
         let mut index = Self::new(config);
-        index.persist_path = Some(path);
+        if !read_only {
+            index.persist_path = Some(path);
+        }
         Ok(index)
     }
 
@@ -553,6 +570,10 @@ impl HnswIndex {
     /// rebuilds the HNSW graph from the cached embeddings. This is much faster
     /// than re-embedding (50-100x speedup).
     pub fn load(path: &Path, config: HnswConfig) -> Result<Self> {
+        Self::load_with_mode(path, config, false)
+    }
+
+    fn load_with_mode(path: &Path, config: HnswConfig, read_only: bool) -> Result<Self> {
         use std::time::Instant;
 
         let start = Instant::now();
@@ -600,8 +621,10 @@ impl HnswIndex {
                             "Embedding cache validation failed: {}. Will need rebuild from segments.",
                             e
                         );
-                        // Delete corrupted cache
-                        let _ = std::fs::remove_file(&cache_path);
+                        if !read_only {
+                            // Delete corrupted cache so the writer path can rebuild cleanly.
+                            let _ = std::fs::remove_file(&cache_path);
+                        }
                         EmbeddingCache::new(config.dimension)
                     } else {
                         cache
@@ -612,8 +635,10 @@ impl HnswIndex {
                         "Failed to load embedding cache: {}. Will need rebuild from segments.",
                         e
                     );
-                    // Delete corrupted cache
-                    let _ = std::fs::remove_file(&cache_path);
+                    if !read_only {
+                        // Delete corrupted cache so the writer path can rebuild cleanly.
+                        let _ = std::fs::remove_file(&cache_path);
+                    }
                     EmbeddingCache::new(config.dimension)
                 }
             }
@@ -676,7 +701,7 @@ impl HnswIndex {
             mapping: RwLock::new(mapping),
             embedding_cache: RwLock::new(embedding_cache),
             config,
-            persist_path: Some(path.to_path_buf()),
+            persist_path: (!read_only).then(|| path.to_path_buf()),
         })
     }
 

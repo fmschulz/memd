@@ -35,6 +35,18 @@ Model and runtime assets:
   targets (`linux/x86_64`, `linux/aarch64`)
 - Default cache dir: `~/.cache/memd/cross-encoder`
 
+Cross-encoder environment variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `MEMD_CROSS_ENCODER_DISABLE` | Set to `1` to disable the cross-encoder. |
+| `MEMD_CROSS_ENCODER_MODEL_PATH` | Use a local ONNX model file instead of downloading one. |
+| `MEMD_CROSS_ENCODER_TOKENIZER_PATH` | Use a local tokenizer file instead of downloading one. |
+| `MEMD_CROSS_ENCODER_CACHE_DIR` | Override the cache directory; default is `~/.cache/memd/cross-encoder`. |
+| `MEMD_CROSS_ENCODER_ORT_DYLIB_PATH` | Use a local ONNX Runtime shared library. |
+| `MEMD_CROSS_ENCODER_ORT_URL` | Download ONNX Runtime from a custom archive URL. |
+| `MEMD_CROSS_ENCODER_ORT_VERSION` | Select the ONNX Runtime release version used for the default download URL. |
+
 Real ONNX smoke test (requires network on first run):
 
 ```bash

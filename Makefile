@@ -1,7 +1,7 @@
 # memd installer
 #
-# One command to build and install memd so the copy on your PATH stays current,
-# and to install/uninstall the agent skill into the standard skill directories.
+# One command installs memd end to end: binary, skill, and enforcement wiring.
+# Uninstall mirrors it while keeping ~/.memd memory data intact.
 # Modeled on ../omics-skills/Makefile (symlink-by-default = always up to date).
 # No assumptions about any private meta-repo: everything targets standard paths.
 #
@@ -11,7 +11,7 @@
 
 .PHONY: help build install install-binary install-skill install-skill-bundle \
         install-skill-copy install-enforcement install-all menu uninstall \
-        uninstall-binary uninstall-skill status clean
+        uninstall-binary uninstall-skill uninstall-enforcement status clean
 
 REPO        := $(CURDIR)
 RELEASE_BIN := $(REPO)/target/release/memd
@@ -62,15 +62,22 @@ menu: ## Interactive TUI to select components to install or uninstall
 ##@ Install
 
 build: ## Build the release binary (cargo build --release -p memd)
+	@if ! command -v cargo >/dev/null 2>&1; then \
+		echo "cargo not found — install Rust (https://rustup.rs) or use the prebuilt installer instead:"; \
+		echo "  curl --proto '=https' --tlsv1.2 -LsSf https://github.com/fmschulz/memd/releases/latest/download/memd-installer.sh | sh"; \
+		exit 1; \
+	fi
 	@echo "$(BLUE)Building memd (release)...$(NC)"
 	@cargo build --release -p memd
 
-install: build install-binary ## Build, then install memd onto PATH (default target)
+install: build install-binary install-skill install-enforcement ## Install everything: binary + skill + enforcement (idempotent)
 	@$(MAKE) --no-print-directory status
+	@echo "$(GREEN)✓ memd fully installed (binary + skill + enforcement) — idempotent, safe to re-run$(NC)"
+	@echo "  next: run 'memd doctor --strict' to verify (exit 0 on a healthy fresh install)"
 
-install-binary: ## Install/refresh the already-built binary at $(BIN)
+install-binary: build ## Binary only (escape hatch): build + install memd onto PATH
 	@if [ ! -x "$(RELEASE_BIN)" ]; then \
-		echo "$(RED)✗$(NC) $(RELEASE_BIN) not found — run 'make build' first"; exit 1; fi
+		echo "$(RED)✗$(NC) $(RELEASE_BIN) not found — run 'make build'"; exit 1; fi
 	@mkdir -p $(BIN_DIR)
 	@command -v memd >/dev/null 2>&1 && memd warm stop >/dev/null 2>&1 || true
 	@if [ "$(INSTALL_METHOD)" = "copy" ]; then \
@@ -82,6 +89,7 @@ install-binary: ## Install/refresh the already-built binary at $(BIN)
 	fi
 	@hash -r 2>/dev/null || true
 	@echo "  $(GREEN)✓$(NC) $$("$(BIN)" --version)"
+	@case ":$$PATH:" in *":$(BIN_DIR):"*) ;; *) echo "  $(YELLOW)⚠ $(BIN_DIR) is not on PATH — add 'export PATH=\"$(BIN_DIR):$$PATH\"' to your shell rc$(NC)";; esac
 
 install-skill: ## Install the skill into ~/.agents, ~/.claude, ~/.codex skills
 	@mkdir -p "$(AGENTS_SKILLS)"
@@ -135,15 +143,16 @@ install-skill-copy: install-skill-bundle ## Alias for install-skill-bundle
 install-enforcement: ## Wire CLI-first agent rules + SessionStart hook (skill installer)
 	@"$(SKILL_SRC)/install_memd_enforcement.sh"
 
-install-all: install install-skill install-enforcement ## Binary + skill + enforcement
-	@echo "$(GREEN)✓ memd fully installed$(NC)"
+install-all: install ## Alias of install (kept for muscle memory)
 
 ##@ Uninstall
 
-uninstall: uninstall-binary uninstall-skill ## Remove the binary and the skill from all dirs
-	@echo "$(GREEN)✓ uninstalled$(NC)"
+uninstall: uninstall-binary uninstall-skill uninstall-enforcement ## Remove binary + skill + enforcement (keeps ~/.memd data)
+	@echo "$(GREEN)✓ uninstalled (binary + skill + enforcement)$(NC)"
+	@echo "  kept: ~/.memd (your memory data) — remove manually for a clean slate"
 
 uninstall-binary: ## Remove the installed binary from PATH
+	@command -v memd >/dev/null 2>&1 && memd warm stop >/dev/null 2>&1 || true
 	@if [ -e "$(BIN)" ] || [ -L "$(BIN)" ]; then rm -f "$(BIN)"; echo "  removed $(BIN)"; \
 	else echo "  $(YELLOW)○$(NC) $(BIN) not present"; fi
 
@@ -153,6 +162,9 @@ uninstall-skill: ## Remove the skill from ~/.agents, ~/.claude, ~/.codex skills
 		if [ -L "$$t" ] || [ -e "$$t" ]; then rm -rf "$$t"; echo "  removed $$t"; removed=1; fi; \
 	done; \
 	[ "$$removed" = "0" ] && echo "  $(YELLOW)○$(NC) skill not installed" || true
+
+uninstall-enforcement: ## Remove agent rule blocks, Cursor rule, and SessionStart hook
+	@"$(SKILL_SRC)/uninstall_memd_enforcement.sh"
 
 ##@ Status & maintenance
 
@@ -173,6 +185,11 @@ status: ## Show built/installed version, PATH location, and skill links
 		elif [ -d "$$t" ]; then echo "(copy)"; \
 		else echo "-"; fi; \
 	done
+	@printf "  enforcement:   "; if grep -qs "memd-enforcement:start" "$(HOME)/.claude/CLAUDE.md"; then echo "$(GREEN)wired$(NC)"; else echo "$(YELLOW)not wired (run 'make install-enforcement')$(NC)"; fi
+	@printf "  SessionStart:  "; if grep -qs "memd session-start" "$(HOME)/.claude/settings.json"; then echo "$(GREEN)wired$(NC)"; else echo "$(YELLOW)not wired$(NC)"; fi
+	@printf "  warm worker:   "; if command -v memd >/dev/null 2>&1; then \
+		if RUST_LOG=error memd warm status 2>/dev/null | grep -q '"status": "running"'; then echo "running"; else echo "stopped"; fi; \
+	else echo "- (memd not on PATH)"; fi
 
 clean: ## Remove skill .bak backups created by install-skill
 	@find "$(AGENTS_SKILLS)" "$(CLAUDE_SKILLS)" "$(CODEX_SKILLS)" -maxdepth 1 -name '$(SKILL_NAME).bak.*' -exec rm -rf {} + 2>/dev/null || true

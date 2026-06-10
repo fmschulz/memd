@@ -38,7 +38,7 @@ per-chunk 30-day aggregate (1 h TTL cache):
 - chunks with no hits older than 30 days get **−2**
 
 `memd eval-counterfactual` measures whether the `kind:consolidated` chunks
-are actually moving ranks versus a same-pass filtered baseline.
+change ranks versus a same-pass filtered baseline.
 
 ## 4. Cross-tenant transfer
 
