@@ -4,7 +4,7 @@
 //! Challenging dataset with short vague queries (avg 3.3 words) and long passages (avg 232 words).
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Instant;
 
 use serde::Deserialize;
@@ -99,7 +99,7 @@ fn extract_content_text(response: &Value) -> Option<&str> {
 }
 
 /// Run NFCorpus evaluation tests
-pub fn run_nfcorpus_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestResult> {
+pub fn run_nfcorpus_tests(memd_path: &Path, embedding_model: &str) -> Vec<TestResult> {
     let mut results = Vec::new();
 
     // Load dataset
@@ -172,7 +172,7 @@ fn load_dataset(path: &std::path::Path) -> Result<NFCorpusDataset, String> {
 }
 
 fn create_indexed_client(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     dataset: &NFCorpusDataset,
     embedding_model: &str,
 ) -> Result<(McpClient, TempDir), String> {
@@ -211,7 +211,7 @@ fn create_indexed_client(
 }
 
 fn run_index_and_evaluate(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     dataset: &NFCorpusDataset,
     embedding_model: &str,
 ) -> (TestResult, Option<QualityMetrics>) {
@@ -264,7 +264,7 @@ fn check_quality_threshold(metrics: &QualityMetrics) -> TestResult {
 }
 
 fn run_performance_baseline(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     dataset: &NFCorpusDataset,
     embedding_model: &str,
 ) -> TestResult {

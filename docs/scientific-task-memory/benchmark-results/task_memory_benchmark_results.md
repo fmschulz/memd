@@ -1,4 +1,4 @@
-# Phase 5 Task Memory Benchmark
+# Phase 5 task memory benchmark
 
 - Corpus: `docs/scientific-task-memory/benchmark-results/task_memory_benchmark_corpus.json`
 - Version: `2026-03-21.v2`
@@ -7,7 +7,7 @@
 - Search variant: `hybrid-feature`
 - memd lanes: `cli_cold, cli_warm, cli_batch`
 
-## Corpus Design
+## Corpus design
 
 - Cases: `8`
 - Queries: `23`
@@ -33,7 +33,7 @@
 | memd_cli_batch_chunk_baseline | cli_batch: memory.search over flattened chunk-native benchmark artifacts | 1.00 | 0.98 | 25.0 | 19.8 | 3 | 100.00% | 0.22 | 5221.7 |
 | memd_cli_batch_task_memory | cli_batch: task.* lifecycle writes plus task.search over exact-filtered task artifacts | 1.00 | 0.87 | 0.6 | 1.1 | 1 | 100.00% | 0.24 | 8995.0 |
 
-## Why memd-native Modes Differ
+## Why memd-native modes differ
 
 - `cli_warm` chunk baseline flattened the corpus into `56` generic chunks and searched them with `memory.search`. In this task-level run it reached `hit@3=1.00` / `MRR=0.98` with average search latency `28.9ms`.
 - `cli_warm` task memory wrote `112` lifecycle projections and searched them with `task.search`, exact artifact filters, and candidate reranking. In this run it reached `hit@3=1.00` / `MRR=0.87` with average search latency `9.6ms`; seed time changed from `4.6s` to `8.4s` (`+3.9s`) and average search latency changed by `-19.2ms` versus the chunk baseline.

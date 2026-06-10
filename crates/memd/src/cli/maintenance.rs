@@ -18,10 +18,9 @@
 //!    next save, but this command can force the conversion eagerly so
 //!    operators don't have to wait for the next write.
 //!
-//! Concurrency: this command does NOT acquire any locks. Run with no
-//! active writer for the affected tenant. The orphan sweep targets
-//! files the loader never reads, so a racing read is safe; a racing
-//! write may resurrect orphans before the next save purges them again.
+//! Concurrency: the CLI acquires the data-dir writer lock before
+//! entering this module. The orphan sweep targets files the loader never
+//! reads, so racing reads are safe.
 
 use std::path::Path;
 

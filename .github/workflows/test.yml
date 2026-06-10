@@ -1,0 +1,69 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel any still-running run for the same ref when a new commit arrives —
+# only the tip commit's test verdict matters.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: this job only reads the repo and reads/writes the Actions
+# cache (handled by the action itself, not the token). No pushes / no issue
+# writes / no releases — drop everything else from the default GITHUB_TOKEN.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Rust workspace test
+    runs-on: ubuntu-latest
+    # 60 min covers the cold-cache path: full workspace debug build + tests.
+    # Warm-cache runs are much faster.
+    timeout-minutes: 60
+    steps:
+      # NOTE on action versions: upstream actions are pinned to v4 major-
+      # tag refs, not commit SHAs. Commit-SHA pins are defense-in-depth
+      # against tag retargeting; swap in verified SHAs when the repo
+      # adopts a supply-chain audit policy (see repo-wide TODO).
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      # TODO tighten: restore '-- -D warnings' once the pre-existing clippy
+      # baseline in crates/memd is fixed (103 warning sites as of 2026-06-09;
+      # memd-evals is already clean). Until then this step surfaces warnings
+      # in the log but only fails on hard errors.
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets
+
+      # Ratchet: memd-evals is already clippy-clean — keep it clean while the
+      # crates/memd baseline (103 pre-existing warning sites) is burned down.
+      - name: Clippy ratchet (memd-evals)
+        run: env RUSTC_WRAPPER= cargo clippy -p memd-evals --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace

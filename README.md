@@ -5,10 +5,10 @@
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-fmschulz.github.io%2Fmemd-blue)](https://fmschulz.github.io/memd/)
 
-`memd` is a local memory CLI that gives coding agents and AI scientists a
-single shared, persistent memory — raw searchable content, structured task
-history, and canonical collaboration artifacts — indexed by a hybrid dense +
-sparse retrieval stack and gated by an explicit trust boundary.
+`memd` is a local memory CLI for coding agents and AI scientists. Each trusted
+machine gets one shared, persistent store: raw searchable content, structured
+task history, and canonical collaboration artifacts. A hybrid dense + sparse
+stack indexes it; an explicit trust boundary decides what counts as verified.
 
 Agents retrieve bounded context with `memd agent-context` or `memd search`,
 read the generated context file, and record durable progress with `memd add`.
@@ -23,39 +23,57 @@ private CLI-managed warm worker driven by ordinary CLI commands.
 | --- | --- | --- |
 | Raw memory | Store and search chunks: code, docs, notes, traces, decisions | `memd add`, `memd search`, `memd get`, `memd stats` |
 | Agent context | Bounded pre-work context + JSON audit logs | `memd agent-context --output .memd/context.md` |
-| Startup memory | Refresh project `memory.md` with ranked takeaways and concrete `agent action` guidance | `memd memory-md`, `memd eval-memory-md` |
+| Startup memory | Refresh project `memory.md` with ranked takeaways and a concrete `Agent action:` line per takeaway | `memd memory-md`, `memd eval-memory-md` |
+| Usefulness report | Usage-ledger and store self-diagnosis for growth, learning, retrieval, and warnings | `memd report --strict` |
 | Warm CLI | Keep store/index state hot for repeated local calls | `memd warm start`, `memd warm status` |
 | Batch CLI | Many structured operations in one loaded process | `memd batch --jsonl requests.jsonl` |
-| Export/import | Move local memory to portable formats | `memd export-omf`, `memd import-omf` |
-| Operations | Structured memory/task/artifact/context/code/debug ops | `memd call task.start --json '{…}'` |
+| Export/import | Manual cross-machine moves through portable OMF | `memd export-omf`, `memd import-omf` |
+| Operations | Structured memory/task/artifact/context/code/debug ops | `memd call task.start --json '{...}'` |
 | Guardrails | Pin tenant/project scope and verify CLI-first agent wiring | `memd init`, `memd doctor` |
 
-Use `memd search --mode brief-project|resume-task|find-failures|find-decisions|find-evidence|find-highlights`
+Use `memd search --mode brief_project|resume_task|find_failures|find_decisions|find_evidence|find_highlights`
 when retrieval should bias toward persisted digests and canonical summaries.
 Use `--compact` and `--token-budget` to keep agent context small.
 High-priority durable writes (`priority:8+` or `importance:8+`) must include
-a concrete `Agent action:` sentence so generated startup memory tells agents
-what to do, check, prefer, avoid, verify, reuse, or resolve.
+a concrete `Agent action:` line. The gate accepts a sentence of at least 24
+characters containing an imperative verb (verify, run, use, check, avoid,
+prefer, record, treat, ...). Tell the next agent what to verify, run, reuse, or
+avoid.
 
 ## 30-second quickstart
 
 ```bash
-# Build
-cargo build --release
+git clone https://github.com/fmschulz/memd
+cd memd
+make install   # binary + agent skill + enforcement
+memd doctor
+```
 
-# Store a memory
-./target/release/memd add \
+Prebuilt binary only (no clone):
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/fmschulz/memd/releases/latest/download/memd-installer.sh | sh
+```
+
+From source, manual:
+
+```bash
+cargo build --release
+```
+
+First memory:
+
+```bash
+memd add \
   --tenant-id quickstart --project-id auth \
   --chunk-type summary --tags kind:note \
   --text "parseConfig reads TOML and validates required auth fields"
 
-# Search
-./target/release/memd search \
+memd search \
   --tenant-id quickstart --project-id auth \
   --query "auth config validation" --compact --token-budget 2000
 
-# Build bounded context for an agent
-./target/release/memd agent-context \
+memd agent-context \
   --tenant-id quickstart --project-id auth \
   --query "auth config validation prior work" \
   --k 2 --token-budget 700 --output .memd/context.md
@@ -125,6 +143,21 @@ More: [Architecture](https://fmschulz.github.io/memd/architecture/),
 [Trust boundary](https://fmschulz.github.io/memd/trust-boundary/),
 [Data layout](https://fmschulz.github.io/memd/data-layout/).
 
+## Concurrency model
+
+Writes route through the private warm worker by default (`--warm auto` starts
+or reuses it for routable commands), and the worker holds the data-dir
+exclusive writer flock for its lifetime; any direct-write fallback or
+`--warm off` write takes the same flock with a bounded retry. Reads open the
+store in ReadOnly mode without taking the lock or mutating disk, and the worker
+probes SQLite `data_version` before each request so direct fallback mutations
+are visible before serving. More: [Shared topology](https://fmschulz.github.io/memd/shared-topology/)
+and [Operational contract](https://fmschulz.github.io/memd/operational-contract/).
+Measured on the dev machine (2026-06, hardening validation run): an 8-writer × 3-round
+write storm leaves 24/24 concurrent writes readable (7 of 16 were lost in the
+2026-06-09 audit before the writer lock); warm-routed `memd add` p50 is 31 ms (vs ~1.6 s cold); a write is
+searchable within p95 <70 ms.
+
 ## Headline benchmark
 
 Cross-system retrieval on upstream
@@ -137,41 +170,46 @@ Cross-system retrieval on upstream
 | `superlocalmemory` v3.4.46 (lexical) | 0.369 | 0.599 | 804.5 ms | 1.8 s |
 | `mem0` v2.0.2 (LLM-extracted) | 0.354 | 0.591 | 40.9 ms | 13,424 s |
 
-`memd` wins on quality (+14% MRR@10 vs SuperLocalMemory, +19% vs Mem0) and
-on search latency. Internal task-memory benchmark (cli_warm: Hit@3 1.00,
-MRR 0.87, 9.7 ms), Bright-Pro biology adapter, multi-turn token benchmark,
-and reproducibility notes are documented at
+Benchmark caveat: mem0 used a self-hosted vLLM `gemma4-31b` endpoint rather
+than the GPT-4-class model used in the upstream Mem0 paper, and
+superlocalmemory ran in lexical-only fallback because its published semantic
+configuration was unreachable; full protocol:
+https://fmschulz.github.io/memd/benchmarking/.
+
+`memd` leads on MRR@10 (+14% vs SuperLocalMemory, +19% vs Mem0), Hit@10, and
+search latency. Internal task-memory benchmark (`cli_warm`: Hit@3 1.00,
+MRR 0.87, 9.7 ms), Bright-Pro biology adapter, multi-turn token benchmark, and
+reproducibility notes are documented at
 [Benchmarking](https://fmschulz.github.io/memd/benchmarking/).
 
 ## Agent skill
 
-The agent skill is the default way to make agents use `memd` correctly.
+The agent skill is the default way to make agents use `memd` through the CLI.
 
-Install the binary on any macOS or Linux machine — Linux builds are **static
-musl**, so there are no `GLIBC_... not found` errors on older or HPC hosts:
+Install the binary, agent skill, and enforcement in one command:
+
+```bash
+git clone https://github.com/fmschulz/memd
+cd memd
+make install   # binary + agent skill + enforcement
+memd doctor
+```
+
+Prebuilt binary only (no clone):
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/fmschulz/memd/releases/latest/download/memd-installer.sh | sh
 ```
 
-Rust users can instead use `cargo binstall memd` (prebuilt, best-effort) or
-`cargo install memd` (from source). Then wire up the agent enforcement:
+The prebuilt installer installs only the binary. To install the skill and
+enforcement, use `make install` from a clone. `make install-binary` installs
+only the binary, `make menu` opens an interactive TUI to pick components, and
+`make uninstall` removes what `make install` installed.
 
-```bash
-./memd-skill/install_memd_enforcement.sh
-```
-
-For local repo installs, `make install-skill` installs the skill as symlinks.
-Use `make install-skill-bundle` to copy the current skill plus the repo-built
-binary into each unique existing standard skill directory among
+For component-target development, `make install-skill` installs the skill as
+symlinks. Use `make install-skill-bundle` to copy the current skill plus the
+repo-built binary into each unique existing standard skill directory among
 `~/.agents/skills`, `~/.claude/skills`, and `~/.codex/skills`.
-
-`--install-binary` runs the one-line installer above for you. The script
-upserts CLI-first instruction blocks into `~/.codex/AGENTS.md` and
-`~/.claude/CLAUDE.md`, writes the matching Cursor rule to
-`~/.cursor/rules/memd.mdc`, and wires a Claude Code `SessionStart` hook in
-`~/.claude/settings.json`. It also injects a pre-refusal rule: agents must
-check `memd` before declaring a task impossible, blocked, or unknowable.
 
 Run `memd doctor` after installation to verify the binary, data directory,
 global rules, SessionStart hook, and current project scope.

@@ -62,7 +62,7 @@ impl SystemVariant {
 }
 
 pub fn run_benchmark_protocol(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     embedding_model: &str,
     config: BenchmarkConfig,
 ) -> Vec<TestResult> {
@@ -192,7 +192,7 @@ pub fn run_benchmark_protocol(
 }
 
 fn run_single_dataset(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     embedding_model: &str,
     dataset_path: &Path,
     dataset_label: &str,

@@ -130,6 +130,7 @@ pub use crate::mcp::post_write_hooks::PostWriteEvent;
 use crate::metrics::{IndexStats, MetricsCollector};
 use crate::retrieval::{ContextPacker, PackerConfig, PackerInput};
 use crate::store::metadata::MetadataStore;
+use crate::store::usage::{query_hash_hex, UsageEvent, UsageOp};
 use crate::store::{
     rank_candidate_chunks, DuplicateHealth, FeedbackEntry, HealthCounts, IndexCoverageHealth,
     PayloadHealth, RelevanceLabel, Store, StoreHealthSnapshot, StoreStats, TenantManager,
@@ -235,6 +236,8 @@ pub struct SearchParams {
     /// Override whether linked canonical artifacts are included.
     #[serde(default)]
     pub include_artifact: Option<bool>,
+    #[serde(skip)]
+    pub suppress_usage_event: bool,
 }
 
 fn default_k() -> usize {
@@ -265,6 +268,7 @@ impl Default for SearchParams {
             token_budget: None,
             include_text: None,
             include_artifact: None,
+            suppress_usage_event: false,
         }
     }
 }
@@ -5492,6 +5496,64 @@ async fn collect_episode_chunks<S: Store>(
     Ok(episode_chunks)
 }
 
+fn record_search_usage_event<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    params: &SearchParams,
+    result_count: usize,
+) {
+    if params.suppress_usage_event {
+        return;
+    }
+
+    let detail = json!({
+        "q_len": params.query.chars().count(),
+        "k": params.k,
+        "q_hash": query_hash_hex(&params.query),
+    })
+    .to_string();
+    store.record_usage_event(UsageEvent {
+        op: UsageOp::Search,
+        tenant: Some(tenant_id.to_string()),
+        project: params.project_id.clone(),
+        outcome: if result_count > 0 {
+            format!("hits:{result_count}")
+        } else {
+            "zero_hits".to_string()
+        },
+        chunk_count: Some(result_count as i64),
+        bytes: None,
+        detail: Some(detail),
+    });
+}
+
+fn add_usage_outcome(admission: &ResolvedAdmission) -> &'static str {
+    match admission.outcome.decision {
+        AdmissionDecision::Durable => "admitted",
+        AdmissionDecision::Ephemeral => "downgraded",
+        AdmissionDecision::Reject => "rejected",
+    }
+}
+
+fn record_add_usage_event<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    project_id: Option<String>,
+    outcome: String,
+    chunk_count: i64,
+    bytes: usize,
+) {
+    store.record_usage_event(UsageEvent {
+        op: UsageOp::Add,
+        tenant: Some(tenant_id.to_string()),
+        project: project_id,
+        outcome,
+        chunk_count: Some(chunk_count),
+        bytes: Some(bytes as i64),
+        detail: None,
+    });
+}
+
 // ---------- Handler Functions ----------
 
 /// Handle memory.search tool call
@@ -5651,6 +5713,7 @@ pub async fn handle_memory_search<S: Store>(
         annotate_chunk_origins(&mut results, &tenant_id, scope_expansion.as_ref());
 
         let (results, budget_info) = shape_memory_results(results, &params);
+        record_search_usage_event(store, &tenant_id, &params, results.len());
         return format_mcp_response(&SearchResult {
             results,
             budget_info,
@@ -5747,6 +5810,7 @@ pub async fn handle_memory_search<S: Store>(
     annotate_chunk_origins(&mut results, &tenant_id, scope_expansion.as_ref());
 
     let (results, budget_info) = shape_memory_results(results, &params);
+    record_search_usage_event(store, &tenant_id, &params, results.len());
     format_mcp_response(&SearchResult {
         results,
         budget_info,
@@ -5778,7 +5842,7 @@ pub async fn handle_memory_add<S: Store>(
             .map_err(|e| McpError::ToolError(e.to_string()))?;
     }
 
-    let mut chunk = MemoryChunk::new(tenant_id, &params.text, chunk_type);
+    let mut chunk = MemoryChunk::new(tenant_id.clone(), &params.text, chunk_type);
 
     // Apply optional fields
     if let Some(project_id) = &params.project_id {
@@ -5802,15 +5866,42 @@ pub async fn handle_memory_add<S: Store>(
     let caller_tags_for_dedupe = chunk.tags.clone();
 
     let ingestion_mode = parse_ingestion_mode(params.mode.as_deref())?;
-    let mut admission = resolve_write_admission(
+    let mut admission = match resolve_write_admission(
         chunk.chunk_type,
         &chunk.text,
         &chunk.tags,
         ingestion_mode,
         params.expires_at_ms,
         params.review_after_ms,
-    )?;
+    ) {
+        Ok(admission) => admission,
+        Err(error) => {
+            let rejected = crate::write_admission::classify_write(
+                chunk.chunk_type,
+                &chunk.text,
+                &chunk.tags,
+                ingestion_mode,
+            );
+            record_add_usage_event(
+                store,
+                &tenant_id,
+                params.project_id.clone(),
+                format!("rejected:{}", rejected.reason),
+                0,
+                chunk.text.len(),
+            );
+            return Err(error);
+        }
+    };
     drop_optional_default_retention_for_in_memory_store(store, &mut admission);
+    record_add_usage_event(
+        store,
+        &tenant_id,
+        params.project_id.clone(),
+        add_usage_outcome(&admission).to_string(),
+        1,
+        chunk.text.len(),
+    );
     chunk = apply_admission_tags(chunk, &admission);
 
     // Phase 1: heuristic auto-priority stamp. No-op if caller already
@@ -6840,6 +6931,15 @@ pub async fn handle_memory_import_omf<S: Store>(
         .into_iter()
         .map(|ic| PostWriteEvent::from_imported_chunk(ic, &tenant_id_str))
         .collect();
+    store.record_usage_event(UsageEvent {
+        op: UsageOp::ImportOmf,
+        tenant: Some(tenant_id.to_string()),
+        project: None,
+        outcome: "ok".to_string(),
+        chunk_count: Some(result.imported as i64),
+        bytes: None,
+        detail: None,
+    });
 
     let response = format_mcp_response(&json!({
         "total": result.total,
@@ -8526,9 +8626,27 @@ pub async fn handle_memory_get<S: Store>(store: &S, params: GetParams) -> Result
         Some(r) => r,
         None => {
             debug!(chunk_id = %chunk_id, "chunk not found");
+            store.record_usage_event(UsageEvent {
+                op: UsageOp::Get,
+                tenant: Some(tenant_id.to_string()),
+                project: None,
+                outcome: "zero_hits".to_string(),
+                chunk_count: Some(0),
+                bytes: None,
+                detail: None,
+            });
             return format_mcp_response(&json!({ "found": false }));
         }
     };
+    store.record_usage_event(UsageEvent {
+        op: UsageOp::Get,
+        tenant: Some(tenant_id.to_string()),
+        project: None,
+        outcome: "hits:1".to_string(),
+        chunk_count: Some(1),
+        bytes: None,
+        detail: None,
+    });
 
     let policy = VisibilityPolicy {
         include_superseded: params.include_superseded.unwrap_or(false),
@@ -8641,6 +8759,15 @@ pub async fn handle_memory_delete<S: Store>(
     } else {
         warn!(chunk_id = %chunk_id, "chunk not found for deletion");
     }
+    store.record_usage_event(UsageEvent {
+        op: UsageOp::Delete,
+        tenant: Some(tenant_id.to_string()),
+        project: None,
+        outcome: if deleted { "ok" } else { "not_found" }.to_string(),
+        chunk_count: Some(if deleted { 1 } else { 0 }),
+        bytes: None,
+        detail: None,
+    });
 
     format_mcp_response(&DeleteResult { deleted })
 }
@@ -9422,6 +9549,16 @@ pub async fn handle_memory_consolidate_episode<S: Store>(
                 .map_err(|e| McpError::ToolError(e.to_string()))?;
         }
     }
+
+    store.record_usage_event(UsageEvent {
+        op: UsageOp::Consolidate,
+        tenant: Some(tenant_id.to_string()),
+        project: None,
+        outcome: "ok".to_string(),
+        chunk_count: Some(episode_chunks.len() as i64),
+        bytes: None,
+        detail: None,
+    });
 
     format_mcp_response(&ConsolidateEpisodeResult {
         summary_chunk_id: summary_chunk_id.to_string(),
@@ -10411,6 +10548,7 @@ mod tests {
             token_budget: None,
             include_text: None,
             include_artifact: None,
+            suppress_usage_event: false,
         };
 
         let result = handle_memory_search(&store, params).await.unwrap();
@@ -10441,6 +10579,7 @@ mod tests {
             token_budget: None,
             include_text: None,
             include_artifact: None,
+            suppress_usage_event: false,
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -10468,6 +10607,7 @@ mod tests {
             token_budget: None,
             include_text: None,
             include_artifact: None,
+            suppress_usage_event: false,
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -10585,6 +10725,7 @@ mod tests {
             token_budget: None,
             include_text: None,
             include_artifact: None,
+            suppress_usage_event: false,
         };
 
         let search_result = handle_memory_search(&store, search_params).await.unwrap();
@@ -11160,6 +11301,7 @@ mod tests {
                 token_budget: None,
                 include_text: None,
                 include_artifact: None,
+                suppress_usage_event: false,
             },
         )
         .await
@@ -11225,6 +11367,7 @@ mod tests {
                 token_budget: None,
                 include_text: None,
                 include_artifact: None,
+                suppress_usage_event: false,
             },
         )
         .await
@@ -11285,6 +11428,7 @@ mod tests {
                 token_budget: None,
                 include_text: None,
                 include_artifact: None,
+                suppress_usage_event: false,
             },
         )
         .await
@@ -11365,6 +11509,7 @@ mod tests {
                 token_budget: None,
                 include_text: None,
                 include_artifact: None,
+                suppress_usage_event: false,
             },
         )
         .await
@@ -11435,6 +11580,7 @@ mod tests {
                 token_budget: None,
                 include_text: None,
                 include_artifact: None,
+                suppress_usage_event: false,
             },
         )
         .await
@@ -11503,6 +11649,7 @@ mod tests {
                 token_budget: None,
                 include_text: None,
                 include_artifact: None,
+                suppress_usage_event: false,
             },
         )
         .await
@@ -11891,6 +12038,7 @@ mod tests {
             token_budget: None,
             include_text: None,
             include_artifact: None,
+            suppress_usage_event: false,
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -11979,6 +12127,7 @@ mod tests {
             token_budget: None,
             include_text: None,
             include_artifact: None,
+            suppress_usage_event: false,
         };
 
         let result = handle_memory_search(&store, search_params).await.unwrap();
@@ -12027,6 +12176,7 @@ mod tests {
             token_budget: None,
             include_text: None,
             include_artifact: None,
+            suppress_usage_event: false,
         };
 
         let result = handle_memory_search(&store, search_params).await.unwrap();
@@ -12835,6 +12985,7 @@ mod tests {
                 token_budget: None,
                 include_text: None,
                 include_artifact: None,
+                suppress_usage_event: false,
             },
         )
         .await
@@ -13598,6 +13749,7 @@ mod tests {
                 token_budget: None,
                 include_text: None,
                 include_artifact: None,
+                suppress_usage_event: false,
             },
         )
         .await
@@ -13682,6 +13834,7 @@ mod tests {
                 token_budget: None,
                 include_text: None,
                 include_artifact: None,
+                suppress_usage_event: false,
             },
         )
         .await

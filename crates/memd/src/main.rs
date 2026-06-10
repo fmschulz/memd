@@ -1,9 +1,12 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
 use tracing::info;
 
-use memd::cli::{run_cli, run_warm_admin, try_run_warm_client, CliCommand, WarmProcessConfig};
+use memd::cli::{
+    run_cli, run_warm_admin, try_run_warm_client, CliCommand, StoreAccess, WarmProcessConfig,
+};
 use memd::embeddings::EmbeddingModel;
 use memd::store::HybridConfig;
 use memd::{
@@ -125,18 +128,19 @@ async fn main() {
         config.server.project_aliases.clone(),
     );
 
-    // Initialize logging
-    let log_level = if args.verbose {
-        "debug"
-    } else {
-        &config.log_level
-    };
-    init_logging("pretty", log_level);
-
-    let Some(cmd) = args.command else {
+    let Some(mut cmd) = args.command else {
         eprintln!("error: memd requires a CLI subcommand. Use --help for usage.");
         std::process::exit(1);
     };
+
+    // Initialize logging
+    let is_warm_worker = matches!(&cmd, CliCommand::WarmWorker { .. });
+    let log_level = if args.verbose || is_warm_worker {
+        "info"
+    } else {
+        "warn"
+    };
+    init_logging("pretty", log_level);
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -145,6 +149,11 @@ async fn main() {
         in_memory = args.in_memory,
         "memd CLI starting"
     );
+
+    if let Err(e) = memd::cli::resolve_command_scope(&mut cmd) {
+        eprintln!("error: {}", e);
+        std::process::exit(1);
+    }
 
     let warm_config = WarmProcessConfig {
         data_dir: data_dir.clone(),
@@ -165,7 +174,7 @@ async fn main() {
         return;
     }
 
-    if matches!(cmd, CliCommand::WarmWorker { .. }) && args.in_memory {
+    if matches!(&cmd, CliCommand::WarmWorker { .. }) && args.in_memory {
         eprintln!("error: warm-worker requires persistent storage");
         std::process::exit(1);
     }
@@ -212,10 +221,18 @@ async fn main() {
         info!(data_dir = %data_dir.display(), embedding_model = ?args.embedding_model, "using persistent store");
         let mut store_config = PersistentStoreConfig {
             data_dir: data_dir.clone(),
+            read_only: cmd.store_access() == StoreAccess::ReadOnly,
             embedding_model: args.embedding_model.into(),
             ..Default::default()
         };
         apply_search_variant(args.search_variant, &mut store_config);
+        if matches!(&cmd, CliCommand::WarmWorker { .. }) {
+            // A warm worker that cannot promptly become THE writer must exit
+            // and let the client's ping find the winner / fall back. Long
+            // retries make herd losers linger and steal the flock after
+            // `memd warm stop`.
+            store_config.writer_lock_timeout_cap = Some(Duration::from_millis(2_000));
+        }
         match PersistentStore::open(store_config) {
             Ok(store) => {
                 if let Err(e) = run_cli(&store, tenant_manager.as_ref(), cmd).await {

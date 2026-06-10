@@ -16,8 +16,8 @@ Do not configure an external agent integration for ordinary work. The solving
 agent should use shell commands and files: `memd agent-context`, `memd search`,
 and `memd add`.
 
-For repeated retrieval in the same local data directory, the CLI may use the
-private warm worker:
+Repeated CLI calls in the same data directory are accelerated by a private warm
+worker that starts on demand (`--warm auto` is the default). Manual control:
 
 ```bash
 memd warm start
@@ -102,6 +102,9 @@ Then read `memory.md` before implementation and before task-specific
 - up to 10 highest-priority project takeaways
 - optional machine-wide takeaways in the selected tenant when `--global-limit`
   is set above 0
+- a `Memory health` header (chunks added/rejected, retrieval hit-rate, learned
+  lessons over the report window); if it looks unhealthy, run
+  `memd report --strict`
 - source chunk IDs, tags, and computed priority scores
 
 The priority score is computed from explicit `priority:N` / `importance:N` tags,
@@ -111,8 +114,6 @@ should survive into future `memory.md` refreshes, add a `priority:N` tag:
 
 ```bash
 memd add \
-  --tenant-id "$TENANT_ID" \
-  --project-id "$PROJECT_ID" \
   --chunk-type summary \
   --tags kind:finish,priority:8,task:"$TASK_ID" \
   --text "Reusable lesson, path, decision, or recurring failure and how to solve it. Agent action: Verify the current files, logs, or tests before applying this lesson."
@@ -125,8 +126,6 @@ write-quality gate:
 
 ```bash
 memd add \
-  --tenant-id "$TENANT_ID" \
-  --project-id "$PROJECT_ID" \
   --chunk-type summary \
   --tags kind:finish,priority:8,task:"$TASK_ID" \
   --text "Validated fix: cache keys must include tenant_id and project_id. Agent action: Verify both fields before reusing cached retrieval results."
@@ -137,13 +136,12 @@ narrow progress notes.
 
 ### Automatic session-start
 
-When the host is wired up (the bundled `memd-skill/install_memd_enforcement.sh
---install-binary` script adds a Claude Code `SessionStart` hook; Codex users
-can copy `memd-skill/examples/codex_session_start_hook.json`), the
-session begins with:
+When the host is wired up (the bundled `memd-skill/install_memd_enforcement.sh`
+script adds a Claude Code `SessionStart` hook; Codex users can copy
+`memd-skill/examples/codex_session_start_hook.json`), the session begins with:
 
 ```bash
-memd session-start --project-dir "$CLAUDE_PROJECT_DIR"
+memd session-start --project-dir "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || true
 ```
 
 This refreshes `memory.md` synchronously and — when ≥10 dirty chunks have
@@ -220,6 +218,8 @@ loss and mean rank shift between the full retrieval pass and the same pass
 with `kind:consolidated` rows filtered out. Higher overlap-loss means the
 consolidated layer is doing real work.
 
+This command runs on the cold path; stop the warm worker first (`memd warm stop`).
+
 ### Cross-tenant takeaways
 
 ```bash
@@ -272,6 +272,7 @@ items lack concrete `agent action` lines, run:
 memd eval-memory-md --project-dir . --min-useful-ratio 0.8 --max-generated-wrappers 0
 memd memory-md --project-dir . --output memory.md --explain-output .memd/memory-explain.json
 memd audit --tenant-id "$TENANT_ID" --project-id "$PROJECT_ID" --format markdown
+memd report --strict
 ```
 
 `audit` and `cleanup-plan` report routine progress summaries that still lack an
@@ -282,12 +283,12 @@ exports the scope for inspection.
 
 ## Retrieve Context
 
+Inside a scoped project (`.memd/project_scope.json`), omit `--tenant-id`/`--project-id`; explicit flags override the scope file.
+
 Default pre-work command:
 
 ```bash
 memd agent-context \
-  --tenant-id "$TENANT_ID" \
-  --project-id "$PROJECT_ID" \
   --query "$TASK_OR_ERROR" \
   --k 2 \
   --token-budget 700 \
@@ -308,8 +309,6 @@ Direct search:
 
 ```bash
 memd search \
-  --tenant-id "$TENANT_ID" \
-  --project-id "$PROJECT_ID" \
   --query "$QUERY" \
   --compact \
   --token-budget 2000 \
@@ -320,8 +319,6 @@ Optional high-quality reranking:
 
 ```bash
 memd search \
-  --tenant-id "$TENANT_ID" \
-  --project-id "$PROJECT_ID" \
   --query "$QUERY" \
   --k 50 \
   --reranker auto \
@@ -337,9 +334,15 @@ runtime and fails instead of falling back.
 
 Warm-mode flags:
 
-- `--warm auto` is the default for `search`, `agent-context`, and `call`.
-- `--warm off` forces the current process to open the store and run cold.
+- `--warm auto` is the default for `search`, `agent-context`, `call`, and all
+  write commands (`add`, `delete`, `purge`, `report`, `import-omf`,
+  `consolidate`, and non-stream `batch`).
+- `--warm off` forces the current process to open the store and run cold; cold
+  writes need the exclusive writer lock and fail with `writer lock held` while a
+  warm worker is alive.
 - `--warm required` fails if the warm worker cannot be reached.
+- If a command reports `writer lock held`, a warm worker owns the store: keep
+  the default `--warm auto`, or run `memd warm stop` before cold-only commands.
 
 For scripts or benchmarks that need many structured operations in one loaded
 process:
@@ -349,17 +352,20 @@ memd batch --jsonl requests.jsonl
 memd batch --jsonl - --stream
 ```
 
+`batch --jsonl - --stream` always runs on the cold path: stop the warm worker
+first (`memd warm stop`).
+
 Each JSONL line should contain `{"tool":"memory.search","arguments":{...}}`;
 the command emits one JSON result row per input line.
 
 Useful modes:
 
-- `--mode brief-project` for onboarding summaries
-- `--mode resume-task` for task-like handoffs
-- `--mode find-failures` for prior failed approaches
-- `--mode find-decisions` for previous decisions
-- `--mode find-evidence` for evidence highlights
-- `--mode find-highlights` for high-uplift lessons
+- `--mode brief_project` for onboarding summaries
+- `--mode resume_task` for task-like handoffs
+- `--mode find_failures` for prior failed approaches
+- `--mode find_decisions` for previous decisions
+- `--mode find_evidence` for evidence highlights
+- `--mode find_highlights` for high-uplift lessons
 
 ## Record Work
 
@@ -373,8 +379,6 @@ Progress:
 
 ```bash
 memd add \
-  --tenant-id "$TENANT_ID" \
-  --project-id "$PROJECT_ID" \
   --chunk-type summary \
   --tags kind:progress,task:"$TASK_ID" \
   --text "Mapped the failing path; next step is to validate cache-key scope."
@@ -384,8 +388,6 @@ Run evidence:
 
 ```bash
 memd add \
-  --tenant-id "$TENANT_ID" \
-  --project-id "$PROJECT_ID" \
   --chunk-type trace \
   --tags kind:run,task:"$TASK_ID",tool:cargo-test,status:failed \
   --text "cargo test cache_scope: 2 tests failed because cache keys omitted tenant id."
@@ -395,8 +397,6 @@ Concrete evidence:
 
 ```bash
 memd add \
-  --tenant-id "$TENANT_ID" \
-  --project-id "$PROJECT_ID" \
   --chunk-type research \
   --tags kind:evidence,task:"$TASK_ID",supports:true \
   --text "The failure reproduced before the patch and passed after including tenant id in cache keys."
@@ -406,8 +406,6 @@ Decision:
 
 ```bash
 memd add \
-  --tenant-id "$TENANT_ID" \
-  --project-id "$PROJECT_ID" \
   --chunk-type decision \
   --tags kind:decision,task:"$TASK_ID" \
   --text "Use tenant-scoped cache keys; global keys cause cross-tenant contamination."
@@ -417,8 +415,6 @@ Finish:
 
 ```bash
 memd add \
-  --tenant-id "$TENANT_ID" \
-  --project-id "$PROJECT_ID" \
   --chunk-type summary \
   --tags kind:finish,task:"$TASK_ID" \
   --text "Implemented tenant-scoped cache keys. Validation: cargo test cache_scope passed. Remaining risk: no load test yet."
@@ -444,9 +440,10 @@ This writes `.memd/memory_guardrails.md`, `.memd/tenant_scope.json`, and
 `AGENTS.md` and `CLAUDE.md`.
 
 For the "just works in any repo" UX, you do NOT need to run `memd init` —
-the `SessionStart` hook will auto-create a minimal `.memd/project_scope.json`
-on first use. See [Automatic session-start](#automatic-session-start). Run
-`memd init` only when you want the full guardrail suite for a repo.
+the `SessionStart` hook will auto-create a memd-managed
+`.memd/project_scope.json` (do not hand-write this file; partial JSON fails to
+parse) on first use. See [Automatic session-start](#automatic-session-start).
+Run `memd init` only when you want the full guardrail suite for a repo.
 
 ## Verify the install
 
@@ -457,6 +454,11 @@ memd doctor
 Reports binary path/version, data directory, global agent rules (Claude,
 Codex, Cursor), the Claude `SessionStart` hook, and the current project's
 `.memd` scope. Use `--format json` for machine-readable output.
+
+`memd doctor --strict` exits non-zero when any check fails — use it in scripts.
+On a fresh store, the data dir and project scope checks read as failing until
+your first `session-start`. For store-content health (rejected writes, hit-rate,
+noise), run `memd report --strict`.
 
 ## Practical Rules
 

@@ -11,8 +11,9 @@
 //! - Current project scope (`.memd/project_scope.json`) if cwd is a
 //!   memd-aware repo
 //!
-//! Always exits 0 — `doctor` is informational. Use `--format json`
-//! for machine-readable output suitable for `--quiet` checks.
+//! By default `doctor` exits 0 and is informational; `--strict` exits 2
+//! when any doctor check fails. Use `--format json` for machine-readable
+//! output suitable for `--quiet` checks.
 
 use std::path::{Path, PathBuf};
 
@@ -97,6 +98,7 @@ fn check_binary() -> Value {
         "current_exe": exe.as_ref().map(|p| p.display().to_string()),
         "on_path": on_path.as_ref().map(|p| p.display().to_string()),
         "version": version,
+        "fix": if on_path.is_some() { "" } else { "run: make install (from the memd repo)" },
     })
 }
 
@@ -130,11 +132,50 @@ fn check_data_dir() -> Value {
     let path = dirs::home_dir().map(|h| h.join(".memd").join("data"));
     let exists = path.as_ref().map(|p| p.exists()).unwrap_or(false);
     let tenant_count = path.as_ref().map(|p| count_tenant_dirs(p)).unwrap_or(0);
-    json!({
-        "ok": exists,
+    let fresh = !exists || tenant_count == 0;
+    let writable = if exists {
+        path.as_ref()
+            .map(|path| probe_data_dir_writable(path))
+            .unwrap_or(false)
+    } else {
+        true
+    };
+    let fix = if writable {
+        String::new()
+    } else {
+        format!(
+            "check write permissions on {}",
+            path.as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "?".to_string())
+        )
+    };
+    let mut value = json!({
+        "ok": writable,
         "path": path.as_ref().map(|p| p.display().to_string()),
         "tenant_count": tenant_count,
-    })
+        "fresh": fresh,
+        "fix": fix,
+    });
+    if fresh {
+        value["note"] = json!("empty — fresh install");
+    }
+    value
+}
+
+fn probe_data_dir_writable(path: &Path) -> bool {
+    let probe = path.join(format!(".memd-doctor-write-test-{}", std::process::id()));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(probe);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 fn count_tenant_dirs(data_dir: &Path) -> usize {
@@ -150,13 +191,18 @@ fn count_tenant_dirs(data_dir: &Path) -> usize {
 
 fn check_rules_file(path: Option<&Path>) -> Value {
     let Some(path) = path else {
-        return json!({"ok": false, "reason": "no home dir"});
+        return json!({
+            "ok": false,
+            "reason": "no home dir",
+            "fix": "run: make install-enforcement (or bash memd-skill/install_memd_enforcement.sh)",
+        });
     };
     if !path.exists() {
         return json!({
             "ok": false,
             "path": path.display().to_string(),
             "reason": "file missing",
+            "fix": "run: make install-enforcement (or bash memd-skill/install_memd_enforcement.sh)",
         });
     }
     let contents = std::fs::read_to_string(path).unwrap_or_default();
@@ -165,12 +211,17 @@ fn check_rules_file(path: Option<&Path>) -> Value {
         "ok": wired,
         "path": path.display().to_string(),
         "reason": if wired { Value::Null } else { json!("memd-enforcement block missing") },
+        "fix": if wired { "" } else { "run: make install-enforcement (or bash memd-skill/install_memd_enforcement.sh)" },
     })
 }
 
 fn check_cursor_rules() -> Value {
     let Some(home) = dirs::home_dir() else {
-        return json!({"ok": false, "reason": "no home dir"});
+        return json!({
+            "ok": false,
+            "reason": "no home dir",
+            "fix": "run: make install-enforcement (or bash memd-skill/install_memd_enforcement.sh)",
+        });
     };
     let dir = home.join(".cursor").join("rules");
     let path = dir.join("memd.mdc");
@@ -178,6 +229,7 @@ fn check_cursor_rules() -> Value {
         return json!({
             "ok": true,
             "path": path.display().to_string(),
+            "fix": "",
         });
     }
     // Fall back: any .mdc rule that references memd counts as
@@ -194,6 +246,7 @@ fn check_cursor_rules() -> Value {
                         "ok": true,
                         "path": p.display().to_string(),
                         "note": "matched a non-default .mdc referencing memd",
+                        "fix": "",
                     });
                 }
             }
@@ -203,12 +256,17 @@ fn check_cursor_rules() -> Value {
         "ok": false,
         "path": path.display().to_string(),
         "reason": "no memd Cursor rule found",
+        "fix": "run: make install-enforcement (or bash memd-skill/install_memd_enforcement.sh)",
     })
 }
 
 fn check_session_hook() -> Value {
     let Some(home) = dirs::home_dir() else {
-        return json!({"ok": false, "reason": "no home dir"});
+        return json!({
+            "ok": false,
+            "reason": "no home dir",
+            "fix": "run: make install-enforcement (or bash memd-skill/install_memd_enforcement.sh)",
+        });
     };
     let path = home.join(".claude").join("settings.json");
     if !path.exists() {
@@ -216,6 +274,7 @@ fn check_session_hook() -> Value {
             "ok": false,
             "path": path.display().to_string(),
             "reason": "settings.json missing",
+            "fix": "run: make install-enforcement (or bash memd-skill/install_memd_enforcement.sh)",
         });
     }
     let contents = std::fs::read_to_string(&path).unwrap_or_default();
@@ -230,6 +289,7 @@ fn check_session_hook() -> Value {
                 "ok": false,
                 "path": path.display().to_string(),
                 "reason": "settings.json is not valid JSON",
+                "fix": "run: make install-enforcement (or bash memd-skill/install_memd_enforcement.sh)",
             });
         }
     };
@@ -237,6 +297,7 @@ fn check_session_hook() -> Value {
         "ok": wired,
         "path": path.display().to_string(),
         "reason": if wired { Value::Null } else { json!("SessionStart hook for memd missing") },
+        "fix": if wired { "" } else { "run: make install-enforcement (or bash memd-skill/install_memd_enforcement.sh)" },
     })
 }
 
@@ -270,9 +331,10 @@ fn check_project_scope(project_dir: &Path) -> Value {
     let scope_path = project_dir.join(".memd").join("project_scope.json");
     if !scope_path.exists() {
         return json!({
-            "ok": false,
+            "ok": true,
             "path": scope_path.display().to_string(),
-            "reason": "no project scope (will be auto-created on next session-start)",
+            "note": "none yet (created by memd session-start)",
+            "fix": "",
         });
     }
     let text = std::fs::read_to_string(&scope_path).unwrap_or_default();
@@ -282,6 +344,7 @@ fn check_project_scope(project_dir: &Path) -> Value {
             "ok": false,
             "path": scope_path.display().to_string(),
             "reason": "malformed JSON",
+            "fix": "run: memd session-start --project-dir . (rewrites .memd/project_scope.json)",
         });
     };
     json!({
@@ -289,6 +352,7 @@ fn check_project_scope(project_dir: &Path) -> Value {
         "path": scope_path.display().to_string(),
         "tenant_id": parsed.get("tenant_id"),
         "project_id": parsed.get("project_id"),
+        "fix": "",
     })
 }
 
@@ -480,6 +544,22 @@ fn home_path(suffix: &str) -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(suffix))
 }
 
+pub(super) fn failing_checks(report: &Value) -> Vec<String> {
+    [
+        ("binary on PATH", &report["binary"]),
+        ("data dir", &report["data_dir"]),
+        ("claude rules", &report["global_rules"]["claude_md"]),
+        ("codex rules", &report["global_rules"]["codex_agents_md"]),
+        ("cursor rules", &report["global_rules"]["cursor_rules_mdc"]),
+        ("SessionStart hook", &report["session_start_hook"]),
+        ("project scope", &report["project_scope"]),
+    ]
+    .into_iter()
+    .filter(|(_, value)| !value.get("ok").and_then(|ok| ok.as_bool()).unwrap_or(false))
+    .map(|(name, _)| name.to_string())
+    .collect()
+}
+
 /// Render a human-readable report. One line per check; `[ok]` /
 /// `[--]` prefixes are stable so users can grep them.
 fn render_text(report: &Value) -> String {
@@ -497,11 +577,16 @@ fn render_text(report: &Value) -> String {
         format!("{on_path} (v{version}; current_exe={current})")
     });
     push_line(&mut out, "data dir", &report["data_dir"], |v| {
-        format!(
-            "{} ({} tenants)",
-            v.get("path").and_then(|p| p.as_str()).unwrap_or("?"),
-            v.get("tenant_count").and_then(|p| p.as_u64()).unwrap_or(0),
-        )
+        let path = v.get("path").and_then(|p| p.as_str()).unwrap_or("?");
+        if v.get("fresh").and_then(|fresh| fresh.as_bool()) == Some(true) {
+            format!("{path} (empty — fresh install)")
+        } else {
+            format!(
+                "{} ({} tenants)",
+                path,
+                v.get("tenant_count").and_then(|p| p.as_u64()).unwrap_or(0),
+            )
+        }
     });
     let rules = &report["global_rules"];
     push_line(
@@ -530,6 +615,9 @@ fn render_text(report: &Value) -> String {
     );
     push_line(&mut out, "project scope", &report["project_scope"], |v| {
         if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+            if let Some(note) = v.get("note").and_then(|note| note.as_str()) {
+                return note.to_string();
+            }
             let mut detail = format!(
                 "tenant={} project={}",
                 v.get("tenant_id").and_then(|p| p.as_str()).unwrap_or("?"),
@@ -554,6 +642,18 @@ fn render_text(report: &Value) -> String {
         }
     });
 
+    let failing = failing_checks(report);
+    if failing.len() > 1 {
+        out.push_str("fix everything: make install (from the memd repo)\n");
+    }
+    if !failing.is_empty() {
+        out.push_str(&format!(
+            "failing: {} ({})\n",
+            failing.len(),
+            failing.join(", ")
+        ));
+    }
+
     out
 }
 
@@ -570,7 +670,13 @@ fn path_or_reason(v: &Value) -> String {
 fn push_line<F: Fn(&Value) -> String>(out: &mut String, label: &str, v: &Value, detail: F) {
     let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
     let tag = if ok { "[ok]" } else { "[--]" };
-    out.push_str(&format!("{tag} {label}: {}\n", detail(v)));
+    let mut line = format!("{tag} {label}: {}", detail(v));
+    if !ok {
+        if let Some(fix) = v.get("fix").and_then(|fix| fix.as_str()) {
+            line.push_str(&format!(" -> fix: {fix}"));
+        }
+    }
+    out.push_str(&format!("{line}\n"));
 }
 
 #[cfg(test)]
@@ -604,6 +710,41 @@ mod tests {
     }
 
     #[test]
+    fn failing_checks_empty_for_all_ok_report() {
+        let report = json!({
+            "binary": {"ok": true},
+            "data_dir": {"ok": true},
+            "global_rules": {
+                "claude_md": {"ok": true},
+                "codex_agents_md": {"ok": true},
+                "cursor_rules_mdc": {"ok": true},
+            },
+            "session_start_hook": {"ok": true},
+            "project_scope": {"ok": true},
+        });
+        assert!(failing_checks(&report).is_empty());
+    }
+
+    #[test]
+    fn failing_checks_returns_failed_names_in_order() {
+        let report = json!({
+            "binary": {"ok": true},
+            "data_dir": {"ok": false},
+            "global_rules": {
+                "claude_md": {"ok": false},
+                "codex_agents_md": {"ok": true},
+                "cursor_rules_mdc": {"ok": true},
+            },
+            "session_start_hook": {"ok": true},
+            "project_scope": {"ok": true},
+        });
+        assert_eq!(
+            failing_checks(&report),
+            vec!["data dir".to_string(), "claude rules".to_string()]
+        );
+    }
+
+    #[test]
     fn project_scope_reports_ok_for_valid_file() {
         let dir = tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".memd")).unwrap();
@@ -619,12 +760,12 @@ mod tests {
     }
 
     #[test]
-    fn project_scope_reports_missing_with_helpful_reason() {
+    fn project_scope_reports_missing_as_fresh_with_helpful_note() {
         let dir = tempdir().unwrap();
         let v = check_project_scope(dir.path());
-        assert_eq!(v["ok"], false);
-        let reason = v["reason"].as_str().unwrap_or("");
-        assert!(reason.contains("auto-created"), "reason was: {reason}");
+        assert_eq!(v["ok"], true);
+        let note = v["note"].as_str().unwrap_or("");
+        assert!(note.contains("session-start"), "note was: {note}");
     }
 
     #[test]
@@ -635,6 +776,10 @@ mod tests {
         let v = check_project_scope(dir.path());
         assert_eq!(v["ok"], false);
         assert_eq!(v["reason"], "malformed JSON");
+        assert_eq!(
+            v["fix"],
+            "run: memd session-start --project-dir . (rewrites .memd/project_scope.json)"
+        );
     }
 
     #[test]
@@ -782,6 +927,27 @@ mod tests {
             .filter(|l| l.starts_with("[ok]") || l.starts_with("[--]"))
             .count();
         assert_eq!(lines, 7, "expected 7 status lines, got:\n{text}");
+    }
+
+    #[test]
+    fn render_text_adds_fixes_and_multi_failure_footer() {
+        let report = json!({
+            "binary": {"ok": false, "on_path": "missing", "current_exe": "?", "version": "test", "fix": "run: make install (from the memd repo)"},
+            "data_dir": {"ok": false, "path": "/tmp/memd-data", "tenant_count": 0, "fresh": false, "fix": "check write permissions on /tmp/memd-data"},
+            "global_rules": {
+                "claude_md": {"ok": true},
+                "codex_agents_md": {"ok": true},
+                "cursor_rules_mdc": {"ok": true},
+            },
+            "session_start_hook": {"ok": true},
+            "project_scope": {"ok": true, "note": "none yet (created by memd session-start)"},
+        });
+        let text = render_text(&report);
+        assert!(text.contains(
+            "[--] binary on PATH: missing (vtest; current_exe=?) -> fix: run: make install"
+        ));
+        assert!(text.contains("[--] data dir: /tmp/memd-data (0 tenants) -> fix: check write permissions on /tmp/memd-data"));
+        assert!(text.contains("fix everything: make install (from the memd repo)"));
     }
 
     #[test]

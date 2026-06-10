@@ -11,6 +11,19 @@
 | `ORT_DYLIB_PATH` | unset | Override ONNX Runtime shared library location. |
 | `MEMD_CONSOLIDATOR` | `auto` | LLM backend for `memd consolidate`: `claude`, `codex`, `auto`, `mock`. |
 | `MEMD_SHARED_TENANT` | unset | Destination tenant for `--promote-to-shared` consolidations. |
+| `MEMD_WRITER_LOCK_TIMEOUT_MS` | `10000` | Total retry budget for taking the data-dir writer lock on direct writes. |
+| `MEMD_USAGE_LEDGER` | on | `off`, `0`, `false`, or `no` disables usage-event recording. |
+| `MEMD_USAGE_RETENTION_DAYS` | `90` | Usage-ledger TTL in days; older events are swept opportunistically. |
+
+## Worker environment
+
+Warm-routed commands execute inside the worker process. Environment variables
+such as `MEMD_CONSOLIDATOR`, `MEMD_USAGE_LEDGER`, and
+`MEMD_USAGE_RETENTION_DAYS` are resolved from the worker's environment, not
+from the invoking shell. To apply a change, restart the worker with
+`memd warm stop`; the next warm-routed command auto-starts a fresh one.
+`MEMD_WRITER_LOCK_TIMEOUT_MS` applies to the process taking the lock, either a
+direct-write CLI process or worker startup.
 
 ## Config file
 
@@ -35,20 +48,25 @@ log_level = "info"
 log_format = "json"
 
 [server]
-# Transport for the (deprecated) MCP server. Default: stdio.
-transport = "stdio"
+# Compatibility/scope routing. The table name remains [server] for existing
+# config files; the binary no longer exposes network or stdio server mode.
+allow_cross_tenant_project_fallback = false
 
-# Bind address for HTTP transport (if used).
-bind = "127.0.0.1:8787"
-
-# Endpoint path for streamable HTTP transport.
-path = "/mcp"
-
-[retrieval]
-# Retrieval variant. Use "hybrid" for default; "hybrid-cross-encoder"
-# enables the optional ONNX cross-encoder reranker (see Optional rerankers).
-search_variant = "hybrid"
+[[server.project_aliases]]
+tenant_id = "lab"
+project_id = "memd"
+aliases = [
+  { tenant_id = "legacy", project_id = "memd", reason = "migrated history" },
+  { tenant_id = "shared", reason = "shared lessons" },
+]
 ```
+
+Unknown keys are silently ignored because the config structs do not deny
+unknown fields.
+
+Retrieval variant is not a config key. Use the global CLI flag
+`--search-variant` with `hybrid-feature` (default), `hybrid-cross-encoder`,
+`dense-only`, or `bm25-only`.
 
 ## Project alias compatibility
 

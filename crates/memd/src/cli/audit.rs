@@ -43,8 +43,8 @@ struct AuditTotals {
 }
 
 #[derive(Debug, Serialize)]
-struct StorageReport {
-    total_bytes: u64,
+pub(super) struct StorageReport {
+    pub(super) total_bytes: u64,
     metadata_db_bytes: u64,
     sparse_index_bytes: u64,
     tenants_bytes: u64,
@@ -152,8 +152,8 @@ struct ProjectAccumulator {
 }
 
 #[derive(Debug, Clone)]
-struct ScannedChunk {
-    chunk: MemoryChunk,
+pub(super) struct ScannedChunk {
+    pub(super) chunk: MemoryChunk,
     expires_at_ms: Option<i64>,
 }
 
@@ -272,7 +272,11 @@ pub(super) fn render_audit_report(report: &AuditReport, format: ExportFormat) ->
     }
 }
 
-async fn resolve_tenants<S: Store>(
+pub(super) fn strict_should_fail(report: &AuditReport) -> bool {
+    report.totals.unreadable_active_chunks > 0
+}
+
+pub(super) async fn resolve_tenants<S: Store>(
     store: &S,
     tenant_manager: Option<&TenantManager>,
     tenant_id: Option<&str>,
@@ -293,7 +297,7 @@ async fn resolve_tenants<S: Store>(
     Ok(tenants.into_values().collect())
 }
 
-async fn collect_scanned_chunks<S: Store>(
+pub(super) async fn collect_scanned_chunks<S: Store>(
     store: &S,
     tenant: &TenantId,
     project_id: Option<&str>,
@@ -557,7 +561,7 @@ fn normalize_project_id(project_id: &str) -> String {
         .collect()
 }
 
-fn storage_report(data_dir: &Path) -> Result<StorageReport> {
+pub(super) fn storage_report(data_dir: &Path) -> Result<StorageReport> {
     Ok(StorageReport {
         total_bytes: path_size(data_dir)?,
         metadata_db_bytes: path_size(&data_dir.join("metadata.db"))?,
@@ -761,6 +765,21 @@ mod tests {
             chunk,
             expires_at_ms,
         }
+    }
+
+    #[test]
+    fn strict_should_fail_tracks_unreadable_active_chunks() {
+        let mut report = AuditReport {
+            generated_unix_ms: 1,
+            data_dir: None,
+            storage: None,
+            totals: AuditTotals::default(),
+            tenants: Vec::new(),
+        };
+        assert!(!strict_should_fail(&report));
+
+        report.totals.unreadable_active_chunks = 1;
+        assert!(strict_should_fail(&report));
     }
 
     #[test]

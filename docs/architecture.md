@@ -107,7 +107,7 @@ Two surfaces, one shared dispatcher.
   retrieve/write pair; `memd warm start|status` keeps the store and indexes
   hot across calls; `memd batch --jsonl` streams structured operations
   through a single loaded process.
-- **Operation surface.** `memd call <op> --json '{…}'` and the typed CLI
+- **Operation surface.** `memd call <op> --json '{...}'` and the typed CLI
   subcommands dispatch to the same handlers: `memory`, `task`, `artifact`,
   `context`, `code`, and `debug`. `memory.*` is intentionally flexible
   (chunks, code, docs, traces); `task.*` and `artifact.*` are stricter and

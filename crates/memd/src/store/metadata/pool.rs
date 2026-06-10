@@ -34,7 +34,7 @@ use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 use crate::error::{MemdError, Result};
 
@@ -53,6 +53,7 @@ pub struct SqliteConnectionPool {
 
 struct PoolInner {
     db_path: PathBuf,
+    open_flags: Option<OpenFlags>,
     state: Mutex<PoolState>,
     not_empty: Condvar,
     max_size: usize,
@@ -80,10 +81,29 @@ impl SqliteConnectionPool {
 
     /// Open a pool with an explicit cap. Exposed primarily for tests.
     pub fn open_with_max(db_path: &Path, max_size: usize) -> Result<Self> {
+        Self::open_with_max_and_flags(db_path, max_size, None)
+    }
+
+    /// Open a URI-backed pool with an explicit cap. Used for shared-cache
+    /// in-memory metadata databases.
+    pub fn open_uri_with_max(uri: &str, max_size: usize) -> Result<Self> {
+        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_SHARED_CACHE;
+        Self::open_with_max_and_flags(Path::new(uri), max_size, Some(flags))
+    }
+
+    fn open_with_max_and_flags(
+        db_path: &Path,
+        max_size: usize,
+        open_flags: Option<OpenFlags>,
+    ) -> Result<Self> {
         assert!(max_size > 0, "SQLite pool max_size must be > 0");
-        let warm = open_configured_connection(db_path)?;
+        let warm = open_configured_connection(db_path, open_flags)?;
         let inner = Arc::new(PoolInner {
             db_path: db_path.to_path_buf(),
+            open_flags,
             state: Mutex::new(PoolState {
                 idle: vec![warm],
                 outstanding: 0,
@@ -121,7 +141,7 @@ impl SqliteConnectionPool {
                 state.outstanding += 1;
                 drop(state);
 
-                match open_configured_connection(&self.inner.db_path) {
+                match open_configured_connection(&self.inner.db_path, self.inner.open_flags) {
                     Ok(conn) => {
                         return PooledConnection {
                             conn: Some(conn),
@@ -218,10 +238,12 @@ impl Drop for PooledConnection {
 /// Open a single SQLite connection with the PRAGMAs the metadata
 /// store needs. Kept as a free function so both `open_with_max` and
 /// the grow-on-demand path can call it.
-fn open_configured_connection(path: &Path) -> Result<Connection> {
-    let conn = Connection::open(path).map_err(|e| {
-        MemdError::StorageError(format!("open sqlite at {}: {}", path.display(), e))
-    })?;
+fn open_configured_connection(path: &Path, flags: Option<OpenFlags>) -> Result<Connection> {
+    let conn = match flags {
+        Some(flags) => Connection::open_with_flags(path, flags),
+        None => Connection::open(path),
+    }
+    .map_err(|e| MemdError::StorageError(format!("open sqlite at {}: {}", path.display(), e)))?;
 
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(|e| MemdError::StorageError(format!("set journal_mode=WAL: {}", e)))?;

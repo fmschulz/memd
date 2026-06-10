@@ -4,8 +4,11 @@ Persistent mode writes to:
 
 ```
 ~/.memd/data/
+├── .writer.lock                      # Exclusive writer flock
 ├── metadata.db                       # SQLite metadata (WAL mode, pooled)
 ├── sparse_index/                     # tantivy BM25 index (open_or_create)
+├── warm/<hash>/                      # 0700 runtime dir for warm worker socket
+│                                      # socket file chmod 0600
 └── tenants/
     └── <tenant_id>/
         ├── wal.log                   # Append-only WAL; fsync before commit

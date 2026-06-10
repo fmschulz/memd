@@ -24,6 +24,35 @@ pub enum MemdError {
     #[error("protocol error: {0}")]
     ProtocolError(String),
 
+    /// Warm worker identity does not match this CLI.
+    #[error(
+        "warm worker is incompatible: worker version {worker_version}, protocol {worker_protocol}; CLI version {cli_version}, protocol {cli_protocol}"
+    )]
+    IncompatibleWarmWorker {
+        worker_version: String,
+        worker_protocol: String,
+        cli_version: String,
+        cli_protocol: String,
+    },
+
+    /// Another process currently owns the persistent-store writer lock.
+    #[error(
+        "writer lock held by another process ({holder}) at {lock_path}; if a memd warm worker is running, route this write through it (--warm auto, the default) or stop it with `memd warm stop`; otherwise stop the other memd process or retry later (MEMD_WRITER_LOCK_TIMEOUT_MS)"
+    )]
+    WriterLockHeld {
+        /// Path to the lock file.
+        lock_path: std::path::PathBuf,
+        /// Best-effort holder information read from the lock file.
+        holder: String,
+    },
+
+    /// Mutating operation attempted on a read-only persistent store.
+    #[error("store opened read-only: operation '{op}' not permitted")]
+    ReadOnlyStore {
+        /// Operation name.
+        op: String,
+    },
+
     /// Embedding generation errors
     #[error("embedding error: {0}")]
     EmbeddingError(String),

@@ -4,7 +4,7 @@
 //! Measures quality improvement and performance baseline.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Instant;
 
 use serde::Deserialize;
@@ -102,7 +102,7 @@ fn extract_content_text(response: &Value) -> Option<&str> {
 }
 
 /// Run hybrid evaluation tests
-pub fn run_hybrid_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestResult> {
+pub fn run_hybrid_tests(memd_path: &Path, embedding_model: &str) -> Vec<TestResult> {
     let mut results = Vec::new();
 
     // Load dataset
@@ -199,7 +199,7 @@ pub fn load_dataset_generic(path: &std::path::Path) -> Result<HybridDataset, Str
 
 /// Create a client, index documents, and optionally run queries
 fn create_indexed_client(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     dataset: &HybridDataset,
     embedding_model: &str,
 ) -> Result<(McpClient, TempDir), String> {
@@ -238,7 +238,7 @@ fn create_indexed_client(
 }
 
 fn run_c1_index_and_evaluate(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     dataset: &HybridDataset,
     embedding_model: &str,
 ) -> (TestResult, Option<(TypeMetrics, TypeMetrics, TypeMetrics)>) {
@@ -384,7 +384,7 @@ fn run_c5_hybrid_comparison(
 }
 
 fn run_c6_performance_baseline(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     dataset: &HybridDataset,
     embedding_model: &str,
 ) -> TestResult {

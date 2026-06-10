@@ -1,4 +1,4 @@
-# Scientific Task Memory Benchmark Results
+# Scientific task memory benchmark results
 
 This directory contains the tracked corpus and summary outputs for Phase 5 benchmarking of memd's task-oriented knowledge artifact layer.
 
@@ -29,7 +29,7 @@ To regenerate the omitted large artifacts locally:
 ./evals/bench/scripts/run_task_memory_benchmark.sh
 ```
 
-## What The Benchmark Measures
+## What the benchmark measures
 
 The benchmark compares two memd-native schema modes on the same knowledge:
 
@@ -79,7 +79,7 @@ Optional reference numbers from GenesisM's earlier unified benchmark are importe
 
 Those reference numbers are included for continuity, but they are not directly apples-to-apples because the earlier GenesisM `memd` benchmark predated memd's real task lifecycle.
 
-## Corpus Design
+## Corpus design
 
 The current `2026-03-21.v2` corpus is intentionally harder than the initial Phase 5 draft.
 
@@ -122,7 +122,7 @@ The Phase 5 report includes:
 
 For external systems with flatter schemas, the benchmark currently scores task-level recovery rather than memd-style facet-level recovery. That difference is important when interpreting quality numbers.
 
-## memd-native Modes
+## memd-native modes
 
 The generated system names combine an execution lane with a schema mode, for
 example `memd_cli_warm_task_memory` or `memd_cli_batch_chunk_baseline`.
@@ -146,7 +146,7 @@ but they seed and query it differently.
 
 The relative quality and latency should be read from the current generated report. The task-memory mode usually writes more projections and is expected to cost more at seed time, while current retrieval quality depends on both the structured `task.search` filters and the strength of the generic `memory.search` baseline.
 
-## How To Run
+## How to run
 
 ```bash
 ./evals/bench/scripts/run_task_memory_benchmark.sh
@@ -171,7 +171,7 @@ For a full side-by-side local run, make sure these are available:
 
 The runner now prints explicit stage progress and applies external CLI timeouts so long live-system legs are observable and bounded during reproduction.
 
-## Why This Benchmark Matters
+## Why this benchmark matters
 
 The benchmark is meant to answer one question:
 

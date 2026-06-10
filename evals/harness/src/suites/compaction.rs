@@ -13,7 +13,7 @@
 //! - **F6**: Force compaction - force flag bypasses threshold checks
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde::Deserialize;
@@ -167,7 +167,7 @@ fn extract_chunk_ids(response: &Value) -> HashSet<String> {
 }
 
 /// Run compaction evaluation tests
-pub fn run_compaction_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestResult> {
+pub fn run_compaction_tests(memd_path: &Path, embedding_model: &str) -> Vec<TestResult> {
     let mut results = Vec::new();
     let config = CompactionEvalConfig::default();
 
@@ -208,7 +208,7 @@ pub fn run_compaction_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<T
 }
 
 /// F1: Deleted chunks never appear in search results
-fn run_f1_tombstone_filtering(memd_path: &PathBuf, embedding_model: &str) -> TestResult {
+fn run_f1_tombstone_filtering(memd_path: &Path, embedding_model: &str) -> TestResult {
     let start = Instant::now();
     let name = "F1_tombstone_filtering";
 
@@ -320,7 +320,7 @@ fn run_f1_tombstone_filtering(memd_path: &PathBuf, embedding_model: &str) -> Tes
 }
 
 /// F2: Segment count reduces after merge
-fn run_f2_segment_merge(memd_path: &PathBuf, embedding_model: &str) -> TestResult {
+fn run_f2_segment_merge(memd_path: &Path, embedding_model: &str) -> TestResult {
     let start = Instant::now();
     let name = "F2_segment_merge";
 
@@ -417,7 +417,7 @@ fn run_f2_segment_merge(memd_path: &PathBuf, embedding_model: &str) -> TestResul
 }
 
 /// F3: HNSW staleness reduces after rebuild
-fn run_f3_hnsw_rebuild(memd_path: &PathBuf, embedding_model: &str) -> TestResult {
+fn run_f3_hnsw_rebuild(memd_path: &Path, embedding_model: &str) -> TestResult {
     let start = Instant::now();
     let name = "F3_hnsw_rebuild";
 
@@ -538,7 +538,7 @@ fn run_f3_hnsw_rebuild(memd_path: &PathBuf, embedding_model: &str) -> TestResult
 
 /// F4: Results invariant - same chunk IDs (as set) before/after compaction
 fn run_f4_results_invariant(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     config: &CompactionEvalConfig,
     embedding_model: &str,
 ) -> TestResult {
@@ -757,7 +757,7 @@ fn run_f4_results_invariant(
 
 /// F5: Latency during compaction
 fn run_f5_latency_during_compaction(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     config: &CompactionEvalConfig,
     embedding_model: &str,
 ) -> TestResult {
@@ -868,7 +868,7 @@ fn run_f5_latency_during_compaction(
 }
 
 /// F6: Force compaction bypasses thresholds
-fn run_f6_force_compaction(memd_path: &PathBuf, embedding_model: &str) -> TestResult {
+fn run_f6_force_compaction(memd_path: &Path, embedding_model: &str) -> TestResult {
     let start = Instant::now();
     let name = "F6_force_compaction";
 

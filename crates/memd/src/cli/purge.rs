@@ -13,6 +13,7 @@ use crate::error::{MemdError, Result};
 use crate::index::sparse::SparseIndex;
 use crate::store::metadata::{ChunkMetadata, MetadataStore};
 use crate::store::persistent::PersistentStore;
+use crate::store::usage::{UsageEvent, UsageOp};
 use crate::store::Store;
 use crate::types::{ChunkId, ChunkStatus, MemoryChunk, MemoryTier, TenantId};
 
@@ -74,6 +75,7 @@ struct PurgeCandidate {
 
 pub(super) async fn run_purge<S: Store>(store: &S, options: PurgeOptions) -> Result<Value> {
     let tenant_id = TenantId::new(&options.tenant_id)?;
+    let project_id_for_usage = options.project_id.clone();
     let Some(persistent) = store.as_persistent() else {
         return Err(MemdError::ValidationError(
             "purge requires a persistent store".to_string(),
@@ -284,7 +286,7 @@ pub(super) async fn run_purge<S: Store>(store: &S, options: PurgeOptions) -> Res
         None => Value::Null,
     };
 
-    Ok(json!({
+    let payload = json!({
         "status": "completed",
         "tenant_id": tenant_id.to_string(),
         "project_id": options.project_id,
@@ -305,7 +307,19 @@ pub(super) async fn run_purge<S: Store>(store: &S, options: PurgeOptions) -> Res
         "archive_verification": archive_verification,
         "metadata_vacuum_ran": metadata_vacuum_ran,
         "warnings": warnings,
-    }))
+    });
+
+    store.record_usage_event(UsageEvent {
+        op: UsageOp::Purge,
+        tenant: Some(options.tenant_id),
+        project: project_id_for_usage,
+        outcome: "ok".to_string(),
+        chunk_count: Some(hard_deleted as i64),
+        bytes: None,
+        detail: None,
+    });
+
+    Ok(payload)
 }
 
 pub(super) fn inspect_purge_archive(

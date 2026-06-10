@@ -9,7 +9,7 @@
 //! Also tests intent classification for natural language queries.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -248,7 +248,7 @@ fn calculate_f1(precision: f32, recall: f32) -> f32 {
 // ---------- Main Suite Functions ----------
 
 /// Run all structural evaluation tests
-pub fn run_structural_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestResult> {
+pub fn run_structural_tests(memd_path: &Path, embedding_model: &str) -> Vec<TestResult> {
     let mut results = Vec::new();
 
     // Load primary dataset
@@ -327,7 +327,7 @@ pub fn run_structural_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<T
 }
 
 fn run_e1_setup_project(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     dataset: &StructuralDataset,
     embedding_model: &str,
 ) -> (TestResult, Option<McpClient>, Option<TempDir>) {

@@ -22,11 +22,11 @@ BIN = HOME / ".local" / "bin" / "memd"
 AGENTS_SKILL = HOME / ".agents" / "skills" / "memd"
 CLAUDE_MD = HOME / ".claude" / "CLAUDE.md"
 
-# key, label, install targets, uninstall targets (None = no clean uninstall)
+# key, label, install targets, uninstall targets
 COMPONENTS = [
-    ("binary", "Binary       ~/.local/bin/memd", ["install"], ["uninstall-binary"]),
+    ("binary", "Binary       ~/.local/bin/memd", ["install-binary"], ["uninstall-binary"]),
     ("skill", "Skill        ~/.agents,~/.claude,~/.codex /skills/memd", ["install-skill"], ["uninstall-skill"]),
-    ("enforcement", "Enforcement  agent rules + SessionStart hook", ["install-enforcement"], None),
+    ("enforcement", "Enforcement  agent rules + SessionStart hook", ["install-enforcement"], ["uninstall-enforcement"]),
 ]
 
 
@@ -69,9 +69,9 @@ def non_tty_status(make: str) -> int:
         box = "x" if installed(key) else " "
         print(f"  [{box}] {label}  ({status_line(key)})")
     print("\nNot a TTY. Run one of:")
-    print(f"  {make} install-all   # binary + skill + enforcement")
-    print(f"  {make} install-skill-bundle   # copy skill + built binary into existing skill dirs")
-    print(f"  {make} uninstall     # binary + skill")
+    print(f"  {make} install         # everything: binary + skill + enforcement")
+    print(f"  {make} install-binary  # binary only")
+    print(f"  {make} uninstall       # remove binary + skill + enforcement (keeps ~/.memd data)")
     print(f"  {make} status")
     return 0
 
@@ -102,7 +102,7 @@ def _curses_ui(stdscr, make: str, repo: Path, method: str):
                 attr |= curses.A_DIM
             put(3 + i, 0, f"[{mark}] {label}  ({status_line(key)})", attr)
         put(3 + len(COMPONENTS) + 1, 0,
-            "enforcement has no clean uninstall (edit agent rule files manually)"
+            "uninstall keeps ~/.memd (memory data)"
             if mode == "uninstall" else "")
         stdscr.refresh()
 

@@ -18,6 +18,16 @@ pub enum ExportFormat {
     Jsonl,
 }
 
+/// Report output format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportFormat {
+    /// Human-readable Markdown.
+    Markdown,
+    /// Pretty JSON report.
+    Json,
+}
+
 /// Read-scope mode for tenant memory access guardrails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -150,7 +160,7 @@ pub enum CliCommand {
     Add {
         /// Tenant identifier
         #[arg(long)]
-        tenant_id: String,
+        tenant_id: Option<String>,
 
         /// Text content of the chunk
         #[arg(long)]
@@ -175,13 +185,17 @@ pub enum CliCommand {
         /// Optional source path
         #[arg(long)]
         source_path: Option<String>,
+
+        /// Route this write through the local warm worker (auto starts one if needed; off runs locally and requires the writer lock; required fails when no worker is reachable)
+        #[arg(long, value_enum, default_value = "auto")]
+        warm: WarmMode,
     },
 
     /// Search memory chunks
     Search {
         /// Tenant identifier
         #[arg(long)]
-        tenant_id: String,
+        tenant_id: Option<String>,
 
         /// Search query
         #[arg(long)]
@@ -265,7 +279,7 @@ pub enum CliCommand {
     AgentContext {
         /// Tenant identifier
         #[arg(long)]
-        tenant_id: String,
+        tenant_id: Option<String>,
 
         /// Optional project identifier
         #[arg(long)]
@@ -508,6 +522,10 @@ pub enum CliCommand {
         /// without an explicit opt-in.
         #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
         promote_to_shared: bool,
+
+        /// Route this write through the local warm worker (auto starts one if needed; off runs locally and requires the writer lock; required fails when no worker is reachable)
+        #[arg(long, value_enum, default_value = "auto")]
+        warm: WarmMode,
     },
 
     /// Counterfactual retrieval eval (Phase 3).
@@ -599,6 +617,10 @@ pub enum CliCommand {
         /// Output file path (defaults to stdout)
         #[arg(long)]
         output: Option<PathBuf>,
+
+        /// Route this write through the local warm worker (auto starts one if needed; off runs locally and requires the writer lock; required fails when no worker is reachable)
+        #[arg(long, value_enum, default_value = "auto")]
+        warm: WarmMode,
     },
 
     /// Manage the local warm worker used by `--warm auto|required`.
@@ -619,7 +641,7 @@ pub enum CliCommand {
     Get {
         /// Tenant identifier
         #[arg(long)]
-        tenant_id: String,
+        tenant_id: Option<String>,
 
         /// Chunk identifier (UUID)
         #[arg(long)]
@@ -630,18 +652,22 @@ pub enum CliCommand {
     Delete {
         /// Tenant identifier
         #[arg(long)]
-        tenant_id: String,
+        tenant_id: Option<String>,
 
         /// Chunk identifier (UUID)
         #[arg(long)]
         chunk_id: String,
+
+        /// Route this write through the local warm worker (auto starts one if needed; off runs locally and requires the writer lock; required fails when no worker is reachable)
+        #[arg(long, value_enum, default_value = "auto")]
+        warm: WarmMode,
     },
 
     /// Show statistics for a tenant
     Stats {
         /// Tenant identifier
         #[arg(long)]
-        tenant_id: String,
+        tenant_id: Option<String>,
     },
 
     /// Audit memory storage and signal quality by tenant/project.
@@ -662,6 +688,10 @@ pub enum CliCommand {
         #[arg(long, value_enum, default_value = "markdown")]
         format: ExportFormat,
 
+        /// Exit with code 2 when unreadable_active_chunks > 0.
+        #[arg(long)]
+        strict: bool,
+
         /// Output file path (defaults to stdout).
         #[arg(long)]
         output: Option<PathBuf>,
@@ -677,6 +707,41 @@ pub enum CliCommand {
         /// Maximum project rows to render per tenant.
         #[arg(long, default_value_t = 15)]
         top_projects: usize,
+    },
+
+    /// Usefulness & self-diagnosis report from the usage ledger and store metadata.
+    Report {
+        /// Optional tenant identifier. Omit to scan every known tenant.
+        #[arg(long)]
+        tenant_id: Option<String>,
+
+        /// Optional project identifier filter.
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Time window: Nd (days) or Nh (hours), e.g. 7d, 24h, 30d.
+        #[arg(long, default_value = "7d")]
+        since: String,
+
+        /// Output format.
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: ReportFormat,
+
+        /// Exit with code 2 when any [warn] self-diagnosis line is present.
+        #[arg(long)]
+        strict: bool,
+
+        /// Max learning-digest entries.
+        #[arg(long, default_value_t = 5)]
+        top: usize,
+
+        /// Output file path (defaults to stdout).
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Warm-worker routing.
+        #[arg(long, value_enum, default_value = "auto")]
+        warm: WarmMode,
     },
 
     /// Build a non-destructive cleanup approval plan.
@@ -767,6 +832,10 @@ pub enum CliCommand {
         /// Rewrite finalized segment files after metadata purge to reclaim tombstoned payload bytes.
         #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
         rewrite_segments: bool,
+
+        /// Route this write through the local warm worker (auto starts one if needed; off runs locally and requires the writer lock; required fails when no worker is reachable)
+        #[arg(long, value_enum, default_value = "auto")]
+        warm: WarmMode,
     },
 
     /// Inspect and verify a purge archive without writing to the store.
@@ -803,7 +872,7 @@ pub enum CliCommand {
     Export {
         /// Tenant identifier
         #[arg(long)]
-        tenant_id: String,
+        tenant_id: Option<String>,
 
         /// Export format
         #[arg(long, value_enum, default_value = "markdown")]
@@ -828,7 +897,7 @@ pub enum CliCommand {
     ExportMarkdown {
         /// Tenant identifier
         #[arg(long)]
-        tenant_id: String,
+        tenant_id: Option<String>,
 
         /// Output directory. Created if missing. Must not be inside memd's
         /// data directory.
@@ -858,7 +927,7 @@ pub enum CliCommand {
     ExportOmf {
         /// Tenant identifier
         #[arg(long)]
-        tenant_id: String,
+        tenant_id: Option<String>,
 
         /// Optional project filter
         #[arg(long)]
@@ -889,7 +958,7 @@ pub enum CliCommand {
     ImportOmf {
         /// Tenant identifier
         #[arg(long)]
-        tenant_id: String,
+        tenant_id: Option<String>,
 
         /// Input file path. `-` or omitted reads from stdin.
         #[arg(long)]
@@ -906,6 +975,10 @@ pub enum CliCommand {
         /// Preview only — compute counts without writing.
         #[arg(long, default_value_t = false, action = ArgAction::Set)]
         dry_run: bool,
+
+        /// Route this write through the local warm worker (auto starts one if needed; off runs locally and requires the writer lock; required fails when no worker is reachable)
+        #[arg(long, value_enum, default_value = "auto")]
+        warm: WarmMode,
     },
 
     /// Initialize memd CLI guardrails for agent workflows
@@ -948,8 +1021,8 @@ pub enum CliCommand {
     /// Reports the state of: `memd` binary discovery, data directory,
     /// global agent rules (Claude / Codex / Cursor), Claude
     /// `SessionStart` hook, and the current project's `.memd`
-    /// scope. Always exits 0; use `--format json` for machine-readable
-    /// output.
+    /// scope. By default this is informational and exits 0; use
+    /// `--strict` to fail when any doctor check fails.
     Doctor {
         /// Project directory to inspect for `.memd/project_scope.json`.
         #[arg(long, default_value = ".")]
@@ -960,6 +1033,10 @@ pub enum CliCommand {
         /// raw structured report.
         #[arg(long, value_enum, default_value = "markdown")]
         format: ExportFormat,
+
+        /// Exit with code 2 when any doctor check fails.
+        #[arg(long)]
+        strict: bool,
     },
 
     /// Disk hygiene: sweep orphan HNSW snapshots, repack legacy mapping
@@ -990,15 +1067,53 @@ pub enum CliCommand {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreAccess {
+    ReadOnly,
+    Writer,
+}
+
 impl CliCommand {
+    pub fn store_access(&self) -> StoreAccess {
+        match self {
+            CliCommand::Add { .. } => StoreAccess::Writer,
+            CliCommand::Search { .. } => StoreAccess::ReadOnly,
+            CliCommand::AgentContext { .. } => StoreAccess::ReadOnly,
+            CliCommand::MemoryMd { .. } => StoreAccess::ReadOnly,
+            CliCommand::EvalMemoryMd { .. } => StoreAccess::ReadOnly,
+            CliCommand::EvalRetrieval { .. } => StoreAccess::ReadOnly,
+            // Opens and mutates an isolated scratch PersistentStore.
+            CliCommand::EvalWriteQuality { .. } => StoreAccess::Writer,
+            CliCommand::Consolidate { .. } => StoreAccess::Writer,
+            CliCommand::EvalCounterfactual { .. } => StoreAccess::Writer,
+            CliCommand::SessionStart { .. } => StoreAccess::ReadOnly,
+            CliCommand::Call { .. } => StoreAccess::Writer,
+            CliCommand::Batch { .. } => StoreAccess::Writer,
+            CliCommand::Warm { .. } => StoreAccess::Writer,
+            CliCommand::WarmWorker { .. } => StoreAccess::Writer,
+            CliCommand::Get { .. } => StoreAccess::ReadOnly,
+            CliCommand::Delete { .. } => StoreAccess::Writer,
+            CliCommand::Stats { .. } => StoreAccess::ReadOnly,
+            CliCommand::Audit { .. } => StoreAccess::ReadOnly,
+            CliCommand::Report { .. } => StoreAccess::ReadOnly,
+            CliCommand::CleanupPlan { .. } => StoreAccess::ReadOnly,
+            CliCommand::Purge { .. } => StoreAccess::Writer,
+            CliCommand::PurgeArchive { .. } => StoreAccess::ReadOnly,
+            CliCommand::Export { .. } => StoreAccess::ReadOnly,
+            CliCommand::ExportMarkdown { .. } => StoreAccess::ReadOnly,
+            CliCommand::ExportOmf { .. } => StoreAccess::ReadOnly,
+            CliCommand::ImportOmf { .. } => StoreAccess::Writer,
+            CliCommand::Init { .. } => StoreAccess::ReadOnly,
+            CliCommand::Doctor { .. } => StoreAccess::ReadOnly,
+            CliCommand::Maintenance { .. } => StoreAccess::Writer,
+        }
+    }
+
     /// Whether this command needs an initialized backing store.
     pub fn requires_store(&self) -> bool {
         !matches!(
             self,
-            CliCommand::Init { .. }
-                | CliCommand::Warm { .. }
-                | CliCommand::Maintenance { .. }
-                | CliCommand::Doctor { .. }
+            CliCommand::Init { .. } | CliCommand::Warm { .. } | CliCommand::Maintenance { .. }
         )
     }
 
@@ -1007,7 +1122,14 @@ impl CliCommand {
         match self {
             CliCommand::Search { warm, .. }
             | CliCommand::AgentContext { warm, .. }
-            | CliCommand::Call { warm, .. } => Some(*warm),
+            | CliCommand::Consolidate { warm, .. }
+            | CliCommand::Call { warm, .. }
+            | CliCommand::Batch { warm, .. }
+            | CliCommand::Add { warm, .. }
+            | CliCommand::Delete { warm, .. }
+            | CliCommand::Purge { warm, .. }
+            | CliCommand::Report { warm, .. }
+            | CliCommand::ImportOmf { warm, .. } => Some(*warm),
             _ => None,
         }
     }

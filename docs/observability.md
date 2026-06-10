@@ -1,8 +1,83 @@
 # Observability
 
-`memd` exposes operational signal through three surfaces: stats/health/metrics
-operations, structured tracing logs, and hit-counter telemetry written to
+`memd` has four observability surfaces: the usage ledger and `memd report`
+(including the session-start health header), stats/health/metrics operations,
+structured tracing logs, and per-search hit counters in
 `.memd/data/hit_counts.jsonl`.
+
+## Usage ledger
+
+The `usage_events` table lives inside `metadata.db`. It records operational
+events for self-diagnosis and report generation.
+
+| Recorded ops | Notes |
+| --- | --- |
+| `add`, `search`, `agent_context`, `get`, `delete`, `purge`, `consolidate`, `import_omf`, `report` | Written by the ops layer for growth, retrieval, and learning-digest analytics. |
+
+Recording is best-effort. Ledger failures are debug-logged only and never fail
+or slow the user operation. ReadOnly store opens skip recording entirely, so
+direct `--warm off` reads such as `search` and `agent-context`, and the
+always-cold `memd get`, record nothing; default warm-routed operations record
+through the worker.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `MEMD_USAGE_LEDGER` | on | `off`, `0`, `false`, or `no` disables usage-event recording. |
+| `MEMD_USAGE_RETENTION_DAYS` | `90` | Events older than this are swept opportunistically, at most hourly. |
+
+Worker-scoped environment variables are resolved from the worker process; see
+[Configuration](configuration.md#worker-environment).
+
+Search query text is never stored verbatim. The ledger stores only a 16-hex
+`q_hash` for distinct-query analytics. The hash is not stable across Rust
+releases, so distinctness comparisons are meaningful only among events written
+by the same `memd` build.
+
+## memd report
+
+`memd report` renders a usefulness and self-diagnosis report from the usage
+ledger and store metadata.
+On a 10k-chunk store the report renders in 656 ms (dev machine, 2026-06).
+
+| Flag | Behavior |
+| --- | --- |
+| `--tenant-id` | Scope to one tenant; omit to scan every known tenant. |
+| `--project-id` | Restrict to one project. |
+| `--since Nd\|Nh` | Window in days or hours; default `7d`. |
+| `--format markdown\|json` | Output format; default `markdown`. |
+| `--strict` | Exit code 2 when any `[warn]` self-diagnosis line is present. |
+| `--top N` | Max learning-digest entries; default `5`. |
+| `--output <path>` | Write to a file; default is stdout. |
+| `--warm <auto\|off\|required>` | Routes through the worker by default. |
+
+Markdown and JSON contain the same data:
+
+- `## Growth` — admitted, downgraded, and rejected writes with reasons; bytes
+  added; deletes, imports, and purges; expired and superseded chunks in the
+  window; store totals.
+- `## Learning digest` — consolidated and high-priority counts, including
+  `high_priority_in_window`, plus entries with their `Agent action:` lines.
+- `## Retrieval usefulness` — searches, hit rate, distinct queries by hash,
+  distinct chunks served, top-served chunks, and zero-hit share.
+- `## Self-diagnosis` — summary lines with no prefix, plus `[warn]`-prefixed
+  lines only when warnings exist.
+
+`hit_rate` is the share of search events that returned at least one result
+(`1 - zero_hits/searches`). Vector search returns top-k on any non-empty store,
+so `zero_hits` is approximately an empty-store or empty-scope signal and
+`hit_rate` is inflated until a relevance threshold exists. Relevance-threshold
+based usefulness measurement is future work.
+
+Eval commands such as `memd eval-counterfactual` execute real searches through
+the same ops layer. Their events land in the ledger and inflate search counts
+in the report window; tagging or filtering eval-origin events is future work.
+
+## Session-start health header
+
+`memd memory-md` prepends a compact `## Memory health` section with summary
+lines derived from `memd report`; those lines have no prefix. It adds
+`[warn]`-prefixed lines only when warnings exist. This is best-effort and is
+silently skipped if report generation fails.
 
 ## Stats, health, metrics
 
@@ -46,10 +121,10 @@ Every CLI search appends one JSONL record per returned chunk to
 per-chunk 30-day aggregate (1 h TTL cache) — frequently retrieved chunks get
 up to +8, chunks with no hits older than 30 days get −2.
 
-`memd eval-counterfactual` measures whether `kind:consolidated` chunks are
-actually moving ranks versus a same-pass filtered baseline.
+`memd eval-counterfactual` measures whether `kind:consolidated` chunks change
+ranks versus a same-pass filtered baseline.
 
-## Startup Memory Explanations
+## Startup memory explanations
 
 When `memory.md` looks noisy, generate an explanation report:
 

@@ -4,7 +4,7 @@
 //! This suite isolates embedding model quality by using queries where BM25 cannot help.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Instant;
 
 use serde_json::Value;
@@ -23,7 +23,7 @@ fn extract_content_text(response: &Value) -> Option<&str> {
         .and_then(|t| t.as_str())
 }
 
-pub fn run_true_semantic_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestResult> {
+pub fn run_true_semantic_tests(memd_path: &Path, embedding_model: &str) -> Vec<TestResult> {
     let mut results = Vec::new();
 
     let dataset_path =
@@ -62,7 +62,7 @@ pub fn run_true_semantic_tests(memd_path: &PathBuf, embedding_model: &str) -> Ve
 }
 
 fn create_indexed_client(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     dataset: &HybridDataset,
     embedding_model: &str,
 ) -> Result<(McpClient, TempDir), String> {
@@ -100,7 +100,7 @@ fn create_indexed_client(
 }
 
 fn run_index_and_evaluate(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     dataset: &HybridDataset,
     embedding_model: &str,
 ) -> (TestResult, Option<f64>) {

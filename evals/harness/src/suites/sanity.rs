@@ -4,7 +4,7 @@
 //! All queries should achieve 1.000 Recall@10. If not, harness has bugs.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Instant;
 
 use serde::Deserialize;
@@ -53,7 +53,7 @@ fn extract_content_text(response: &Value) -> Option<&str> {
         .and_then(|t| t.as_str())
 }
 
-pub fn run_sanity_tests(memd_path: &PathBuf, embedding_model: &str) -> Vec<TestResult> {
+pub fn run_sanity_tests(memd_path: &Path, embedding_model: &str) -> Vec<TestResult> {
     let mut results = Vec::new();
 
     let dataset_path =
@@ -107,7 +107,7 @@ fn load_dataset(path: &std::path::Path) -> Result<SanityDataset, String> {
 }
 
 fn run_exact_match_test(
-    memd_path: &PathBuf,
+    memd_path: &Path,
     dataset: &SanityDataset,
     embedding_model: &str,
 ) -> TestResult {

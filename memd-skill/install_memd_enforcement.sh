@@ -46,6 +46,9 @@ require_cmd() {
   fi
 }
 
+# Prefer python3: modern distros ship no `python` alias.
+PYTHON_BIN="$(command -v python3 || command -v python || true)"
+
 stop_existing_warm_worker() {
   if command -v memd >/dev/null 2>&1; then
     memd warm stop >/dev/null 2>&1 || true
@@ -63,7 +66,7 @@ upsert_block() {
   touch "$target"
   tmp="$(mktemp)"
 
-  python - "$target" "$start_marker" "$end_marker" "$content" >"$tmp" <<'PY'
+  "$PYTHON_BIN" - "$target" "$start_marker" "$end_marker" "$content" >"$tmp" <<'PY'
 from pathlib import Path
 import sys
 
@@ -107,7 +110,7 @@ install_binary() {
 wire_session_start_hook() {
   local settings="${HOME}/.claude/settings.json"
   mkdir -p "$(dirname "$settings")"
-  python - "$settings" <<'PY'
+  "$PYTHON_BIN" - "$settings" <<'PY'
 import json, sys
 from pathlib import Path
 
@@ -140,7 +143,10 @@ print("added memd SessionStart hook to %s" % path)
 PY
 }
 
-require_cmd python
+if [[ -z "$PYTHON_BIN" ]]; then
+  echo "missing required command: python3 (or python)" >&2
+  exit 1
+fi
 
 if [[ "$INSTALL_BINARY" -eq 1 ]]; then
   stop_existing_warm_worker
@@ -152,16 +158,17 @@ Mandatory `memd` CLI contract for substantive technical and scientific work:
 
 - At session start for substantive work, refresh and read project-root `memory.md`: `memd memory-md --project-dir . --output memory.md` when `.memd/project_scope.json` is available, otherwise include `--tenant-id <tenant>` and `--project-id <project>`.
 - For non-trivial engineering, debugging, analysis, literature review, benchmarking, or multi-step scientific work, search `memd` first with the CLI using the current `tenant_id` and available `project_id`.
-- Preferred retrieval command: `memd agent-context --tenant-id <tenant> --project-id <project> --query "<task>" --k 2 --token-budget 700 --format markdown --output .memd/context.md --log-dir .memd/search-logs`.
-- For direct lookup, use `memd search --tenant-id <tenant> --project-id <project> --query "<query>" --compact --token-budget 2000 --format markdown`.
+- Preferred retrieval command: `memd agent-context --query "<task>" --k 2 --token-budget 700 --format markdown --output .memd/context.md --log-dir .memd/search-logs`.
+- For direct lookup, use `memd search --query "<query>" --compact --token-budget 2000 --format markdown`.
+- Inside a scoped project (a .memd/project_scope.json created by memd session-start), omit --tenant-id/--project-id; memd resolves them from the scope file. Explicit flags override the scope file.
 - Before saying the work is impossible, blocked, cannot be answered, or needs user context that might already exist in shared memory, run a relevant `memd` CLI search first. If no relevant record is found, say exactly what you checked.
 - If the work changes understanding, runs tools, produces findings, or could matter to later sessions, record it with `memd add` before the final answer.
-- Use `memd add --chunk-type summary|trace|decision|research|plan --tags kind:progress|run|evidence|decision|finish,priority:N,... --text "<summary>"`; include `--project-id` when known. Use `priority:N` for durable lessons that should be candidates for future `memory.md` refreshes.
+- Use `memd add --chunk-type summary|trace|decision|research|plan --tags kind:progress|run|evidence|decision|finish,priority:N,... --text "<summary>"`. Use `priority:N` for durable lessons that should be candidates for future `memory.md` refreshes.
 - Keep durable writes bounded: a normal single task should leave fewer than 10 durable chunks, usually one decision, one evidence/run record, and one finish summary.
 - Durable writes should contain a decision+rationale, validated fix/result, root cause, command/path/parameter/metric/version, evidence for a claim, or durable follow-up. Avoid "starting", "looking", or "made progress" notes without concrete outcomes.
 - High-priority durable writes with `priority:8+` or `importance:8+` must include a concrete `Agent action:` sentence telling the next agent what to do, check, prefer, avoid, verify, reuse, or resolve; vague labels alone are not useful memory.
 - Do not store full chat logs, play-by-play transcripts, generated digest wrappers, or duplicate summaries that add no new evidence/tags/provenance. Store concise, durable facts that another agent is likely to reuse.
-- If startup memory looks noisy or lacks concrete `agent action` lines, inspect it with `memd eval-memory-md --project-dir . --min-useful-ratio 0.8 --max-generated-wrappers 0` and `memd memory-md --project-dir . --output memory.md --explain-output .memd/memory-explain.json`.
+- If startup memory looks noisy or lacks concrete `Agent action:` lines, inspect it with `memd eval-memory-md --project-dir . --min-useful-ratio 0.8 --max-generated-wrappers 0` and `memd memory-md --project-dir . --output memory.md --explain-output .memd/memory-explain.json`, and check store health with `memd report --strict`.
 - Do not store secrets or private credentials in `memd`: cookies, tokens, API keys, passwords, verification codes, ID numbers, bank cards, private contact details, third-party account configuration, or sensitive values copied from logs.
 - Do not provide a final substantive answer until the CLI retrieval and CLI write have both happened, unless `memd` is unavailable.
 - If `memd` is unavailable or misconfigured, treat that as a blocker and say so explicitly rather than silently skipping memory usage.
@@ -217,4 +224,4 @@ printf '       project .codex/hooks.json to enable the equivalent hook.\n'
 if [[ "$INSTALL_BINARY" -eq 1 ]]; then
   printf 'Installed bundled memd CLI: %s\n' "${LOCAL_BIN}/memd"
 fi
-printf '\nRun '"'"'memd doctor'"'"' to verify the install.\n'
+printf '\nRun '"'"'memd doctor'"'"' to verify the install ('"'"'memd doctor --strict'"'"' exits non-zero on failure; a fresh store reports data dir/project scope as pending until your first session-start).\n'

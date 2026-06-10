@@ -6,11 +6,13 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
 use parking_lot::{Mutex, RwLock};
+use rusqlite::{Connection as ProbeConnection, OpenFlags};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -39,8 +41,13 @@ pub struct TieredStats {
     pub tiered_metrics: TieredMetrics,
 }
 use super::segment::{SegmentReader, SegmentWriter};
+use super::usage::{usage_ledger_enabled, usage_retention_ms, UsageEvent};
 use super::wal::{TaskArtifactWalPayload, WalReader, WalRecord, WalRecordType, WalWriter};
-use super::{rank_candidate_chunks, score_candidate_chunk, Store, StoreHealthSnapshot, StoreStats};
+use super::writer_lock::{acquire_writer_lock_capped, WriterLockGuard};
+use super::{
+    rank_candidate_chunks, score_candidate_chunk, ExternalMutationOutcome, RywProbeStats, Store,
+    StoreHealthSnapshot, StoreStats,
+};
 use crate::embeddings::EmbeddingModel;
 use crate::error::{MemdError, Result};
 use crate::index::{Bm25Index, SparseIndex};
@@ -54,6 +61,16 @@ use crate::types::{ChunkId, ChunkStatus, MemoryChunk, TenantId};
 pub struct PersistentStoreConfig {
     /// Base data directory
     pub data_dir: PathBuf,
+    /// Open without writer privileges.
+    ///
+    /// Read-only mode does not acquire the process-wide writer flock,
+    /// avoids disk mutations outside SQLite metadata side files, makes
+    /// mutating APIs return `MemdError::ReadOnlyStore`, and serves
+    /// WAL-pending chunks from an in-memory overlay instead of replaying
+    /// and truncating WAL.
+    pub read_only: bool,
+    /// Optional upper bound for writer-lock acquisition.
+    pub writer_lock_timeout_cap: Option<Duration>,
     /// Maximum chunks per segment before rotation
     pub segment_max_chunks: u32,
     /// Minimum chunks in an active segment for graceful shutdown / Drop
@@ -142,6 +159,8 @@ impl Default for PersistentStoreConfig {
 
         Self {
             data_dir: PathBuf::from("data"),
+            read_only: false,
+            writer_lock_timeout_cap: None,
             segment_max_chunks: 10_000,
             // 256 ≈ minutes of typical write rate. Below this we leave
             // the active segment unfinalized between graceful shutdowns
@@ -195,18 +214,29 @@ pub struct PersistentStore {
     compaction_runner: Option<CompactionRunner>,
     /// Optional async index worker handle
     async_indexer: Option<AsyncIndexerHandle>,
+    /// Monotonic counter bumped before each PersistentStore-owned write.
+    write_epoch: Arc<AtomicU64>,
+    /// Warn-only detector for metadata.db changes not attributable to this store.
+    external_mutation_probe: Option<ExternalMutationProbe>,
+    /// Last time this store attempted a usage-ledger retention sweep.
+    usage_sweep_last_ms: AtomicI64,
+    /// Process-wide exclusive writer lock. Last field so it drops last.
+    _writer_lock: Option<WriterLockGuard>,
 }
 
 /// Per-tenant storage state
 struct TenantStore {
     tenant_id: String,
     base_dir: PathBuf,
+    read_only: bool,
     /// Current active segment writer (None if read-only)
     active_segment: Mutex<Option<ActiveSegment>>,
     /// Loaded segment readers
     segments: RwLock<HashMap<u64, SegmentReader>>,
-    /// WAL writer
-    wal: Mutex<WalWriter>,
+    /// WAL writer (absent in read-only mode)
+    wal: Mutex<Option<WalWriter>>,
+    /// In-memory payloads from WAL Add records not yet finalized.
+    wal_overlay: RwLock<HashMap<ChunkId, Vec<u8>>>,
     /// Counter for WAL checkpoint
     writes_since_checkpoint: Mutex<u32>,
     /// Max chunks per segment (for rotation)
@@ -288,6 +318,109 @@ struct IndexJob {
     index_rows: Vec<(ChunkId, String)>,
 }
 
+struct ExternalMutationProbe {
+    connection: Mutex<ProbeConnection>,
+    snapshot: Mutex<ExternalMutationSnapshot>,
+    write_epoch: Arc<AtomicU64>,
+    checks: AtomicU64,
+    external_detected: AtomicU64,
+    repairs: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExternalMutationSnapshot {
+    last_data_version: i64,
+    last_write_epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExternalMutationCheck {
+    Clean,
+    OwnWrites,
+    External {
+        prev_data_version: i64,
+        data_version: i64,
+    },
+}
+
+impl ExternalMutationProbe {
+    fn open(path: &Path, write_epoch: Arc<AtomicU64>) -> Result<Self> {
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY;
+        let connection = ProbeConnection::open_with_flags(path, flags)?;
+        connection.busy_timeout(Duration::from_secs(5))?;
+        let last_data_version = Self::query_data_version(&connection)?;
+        let last_write_epoch = write_epoch.load(Ordering::Acquire);
+        Ok(Self {
+            connection: Mutex::new(connection),
+            snapshot: Mutex::new(ExternalMutationSnapshot {
+                last_data_version,
+                last_write_epoch,
+            }),
+            write_epoch,
+            checks: AtomicU64::new(0),
+            external_detected: AtomicU64::new(0),
+            repairs: AtomicU64::new(0),
+        })
+    }
+
+    fn check(&self) -> Result<ExternalMutationCheck> {
+        self.checks.fetch_add(1, Ordering::Relaxed);
+        let data_version = {
+            let connection = self.connection.lock();
+            Self::query_data_version(&connection)?
+        };
+        // Ordering caveat: `ensure_writable` bumps the epoch before a
+        // PersistentStore operation's first SQLite commit. One probe
+        // round can therefore observe the epoch bump, classify
+        // `OwnWrites`, and snapshot the new epoch while that own commit
+        // is still in flight. The next round then sees `data_version`
+        // change with an unchanged epoch and misclassifies it as
+        // `External`: a one-round false positive caused by an in-flight
+        // own write. Symmetrically, a concurrent own write can mask an
+        // external commit for one round. Both cases are acceptable: the
+        // probe only drives telemetry and index refresh/repair, so a
+        // false positive wastes repair work but never affects
+        // correctness. `PRAGMA data_version` changes only when another
+        // connection commits. The metadata pool's 16 connections are
+        // "another connection" from this probe connection's
+        // perspective, which is why epoch comparison is still useful.
+        let write_epoch = self.write_epoch.load(Ordering::Acquire);
+        let mut snapshot = self.snapshot.lock();
+        let check = if data_version == snapshot.last_data_version {
+            ExternalMutationCheck::Clean
+        } else if write_epoch != snapshot.last_write_epoch {
+            ExternalMutationCheck::OwnWrites
+        } else {
+            self.external_detected.fetch_add(1, Ordering::Relaxed);
+            ExternalMutationCheck::External {
+                prev_data_version: snapshot.last_data_version,
+                data_version,
+            }
+        };
+        *snapshot = ExternalMutationSnapshot {
+            last_data_version: data_version,
+            last_write_epoch: write_epoch,
+        };
+        Ok(check)
+    }
+
+    fn record_repair(&self) {
+        self.repairs.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn stats(&self) -> RywProbeStats {
+        RywProbeStats {
+            checks: self.checks.load(Ordering::Relaxed),
+            external_detected: self.external_detected.load(Ordering::Relaxed),
+            repairs: self.repairs.load(Ordering::Relaxed),
+        }
+    }
+
+    fn query_data_version(connection: &ProbeConnection) -> Result<i64> {
+        Ok(connection.pragma_query_value(None, "data_version", |row| row.get(0))?)
+    }
+}
+
 impl PersistentStore {
     /// Borrow the hybrid searcher when hybrid retrieval is enabled.
     pub fn hybrid(&self) -> Option<&HybridSearcher> {
@@ -304,13 +437,79 @@ impl PersistentStore {
         self.metadata.as_ref()
     }
 
+    pub(crate) fn ensure_writable(&self, op: &'static str) -> Result<()> {
+        if self.config.read_only {
+            Err(MemdError::ReadOnlyStore { op: op.to_string() })
+        } else {
+            // Write-epoch invariant for the RYW probe: every mutating
+            // entry point calls `ensure_writable` as its first statement,
+            // so this release-store happens before that operation's
+            // first SQLite commit. That ordering can produce one-round
+            // telemetry mistakes: a probe may snapshot this epoch before
+            // the commit lands, then classify the next `data_version`
+            // change as external even though it was our in-flight write;
+            // a concurrent own write can also mask an external commit
+            // for one round. The probe only triggers telemetry and
+            // index refresh/repair, so false positives cost extra work
+            // and false negatives delay repair by one round; neither
+            // changes store correctness.
+            self.write_epoch.fetch_add(1, Ordering::Release);
+            Ok(())
+        }
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.config.read_only
+    }
+
     /// Open or create persistent store
     pub fn open(config: PersistentStoreConfig) -> Result<Self> {
-        std::fs::create_dir_all(&config.data_dir)?;
+        let read_only_missing_data_dir = config.read_only && !config.data_dir.exists();
+        if !read_only_missing_data_dir {
+            std::fs::create_dir_all(&config.data_dir)?;
+        }
+        let writer_lock = if config.read_only {
+            None
+        } else {
+            Some(acquire_writer_lock_capped(
+                &config.data_dir,
+                config.writer_lock_timeout_cap,
+            )?)
+        };
 
         // Open global metadata database
         let metadata_path = config.data_dir.join("metadata.db");
-        let metadata = Arc::new(SqliteMetadataStore::open(&metadata_path)?);
+        let metadata = if read_only_missing_data_dir {
+            Arc::new(SqliteMetadataStore::open_in_memory()?)
+        } else {
+            Arc::new(SqliteMetadataStore::open(&metadata_path)?)
+        };
+        let usage_sweep_initial_ms = if !config.read_only && usage_ledger_enabled() {
+            let now = current_time_ms();
+            let cutoff = now.saturating_sub(usage_retention_ms());
+            if let Err(error) = metadata.sweep_usage_events_before(cutoff) {
+                debug!(error = %error, "usage ledger startup sweep failed");
+            }
+            now
+        } else {
+            0
+        };
+        let write_epoch = Arc::new(AtomicU64::new(0));
+        let external_mutation_probe = if config.read_only {
+            None
+        } else {
+            match ExternalMutationProbe::open(&metadata_path, Arc::clone(&write_epoch)) {
+                Ok(probe) => Some(probe),
+                Err(error) => {
+                    warn!(
+                        path = %metadata_path.display(),
+                        error = %error,
+                        "RYW external mutation probe unavailable"
+                    );
+                    None
+                }
+            }
+        };
 
         // Initialize dense searcher if enabled
         let dense_searcher = if config.enable_dense_search {
@@ -319,7 +518,9 @@ impl PersistentStore {
             let dense_config = DenseSearchConfig::default();
             match DenseSearcher::new(dense_config) {
                 Ok(searcher) => {
-                    let searcher = searcher.with_base_path(config.data_dir.clone());
+                    let searcher = searcher
+                        .with_base_path(config.data_dir.clone())
+                        .with_read_only(config.read_only);
                     Some(Arc::new(searcher))
                 }
                 Err(e) => {
@@ -343,14 +544,28 @@ impl PersistentStore {
         // Initialize sparse index if hybrid search enabled
         let sparse_index = if config.enable_hybrid_search {
             let sparse_path = config.data_dir.join("sparse_index");
-            match Bm25Index::with_path(Some(sparse_path)) {
-                Ok(index) => Some(Arc::new(index)),
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        "failed to initialize sparse index, hybrid search disabled"
-                    );
-                    None
+            if config.read_only {
+                match Bm25Index::with_path_read_only(sparse_path) {
+                    Ok(Some(index)) => Some(Arc::new(index)),
+                    Ok(None) => None,
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "failed to initialize read-only sparse index, hybrid search disabled"
+                        );
+                        None
+                    }
+                }
+            } else {
+                match Bm25Index::with_path(Some(sparse_path)) {
+                    Ok(index) => Some(Arc::new(index)),
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "failed to initialize sparse index, hybrid search disabled"
+                        );
+                        None
+                    }
                 }
             }
         } else {
@@ -385,6 +600,10 @@ impl PersistentStore {
             metrics: Arc::new(MetricsCollector::default()),
             compaction_runner,
             async_indexer: None,
+            write_epoch,
+            external_mutation_probe,
+            usage_sweep_last_ms: AtomicI64::new(usage_sweep_initial_ms),
+            _writer_lock: writer_lock,
         };
 
         // Recover existing tenants
@@ -394,10 +613,10 @@ impl PersistentStore {
         let mut store = store;
         store.async_indexer = async_indexer;
 
-        if store.config.backfill_hnsw_on_startup {
+        if !store.config.read_only && store.config.backfill_hnsw_on_startup {
             store.spawn_startup_hnsw_backfill();
         }
-        if store.config.backfill_canonical_text_on_startup {
+        if !store.config.read_only && store.config.backfill_canonical_text_on_startup {
             store.spawn_startup_canonical_backfill();
         }
 
@@ -478,6 +697,7 @@ impl PersistentStore {
     /// `chunks_skipped` indicates coverage may be partial (typically
     /// from a corrupt segment or a transient index error).
     pub async fn backfill_hnsw_for_cold_tenants(&self) -> Result<BackfillStats> {
+        self.ensure_writable("backfill_hnsw_for_cold_tenants")?;
         run_hnsw_backfill(
             self.dense_searcher.as_ref(),
             self.hybrid_searcher.as_ref(),
@@ -495,8 +715,12 @@ impl PersistentStore {
     /// rows without requiring a destructive migration. Best-effort: a
     /// single-row failure (deserialization, missing segment) is logged
     /// and counted, not fatal — subsequent runs reattempt the same row.
-    pub fn backfill_canonical_text_for_legacy_chunks(&self) -> CanonicalBackfillStats {
-        run_canonical_text_backfill(self.metadata.as_ref(), self.tenants.as_ref())
+    pub fn backfill_canonical_text_for_legacy_chunks(&self) -> Result<CanonicalBackfillStats> {
+        self.ensure_writable("backfill_canonical_text_for_legacy_chunks")?;
+        Ok(run_canonical_text_backfill(
+            self.metadata.as_ref(),
+            self.tenants.as_ref(),
+        ))
     }
 
     /// Schedule a one-shot background task that populates canonical_text
@@ -533,7 +757,62 @@ impl PersistentStore {
         Arc::clone(&self.metrics)
     }
 
+    pub async fn probe_external_mutation(&self) -> ExternalMutationOutcome {
+        let Some(probe) = self.external_mutation_probe.as_ref() else {
+            return ExternalMutationOutcome::Unavailable;
+        };
+
+        match probe.check() {
+            Ok(ExternalMutationCheck::Clean) => ExternalMutationOutcome::Clean,
+            Ok(ExternalMutationCheck::OwnWrites) => ExternalMutationOutcome::OwnWrites,
+            Ok(ExternalMutationCheck::External {
+                prev_data_version,
+                data_version,
+            }) => {
+                warn!(
+                    prev_data_version,
+                    data_version,
+                    "external metadata.db mutation detected while holding the writer lock; refreshing indexes"
+                );
+                // Sparse/tantivy needs no action here: `SparseIndex::search()`
+                // already does `commit_if_dirty` + `reader.reload()` per
+                // query, and read paths hit SQLite directly. The repair seam
+                // refreshes in-memory HNSW coverage for chunks now present in
+                // metadata.
+                match self.backfill_hnsw_for_cold_tenants().await {
+                    Ok(_) => {
+                        probe.record_repair();
+                        ExternalMutationOutcome::External { repaired: true }
+                    }
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            "failed to repair after external metadata.db mutation"
+                        );
+                        ExternalMutationOutcome::External { repaired: false }
+                    }
+                }
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "RYW external mutation probe failed; serving request without probe result"
+                );
+                ExternalMutationOutcome::Unavailable
+            }
+        }
+    }
+
+    pub fn ryw_probe_stats(&self) -> Option<RywProbeStats> {
+        self.external_mutation_probe
+            .as_ref()
+            .map(ExternalMutationProbe::stats)
+    }
+
     fn start_async_indexer_if_enabled(&self) -> Option<AsyncIndexerHandle> {
+        if self.config.read_only {
+            return None;
+        }
         if !self.config.enable_async_indexing {
             return None;
         }
@@ -555,6 +834,7 @@ impl PersistentStore {
         let hybrid_searcher = self.hybrid_searcher.clone();
         let dense_searcher = self.dense_searcher.clone();
         let tenants = Arc::clone(&self.tenants);
+        let write_epoch = Arc::clone(&self.write_epoch);
 
         let (job_tx, mut job_rx) = mpsc::unbounded_channel::<IndexJob>();
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -572,6 +852,7 @@ impl PersistentStore {
                             dense_searcher.as_ref(),
                             batch_size,
                             job,
+                            &write_epoch,
                         )
                         .await;
                     }
@@ -582,6 +863,7 @@ impl PersistentStore {
                             hybrid_searcher.as_ref(),
                             dense_searcher.as_ref(),
                             batch_size,
+                            &write_epoch,
                         )
                         .await;
                     }
@@ -651,6 +933,13 @@ impl PersistentStore {
         &self,
         tenant_id: &TenantId,
     ) -> Option<crate::tiered::MaintenanceResult> {
+        if self.config.read_only {
+            tracing::debug!(
+                tenant_id = %tenant_id,
+                "skipping tiered maintenance for read-only store"
+            );
+            return None;
+        }
         let hybrid = self.hybrid_searcher.as_ref()?;
         let result = hybrid.run_tiered_maintenance(tenant_id)?;
 
@@ -678,6 +967,7 @@ impl PersistentStore {
     ///
     /// Forces compaction to run even if no thresholds are exceeded.
     pub fn run_compaction(&self, tenant_id: &TenantId) -> Result<CompactionResult> {
+        self.ensure_writable("run_compaction")?;
         let runner = self
             .compaction_runner
             .as_ref()
@@ -706,6 +996,7 @@ impl PersistentStore {
         &self,
         tenant_id: &TenantId,
     ) -> Result<SegmentRewriteResult> {
+        self.ensure_writable("rewrite_segments_for_tenant")?;
         let tenant = self.get_or_create_tenant(tenant_id.as_str())?;
         tenant.rewrite_finalized_segments(&self.metadata, tenant_id)
     }
@@ -723,6 +1014,7 @@ impl PersistentStore {
         &self,
         tenant_id: &TenantId,
     ) -> Result<Option<CompactionResult>> {
+        self.ensure_writable("run_compaction_if_needed")?;
         let runner = match &self.compaction_runner {
             Some(r) => r,
             None => return Ok(None),
@@ -914,6 +1206,7 @@ impl PersistentStore {
             self.config.segment_max_chunks,
             self.config.min_finalize_chunks,
             self.config.wal_checkpoint_interval,
+            self.config.read_only,
         )?;
 
         let tenant = Arc::new(tenant);
@@ -925,6 +1218,11 @@ impl PersistentStore {
     /// Graceful shutdown - finalizes all active segments
     pub fn shutdown(&self) -> Result<()> {
         info!("PersistentStore shutting down");
+
+        if self.config.read_only {
+            tracing::debug!("read-only PersistentStore shutdown skips persistence writes");
+            return Ok(());
+        }
 
         // Save dense indices
         if let Some(ref searcher) = self.dense_searcher {
@@ -974,21 +1272,31 @@ impl TenantStore {
         segment_max_chunks: u32,
         min_finalize_chunks: u32,
         wal_checkpoint_interval: u32,
+        read_only: bool,
     ) -> Result<Self> {
-        std::fs::create_dir_all(&base_dir)?;
-        std::fs::create_dir_all(base_dir.join("segments"))?;
-
-        // Open WAL (use open_or_create for seamless startup)
         let wal_path = base_dir.join("wal.log");
         let wal_reader = WalReader::open(&wal_path)?;
-        let wal_writer = WalWriter::open_or_create(&wal_path)?;
+        let wal_overlay = if read_only {
+            build_wal_overlay(&wal_reader, &tenant_id)?
+        } else {
+            HashMap::new()
+        };
+        let wal_writer = if read_only {
+            None
+        } else {
+            std::fs::create_dir_all(&base_dir)?;
+            std::fs::create_dir_all(base_dir.join("segments"))?;
+            Some(WalWriter::open_or_create(&wal_path)?)
+        };
 
         let store = Self {
             tenant_id: tenant_id.clone(),
             base_dir,
+            read_only,
             active_segment: Mutex::new(None),
             segments: RwLock::new(HashMap::new()),
             wal: Mutex::new(wal_writer),
+            wal_overlay: RwLock::new(wal_overlay),
             writes_since_checkpoint: Mutex::new(0),
             segment_max_chunks,
             min_finalize_chunks,
@@ -998,8 +1306,10 @@ impl TenantStore {
         // Load existing segments
         store.load_segments()?;
 
-        // Recover from WAL - FULL IMPLEMENTATION
-        store.recover_from_wal(&wal_reader, metadata)?;
+        if !read_only {
+            // Recover from WAL - FULL IMPLEMENTATION
+            store.recover_from_wal(&wal_reader, metadata)?;
+        }
 
         Ok(store)
     }
@@ -1032,6 +1342,96 @@ impl TenantStore {
             }
         }
 
+        Ok(())
+    }
+
+    fn read_payload_fallback(
+        &self,
+        chunk_id: &ChunkId,
+        segment_id: u64,
+        ordinal: u32,
+    ) -> Result<Option<Vec<u8>>> {
+        if let Some(bytes) = self.read_from_active_segment(segment_id, ordinal)? {
+            return Ok(Some(bytes));
+        }
+
+        {
+            let segments = self.segments.read();
+            if let Some(reader) = segments.get(&segment_id) {
+                return Ok(reader.read_chunk(ordinal)?);
+            }
+        }
+
+        // In read-only mode we do not replay/truncate WAL. Metadata may
+        // point at an unfinalized segment that this process deliberately
+        // did not open for append, so serve the original Add payload from
+        // an in-memory WAL overlay. WAL Delete records whose metadata write
+        // never landed can remain visible here; read-only mode does not try
+        // to repair or infer half-applied deletes.
+        if self.read_only {
+            return Ok(self.wal_overlay.read().get(chunk_id).cloned());
+        }
+
+        Ok(None)
+    }
+
+    fn append_wal_records(&self, records: &[WalRecord], op: &'static str) -> Result<()> {
+        let mut wal = self.wal.lock();
+        let Some(wal) = wal.as_mut() else {
+            return Err(MemdError::ReadOnlyStore { op: op.to_string() });
+        };
+        wal.append_batch(records)?;
+        Ok(())
+    }
+
+    fn append_wal_add_batch(
+        &self,
+        tenant_id: &str,
+        records: &[(String, i64, Vec<u8>)],
+        op: &'static str,
+    ) -> Result<()> {
+        let mut wal = self.wal.lock();
+        let Some(wal) = wal.as_mut() else {
+            return Err(MemdError::ReadOnlyStore { op: op.to_string() });
+        };
+        wal.append_add_batch(tenant_id, records)?;
+        Ok(())
+    }
+
+    fn append_wal_delete(
+        &self,
+        tenant_id: &str,
+        chunk_id: &str,
+        timestamp: i64,
+        op: &'static str,
+    ) -> Result<()> {
+        let mut wal = self.wal.lock();
+        let Some(wal) = wal.as_mut() else {
+            return Err(MemdError::ReadOnlyStore { op: op.to_string() });
+        };
+        wal.append_delete(tenant_id, chunk_id, timestamp)?;
+        Ok(())
+    }
+
+    fn append_wal_checkpoint(&self, tenant_id: &str, timestamp: i64) -> Result<()> {
+        let mut wal = self.wal.lock();
+        let Some(wal) = wal.as_mut() else {
+            return Err(MemdError::ReadOnlyStore {
+                op: "append_wal_checkpoint".to_string(),
+            });
+        };
+        wal.append_checkpoint(tenant_id, timestamp)?;
+        Ok(())
+    }
+
+    fn truncate_wal(&self) -> Result<()> {
+        let mut wal = self.wal.lock();
+        let Some(wal) = wal.as_mut() else {
+            return Err(MemdError::ReadOnlyStore {
+                op: "truncate_wal".to_string(),
+            });
+        };
+        wal.truncate()?;
         Ok(())
     }
 
@@ -1232,10 +1632,7 @@ impl TenantStore {
         }
 
         // After durable recovery, truncate WAL to start fresh.
-        {
-            let mut wal = self.wal.lock();
-            wal.truncate()?;
-        }
+        self.truncate_wal()?;
 
         Ok(())
     }
@@ -1281,6 +1678,11 @@ impl TenantStore {
     }
 
     fn get_or_create_active_segment(&self, max_chunks: u32) -> Result<()> {
+        if self.read_only {
+            return Err(MemdError::ReadOnlyStore {
+                op: "get_or_create_active_segment".to_string(),
+            });
+        }
         let mut active = self.active_segment.lock();
 
         if active.is_some() {
@@ -1325,6 +1727,11 @@ impl TenantStore {
     /// no metadata row survives that references bytes only ever present
     /// in the in-memory `BufWriter`.
     fn flush_active_segment_payload(&self) -> Result<()> {
+        if self.read_only {
+            return Err(MemdError::ReadOnlyStore {
+                op: "flush_active_segment_payload".to_string(),
+            });
+        }
         let mut active = self.active_segment.lock();
         if let Some(seg) = active.as_mut() {
             seg.writer.flush_payload()?;
@@ -1342,6 +1749,13 @@ impl TenantStore {
     /// have to land in a finalized segment before WAL truncation, or a
     /// second crash strands them.
     fn finalize_active_segment(&self) -> Result<()> {
+        if self.read_only {
+            tracing::debug!(
+                tenant = %self.tenant_id,
+                "skipping active segment finalize for read-only tenant"
+            );
+            return Ok(());
+        }
         let mut active = self.active_segment.lock();
         if let Some(seg) = active.take() {
             if seg.chunk_count > 0 {
@@ -1392,6 +1806,9 @@ impl TenantStore {
     /// the gate visible and configurable so the eventual segment-reuse
     /// path has a stable entry point.
     fn finalize_active_segment_if_above_threshold(&self) -> Result<()> {
+        if self.read_only {
+            return Ok(());
+        }
         if self.wal_checkpoint_interval > 0 {
             return self.finalize_active_segment();
         }
@@ -1427,6 +1844,11 @@ impl TenantStore {
         metadata: &SqliteMetadataStore,
         tenant_id: &TenantId,
     ) -> Result<SegmentRewriteResult> {
+        if self.read_only {
+            return Err(MemdError::ReadOnlyStore {
+                op: "rewrite_finalized_segments".to_string(),
+            });
+        }
         // Seal the active writer first so a purge in a short-lived CLI
         // process can reclaim bytes from chunks written in the same run.
         self.finalize_active_segment()?;
@@ -1532,6 +1954,33 @@ impl TenantStore {
     }
 }
 
+fn build_wal_overlay(wal_reader: &WalReader, tenant_id: &str) -> Result<HashMap<ChunkId, Vec<u8>>> {
+    let mut overlay = HashMap::new();
+    if wal_reader.is_empty() {
+        return Ok(overlay);
+    }
+
+    for record in wal_reader.records_for_recovery()? {
+        if record.record_type != WalRecordType::Add || record.tenant_id != tenant_id {
+            continue;
+        }
+        let chunk_id = ChunkId::parse(&record.chunk_id).map_err(|e| {
+            MemdError::StorageError(format!("invalid chunk_id in WAL overlay: {}", e))
+        })?;
+        overlay.insert(chunk_id, record.payload);
+    }
+
+    if !overlay.is_empty() {
+        debug!(
+            tenant_id = tenant_id,
+            pending = overlay.len(),
+            "built read-only WAL payload overlay"
+        );
+    }
+
+    Ok(overlay)
+}
+
 fn path_size(path: &Path) -> Result<u64> {
     if !path.exists() {
         return Ok(0);
@@ -1573,6 +2022,7 @@ impl Drop for TenantStore {
 #[async_trait::async_trait]
 impl Store for PersistentStore {
     async fn add(&self, chunk: MemoryChunk) -> Result<ChunkId> {
+        self.ensure_writable("add")?;
         self.add_chunks_internal(vec![chunk])
             .await?
             .into_iter()
@@ -1581,10 +2031,12 @@ impl Store for PersistentStore {
     }
 
     async fn add_batch(&self, chunks: Vec<MemoryChunk>) -> Result<Vec<ChunkId>> {
+        self.ensure_writable("add_batch")?;
         self.add_chunks_internal(chunks).await
     }
 
     async fn add_feedback(&self, feedback: FeedbackEntry) -> Result<()> {
+        self.ensure_writable("add_feedback")?;
         self.metadata.insert_feedback(&feedback)
     }
 
@@ -1593,6 +2045,7 @@ impl Store for PersistentStore {
         artifact: TaskArtifact,
         projections: Vec<TaskProjection>,
     ) -> Result<TaskArtifactWriteResult> {
+        self.ensure_writable("add_task_artifact")?;
         let projection_kinds = projections
             .iter()
             .map(|projection| projection.kind.as_str().to_string())
@@ -1659,8 +2112,7 @@ impl Store for PersistentStore {
             task_wal_payload,
         ));
         {
-            let mut wal = tenant.wal.lock();
-            wal.append_batch(&wal_records)?;
+            tenant.append_wal_records(&wal_records, "add_task_artifact")?;
         }
 
         let mut metadata_rows = Vec::with_capacity(pending.len());
@@ -1960,6 +2412,42 @@ impl Store for PersistentStore {
         Some(self)
     }
 
+    async fn probe_external_mutation(&self) -> ExternalMutationOutcome {
+        PersistentStore::probe_external_mutation(self).await
+    }
+
+    fn ryw_probe_stats(&self) -> Option<RywProbeStats> {
+        PersistentStore::ryw_probe_stats(self)
+    }
+
+    fn record_usage_event(&self, event: UsageEvent) {
+        if self.config.read_only {
+            debug!("usage ledger recording skipped for read-only store");
+            return;
+        }
+        if !usage_ledger_enabled() {
+            return;
+        }
+
+        let ts = current_time_ms();
+        if let Err(error) = self.metadata.insert_usage_event(ts, &event) {
+            debug!(error = %error, "usage ledger insert failed");
+        }
+
+        let last_sweep = self.usage_sweep_last_ms.load(Ordering::Relaxed);
+        if ts.saturating_sub(last_sweep) >= 3_600_000
+            && self
+                .usage_sweep_last_ms
+                .compare_exchange(last_sweep, ts, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+        {
+            let cutoff = ts.saturating_sub(usage_retention_ms());
+            if let Err(error) = self.metadata.sweep_usage_events_before(cutoff) {
+                debug!(error = %error, "usage ledger retention sweep failed");
+            }
+        }
+    }
+
     async fn search(
         &self,
         tenant_id: &TenantId,
@@ -1988,6 +2476,7 @@ impl Store for PersistentStore {
     }
 
     async fn delete(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<bool> {
+        self.ensure_writable("delete")?;
         self.delete_chunk(tenant_id, chunk_id).await
     }
 
@@ -2121,6 +2610,7 @@ async fn run_async_index_job(
     dense_searcher: Option<&Arc<DenseSearcher>>,
     batch_size: usize,
     job: IndexJob,
+    write_epoch: &AtomicU64,
 ) {
     let mut index_error: Option<String> = None;
     for rows in job.index_rows.chunks(batch_size.max(1)) {
@@ -2144,10 +2634,17 @@ async fn run_async_index_job(
             error = %error_message,
             "async index job failed"
         );
+        // Async index-state writes are store-owned metadata commits but
+        // do not enter through `ensure_writable`; attribute them before
+        // the commit so the external-mutation probe does not warn on
+        // queued async indexing.
+        write_epoch.fetch_add(1, Ordering::Release);
         mark_index_failed_many(metadata, &job.tenant_id, &job.chunk_ids, &error_message);
         return;
     }
 
+    // See the failure branch above for why this bypass path bumps the epoch.
+    write_epoch.fetch_add(1, Ordering::Release);
     if let Err(e) = metadata.mark_indexed(&job.tenant_id, &job.chunk_ids, current_time_ms()) {
         warn!(
             tenant_id = %job.tenant_id,
@@ -2175,25 +2672,14 @@ fn load_chunk_text_for_index(
         None => return Ok(None),
     };
 
-    if let Some(bytes) = tenant.read_from_active_segment(meta.segment_id, meta.ordinal)? {
+    if let Some(bytes) =
+        tenant.read_payload_fallback(&meta.chunk_id, meta.segment_id, meta.ordinal)?
+    {
         let chunk: MemoryChunk = serde_json::from_slice(&bytes)
             .map_err(|e| MemdError::StorageError(format!("deserialize chunk: {}", e)))?;
         return Ok(Some(chunk.text));
     }
-
-    let segments = tenant.segments.read();
-    let Some(reader) = segments.get(&meta.segment_id) else {
-        return Ok(None);
-    };
-
-    let payload = reader.read_chunk(meta.ordinal)?;
-    let Some(bytes) = payload else {
-        return Ok(None);
-    };
-
-    let chunk: MemoryChunk = serde_json::from_slice(&bytes)
-        .map_err(|e| MemdError::StorageError(format!("deserialize chunk: {}", e)))?;
-    Ok(Some(chunk.text))
+    Ok(None)
 }
 
 async fn run_hnsw_backfill(
@@ -2415,6 +2901,7 @@ async fn sweep_pending_index_jobs(
     hybrid_searcher: Option<&Arc<HybridSearcher>>,
     dense_searcher: Option<&Arc<DenseSearcher>>,
     batch_size: usize,
+    write_epoch: &AtomicU64,
 ) {
     let tenant_ids: Vec<String> = tenants.read().keys().cloned().collect();
     for tenant_id_str in tenant_ids {
@@ -2436,6 +2923,11 @@ async fn sweep_pending_index_jobs(
         if pending_ids.is_empty() {
             continue;
         }
+        // Async sweep writes (`mark_indexed` / `mark_index_failed`) bypass
+        // the public `ensure_writable` entry points. Bump the same epoch
+        // before any metadata write in this sweep iteration so async mode
+        // does not look like an external metadata mutation.
+        write_epoch.fetch_add(1, Ordering::Release);
 
         let mut chunk_ids = Vec::with_capacity(pending_ids.len());
         let mut index_rows = Vec::with_capacity(pending_ids.len());
@@ -2475,6 +2967,7 @@ async fn sweep_pending_index_jobs(
                     chunk_ids,
                     index_rows,
                 },
+                write_epoch,
             )
             .await;
         }
@@ -2550,14 +3043,14 @@ impl PersistentStore {
         }
 
         let timestamp = current_time_ms();
-        let mut wal = tenant.wal.lock();
         for _ in 0..checkpoints {
-            wal.append_checkpoint(tenant_id, timestamp)?;
+            tenant.append_wal_checkpoint(tenant_id, timestamp)?;
         }
         Ok(())
     }
 
     async fn add_chunks_internal(&self, chunks: Vec<MemoryChunk>) -> Result<Vec<ChunkId>> {
+        self.ensure_writable("add_chunks_internal")?;
         if chunks.is_empty() {
             return Ok(Vec::new());
         }
@@ -2587,10 +3080,7 @@ impl PersistentStore {
                     )
                 })
                 .collect();
-            {
-                let mut wal = tenant.wal.lock();
-                wal.append_add_batch(&tenant_id_str, &wal_rows)?;
-            }
+            tenant.append_wal_add_batch(&tenant_id_str, &wal_rows, "add_batch")?;
 
             let mut metadata_rows = Vec::with_capacity(indices.len());
             let mut index_rows = Vec::with_capacity(indices.len());
@@ -2735,6 +3225,7 @@ impl PersistentStore {
         chunk_id: &ChunkId,
         delta: &LifecycleDelta,
     ) -> Result<()> {
+        self.ensure_writable("update_lifecycle")?;
         self.metadata.update_lifecycle(tenant_id, chunk_id, delta)?;
         if let Some(h) = self.hybrid() {
             h.bump_tenant_memory_version(tenant_id);
@@ -2759,6 +3250,7 @@ impl PersistentStore {
         chunk_id: &ChunkId,
         delta: &LifecycleDelta,
     ) -> Result<bool> {
+        self.ensure_writable("update_lifecycle_if_exists")?;
         let rows = self
             .metadata
             .update_lifecycle_counted(tenant_id, chunk_id, delta)?;
@@ -2793,6 +3285,7 @@ impl PersistentStore {
         chunk: MemoryChunk,
         initial: LifecycleDelta,
     ) -> Result<ChunkId> {
+        self.ensure_writable("add_chunk_with_lifecycle")?;
         let tenant_id = chunk.tenant_id.clone();
 
         // Step 1: write payload via existing add path (WAL + segment +
@@ -2866,6 +3359,7 @@ impl PersistentStore {
         old_id: &ChunkId,
         new_chunk: MemoryChunk,
     ) -> Result<ChunkId> {
+        self.ensure_writable("supersede_chunk")?;
         // Step 0: refuse tenant mismatch immediately. Without this guard
         // the new chunk would be written under `new_chunk.tenant_id`
         // while `atomic_supersede` looks for `old_id` under
@@ -3037,28 +3531,12 @@ impl PersistentStore {
             None => return Ok(None),
         };
 
-        // First check active segment (for chunks not yet in finalized segments)
-        if let Some(bytes) = tenant.read_from_active_segment(meta.segment_id, meta.ordinal)? {
+        if let Some(bytes) =
+            tenant.read_payload_fallback(chunk_id, meta.segment_id, meta.ordinal)?
+        {
             let chunk: MemoryChunk = serde_json::from_slice(&bytes)
                 .map_err(|e| MemdError::StorageError(format!("deserialize chunk: {}", e)))?;
             return Ok(Some(chunk));
-        }
-
-        // Check finalized segments — fast path via the in-memory cache.
-        {
-            let segments = tenant.segments.read();
-            if let Some(reader) = segments.get(&meta.segment_id) {
-                let payload = reader.read_chunk(meta.ordinal)?;
-                return Ok(match payload {
-                    Some(bytes) => {
-                        let chunk: MemoryChunk = serde_json::from_slice(&bytes).map_err(|e| {
-                            MemdError::StorageError(format!("deserialize chunk: {}", e))
-                        })?;
-                        Some(chunk)
-                    }
-                    None => None, // Tombstoned
-                });
-            }
         }
 
         // Cache miss. Metadata says the chunk exists at (segment_id, ordinal)
@@ -3160,7 +3638,7 @@ impl PersistentStore {
         query: &str,
         k: usize,
     ) -> Result<Vec<(MemoryChunk, f32)>> {
-        warn!(
+        debug!(
             tenant_id = %tenant_id,
             query = &query[..query.len().min(50)],
             k = k,
@@ -3171,7 +3649,7 @@ impl PersistentStore {
 
         // Use real hybrid search if available, otherwise fallback
         if self.hybrid_searcher.is_some() || self.dense_searcher.is_some() {
-            warn!("taking search_with_scores_real path");
+            debug!("taking search_with_scores_real path");
             return self.search_with_scores_real(tenant_id, query, k).await;
         }
         // Final fallback: simple text search
@@ -3223,7 +3701,7 @@ impl PersistentStore {
         query: &str,
         k: usize,
     ) -> Result<Vec<(MemoryChunk, f32)>> {
-        warn!(
+        debug!(
             tenant_id = %tenant_id,
             hybrid = self.hybrid_searcher.is_some(),
             dense = self.dense_searcher.is_some(),
@@ -3234,7 +3712,7 @@ impl PersistentStore {
 
         // Use hybrid search if available (combines dense + sparse)
         if let Some(ref hybrid) = self.hybrid_searcher {
-            warn!("using HYBRID search path");
+            debug!("using HYBRID search path");
             let (hybrid_results, timing) =
                 hybrid.search_with_timing(tenant_id, query, k, None).await?;
 
@@ -3311,7 +3789,7 @@ impl PersistentStore {
 
         // Fallback to dense-only if hybrid not available
         if let Some(ref searcher) = self.dense_searcher {
-            warn!("using DENSE-ONLY search path");
+            debug!("using DENSE-ONLY search path");
             let (dense_results, embed_time, search_time) =
                 searcher.search_with_timing(tenant_id, query, k).await?;
 
@@ -3353,6 +3831,7 @@ impl PersistentStore {
     }
 
     async fn delete_chunk(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<bool> {
+        self.ensure_writable("delete_chunk")?;
         // Get metadata to find segment/ordinal
         let meta = self.metadata.get(tenant_id, chunk_id)?;
         let meta = match meta {
@@ -3370,8 +3849,7 @@ impl PersistentStore {
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
 
-            let mut wal = tenant.wal.lock();
-            wal.append_delete(&tenant_str, &chunk_id.to_string(), timestamp)?;
+            tenant.append_wal_delete(&tenant_str, &chunk_id.to_string(), timestamp, "delete")?;
         }
 
         // Update metadata status
@@ -3460,6 +3938,138 @@ mod tests {
 
     fn make_chunk(tenant: &TenantId, text: &str) -> MemoryChunk {
         MemoryChunk::new(tenant.clone(), text, ChunkType::Doc)
+    }
+
+    #[test]
+    fn ensure_writable_bumps_write_epoch() {
+        let (store, _dir) = make_test_store();
+        let before = store.write_epoch.load(std::sync::atomic::Ordering::Acquire);
+
+        store.ensure_writable("test_write").unwrap();
+        let after_first = store.write_epoch.load(std::sync::atomic::Ordering::Acquire);
+        store.ensure_writable("test_write").unwrap();
+        let after_second = store.write_epoch.load(std::sync::atomic::Ordering::Acquire);
+
+        assert!(after_first > before);
+        assert!(after_second > after_first);
+    }
+
+    #[test]
+    fn ensure_writable_read_only_does_not_bump_write_epoch() {
+        let dir = tempdir().unwrap();
+        {
+            let config = PersistentStoreConfig {
+                data_dir: dir.path().to_path_buf(),
+                enable_dense_search: false,
+                enable_hybrid_search: false,
+                ..Default::default()
+            };
+            let store = PersistentStore::open(config).unwrap();
+            drop(store);
+        }
+
+        let config = PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            read_only: true,
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            ..Default::default()
+        };
+        let store = PersistentStore::open(config).unwrap();
+        let before = store.write_epoch.load(std::sync::atomic::Ordering::Acquire);
+        let error = store.ensure_writable("test_write").unwrap_err();
+        let after = store.write_epoch.load(std::sync::atomic::Ordering::Acquire);
+
+        assert!(matches!(error, MemdError::ReadOnlyStore { .. }));
+        assert_eq!(after, before);
+    }
+
+    #[tokio::test]
+    async fn probe_reports_own_writes_not_external() {
+        let (store, _dir) = make_test_store();
+        let tenant = make_tenant();
+
+        assert_eq!(
+            store.probe_external_mutation().await,
+            ExternalMutationOutcome::Clean
+        );
+        store
+            .add(make_chunk(&tenant, "probe own write"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.probe_external_mutation().await,
+            ExternalMutationOutcome::OwnWrites
+        );
+        assert_eq!(
+            store.probe_external_mutation().await,
+            ExternalMutationOutcome::Clean
+        );
+        let stats = store.ryw_probe_stats().unwrap();
+        assert_eq!(stats.checks, 3);
+        assert_eq!(stats.external_detected, 0);
+        assert_eq!(stats.repairs, 0);
+    }
+
+    #[tokio::test]
+    async fn probe_detects_external_connection_write() {
+        let (store, dir) = make_test_store();
+
+        assert_eq!(
+            store.probe_external_mutation().await,
+            ExternalMutationOutcome::Clean
+        );
+
+        let conn = Connection::open(dir.path().join("metadata.db")).unwrap();
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ryw_probe_external_test(x INTEGER)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO ryw_probe_external_test(x) VALUES (1)", [])
+            .unwrap();
+        drop(conn);
+
+        assert_eq!(
+            store.probe_external_mutation().await,
+            ExternalMutationOutcome::External { repaired: true }
+        );
+        let stats = store.ryw_probe_stats().unwrap();
+        assert_eq!(stats.checks, 2);
+        assert_eq!(stats.external_detected, 1);
+        assert_eq!(stats.repairs, 1);
+    }
+
+    #[tokio::test]
+    async fn read_only_store_probe_is_unavailable() {
+        let dir = tempdir().unwrap();
+        {
+            let config = PersistentStoreConfig {
+                data_dir: dir.path().to_path_buf(),
+                enable_dense_search: false,
+                enable_hybrid_search: false,
+                ..Default::default()
+            };
+            let store = PersistentStore::open(config).unwrap();
+            drop(store);
+        }
+
+        let config = PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            read_only: true,
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            ..Default::default()
+        };
+        let store = PersistentStore::open(config).unwrap();
+
+        assert_eq!(
+            store.probe_external_mutation().await,
+            ExternalMutationOutcome::Unavailable
+        );
+        assert_eq!(store.ryw_probe_stats(), None);
     }
 
     fn make_long_document() -> String {
@@ -4070,7 +4680,7 @@ mod tests {
             let config = PersistentStoreConfig {
                 data_dir: dir.path().to_path_buf(),
                 segment_max_chunks: 100,
-                wal_checkpoint_interval: 10,
+                wal_checkpoint_interval: 0,
                 enable_dense_search: false,
                 enable_hybrid_search: false,
                 ..Default::default()
@@ -4122,8 +4732,10 @@ mod tests {
             let chunk = make_chunk(&tenant, "crash test data");
             chunk_id = store.add(chunk).await.unwrap();
 
-            // Simulate crash: forget without drop (leak the store)
-            std::mem::forget(store);
+            // Leave the active segment below the finalize threshold so
+            // the next writer must recover from WAL, while still dropping
+            // the store to release the process-wide writer flock.
+            drop(store);
         }
 
         // Second session: should recover from WAL
@@ -4131,7 +4743,7 @@ mod tests {
             let config = PersistentStoreConfig {
                 data_dir: dir.path().to_path_buf(),
                 segment_max_chunks: 100,
-                wal_checkpoint_interval: 10,
+                wal_checkpoint_interval: 0,
                 enable_dense_search: false,
                 enable_hybrid_search: false,
                 ..Default::default()
@@ -4157,7 +4769,7 @@ mod tests {
             let config = PersistentStoreConfig {
                 data_dir: dir.path().to_path_buf(),
                 segment_max_chunks: 100,
-                wal_checkpoint_interval: 10,
+                wal_checkpoint_interval: 0,
                 enable_dense_search: false,
                 enable_hybrid_search: false,
                 ..Default::default()
@@ -4189,14 +4801,14 @@ mod tests {
             conn.execute("DELETE FROM task_artifacts", []).unwrap();
             drop(conn);
 
-            std::mem::forget(store);
+            drop(store);
         }
 
         {
             let config = PersistentStoreConfig {
                 data_dir: dir.path().to_path_buf(),
                 segment_max_chunks: 100,
-                wal_checkpoint_interval: 10,
+                wal_checkpoint_interval: 0,
                 enable_dense_search: false,
                 enable_hybrid_search: false,
                 ..Default::default()

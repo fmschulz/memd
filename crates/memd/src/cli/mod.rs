@@ -13,8 +13,10 @@ use tracing::info;
 
 use crate::error::{MemdError, Result};
 use crate::store::metadata::MetadataStore;
+use crate::store::usage::{UsageEvent, UsageOp};
+use crate::store::writer_lock::acquire_writer_lock;
 use crate::store::{Store, TenantManager};
-use crate::types::{ChunkId, MemoryChunk, ProjectId, Source, TenantId};
+use crate::types::{ChunkId, ChunkType, MemoryChunk, ProjectId, Source, TenantId};
 
 mod args;
 mod audit;
@@ -32,29 +34,31 @@ mod ops_bridge;
 mod paths;
 mod purge;
 mod render;
+mod report;
+mod scope;
 mod search;
 mod session_start;
 mod warm;
 
 #[cfg(test)]
-use crate::types::ChunkType;
-#[cfg(test)]
 use args::parse_chunk_type;
 pub use args::{
-    CliCommand, CliQueryMode, ExportFormat, SearchReranker, TenantScopeMode, WarmCommand, WarmMode,
-    WarmProcessConfig,
+    CliCommand, CliQueryMode, ExportFormat, ReportFormat, SearchReranker, StoreAccess,
+    TenantScopeMode, WarmCommand, WarmMode, WarmProcessConfig,
 };
 use args::{ProjectScopeConfig, SearchRerankerOptions};
-use audit::{render_audit_report, run_audit, AuditOptions};
+use audit::{render_audit_report, run_audit, strict_should_fail, AuditOptions};
 use batch::{read_batch_input, run_batch_jsonl, stream_batch_jsonl};
 use call::parse_call_arguments;
 use cleanup_plan::{render_cleanup_plan, run_cleanup_plan, CleanupPlanOptions};
 use consolidate::{run_consolidate, ConsolidateOptions};
-use doctor::{run_doctor, DoctorOptions};
+use doctor::{failing_checks, run_doctor, DoctorOptions};
 use eval_counterfactual::{run_eval_counterfactual, EvalCounterfactualOptions};
 use eval_retrieval::{run_eval_retrieval, EvalRetrievalOptions};
 use eval_write_quality::{run_eval_write_quality, EvalWriteQualityOptions};
-use memory_md::{refresh_memory_md, run_memory_md_eval, MemoryMdEvalOptions, MemoryMdOptions};
+use memory_md::{
+    refresh_memory_md_with_health, run_memory_md_eval, MemoryMdEvalOptions, MemoryMdOptions,
+};
 use ops_bridge::cli_call_tool;
 use paths::{
     absolutize_project_dir, build_tenant_scope_config, normalize_absolute, path_is_inside,
@@ -71,12 +75,186 @@ use render::{
     render_agent_context, render_export, render_guardrail_block, render_search_payload,
     unwrap_content_payload, upsert_guardrail_file, write_cli_log, write_rendered,
 };
+use report::{cli_report_rendered, ReportOptions};
+pub use scope::resolve_command_scope;
 use search::{
     apply_search_reranker, cli_agent_context_payload, cli_search_payload, export_format_name,
 };
 use session_start::{run_session_start, SessionStartOptions};
 use warm::run_warm_worker;
 pub use warm::{run_warm_admin, try_run_warm_client, warm_socket_path};
+
+#[derive(Debug, Clone)]
+pub(super) struct CliAddRenderOptions {
+    pub(super) tenant_id: String,
+    pub(super) text: String,
+    pub(super) chunk_type: ChunkType,
+    pub(super) project_id: Option<String>,
+    pub(super) tags: Option<Vec<String>>,
+    pub(super) source_uri: Option<String>,
+    pub(super) source_path: Option<String>,
+}
+
+pub(super) async fn cli_add_rendered<S: Store>(
+    store: &S,
+    tenant_manager: Option<&TenantManager>,
+    opts: CliAddRenderOptions,
+) -> Result<String> {
+    let tenant = TenantId::new(&opts.tenant_id)?;
+
+    // Ensure tenant directory exists
+    if let Some(tm) = tenant_manager {
+        tm.ensure_tenant_dir(&tenant)?;
+    }
+
+    let project_id_for_usage = opts.project_id.clone();
+    let mut chunk = MemoryChunk::new(tenant, &opts.text, opts.chunk_type);
+
+    if let Some(pid) = opts.project_id {
+        chunk = chunk.with_project(ProjectId::new(Some(pid)));
+    }
+
+    let mut effective_tags = opts.tags.unwrap_or_default();
+    let admission = crate::write_admission::classify_write(
+        opts.chunk_type,
+        &opts.text,
+        &effective_tags,
+        crate::types::IngestionMode::Document,
+    );
+    if admission.decision == crate::write_admission::AdmissionDecision::Reject {
+        store.record_usage_event(UsageEvent {
+            op: UsageOp::Add,
+            tenant: Some(chunk.tenant_id.to_string()),
+            project: project_id_for_usage.clone(),
+            outcome: format!("rejected:{}", admission.reason),
+            chunk_count: Some(0),
+            bytes: Some(opts.text.len() as i64),
+            detail: None,
+        });
+        return Err(crate::error::MemdError::ValidationError(format!(
+            "memory.add rejected by quality gate: {}",
+            admission.reason
+        )));
+    }
+    if admission.decision == crate::write_admission::AdmissionDecision::Durable {
+        crate::auto_priority::stamp_auto_priority(opts.chunk_type, &opts.text, &mut effective_tags);
+    }
+    chunk = chunk.with_tags(effective_tags);
+
+    if opts.source_uri.is_some() || opts.source_path.is_some() {
+        let source = Source {
+            uri: opts.source_uri,
+            path: opts.source_path,
+            ..Default::default()
+        };
+        chunk = chunk.with_source(source);
+    }
+
+    store.record_usage_event(UsageEvent {
+        op: UsageOp::Add,
+        tenant: Some(chunk.tenant_id.to_string()),
+        project: project_id_for_usage,
+        outcome: match admission.decision {
+            crate::write_admission::AdmissionDecision::Durable => "admitted",
+            crate::write_admission::AdmissionDecision::Ephemeral => "downgraded",
+            crate::write_admission::AdmissionDecision::Reject => "rejected",
+        }
+        .to_string(),
+        chunk_count: Some(1),
+        bytes: Some(opts.text.len() as i64),
+        detail: None,
+    });
+
+    let chunk_id = store.add(chunk).await?;
+    info!(chunk_id = %chunk_id, "chunk added");
+
+    let output = json!({
+        "chunk_id": chunk_id.to_string(),
+        "admission_decision": admission.decision.as_str(),
+        "admission_reason": admission.reason,
+    });
+    Ok(serde_json::to_string_pretty(&output)? + "\n")
+}
+
+pub(super) async fn cli_delete_rendered<S: Store>(
+    store: &S,
+    tenant_id: &str,
+    chunk_id: &str,
+) -> Result<String> {
+    let tenant = TenantId::new(tenant_id)?;
+    let cid = ChunkId::parse(chunk_id)?;
+    let deleted = store.delete(&tenant, &cid).await?;
+
+    info!(chunk_id = %cid, deleted = deleted, "delete operation");
+
+    let output = json!({
+        "deleted": deleted
+    });
+    Ok(serde_json::to_string_pretty(&output)? + "\n")
+}
+
+pub(super) async fn cli_import_omf_rendered<S: Store>(
+    store: &S,
+    tenant_manager: Option<&TenantManager>,
+    tenant_id: &str,
+    raw_document: &str,
+    include_archived: bool,
+    fuzzy_threshold: Option<f32>,
+    dry_run: bool,
+) -> Result<String> {
+    let tenant = TenantId::new(tenant_id)?;
+
+    // Read + parse BEFORE any side effect so a malformed input
+    // or a missing file errors out without touching disk. Only
+    // the non-dry-run branch calls `ensure_tenant_dir` — dry-run
+    // stays fully read-only, matching preview_omf_import's operation
+    // semantics (Codex F6 review MEDIUM).
+    let doc: crate::omf::OmfDocument = serde_json::from_str(raw_document).map_err(|e| {
+        crate::error::MemdError::ValidationError(format!(
+            "input is not a valid OMF 1.0 document: {e}"
+        ))
+    })?;
+
+    let ps = store.as_persistent().ok_or_else(|| {
+        crate::error::MemdError::StorageError("import-omf requires a persistent store".to_string())
+    })?;
+    let opts = crate::omf::import::ImportOptions {
+        include_archived,
+        fuzzy_threshold,
+    };
+
+    if dry_run {
+        let preview = crate::omf::import::preview_omf_import(ps, &tenant, &doc, opts).await?;
+        let output = json!({
+            "tenant_id": tenant.to_string(),
+            "dry_run": true,
+            "total": preview.total,
+            "to_import": preview.to_import,
+            "duplicates": preview.duplicates,
+            "filtered": preview.filtered,
+            "unscoped": preview.unscoped,
+            "by_project": preview.by_project,
+        });
+        Ok(serde_json::to_string_pretty(&output)? + "\n")
+    } else {
+        // Real import: now we can materialise the tenant dir.
+        // Done AFTER parse so bad input doesn't create artefacts
+        // on disk.
+        if let Some(tm) = tenant_manager {
+            tm.ensure_tenant_dir(&tenant)?;
+        }
+        let result = crate::omf::import::import_omf(ps, &tenant, &doc, opts).await?;
+        let output = json!({
+            "tenant_id": tenant.to_string(),
+            "dry_run": false,
+            "total": result.total,
+            "imported": result.imported,
+            "duplicates": result.duplicates,
+            "skipped": result.skipped,
+        });
+        Ok(serde_json::to_string_pretty(&output)? + "\n")
+    }
+}
 
 /// Run a CLI command
 ///
@@ -95,56 +273,24 @@ pub async fn run_cli<S: Store>(
             tags,
             source_uri,
             source_path,
+            warm: _,
         } => {
-            let tenant = TenantId::new(&tenant_id)?;
-
-            // Ensure tenant directory exists
-            if let Some(tm) = tenant_manager {
-                tm.ensure_tenant_dir(&tenant)?;
-            }
-
-            let mut chunk = MemoryChunk::new(tenant, &text, chunk_type);
-
-            if let Some(pid) = project_id {
-                chunk = chunk.with_project(ProjectId::new(Some(pid)));
-            }
-
-            let mut effective_tags = tags.unwrap_or_default();
-            let admission = crate::write_admission::classify_write(
-                chunk_type,
-                &text,
-                &effective_tags,
-                crate::types::IngestionMode::Document,
-            );
-            if admission.decision == crate::write_admission::AdmissionDecision::Reject {
-                return Err(crate::error::MemdError::ValidationError(format!(
-                    "memory.add rejected by quality gate: {}",
-                    admission.reason
-                )));
-            }
-            if admission.decision == crate::write_admission::AdmissionDecision::Durable {
-                crate::auto_priority::stamp_auto_priority(chunk_type, &text, &mut effective_tags);
-            }
-            chunk = chunk.with_tags(effective_tags);
-
-            if source_uri.is_some() || source_path.is_some() {
-                let source = Source {
-                    uri: source_uri,
-                    path: source_path,
-                    ..Default::default()
-                };
-                chunk = chunk.with_source(source);
-            }
-
-            let chunk_id = store.add(chunk).await?;
-            info!(chunk_id = %chunk_id, "chunk added");
-
-            let output = json!({
-                "chunk_id": chunk_id.to_string(),
-                "admission_decision": admission.decision.as_str(),
-                "admission_reason": admission.reason,
-            });
-            println!("{}", serde_json::to_string_pretty(&output)?);
+            let tenant_id = scope::require_tenant(tenant_id)?;
+            let rendered = cli_add_rendered(
+                store,
+                tenant_manager,
+                CliAddRenderOptions {
+                    tenant_id,
+                    text,
+                    chunk_type,
+                    project_id,
+                    tags,
+                    source_uri,
+                    source_path,
+                },
+            )
+            .await?;
+            print!("{rendered}");
         }
 
         CliCommand::Search {
@@ -168,6 +314,7 @@ pub async fn run_cli<S: Store>(
             reranker_python,
             warm: _,
         } => {
+            let tenant_id = scope::require_tenant(tenant_id)?;
             let mut payload = cli_search_payload(
                 store,
                 tenant_id,
@@ -211,6 +358,7 @@ pub async fn run_cli<S: Store>(
             log_dir,
             warm: _,
         } => {
+            let tenant_id = scope::require_tenant(tenant_id)?;
             let payload = cli_agent_context_payload(
                 store,
                 &tenant_id,
@@ -238,8 +386,9 @@ pub async fn run_cli<S: Store>(
             cross_tenant,
             explain_output,
         } => {
-            let result = refresh_memory_md(
+            let result = refresh_memory_md_with_health(
                 store,
+                tenant_manager,
                 MemoryMdOptions {
                     tenant_id,
                     project_id,
@@ -269,6 +418,7 @@ pub async fn run_cli<S: Store>(
         } => {
             let result = run_memory_md_eval(
                 store,
+                tenant_manager,
                 MemoryMdEvalOptions {
                     tenant_id,
                     project_id,
@@ -343,6 +493,7 @@ pub async fn run_cli<S: Store>(
             background,
             force,
             promote_to_shared,
+            warm: _,
         } => {
             let result = run_consolidate(
                 store,
@@ -390,8 +541,9 @@ pub async fn run_cli<S: Store>(
         CliCommand::Doctor {
             project_dir,
             format,
+            strict,
         } => {
-            run_doctor(
+            let report = run_doctor(
                 store,
                 DoctorOptions {
                     project_dir,
@@ -399,6 +551,9 @@ pub async fn run_cli<S: Store>(
                 },
             )
             .await?;
+            if strict && !failing_checks(&report).is_empty() {
+                std::process::exit(2);
+            }
         }
 
         CliCommand::Call {
@@ -424,6 +579,7 @@ pub async fn run_cli<S: Store>(
             stream,
             continue_on_error,
             output,
+            warm: _,
         } => {
             if stream {
                 stream_batch_jsonl(
@@ -471,6 +627,8 @@ pub async fn run_cli<S: Store>(
                     None => resolve_data_dir(None)?,
                 },
             };
+            std::fs::create_dir_all(&data_dir)?;
+            let _writer_lock = acquire_writer_lock(&data_dir)?;
             let report = maintenance::run(&data_dir, tenant_id.as_deref(), dry_run, aggressive)?;
             let rendered = maintenance::render_report(&report, dry_run, aggressive);
             print!("{}", rendered);
@@ -480,6 +638,7 @@ pub async fn run_cli<S: Store>(
             tenant_id,
             chunk_id,
         } => {
+            let tenant_id = scope::require_tenant(tenant_id)?;
             let tenant = TenantId::new(&tenant_id)?;
             let cid = ChunkId::parse(&chunk_id)?;
             let chunk = store.get(&tenant, &cid).await?;
@@ -496,20 +655,15 @@ pub async fn run_cli<S: Store>(
         CliCommand::Delete {
             tenant_id,
             chunk_id,
+            warm: _,
         } => {
-            let tenant = TenantId::new(&tenant_id)?;
-            let cid = ChunkId::parse(&chunk_id)?;
-            let deleted = store.delete(&tenant, &cid).await?;
-
-            info!(chunk_id = %cid, deleted = deleted, "delete operation");
-
-            let output = json!({
-                "deleted": deleted
-            });
-            println!("{}", serde_json::to_string_pretty(&output)?);
+            let tenant_id = scope::require_tenant(tenant_id)?;
+            let rendered = cli_delete_rendered(store, &tenant_id, &chunk_id).await?;
+            print!("{rendered}");
         }
 
         CliCommand::Stats { tenant_id } => {
+            let tenant_id = scope::require_tenant(tenant_id)?;
             let tenant = TenantId::new(&tenant_id)?;
             let stats = store.stats(&tenant).await?;
 
@@ -538,6 +692,7 @@ pub async fn run_cli<S: Store>(
             tenant_id,
             project_id,
             format,
+            strict,
             output,
             page_size,
             duplicate_examples,
@@ -556,6 +711,38 @@ pub async fn run_cli<S: Store>(
             )
             .await?;
             write_rendered(output.as_deref(), &render_audit_report(&report, format)?)?;
+            if strict && strict_should_fail(&report) {
+                std::process::exit(2);
+            }
+        }
+
+        CliCommand::Report {
+            tenant_id,
+            project_id,
+            since,
+            format,
+            strict,
+            top,
+            output,
+            warm: _,
+        } => {
+            let (rendered, warn_count) = cli_report_rendered(
+                store,
+                tenant_manager,
+                ReportOptions {
+                    tenant_id,
+                    project_id,
+                    since,
+                    top,
+                    format,
+                    served_via_worker: false,
+                },
+            )
+            .await?;
+            write_rendered(output.as_deref(), &rendered)?;
+            if strict && warn_count > 0 {
+                std::process::exit(2);
+            }
         }
 
         CliCommand::CleanupPlan {
@@ -598,6 +785,7 @@ pub async fn run_cli<S: Store>(
             apply,
             vacuum_metadata,
             rewrite_segments,
+            warm: _,
         } => {
             let result = run_purge(
                 store,
@@ -643,6 +831,7 @@ pub async fn run_cli<S: Store>(
             output,
             page_size,
         } => {
+            let tenant_id = scope::require_tenant(tenant_id)?;
             let tenant = TenantId::new(&tenant_id)?;
             let page_size = page_size.max(1).min(10_000);
             let chunks = collect_all_chunks(store, &tenant, page_size).await?;
@@ -669,6 +858,7 @@ pub async fn run_cli<S: Store>(
             include_history,
             data_dir,
         } => {
+            let tenant_id = scope::require_tenant(tenant_id)?;
             let tenant = TenantId::new(&tenant_id)?;
             let ps = store.as_persistent().ok_or_else(|| {
                 crate::error::MemdError::StorageError(
@@ -819,6 +1009,7 @@ pub async fn run_cli<S: Store>(
             include_superseded,
             include_expired,
         } => {
+            let tenant_id = scope::require_tenant(tenant_id)?;
             let tenant = TenantId::new(&tenant_id)?;
             let ps = store.as_persistent().ok_or_else(|| {
                 crate::error::MemdError::StorageError(
@@ -854,63 +1045,21 @@ pub async fn run_cli<S: Store>(
             include_archived,
             fuzzy_threshold,
             dry_run,
+            warm: _,
         } => {
-            let tenant = TenantId::new(&tenant_id)?;
-
-            // Read + parse BEFORE any side effect so a malformed input
-            // or a missing file errors out without touching disk. Only
-            // the non-dry-run branch calls `ensure_tenant_dir` — dry-run
-            // stays fully read-only, matching preview_omf_import's operation
-            // semantics (Codex F6 review MEDIUM).
+            let tenant_id = scope::require_tenant(tenant_id)?;
             let raw = read_omf_input(input.as_deref())?;
-            let doc: crate::omf::OmfDocument = serde_json::from_str(&raw).map_err(|e| {
-                crate::error::MemdError::ValidationError(format!(
-                    "input is not a valid OMF 1.0 document: {e}"
-                ))
-            })?;
-
-            let ps = store.as_persistent().ok_or_else(|| {
-                crate::error::MemdError::StorageError(
-                    "import-omf requires a persistent store".to_string(),
-                )
-            })?;
-            let opts = crate::omf::import::ImportOptions {
+            let rendered = cli_import_omf_rendered(
+                store,
+                tenant_manager,
+                &tenant_id,
+                &raw,
                 include_archived,
                 fuzzy_threshold,
-            };
-
-            if dry_run {
-                let preview =
-                    crate::omf::import::preview_omf_import(ps, &tenant, &doc, opts).await?;
-                let output = json!({
-                    "tenant_id": tenant.to_string(),
-                    "dry_run": true,
-                    "total": preview.total,
-                    "to_import": preview.to_import,
-                    "duplicates": preview.duplicates,
-                    "filtered": preview.filtered,
-                    "unscoped": preview.unscoped,
-                    "by_project": preview.by_project,
-                });
-                println!("{}", serde_json::to_string_pretty(&output)?);
-            } else {
-                // Real import: now we can materialise the tenant dir.
-                // Done AFTER parse so bad input doesn't create artefacts
-                // on disk.
-                if let Some(tm) = tenant_manager {
-                    tm.ensure_tenant_dir(&tenant)?;
-                }
-                let result = crate::omf::import::import_omf(ps, &tenant, &doc, opts).await?;
-                let output = json!({
-                    "tenant_id": tenant.to_string(),
-                    "dry_run": false,
-                    "total": result.total,
-                    "imported": result.imported,
-                    "duplicates": result.duplicates,
-                    "skipped": result.skipped,
-                });
-                println!("{}", serde_json::to_string_pretty(&output)?);
-            }
+                dry_run,
+            )
+            .await?;
+            print!("{rendered}");
         }
 
         CliCommand::Init {
@@ -1072,13 +1221,14 @@ mod tests {
             &store,
             None,
             CliCommand::Add {
-                tenant_id: "quality_gate_cli".to_string(),
+                tenant_id: Some("quality_gate_cli".to_string()),
                 text: "starting to inspect the files".to_string(),
                 chunk_type: ChunkType::Summary,
                 project_id: None,
                 tags: Some(vec!["kind:progress".to_string()]),
                 source_uri: None,
                 source_path: None,
+                warm: WarmMode::Off,
             },
         )
         .await;
@@ -1103,7 +1253,7 @@ mod tests {
             &store,
             None,
             CliCommand::Export {
-                tenant_id: "export_tenant".to_string(),
+                tenant_id: Some("export_tenant".to_string()),
                 format: ExportFormat::Markdown,
                 output: Some(output_path.clone()),
                 page_size: 100,
@@ -1131,7 +1281,7 @@ mod tests {
             &store,
             None,
             CliCommand::Export {
-                tenant_id: "export_json_tenant".to_string(),
+                tenant_id: Some("export_json_tenant".to_string()),
                 format: ExportFormat::Json,
                 output: Some(output_path.clone()),
                 page_size: 100,

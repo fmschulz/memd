@@ -25,8 +25,8 @@ Use this when multiple agents compare what worked, what failed, and why.
 
 Key commands:
 
-- `memd search --mode find-decisions`
-- `memd search --mode find-evidence`
+- `memd search --mode find_decisions`
+- `memd search --mode find_evidence`
 - `memd add --chunk-type decision --tags kind:decision`
 - `memd add --chunk-type research --tags kind:evidence`
 
