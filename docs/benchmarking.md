@@ -1,19 +1,33 @@
 # Benchmarking
 
-`memd` ships four benchmark families. They exercise different parts of the
+`memd` ships several benchmark families. They exercise different parts of the
 system, so their numbers should not be mixed without the workload context.
 The cross-system [LoCoMo retrieval](#cross-system-retrieval-locomo) result
-is the public headline; the others are internal-corpus or scoped checks.
+is the public headline; the [BEIR offline gate](#offline-retrieval-gate-beir)
+is the per-PR regression tripwire; the others are internal-corpus or scoped
+checks.
 
 ## Quick runs
 
 ```bash
+# Cross-system LoCoMo retrieval (memd vs mem0 vs SuperLocalMemory)
+./evals/benchmarks/locomo/run.sh
+
 # Task-memory benchmark (internal corpus)
 ./evals/bench/scripts/run_task_memory_benchmark.sh
 
 # Offline retrieval benchmark (BEIR fiqa + scidocs)
 ./evals/bench/scripts/run_offline_retrieval_benchmark.sh
+
+# Regenerate the figures on this page from the checked-in result snapshots
+bash evals/notebooks/run_notebooks.sh
 ```
+
+The figures below are produced by the notebooks in
+[`evals/notebooks/`](https://github.com/fmschulz/memd/tree/main/evals/notebooks)
+(`locomo_cross_system.ipynb`, `beir_retrieval_gate.ipynb`), which read the
+checked-in JSON snapshots under `evals/notebooks/data/` and render to
+`docs/figures/`. Re-running them after a fresh benchmark refreshes every plot.
 
 ## Task memory (internal corpus)
 
@@ -72,7 +86,7 @@ evidence IDs (MRR@10 over categories 1–4: 10 conversations, 5,882 turns,
 
 | System | MRR@10 | Hit@1 | Hit@3 | Hit@10 | Avg search | Seed |
 |---|---:|---:|---:|---:|---:|---:|
-| **`memd` v0.50.0** | **0.420** | **0.322** | **0.490** | **0.621** | **26.7 ms** | 108 s |
+| **`memd` (hybrid)** | **0.420** | **0.322** | **0.490** | **0.621** | **26.7 ms** | 108 s |
 | `superlocalmemory` v3.4.46 (lexical) | 0.369 | 0.245 | 0.469 | 0.599 | 804.5 ms | 1.8 s |
 | `mem0` v2.0.2 (LLM-extracted) | 0.354 | 0.255 | 0.412 | 0.591 | 40.9 ms | 13,424 s |
 
@@ -80,6 +94,15 @@ evidence IDs (MRR@10 over categories 1–4: 10 conversations, 5,882 turns,
 search latency. Seeding cost trades off against
 quality — SuperLocalMemory has the cheapest seed (no embeddings in this
 configuration), Mem0 the most expensive (LLM extraction).
+
+![LoCoMo retrieval quality by system: grouped bars for MRR@10, Hit@1, Hit@3, and Hit@10, with memd leading every metric](figures/locomo_quality.svg)
+
+The two axes that matter operationally are quality and query latency. `memd`
+sits in the best corner of both — highest MRR@10 at the lowest latency —
+while SuperLocalMemory's lexical fallback is roughly 30× slower per query
+(bubble area is p95 search latency):
+
+![LoCoMo quality versus query latency: memd top-left at ~27 ms mean latency and 0.420 MRR@10, mem0 lower at ~41 ms, SuperLocalMemory far right as a large slow bubble at ~805 ms](figures/locomo_quality_latency.svg)
 
 ### Per-category
 
@@ -91,6 +114,8 @@ configuration), Mem0 the most expensive (LLM extraction).
 | 2 | specific facts | **0.513** | 0.390 | 0.433 |
 | 3 | open-domain | **0.279** | 0.255 | 0.227 |
 | 4 | long-form | **0.421** | 0.372 | 0.397 |
+
+![LoCoMo MRR@10 by question category as a heatmap: memd is the strongest row across all four categories, peaking on category 2](figures/locomo_per_category.svg)
 
 ### Three design philosophies
 
@@ -109,14 +134,45 @@ configuration), Mem0 the most expensive (LLM extraction).
 
 ### Reproducibility
 
-The full benchmark harness lives in the sibling `memory-benchmark`
-workspace (separate repo). A self-contained in-repo
-`evals/benchmarks/locomo/` is in progress and will land here once the
-SLM embedded mode is debugged upstream and the OpenAI / Anthropic /
-self-hosted vLLM LLM choice is documented for `mem0` reproducers.
+The self-contained harness is in-repo at
+[`evals/benchmarks/locomo/`](https://github.com/fmschulz/memd/tree/main/evals/benchmarks/locomo):
+`./run.sh` fetches the dataset, builds `memd`, runs the `memd` adapter, and
+attempts the optional `mem0` and SuperLocalMemory adapters when their Python
+venvs are present under `evals/benchmarks/locomo/envs/`. The numbers above are
+the `2026-05-22` run; the `memd` retrieval path is unchanged since, so they
+track the current release.
 
 Same-LLM caveat: `mem0` numbers above use a self-hosted vLLM
 `gemma4-31b` endpoint, not the GPT-4-class model the upstream Mem0
 README benchmarks against. Numbers are directly comparable across
 the three systems in this table but not directly comparable to the
 upstream Mem0 leaderboard.
+
+## Offline retrieval gate (BEIR)
+
+The internal regression gate runs hybrid retrieval (all-MiniLM dense + BM25
+sparse + feature reranker) on BEIR FiQA and SciDocs, capped at 30 queries and
+500 documents per dataset (seed 42, 1,000 bootstrap iterations). This is the
+exact configuration the CI
+[`retrieval-gate`](https://github.com/fmschulz/memd/blob/main/.github/workflows/retrieval-gate.yml)
+workflow enforces on every PR, so it is a fast tripwire rather than a precise
+leaderboard — the wide confidence intervals below are a direct consequence of
+the 30-query cap.
+
+| Dataset | nDCG@10 | Recall@10 | MRR | P@10 | Queries |
+|---|---:|---:|---:|---:|---:|
+| BEIR FiQA | 0.694 | 0.882 | 0.587 | 0.100 | 17 |
+| BEIR SciDocs | 0.445 | 0.422 | 0.568 | 0.174 | 30 |
+| cross-corpus (macro avg) | 0.570 | 0.652 | 0.577 | 0.137 | — |
+
+![BEIR nDCG@k retrieval curves for FiQA and SciDocs plus the macro-averaged cross-corpus curve, rising with cutoff k](figures/beir_ndcg_curves.svg)
+
+![BEIR Recall@10, MRR, and P@10 per dataset with 95% bootstrap confidence intervals](figures/beir_metrics_ci.svg)
+
+The gate compares the current code against the checked-in `beir_v1.json`
+baseline with a paired-query test on nDCG@10. The current code clears the
+baseline with a statistically significant improvement (the v0.60/0.61
+memory-quality work lifts mean nDCG@10 from 0.417 to 0.535, p = 0.005, effect
+size 0.41, 21 wins / 9 losses / 17 ties over 47 paired queries):
+
+![BEIR regression gate, PASS: paired-query mean nDCG@10 rises from 0.417 baseline to 0.535 current code, with 21 wins, 9 losses, and 17 ties across 47 paired queries](figures/beir_regression_gate.svg)

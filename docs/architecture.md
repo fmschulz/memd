@@ -104,9 +104,19 @@ Two surfaces, one shared dispatcher.
 
 - **Entry commands.** `memd agent-context` builds a bounded pre-work context
   file with a JSON audit log; `memd search` and `memd add` are the workhorse
-  retrieve/write pair; `memd warm start|status` keeps the store and indexes
-  hot across calls; `memd batch --jsonl` streams structured operations
-  through a single loaded process.
+  retrieve/write pair; `memd warm start|status|stop` manages the worker that
+  keeps the store and indexes hot across calls; `memd batch --jsonl` streams
+  structured operations through a single loaded process. `memd doctor`
+  diagnoses host wiring (binary/worker version skew, the resolved data dir,
+  agent-rule and hook installation).
+- **Retrieval observability.** `memd search` and `memd agent-context` attach a
+  `scope_status` block to every result payload: the effective tenant/project,
+  the `retrieval_mode` (`hybrid` vs `text_fallback` when the embedder is
+  unavailable), a warning when the requested tenant has no stored memory, and
+  a `wider_scope_hits` hint when a project-scoped query comes up short but the
+  tenant holds matching memory one scope wider. This keeps "no memory exists"
+  distinguishable from "scoped past it" and surfaces degraded retrieval
+  in-band instead of only in logs.
 - **Operation surface.** `memd call <op> --json '{...}'` and the typed CLI
   subcommands dispatch to the same handlers: `memory`, `task`, `artifact`,
   `context`, `code`, and `debug`. `memory.*` is intentionally flexible
@@ -142,6 +152,22 @@ paths.
 - **Structural code index** sits next to the metadata DB and serves
   `code.*` definitions, references, callers, and imports without going
   through the hybrid retriever.
+
+### Concurrency and the warm worker
+
+One trusted machine runs **one writer, many readers**. The warm worker is the
+normal writer: it holds an exclusive `flock` on `<data_dir>/.writer.lock` and
+records its pid and `memd` version there. Reads open the store read-only, take
+no lock, and never mutate indexes. Direct writes (`--warm off`, or the cold
+fallback when no worker is reachable) take the same lock with a bounded retry
+budget, so two processes never corrupt the store.
+
+The worker's control socket lives at a stable path derived only from the data
+directory, so a freshly upgraded binary can reach, ping, and replace a worker
+left running by the previous version instead of stranding it. An idle worker
+exits on its own after `MEMD_WARM_IDLE_TIMEOUT_SECS` (default 30 minutes),
+releasing the lock — an orphaned daemon cannot block writes indefinitely. See
+[Shared topology](shared-topology.md) for the single-writer contract in full.
 
 ### On-disk layout
 

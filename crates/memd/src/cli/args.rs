@@ -28,18 +28,6 @@ pub enum ReportFormat {
     Json,
 }
 
-/// Read-scope mode for tenant memory access guardrails.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TenantScopeMode {
-    /// Only read from the current tenant.
-    Local,
-    /// Read from all discovered tenants in the configured data directory.
-    Global,
-    /// Read only from explicitly allowed tenants.
-    Allowlist,
-}
-
 /// Retrieval intent for CLI search/orchestration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -128,14 +116,7 @@ impl From<CliQueryMode> for QueryMode {
 pub(super) struct TenantScopeConfig {
     pub(super) primary_tenant: String,
     pub(super) write_tenant: String,
-    pub(super) scope: TenantScopeMode,
-    /// Optional explicit allowlist (used when scope=allowlist)
-    #[serde(default)]
-    pub(super) allow_tenants: Vec<String>,
-    /// Effective read tenants for retrieval
-    #[serde(default)]
-    pub(super) read_tenants: Vec<String>,
-    /// Data directory used for global tenant discovery
+    /// Data directory used by export-markdown containment discovery
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) data_dir: Option<String>,
 }
@@ -145,8 +126,6 @@ pub(super) struct ProjectScopeConfig {
     pub(super) tenant_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) project_id: Option<String>,
-    #[serde(default)]
-    pub(super) read_tenants: Vec<String>,
     pub(super) interface: String,
     pub(super) cli_command: String,
     pub(super) agent_context_output: String,
@@ -330,8 +309,8 @@ pub enum CliCommand {
     ///
     /// This is intended for agent session startup. It distills up to 10
     /// project-scoped takeaways from memd, writes them to `memory.md`,
-    /// and prints a JSON summary. Machine-wide takeaways are opt-in via
-    /// `--global-limit`.
+    /// and prints a JSON summary. Up to 5 machine-wide takeaways are
+    /// included by default; tune with `--global-limit` (0 disables).
     MemoryMd {
         /// Tenant identifier. Defaults to `.memd/project_scope.json` when present.
         #[arg(long)]
@@ -353,19 +332,14 @@ pub enum CliCommand {
         #[arg(long, default_value_t = 10)]
         project_limit: usize,
 
-        /// Maximum machine-wide takeaways to keep, capped at 10. Defaults to 0.
-        #[arg(long, default_value_t = 0)]
+        /// Maximum machine-wide takeaways to keep, capped at 10.
+        /// Defaults to 5; 0 disables the section.
+        #[arg(long, default_value_t = 5)]
         global_limit: usize,
 
         /// Candidate memories to retrieve per query before scoring
         #[arg(long, default_value_t = 40)]
         candidate_k: usize,
-
-        /// Render a `## Cross-Tenant Takeaways` section sourced from
-        /// `kind:consolidated, priority>=8` chunks across every
-        /// tenant under the data root.
-        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
-        cross_tenant: bool,
 
         /// Optional JSON report explaining retrieved candidates,
         /// priority score components, and display/filter decisions.
@@ -492,7 +466,8 @@ pub enum CliCommand {
         #[arg(long)]
         tenant_id: Option<String>,
 
-        /// Optional project identifier. Defaults to the scope file.
+        /// Optional project identifier. Defaults to the scope file
+        /// only when --tenant-id is also omitted.
         #[arg(long)]
         project_id: Option<String>,
 
@@ -515,13 +490,6 @@ pub enum CliCommand {
         /// Consolidate even when the region is below the threshold.
         #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
         force: bool,
-
-        /// Promote consolidated lessons that span ≥2 distinct
-        /// projects to `MEMD_SHARED_TENANT` (default `shared`).
-        /// OFF by default — never crosses the tenant boundary
-        /// without an explicit opt-in.
-        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
-        promote_to_shared: bool,
 
         /// Route this write through the local warm worker (auto starts one if needed; off runs locally and requires the writer lock; required fails when no worker is reachable)
         #[arg(long, value_enum, default_value = "auto")]
@@ -986,14 +954,6 @@ pub enum CliCommand {
         /// Tenant identifier to enforce in generated policies
         #[arg(long)]
         tenant_id: String,
-
-        /// Tenant read scope mode
-        #[arg(long, value_enum, default_value = "local")]
-        scope: TenantScopeMode,
-
-        /// Comma-separated tenant allowlist (required with --scope allowlist)
-        #[arg(long, value_delimiter = ',')]
-        allow_tenants: Option<Vec<String>>,
 
         /// Project directory where guardrail files will be written
         #[arg(long, default_value = ".")]

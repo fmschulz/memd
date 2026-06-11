@@ -370,6 +370,15 @@ pub trait Store: Send + Sync {
         Ok(chunks.into_iter().map(|c| (c, 1.0)).collect())
     }
 
+    /// Coarse retrieval capability, reported in-band via `scope_status`
+    /// so agents can tell ranked semantic retrieval from degraded
+    /// substring matching. Default matches the `search_with_scores`
+    /// default above (text matching at constant score); PersistentStore
+    /// overrides this when a hybrid/dense searcher is available.
+    fn retrieval_mode(&self) -> &'static str {
+        "text_fallback"
+    }
+
     /// List chunks for a tenant with pagination semantics.
     ///
     /// Default implementation uses `search` with an empty query and applies

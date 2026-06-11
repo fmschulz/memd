@@ -17,7 +17,7 @@ turns, 1,536 queries, MRR@10 over categories 1–4:
 
 | System | MRR@10 | Hit@10 | Avg search | Seed |
 |---|---:|---:|---:|---:|
-| **`memd` v0.50.0** | **0.420** | **0.621** | **26.7 ms** | 108 s |
+| **`memd` (hybrid)** | **0.420** | **0.621** | **26.7 ms** | 108 s |
 | `superlocalmemory` v3.4.46 (lexical) | 0.369 | 0.599 | 804.5 ms | 1.8 s |
 | `mem0` v2.0.2 (LLM-extracted) | 0.354 | 0.591 | 40.9 ms | 13,424 s |
 

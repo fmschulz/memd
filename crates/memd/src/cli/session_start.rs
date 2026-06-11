@@ -150,9 +150,10 @@ pub(super) async fn run_session_start_inner<S: Store>(
             project_dir: project_dir.clone(),
             output: PathBuf::from("memory.md"),
             project_limit: 10,
-            global_limit: 0,
+            // Machine-wide takeaways are on by default so a fresh
+            // project's memory.md surfaces tenant-wide lessons.
+            global_limit: 5,
             candidate_k: 40,
-            cross_tenant: false,
             explain_output: None,
         },
     )
@@ -188,7 +189,6 @@ pub(super) async fn run_session_start_inner<S: Store>(
                         dry_run: false,
                         background: true,
                         force: false,
-                        promote_to_shared: false,
                     },
                 )
                 .await;
@@ -238,7 +238,6 @@ pub(super) fn maybe_auto_create_scope(
     let scope = ProjectScopeConfig {
         tenant_id: inputs.default_tenant.clone(),
         project_id: Some(project_id),
-        read_tenants: vec![inputs.default_tenant.clone()],
         interface: "cli".to_string(),
         cli_command: "memd".to_string(),
         agent_context_output: ".memd/context.md".to_string(),
@@ -401,7 +400,6 @@ mod tests {
         let existing = ProjectScopeConfig {
             tenant_id: "preexisting".to_string(),
             project_id: Some("keep_me".to_string()),
-            read_tenants: vec!["preexisting".to_string()],
             interface: "cli".to_string(),
             cli_command: "memd".to_string(),
             agent_context_output: ".memd/context.md".to_string(),

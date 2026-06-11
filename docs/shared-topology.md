@@ -28,9 +28,12 @@ flowchart LR
 ## Single writer, many readers
 
 The warm worker is the normal writer. It opens `<data_dir>/.writer.lock` with
-an exclusive `flock`, records its pid and start time in the lock file for
-diagnostics, and holds the flock for its whole lifetime. The flock releases
-when the process dies; there is no stale-lock garbage collector.
+an exclusive `flock` and records its pid, memd version, and start time in the
+lock file for diagnostics. The flock releases when the process dies, and an
+idle worker exits on its own after `MEMD_WARM_IDLE_TIMEOUT_SECS` (default
+30 min; `0` disables) so an orphaned worker cannot hold the lock forever. The
+socket path is stable across binary upgrades, so a newer CLI reaches — and
+replaces — a version-skewed worker on first contact.
 
 Read and write commands use `--warm <auto|off|required>` where supported
 (`add`, `search`, `agent-context`, `delete`, `import-omf`, `purge`,
@@ -88,6 +91,9 @@ the lock directly and also requires the worker to be stopped.
   `thread_id`, and `task_id` for narrower retrieval scopes.
 - Cross-tenant project aliasing is **off by default**. Enable it only when
   consolidating mis-routed history; every widened hit produces a warning log.
+- `memd search`/`agent-context` payloads carry a `scope_status` block
+  (retrieval mode, tenant-existence warnings, and a `wider_scope_hits` hint
+  when a project-scoped search misses content that exists tenant-wide).
 - Do not share a live data directory over NFS or other network filesystems;
   `flock` is unreliable there. Move memory across machines with OMF
   export/import instead.

@@ -1,6 +1,6 @@
 # memd
 
-[![Version](https://img.shields.io/badge/version-0.61.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.62.0-blue)](CHANGELOG.md)
 [![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust&logoColor=white)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-fmschulz.github.io%2Fmemd-blue)](https://fmschulz.github.io/memd/)
@@ -166,7 +166,7 @@ Cross-system retrieval on upstream
 
 | System | MRR@10 | Hit@10 | Avg search | Seed |
 |---|---:|---:|---:|---:|
-| **`memd` v0.50.0** | **0.420** | **0.621** | **26.7 ms** | 108 s |
+| **`memd` (hybrid)** | **0.420** | **0.621** | **26.7 ms** | 108 s |
 | `superlocalmemory` v3.4.46 (lexical) | 0.369 | 0.599 | 804.5 ms | 1.8 s |
 | `mem0` v2.0.2 (LLM-extracted) | 0.354 | 0.591 | 40.9 ms | 13,424 s |
 

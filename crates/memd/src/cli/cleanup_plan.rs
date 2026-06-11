@@ -1949,7 +1949,6 @@ mod tests {
         ProjectScopeConfig {
             tenant_id: tenant_id.to_string(),
             project_id: project_id.map(str::to_string),
-            read_tenants: vec![tenant_id.to_string()],
             interface: "cli".to_string(),
             cli_command: "memd".to_string(),
             agent_context_output: ".memd/context.md".to_string(),

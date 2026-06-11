@@ -1,0 +1,28 @@
+{
+  "generated_unix_seconds": 1781161297,
+  "baseline_report": "evals/bench/baselines/beir_v1.json",
+  "candidate_report": "/tmp/memd-bench/candidate-final.json",
+  "baseline_report_shape": "CrossCorpusReport",
+  "candidate_report_shape": "CrossCorpusReport",
+  "alpha": 0.05,
+  "min_effect_size": 0.05,
+  "metric": "ndcg_at_10",
+  "overall_passed": true,
+  "paired_query_count": 47,
+  "metrics": [
+    {
+      "metric": "ndcg_at_10",
+      "baseline_mean": 0.4174897180557936,
+      "candidate_mean": 0.5353455615724225,
+      "mean_difference": 0.11785584351662905,
+      "p_value": 0.0046692289927350306,
+      "effect_size": 0.41265472464567077,
+      "wins": 21,
+      "losses": 9,
+      "ties": 17,
+      "n_pairs": 47,
+      "gate_passed": true,
+      "gate_reason": "No statistically significant practical regression detected"
+    }
+  ]
+}

@@ -107,7 +107,6 @@ enum WarmWireCommand {
         dry_run: bool,
         background: bool,
         force: bool,
-        promote_to_shared: bool,
     },
     Batch {
         jsonl_content: String,
@@ -175,23 +174,19 @@ impl WarmWireResponse {
 }
 
 pub fn warm_socket_path(config: &WarmProcessConfig) -> PathBuf {
+    warm_socket_path_for_data_dir(&config.data_dir)
+}
+
+/// One socket per data dir, stable across binary upgrades.
+/// Version/protocol/model/variant are deliberately NOT hashed so a new
+/// CLI can ping and replace a worker left behind by an old binary;
+/// skew is handled by the ping identity handshake.
+pub(super) fn warm_socket_path_for_data_dir(data_dir: &Path) -> PathBuf {
     let mut hasher = Sha256::new();
-    hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
-    hasher.update(b"\0");
-    hasher.update(WARM_WIRE_PROTOCOL.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(config.data_dir.display().to_string().as_bytes());
-    hasher.update(b"\0");
-    hasher.update(config.embedding_model.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(config.search_variant.as_bytes());
+    hasher.update(data_dir.display().to_string().as_bytes());
     let digest = hasher.finalize();
     let hex = format!("{digest:x}");
-    let data_dir_socket = config
-        .data_dir
-        .join("warm")
-        .join(&hex[..16])
-        .join("memd.sock");
+    let data_dir_socket = data_dir.join("warm").join(&hex[..16]).join("memd.sock");
     if data_dir_socket.to_string_lossy().len() < 100 {
         data_dir_socket
     } else {
@@ -512,7 +507,6 @@ fn warm_wire_command_from_cli(
             dry_run,
             background,
             force,
-            promote_to_shared,
             warm: _,
         } => (
             WarmWireCommand::Consolidate {
@@ -523,7 +517,6 @@ fn warm_wire_command_from_cli(
                 dry_run: *dry_run,
                 background: *background,
                 force: *force,
-                promote_to_shared: *promote_to_shared,
             },
             WarmLocalOutputs {
                 output: None,
@@ -729,7 +722,6 @@ async fn execute_warm_wire_command<S: Store>(
             dry_run,
             background,
             force,
-            promote_to_shared,
         } => {
             let result = run_consolidate(
                 store,
@@ -741,7 +733,6 @@ async fn execute_warm_wire_command<S: Store>(
                     dry_run,
                     background,
                     force,
-                    promote_to_shared,
                 },
             )
             .await?;
@@ -851,7 +842,7 @@ pub async fn try_run_warm_client(config: &WarmProcessConfig, cmd: &CliCommand) -
 }
 
 pub async fn run_warm_admin(config: &WarmProcessConfig, command: WarmCommand) -> Result<()> {
-    let payload = match command {
+    let mut payload = match &command {
         WarmCommand::Start => warm_start(config).await?,
         WarmCommand::Status => match warm_ping(config).await {
             Ok(result) => json!({
@@ -898,6 +889,21 @@ pub async fn run_warm_admin(config: &WarmProcessConfig, command: WarmCommand) ->
             }
         }
     };
+    match command {
+        WarmCommand::Status => {
+            let legacy = ping_legacy_warm_workers(&config.data_dir).await;
+            if !legacy.is_empty() {
+                payload["legacy_workers"] = json!(legacy);
+            }
+        }
+        WarmCommand::Stop => {
+            let legacy_stopped = stop_legacy_warm_workers(&config.data_dir).await;
+            if !legacy_stopped.is_empty() {
+                payload["legacy_stopped"] = json!(legacy_stopped);
+            }
+        }
+        WarmCommand::Start => {}
+    }
     println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }
@@ -949,6 +955,64 @@ fn warm_worker_needs_replacement(error: &MemdError) -> bool {
 async fn replace_incompatible_warm_worker(config: &WarmProcessConfig) -> Result<Value> {
     shutdown_existing_warm_worker_best_effort(config).await;
     warm_start(config).await
+}
+
+/// Socket paths left behind by pre-stable-path binaries. Old versions
+/// hashed version/protocol/model/variant into the socket dir name, so
+/// after an upgrade an old worker may still be listening — and holding
+/// the writer flock — at another `<data_dir>/warm/<hash>/memd.sock`.
+fn legacy_warm_sockets(data_dir: &Path) -> Vec<PathBuf> {
+    let canonical = warm_socket_path_for_data_dir(data_dir);
+    let Ok(entries) = std::fs::read_dir(data_dir.join("warm")) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path().join("memd.sock"))
+        .filter(|socket| socket.exists() && *socket != canonical)
+        .collect()
+}
+
+/// Best-effort ping of legacy-path workers for `warm status`. No
+/// identity validation — these are expected to be old versions.
+async fn ping_legacy_warm_workers(data_dir: &Path) -> Vec<Value> {
+    let mut workers = Vec::new();
+    for socket in legacy_warm_sockets(data_dir) {
+        if let Ok(response) = warm_request(&socket, &WarmWireRequest::Ping).await {
+            if response.ok {
+                workers.push(json!({
+                    "socket": socket,
+                    "result": response.result,
+                }));
+            }
+        }
+    }
+    workers
+}
+
+/// Best-effort shutdown of legacy-path workers for `warm stop`, so
+/// upgrading past the stable-socket change does not strand the
+/// previous worker (and its writer flock).
+async fn stop_legacy_warm_workers(data_dir: &Path) -> Vec<Value> {
+    let mut stopped = Vec::new();
+    for socket in legacy_warm_sockets(data_dir) {
+        let Ok(response) = warm_request(&socket, &WarmWireRequest::Shutdown).await else {
+            continue;
+        };
+        if !response.ok {
+            continue;
+        }
+        let result = response.result.unwrap_or(Value::Null);
+        let pid = result
+            .get("pid")
+            .and_then(Value::as_u64)
+            .and_then(|pid| u32::try_from(pid).ok());
+        let _ = wait_for_warm_pid_exit(pid, Duration::from_secs(10)).await;
+        let _ = std::fs::remove_file(&socket);
+        let _ = std::fs::remove_file(warm_pid_path_for_socket(&socket));
+        stopped.push(json!({ "socket": socket, "pid": pid }));
+    }
+    stopped
 }
 
 async fn warm_start(config: &WarmProcessConfig) -> Result<Value> {
@@ -1061,6 +1125,22 @@ async fn warm_ping(config: &WarmProcessConfig) -> Result<Value> {
     Ok(result)
 }
 
+/// Diagnostic ping for `memd doctor`: returns the worker's identity
+/// WITHOUT validating it, so doctor can report version skew instead of
+/// erroring on it.
+pub(super) async fn warm_ping_identity(data_dir: &Path) -> Result<Value> {
+    let socket = warm_socket_path_for_data_dir(data_dir);
+    let response = warm_request(&socket, &WarmWireRequest::Ping).await?;
+    if !response.ok {
+        return Err(MemdError::ProtocolError(
+            response
+                .error
+                .unwrap_or_else(|| "warm worker ping failed".to_string()),
+        ));
+    }
+    Ok(response.result.unwrap_or(Value::Null))
+}
+
 fn warm_worker_identity(socket: &Path, ryw_probe_stats: Option<RywProbeStats>) -> Value {
     let mut identity = json!({
         "pid": std::process::id(),
@@ -1120,6 +1200,35 @@ async fn warm_request(_socket: &Path, _request: &WarmWireRequest) -> Result<Warm
     ))
 }
 
+/// Default quiet period before an idle warm worker exits and releases
+/// the writer flock.
+const DEFAULT_WARM_IDLE_TIMEOUT_SECS: u64 = 1800;
+
+fn warm_idle_timeout_from_env() -> Option<Duration> {
+    parse_idle_timeout_secs(std::env::var("MEMD_WARM_IDLE_TIMEOUT_SECS").ok().as_deref())
+}
+
+/// `None` disables the timeout (value `0`); missing or unparseable
+/// values fall back to the default.
+fn parse_idle_timeout_secs(value: Option<&str>) -> Option<Duration> {
+    let secs = value
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_WARM_IDLE_TIMEOUT_SECS);
+    (secs > 0).then(|| Duration::from_secs(secs))
+}
+
+/// Total future for the idle-timeout select branch: the expression is
+/// evaluated even when the branch guard is false, so the disabled case
+/// must be a future that never resolves.
+async fn warm_idle_sleep(timeout: Option<Duration>, last_activity: Instant) {
+    match timeout {
+        Some(timeout) => {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(last_activity + timeout)).await
+        }
+        None => std::future::pending().await,
+    }
+}
+
 #[cfg(unix)]
 pub(super) async fn run_warm_worker<S: Store>(
     store: &S,
@@ -1163,6 +1272,8 @@ pub(super) async fn run_warm_worker<S: Store>(
     let mut inflight: FuturesUnordered<Pin<Box<dyn Future<Output = bool> + '_>>> =
         FuturesUnordered::new();
     let mut shutting_down = false;
+    let idle_timeout = warm_idle_timeout_from_env();
+    let mut last_activity = Instant::now();
 
     loop {
         if shutting_down && inflight.is_empty() {
@@ -1171,6 +1282,7 @@ pub(super) async fn run_warm_worker<S: Store>(
 
         tokio::select! {
             accepted = listener.accept(), if !shutting_down && inflight.len() < MAX_INFLIGHT_CONNECTIONS => {
+                last_activity = Instant::now();
                 match accepted {
                     Ok((stream, _)) => {
                         inflight.push(Box::pin(handle_warm_connection(
@@ -1188,11 +1300,20 @@ pub(super) async fn run_warm_worker<S: Store>(
             }
 
             completed = inflight.next(), if !inflight.is_empty() => {
+                last_activity = Instant::now();
                 if let Some(shutdown_requested) = completed {
                     if shutdown_requested {
                         shutting_down = true;
                     }
                 }
+            }
+
+            // Orphaned workers must not hold the writer flock forever:
+            // exit cleanly after a quiet period so the lock releases
+            // even when nobody runs `memd warm stop`.
+            _ = warm_idle_sleep(idle_timeout, last_activity), if idle_timeout.is_some() && inflight.is_empty() => {
+                info!("warm worker idle timeout reached; exiting");
+                break;
             }
         }
     }
@@ -1294,6 +1415,38 @@ mod tests {
             embedding_model: "all-minilm".to_string(),
             search_variant: "hybrid-feature".to_string(),
         }
+    }
+
+    #[test]
+    fn parse_idle_timeout_defaults_and_disables() {
+        assert_eq!(
+            parse_idle_timeout_secs(None),
+            Some(Duration::from_secs(DEFAULT_WARM_IDLE_TIMEOUT_SECS))
+        );
+        assert_eq!(parse_idle_timeout_secs(Some("0")), None);
+        assert_eq!(
+            parse_idle_timeout_secs(Some("garbage")),
+            Some(Duration::from_secs(DEFAULT_WARM_IDLE_TIMEOUT_SECS))
+        );
+        assert_eq!(
+            parse_idle_timeout_secs(Some(" 42 ")),
+            Some(Duration::from_secs(42))
+        );
+    }
+
+    #[test]
+    fn legacy_warm_sockets_excludes_canonical_dir() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let canonical = warm_socket_path_for_data_dir(&data_dir);
+        std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+        std::fs::write(&canonical, b"").unwrap();
+        let legacy = data_dir.join("warm").join("legacyhash16char").join("memd.sock");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, b"").unwrap();
+
+        let found = legacy_warm_sockets(&data_dir);
+        assert_eq!(found, vec![legacy]);
     }
 
     fn search_command(include_superseded: bool, warm: WarmMode) -> CliCommand {
@@ -1494,7 +1647,6 @@ mod tests {
                 dry_run: true,
                 background: false,
                 force: true,
-                promote_to_shared: false,
             },
             WarmWireCommand::Batch {
                 jsonl_content: "{\"tool\":\"memory.stats\"}\n".to_string(),

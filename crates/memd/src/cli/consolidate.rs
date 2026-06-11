@@ -42,10 +42,6 @@ pub(super) struct ConsolidateOptions {
     pub(super) dry_run: bool,
     pub(super) background: bool,
     pub(super) force: bool,
-    /// Promote consolidated lessons that span ≥2 projects to the
-    /// shared tenant. OFF by default so consolidation never crosses
-    /// the tenant boundary without an explicit opt-in.
-    pub(super) promote_to_shared: bool,
 }
 
 /// Entry point: resolves the consolidator backend from the
@@ -112,16 +108,8 @@ async fn consolidate_core<S: Store>(
 
     let now = now_ms();
     let inherited_ctx = most_common_ctx_tags(&region, 3);
-    // Map from source `chunk_id` → owning `project_id` so a
-    // multi-project supersedes set triggers cross-tenant promotion.
-    let source_projects = source_project_map(&region);
-    let shared_tenant = std::env::var("MEMD_SHARED_TENANT")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "shared".to_string());
     let mut written = Vec::new();
     let mut tombstoned = 0usize;
-    let mut promoted = 0usize;
 
     for entry in &entries {
         let new_id = persist_consolidated(
@@ -135,161 +123,30 @@ async fn consolidate_core<S: Store>(
         .await?;
         tombstoned += tombstone_sources(store, &tenant, entry, &new_id, now).await?;
         written.push(new_id.to_string());
-
-        if options.promote_to_shared && spans_multiple_projects(entry, &source_projects) {
-            // Best-effort promotion to the shared tenant; gated on
-            // the explicit `--promote-to-shared` opt-in so the
-            // default consolidate flow never crosses tenants.
-            if promote_to_shared_tenant(
-                store,
-                &shared_tenant,
-                &tenant_id,
-                entry,
-                consolidator.name(),
-                &new_id,
-                &source_projects,
-                &inherited_ctx,
-            )
-            .await
-            .is_ok()
-            {
-                promoted += 1;
-            }
-        }
     }
 
     write_last_consolidation_ms(&state_path, now)?;
 
-    Ok(json!({
+    // Tenant-wide runs persist lessons with no project_id; flag that
+    // project-scoped searches will not surface them.
+    let tenant_wide_write = project_id.is_none() && !written.is_empty();
+    let mut summary = json!({
         "tenant_id": tenant_id,
         "project_id": project_id,
         "region_size": region.len(),
         "consolidated": written.len(),
         "tombstoned": tombstoned,
-        "promoted_to_shared": promoted,
         "consolidator": consolidator.name(),
         "new_chunk_ids": written,
-    }))
-}
-
-/// Build `source_chunk_id → project_id` so we can tell which projects
-/// each consolidated entry spans. Sources without a project id are
-/// recorded as the empty string so they still form a distinct bucket.
-fn source_project_map(region: &[RegionChunk]) -> std::collections::HashMap<String, String> {
-    region
-        .iter()
-        .map(|chunk| {
-            (
-                chunk.chunk_id.clone(),
-                chunk.project_id.clone().unwrap_or_default(),
-            )
-        })
-        .collect()
-}
-
-/// True if `entry.supersedes` references chunks from ≥2 distinct
-/// named projects. Unscoped sources (empty string bucket) are
-/// excluded so a lesson spanning "one real project + ambient chunks"
-/// is not treated as multi-project.
-fn spans_multiple_projects(
-    entry: &ConsolidatedEntry,
-    source_projects: &std::collections::HashMap<String, String>,
-) -> bool {
-    let projects: std::collections::HashSet<&str> = entry
-        .supersedes
-        .iter()
-        .filter_map(|id| source_projects.get(id).map(String::as_str))
-        .filter(|p| !p.is_empty())
-        .collect();
-    projects.len() >= 2
-}
-
-/// Persist a copy of `entry` under the shared tenant with the
-/// `kind:cross_tenant_promoted` provenance tags. The copy is itself
-/// `kind:consolidated` so memory.md's cross-tenant section picks it
-/// up; nothing in the source tenant changes.
-///
-/// Idempotent: identified by
-/// `provenance:<source_tenant>:<sha-of-source-id+supersedes>`. If a
-/// matching promotion already exists in the shared tenant we return
-/// its id without writing a new chunk.
-async fn promote_to_shared_tenant<S: Store>(
-    store: &S,
-    shared_tenant: &str,
-    source_tenant: &str,
-    entry: &ConsolidatedEntry,
-    consolidator_name: &str,
-    source_consolidated_id: &ChunkId,
-    source_projects: &std::collections::HashMap<String, String>,
-    inherited_ctx: &[String],
-) -> Result<ChunkId> {
-    let tenant = TenantId::new(shared_tenant)?;
-    let provenance = promotion_provenance_tag(
-        source_tenant,
-        &source_consolidated_id.to_string(),
-        &entry.supersedes,
-    );
-
-    // Idempotency: scan recent shared-tenant chunks for the same
-    // provenance tag. Best-effort — failure here only risks a
-    // duplicate write, not data loss.
-    if let Ok(existing) = store.list_chunks_for_project(&tenant, None, 500, 0).await {
-        for chunk in existing {
-            if chunk.tags.iter().any(|t| t == &provenance) {
-                return Ok(chunk.chunk_id);
-            }
-        }
+    });
+    if tenant_wide_write {
+        summary["warning"] = json!(
+            "consolidated lessons written without project_id; project-scoped searches \
+             will not see them (they surface via tenant-wide search and memory-md \
+             machine-wide takeaways)"
+        );
     }
-
-    let source_project_list: std::collections::BTreeSet<&str> = entry
-        .supersedes
-        .iter()
-        .filter_map(|id| source_projects.get(id).map(String::as_str))
-        .filter(|p| !p.is_empty())
-        .collect();
-    let source_projects_tag = format!(
-        "source_projects:{}",
-        source_project_list
-            .into_iter()
-            .collect::<Vec<_>>()
-            .join(",")
-    );
-
-    let mut tags = vec![
-        "kind:consolidated".to_string(),
-        "kind:cross_tenant_promoted".to_string(),
-        format!("priority:{}", entry.priority),
-        format!("supersedes:{}", entry.supersedes.join(",")),
-        format!("consolidator:{consolidator_name}"),
-        format!("source_tenant:{source_tenant}"),
-        format!("source_chunk:{source_consolidated_id}"),
-        source_projects_tag,
-        provenance,
-    ];
-    tags.extend(inherited_ctx.iter().cloned());
-    let chunk = MemoryChunk::new(tenant, &entry.text, ChunkType::Summary).with_tags(tags);
-    store.add(chunk).await
-}
-
-/// Deterministic provenance tag: `provenance:<tenant>:<sha8>` over
-/// the source consolidated chunk id plus the sorted supersedes list.
-fn promotion_provenance_tag(
-    source_tenant: &str,
-    source_chunk: &str,
-    supersedes: &[String],
-) -> String {
-    use sha2::{Digest, Sha256};
-    let mut sorted = supersedes.to_vec();
-    sorted.sort();
-    let mut hasher = Sha256::new();
-    hasher.update(source_tenant.as_bytes());
-    hasher.update(b"|");
-    hasher.update(source_chunk.as_bytes());
-    hasher.update(b"|");
-    hasher.update(sorted.join(",").as_bytes());
-    let digest = hasher.finalize();
-    let short: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
-    format!("provenance:{source_tenant}:{short}")
+    Ok(summary)
 }
 
 /// Count the chunks that would form the consolidation region for the
@@ -317,15 +174,22 @@ pub(super) async fn dirty_region_size<S: Store>(
 }
 
 /// Resolve `(tenant_id, project_id)` from explicit args, falling back
-/// to `.memd/project_scope.json` then `.memd/config.json`.
+/// to `.memd/project_scope.json` then `.memd/config.json`. Mirrors
+/// `scope::resolve_required`: an explicit `--tenant-id` suppresses
+/// scope-file inheritance entirely, so a tenant-wide run is never
+/// silently narrowed to the cwd scope file's project_id.
 pub(super) fn resolve_scope(
     project_dir: &Path,
     tenant_arg: Option<String>,
     project_arg: Option<String>,
 ) -> Result<(String, Option<String>)> {
+    if let Some(tenant_id) = tenant_arg {
+        return Ok((tenant_id, project_arg));
+    }
     let scope = read_scope_file(project_dir);
-    let tenant_id = tenant_arg
-        .or_else(|| scope.as_ref().and_then(|s| s.tenant_id.clone()))
+    let tenant_id = scope
+        .as_ref()
+        .and_then(|s| s.tenant_id.clone())
         .ok_or_else(|| {
             MemdError::ValidationError(
                 "consolidate requires --tenant-id or .memd/project_scope.json".to_string(),
@@ -625,9 +489,6 @@ fn spawn_background(options: &ConsolidateOptions) -> Result<Value> {
     if options.force {
         command.arg("--force");
     }
-    if options.promote_to_shared {
-        command.arg("--promote-to-shared");
-    }
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -657,6 +518,9 @@ mod tests {
     use crate::store::persistent::{PersistentStore, PersistentStoreConfig};
     use crate::store::Store;
     use tempfile::tempdir;
+
+    /// Serialises tests that set the process-global `MOCK_RESPONSE_ENV`.
+    static MOCK_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn persistent_store(dir: &Path) -> PersistentStore {
         let cfg = PersistentStoreConfig {
@@ -745,7 +609,6 @@ mod tests {
             dry_run: false,
             background: false,
             force: false,
-            promote_to_shared: false,
         };
         let consolidator = MockEnvConsolidator;
         let result = consolidate_core(&store, opts, &consolidator).await.unwrap();
@@ -777,6 +640,7 @@ mod tests {
             r#"[{{"text":"Cache keys must be tenant-scoped.","supersedes":{},"priority":8}}]"#,
             serde_json::to_string(&ids).unwrap()
         );
+        let _guard = MOCK_ENV_LOCK.lock().unwrap();
         std::env::set_var(crate::consolidate::MOCK_RESPONSE_ENV, &response);
 
         let opts = ConsolidateOptions {
@@ -787,7 +651,6 @@ mod tests {
             dry_run: false,
             background: false,
             force: false,
-            promote_to_shared: false,
         };
         let consolidator = MockEnvConsolidator;
         let result = consolidate_core(&store, opts, &consolidator).await.unwrap();
@@ -795,6 +658,8 @@ mod tests {
 
         assert_eq!(result["consolidated"], 1);
         assert_eq!(result["tombstoned"], 12);
+        // Project-scoped runs must not warn about tenant-wide writes.
+        assert!(result.get("warning").is_none());
 
         // Sources are now superseded; the consolidated chunk carries
         // the provenance tag.
@@ -833,12 +698,67 @@ mod tests {
             dry_run: true,
             background: false,
             force: false,
-            promote_to_shared: false,
         };
         // A mock with no response env set must NOT be invoked.
         let consolidator = MockEnvConsolidator;
         let result = consolidate_core(&store, opts, &consolidator).await.unwrap();
         assert_eq!(result["dry_run"], true);
         assert!(result["prompt"].as_str().unwrap().contains("CHUNKS:"));
+    }
+
+    #[tokio::test]
+    async fn explicit_tenant_ignores_scope_file_project() {
+        let dir = tempdir().unwrap();
+        // cwd scope file names another tenant/project; an explicit
+        // --tenant-id must not inherit its project_id, so the region
+        // stays tenant-wide (the old code narrowed it to 0 chunks).
+        std::fs::create_dir_all(dir.path().join(".memd")).unwrap();
+        std::fs::write(
+            dir.path().join(".memd/project_scope.json"),
+            r#"{"tenant_id":"other_tenant","project_id":"other_project"}"#,
+        )
+        .unwrap();
+        let store = persistent_store(&dir.path().join("store"));
+        let tenant = TenantId::new("t").unwrap();
+        let mut ids = Vec::new();
+        for i in 0..12 {
+            let id = store
+                .add(
+                    MemoryChunk::new(tenant.clone(), format!("lesson {i}"), ChunkType::Summary)
+                        .with_project(ProjectId::from("p")),
+                )
+                .await
+                .unwrap();
+            ids.push(id.to_string());
+        }
+        let response = format!(
+            r#"[{{"text":"One tenant-wide lesson.","supersedes":{},"priority":8}}]"#,
+            serde_json::to_string(&ids).unwrap()
+        );
+        let _guard = MOCK_ENV_LOCK.lock().unwrap();
+        std::env::set_var(crate::consolidate::MOCK_RESPONSE_ENV, &response);
+        let opts = ConsolidateOptions {
+            tenant_id: Some("t".to_string()),
+            project_id: None,
+            project_dir: dir.path().to_path_buf(),
+            max_region: 50,
+            dry_run: false,
+            background: false,
+            force: false,
+        };
+        let result = consolidate_core(&store, opts, &MockEnvConsolidator)
+            .await
+            .unwrap();
+        std::env::remove_var(crate::consolidate::MOCK_RESPONSE_ENV);
+
+        // Old behavior borrowed "other_project" from the scope file:
+        // region_size 0 -> skipped:below_threshold.
+        assert_eq!(result["region_size"], 12);
+        assert_eq!(result["consolidated"], 1);
+        assert!(result["project_id"].is_null());
+        assert!(result["warning"]
+            .as_str()
+            .unwrap()
+            .contains("project-scoped searches"));
     }
 }

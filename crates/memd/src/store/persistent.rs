@@ -2475,6 +2475,17 @@ impl Store for PersistentStore {
         ))
     }
 
+    fn retrieval_mode(&self) -> &'static str {
+        // Mirrors search_with_scores_real's dispatch: without a hybrid
+        // or dense searcher, queries degrade to substring matching at
+        // constant score.
+        if self.hybrid_searcher.is_some() || self.dense_searcher.is_some() {
+            "hybrid"
+        } else {
+            "text_fallback"
+        }
+    }
+
     async fn delete(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<bool> {
         self.ensure_writable("delete")?;
         self.delete_chunk(tenant_id, chunk_id).await

@@ -109,8 +109,9 @@ mod imp {
         file.seek(SeekFrom::Start(0))?;
         writeln!(
             file,
-            "pid={} started_unix_ms={}",
+            "pid={} version={} started_unix_ms={}",
             std::process::id(),
+            env!("CARGO_PKG_VERSION"),
             started_unix_ms
         )?;
         file.sync_all()?;
@@ -138,6 +139,7 @@ mod imp {
             let _guard = acquire_writer_lock(dir.path()).unwrap();
             let text = std::fs::read_to_string(dir.path().join(".writer.lock")).unwrap();
             assert!(text.contains("pid="));
+            assert!(text.contains(&format!("version={}", env!("CARGO_PKG_VERSION"))));
             assert!(text.contains("started_unix_ms="));
         }
 

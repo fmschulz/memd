@@ -241,8 +241,8 @@ file in the repo root.
 
 ### Explicit (full guardrails)
 
-For richer per-repo guardrails — tenant scope rules, AGENTS.md / CLAUDE.md
-upserts, custom `read_tenants` — run:
+For richer per-repo guardrails — pinned tenant scope, AGENTS.md / CLAUDE.md
+upserts — run:
 
 ```bash
 memd init --tenant-id quickstart --project-id auth

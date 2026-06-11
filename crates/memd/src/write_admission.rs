@@ -28,6 +28,9 @@ impl AdmissionDecision {
 pub struct AdmissionOutcome {
     pub decision: AdmissionDecision,
     pub reason: String,
+    /// In-band caller warning, e.g. a high-priority write admitted at
+    /// downgraded priority.
+    pub warning: Option<String>,
 }
 
 impl AdmissionOutcome {
@@ -35,6 +38,15 @@ impl AdmissionOutcome {
         Self {
             decision: AdmissionDecision::Durable,
             reason: reason.into(),
+            warning: None,
+        }
+    }
+
+    pub fn durable_with_warning(reason: impl Into<String>, warning: impl Into<String>) -> Self {
+        Self {
+            decision: AdmissionDecision::Durable,
+            reason: reason.into(),
+            warning: Some(warning.into()),
         }
     }
 
@@ -42,6 +54,7 @@ impl AdmissionOutcome {
         Self {
             decision: AdmissionDecision::Ephemeral,
             reason: reason.into(),
+            warning: None,
         }
     }
 
@@ -49,6 +62,7 @@ impl AdmissionOutcome {
         Self {
             decision: AdmissionDecision::Reject,
             reason: reason.into(),
+            warning: None,
         }
     }
 }
@@ -71,8 +85,15 @@ pub fn classify_write(
     }
 
     if explicit_high_priority(tags) && !has_concrete_agent_action(trimmed) {
-        return AdmissionOutcome::reject(
-            "priority:8+ or importance:8+ memories require a concrete Agent action: sentence",
+        // Admit-and-downgrade instead of reject: losing a legitimate
+        // lesson outright costs more than storing it one notch lower.
+        return AdmissionOutcome::durable_with_warning(
+            "high-priority memory without concrete Agent action; priority downgraded to 7",
+            format!(
+                "priority:8+ or importance:8+ memories need a concrete 'Agent action:' \
+                 sentence (>= 24 chars containing one of: {}); stored at priority 7",
+                ACTION_VERBS.join(", ")
+            ),
         );
     }
 
@@ -148,6 +169,26 @@ fn explicit_high_priority(tags: &[String]) -> bool {
     })
 }
 
+/// Rewrite `priority:`/`importance:` tags valued 8+ down to 7. Applied
+/// when a high-priority write lacks a concrete `Agent action:` line.
+pub fn downgrade_high_priority_tags(tags: &mut [String]) {
+    for tag in tags.iter_mut() {
+        let Some(prefix) = ["priority:", "importance:"]
+            .iter()
+            .find(|p| tag.starts_with(*p))
+        else {
+            continue;
+        };
+        if tag[prefix.len()..]
+            .parse::<f32>()
+            .map(|v| v >= 8.0)
+            .unwrap_or(false)
+        {
+            *tag = format!("{prefix}7");
+        }
+    }
+}
+
 fn has_concrete_agent_action(text: &str) -> bool {
     concrete_agent_action_candidates(text, "agent action:").any(is_concrete_agent_action)
 }
@@ -184,29 +225,17 @@ fn is_concrete_agent_action(action: &str) -> bool {
     action.chars().count() >= 24 && contains_action_verb(action)
 }
 
+/// Imperative verbs that make an `Agent action:` sentence concrete.
+/// Shared with memory-md rendering so the gate and the renderer agree.
+pub(crate) const ACTION_VERBS: &[&str] = &[
+    "apply", "avoid", "check", "configure", "confirm", "disable", "do", "enable", "export",
+    "follow", "include", "keep", "pin", "point", "prefer", "record", "resolve", "reuse", "run",
+    "set", "treat", "update", "use", "verify", "write",
+];
+
 fn contains_action_verb(text: &str) -> bool {
     text.split(|ch: char| !ch.is_ascii_alphabetic())
-        .any(|word| {
-            matches!(
-                word.to_ascii_lowercase().as_str(),
-                "apply"
-                    | "avoid"
-                    | "check"
-                    | "confirm"
-                    | "do"
-                    | "follow"
-                    | "include"
-                    | "prefer"
-                    | "record"
-                    | "resolve"
-                    | "reuse"
-                    | "run"
-                    | "treat"
-                    | "use"
-                    | "verify"
-                    | "write"
-            )
-        })
+        .any(|word| ACTION_VERBS.contains(&word.to_ascii_lowercase().as_str()))
 }
 
 fn durable_signal_reason(
@@ -398,15 +427,54 @@ mod tests {
     }
 
     #[test]
-    fn rejects_high_priority_without_agent_action() {
+    fn downgrades_high_priority_without_agent_action() {
         let outcome = classify_write(
             ChunkType::Summary,
             "starting",
             &tags(&["kind:progress", "priority:9"]),
             IngestionMode::Document,
         );
-        assert_eq!(outcome.decision, AdmissionDecision::Reject);
-        assert!(outcome.reason.contains("Agent action"));
+        // Admitted, not rejected — but downgraded with an in-band
+        // warning naming the verb allowlist.
+        assert_eq!(outcome.decision, AdmissionDecision::Durable);
+        assert!(outcome.reason.contains("downgraded to 7"));
+        let warning = outcome.warning.expect("downgrade warning");
+        assert!(warning.contains("Agent action"));
+        assert!(warning.contains("set"), "warning lists the allowlist: {warning}");
+    }
+
+    #[test]
+    fn accepts_high_priority_with_expanded_verbs() {
+        // "set"/"pin" were missing from the old 16-verb allowlist and
+        // rejected legitimate lessons in testing.
+        let outcome = classify_write(
+            ChunkType::Summary,
+            "Validation: batch size fix passed. Agent action: always set ALPHA_EMBED_BATCH=32 before running the embed worker.",
+            &tags(&["kind:finish", "priority:9"]),
+            IngestionMode::Document,
+        );
+        assert_eq!(outcome.decision, AdmissionDecision::Durable);
+        assert!(outcome.warning.is_none());
+    }
+
+    #[test]
+    fn downgrade_high_priority_tags_rewrites_only_eight_plus() {
+        let mut tags = vec![
+            "priority:9".to_string(),
+            "importance:8".to_string(),
+            "priority:5".to_string(),
+            "kind:finish".to_string(),
+        ];
+        downgrade_high_priority_tags(&mut tags);
+        assert_eq!(
+            tags,
+            vec![
+                "priority:7".to_string(),
+                "importance:7".to_string(),
+                "priority:5".to_string(),
+                "kind:finish".to_string(),
+            ]
+        );
     }
 
     #[test]

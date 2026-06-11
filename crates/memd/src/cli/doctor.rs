@@ -40,13 +40,16 @@ const PROJECT_DRIFT_PAGE_SIZE: usize = 500;
 #[derive(Debug, Clone)]
 pub(super) struct DoctorOptions {
     pub(super) project_dir: PathBuf,
+    /// Resolved global --data-dir; doctor diagnoses this store, not a
+    /// hardcoded ~/.memd/data.
+    pub(super) data_dir: Option<PathBuf>,
     pub(super) format: ExportFormat,
 }
 
 /// Run the doctor command. Returns the structured report as JSON; the
 /// CLI dispatcher renders it according to `options.format`.
 pub(super) async fn run_doctor<S: Store>(store: &S, options: DoctorOptions) -> Result<Value> {
-    let mut report = collect_report(&options.project_dir);
+    let mut report = collect_report(&options.project_dir, options.data_dir.as_deref()).await;
     if let Some(scope) = report.get_mut("project_scope") {
         enrich_project_scope_memory(store, scope).await;
     }
@@ -64,9 +67,10 @@ pub(super) async fn run_doctor<S: Store>(store: &S, options: DoctorOptions) -> R
     Ok(report)
 }
 
-fn collect_report(project_dir: &Path) -> Value {
+async fn collect_report(project_dir: &Path, resolved_data_dir: Option<&Path>) -> Value {
     let binary = check_binary();
-    let data_dir = check_data_dir();
+    let data_dir = check_data_dir(resolved_data_dir);
+    let warm_worker = check_warm_worker(resolved_data_dir).await;
     let claude_rules = check_rules_file(home_path(".claude/CLAUDE.md").as_deref());
     let codex_rules = check_rules_file(home_path(".codex/AGENTS.md").as_deref());
     let cursor_rules = check_cursor_rules();
@@ -76,6 +80,7 @@ fn collect_report(project_dir: &Path) -> Value {
     json!({
         "binary": binary,
         "data_dir": data_dir,
+        "warm_worker": warm_worker,
         "global_rules": {
             "claude_md": claude_rules,
             "codex_agents_md": codex_rules,
@@ -90,16 +95,50 @@ fn check_binary() -> Value {
     let exe = std::env::current_exe().ok();
     let on_path = find_on_path("memd");
     let version = env!("CARGO_PKG_VERSION");
-    // "ok" means `memd` is discoverable via PATH — that's what
-    // matters for SessionStart hooks and skill invocations. Knowing
-    // the current process's exe is informational only.
-    json!({
-        "ok": on_path.is_some(),
+    // "ok" means `memd` is discoverable via PATH AND not version-skewed
+    // against this process — a stale PATH binary means hooks and skills
+    // run old code no matter what was just built.
+    let path_version = on_path.as_deref().and_then(binary_version);
+    let skew = matches!(&path_version, Some(v) if v != version);
+    let fix = if on_path.is_none() {
+        "run: make install (from the memd repo)"
+    } else if skew {
+        "run: make install (from the memd repo); then hash -r to clear the shell PATH cache"
+    } else {
+        ""
+    };
+    let mut value = json!({
+        "ok": on_path.is_some() && !skew,
         "current_exe": exe.as_ref().map(|p| p.display().to_string()),
         "on_path": on_path.as_ref().map(|p| p.display().to_string()),
         "version": version,
-        "fix": if on_path.is_some() { "" } else { "run: make install (from the memd repo)" },
-    })
+        "path_version": path_version,
+        "fix": fix,
+    });
+    if skew {
+        value["reason"] = json!(format!(
+            "memd on PATH is v{} but this process is v{version}",
+            value["path_version"].as_str().unwrap_or("unknown")
+        ));
+    }
+    value
+}
+
+/// Actual version of the binary at `path` via `<path> --version`
+/// (clap prints `memd X.Y.Z`), so doctor reports the PATH binary's
+/// real version instead of this process's compile-time version.
+fn binary_version(path: &Path) -> Option<String> {
+    let output = std::process::Command::new(path)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .last()
+        .map(str::to_string)
 }
 
 /// Walk `$PATH` for an executable named `name`. Returns the first
@@ -128,8 +167,10 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
     None
 }
 
-fn check_data_dir() -> Value {
-    let path = dirs::home_dir().map(|h| h.join(".memd").join("data"));
+fn check_data_dir(resolved: Option<&Path>) -> Value {
+    let path = resolved
+        .map(Path::to_path_buf)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".memd").join("data")));
     let exists = path.as_ref().map(|p| p.exists()).unwrap_or(false);
     let tenant_count = path.as_ref().map(|p| count_tenant_dirs(p)).unwrap_or(0);
     let fresh = !exists || tenant_count == 0;
@@ -161,6 +202,54 @@ fn check_data_dir() -> Value {
         value["note"] = json!("empty — fresh install");
     }
     value
+}
+
+/// Ping the warm worker for the resolved data dir and flag
+/// worker-vs-CLI version skew: a stale daemon serves old code for
+/// every project on the machine until it is restarted.
+async fn check_warm_worker(data_dir: Option<&Path>) -> Value {
+    let Some(data_dir) = data_dir else {
+        return json!({"ok": true, "note": "no data dir resolved", "fix": ""});
+    };
+    match super::warm::warm_ping_identity(data_dir).await {
+        Err(_) => json!({
+            "ok": true,
+            "status": "not_running",
+            "note": "no warm worker running (started on demand by --warm auto)",
+            "fix": "",
+        }),
+        Ok(identity) => {
+            let worker_version = identity
+                .get("memd_version")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            let cli_version = env!("CARGO_PKG_VERSION");
+            let skew = worker_version != cli_version;
+            let mut value = json!({
+                "ok": !skew,
+                "status": "running",
+                "pid": identity.get("pid").cloned().unwrap_or(Value::Null),
+                "worker_version": worker_version,
+                "cli_version": cli_version,
+                "fix": if skew {
+                    format!(
+                        "run: memd --data-dir {} warm stop (a fresh worker starts on the next warm command)",
+                        data_dir.display()
+                    )
+                } else {
+                    String::new()
+                },
+            });
+            if skew {
+                value["reason"] = json!(format!(
+                    "warm worker is v{} but CLI is v{cli_version}",
+                    value["worker_version"].as_str().unwrap_or("unknown")
+                ));
+            }
+            value
+        }
+    }
 }
 
 fn probe_data_dir_writable(path: &Path) -> bool {
@@ -548,6 +637,7 @@ pub(super) fn failing_checks(report: &Value) -> Vec<String> {
     [
         ("binary on PATH", &report["binary"]),
         ("data dir", &report["data_dir"]),
+        ("warm worker", &report["warm_worker"]),
         ("claude rules", &report["global_rules"]["claude_md"]),
         ("codex rules", &report["global_rules"]["codex_agents_md"]),
         ("cursor rules", &report["global_rules"]["cursor_rules_mdc"]),
@@ -574,7 +664,12 @@ fn render_text(report: &Value) -> String {
             .unwrap_or("not found");
         let current = v.get("current_exe").and_then(|p| p.as_str()).unwrap_or("?");
         let version = v.get("version").and_then(|p| p.as_str()).unwrap_or("?");
-        format!("{on_path} (v{version}; current_exe={current})")
+        match v.get("path_version").and_then(|p| p.as_str()) {
+            Some(path_version) if path_version != version => format!(
+                "{on_path} (v{path_version} on PATH; this process v{version}; current_exe={current})"
+            ),
+            _ => format!("{on_path} (v{version}; current_exe={current})"),
+        }
     });
     push_line(&mut out, "data dir", &report["data_dir"], |v| {
         let path = v.get("path").and_then(|p| p.as_str()).unwrap_or("?");
@@ -586,6 +681,20 @@ fn render_text(report: &Value) -> String {
                 path,
                 v.get("tenant_count").and_then(|p| p.as_u64()).unwrap_or(0),
             )
+        }
+    });
+    push_line(&mut out, "warm worker", &report["warm_worker"], |v| {
+        match v.get("status").and_then(|p| p.as_str()) {
+            Some("running") => format!(
+                "running (worker v{}, cli v{})",
+                v.get("worker_version").and_then(|p| p.as_str()).unwrap_or("?"),
+                v.get("cli_version").and_then(|p| p.as_str()).unwrap_or("?"),
+            ),
+            _ => v
+                .get("note")
+                .and_then(|p| p.as_str())
+                .unwrap_or("not running")
+                .to_string(),
         }
     });
     let rules = &report["global_rules"];
@@ -685,13 +794,14 @@ mod tests {
     use crate::{ChunkType, MemoryChunk, MemoryStore, ProjectId, Store, TenantId};
     use tempfile::tempdir;
 
-    #[test]
-    fn report_includes_all_sections() {
+    #[tokio::test]
+    async fn report_includes_all_sections() {
         let dir = tempdir().unwrap();
-        let report = collect_report(dir.path());
+        let report = collect_report(dir.path(), None).await;
         for key in [
             "binary",
             "data_dir",
+            "warm_worker",
             "global_rules",
             "session_start_hook",
             "project_scope",
@@ -714,6 +824,7 @@ mod tests {
         let report = json!({
             "binary": {"ok": true},
             "data_dir": {"ok": true},
+            "warm_worker": {"ok": true},
             "global_rules": {
                 "claude_md": {"ok": true},
                 "codex_agents_md": {"ok": true},
@@ -730,6 +841,7 @@ mod tests {
         let report = json!({
             "binary": {"ok": true},
             "data_dir": {"ok": false},
+            "warm_worker": {"ok": true},
             "global_rules": {
                 "claude_md": {"ok": false},
                 "codex_agents_md": {"ok": true},
@@ -915,10 +1027,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn render_text_emits_stable_ok_dash_prefixes() {
+    #[tokio::test]
+    async fn render_text_emits_stable_ok_dash_prefixes() {
         let dir = tempdir().unwrap();
-        let report = collect_report(dir.path());
+        let report = collect_report(dir.path(), None).await;
         let text = render_text(&report);
         // Each check produces a single line; `[ok]` or `[--]` is the
         // grep contract for human consumers and screen-scrapers.
@@ -926,7 +1038,7 @@ mod tests {
             .lines()
             .filter(|l| l.starts_with("[ok]") || l.starts_with("[--]"))
             .count();
-        assert_eq!(lines, 7, "expected 7 status lines, got:\n{text}");
+        assert_eq!(lines, 8, "expected 8 status lines, got:\n{text}");
     }
 
     #[test]
@@ -934,6 +1046,7 @@ mod tests {
         let report = json!({
             "binary": {"ok": false, "on_path": "missing", "current_exe": "?", "version": "test", "fix": "run: make install (from the memd repo)"},
             "data_dir": {"ok": false, "path": "/tmp/memd-data", "tenant_count": 0, "fresh": false, "fix": "check write permissions on /tmp/memd-data"},
+            "warm_worker": {"ok": true, "status": "not_running", "note": "no warm worker running (started on demand by --warm auto)"},
             "global_rules": {
                 "claude_md": {"ok": true},
                 "codex_agents_md": {"ok": true},
@@ -989,8 +1102,13 @@ mod tests {
         assert!(v.get("current_exe").is_some());
         assert!(v.get("on_path").is_some());
         assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
-        // `ok` reflects on_path, not current_exe.
-        let expected_ok = v["on_path"].as_str().is_some();
+        // `ok` reflects on_path AND no version skew against this
+        // process; environment-independent expectation.
+        let skew = matches!(
+            v["path_version"].as_str(),
+            Some(pv) if pv != env!("CARGO_PKG_VERSION")
+        );
+        let expected_ok = v["on_path"].as_str().is_some() && !skew;
         assert_eq!(v["ok"].as_bool().unwrap_or(false), expected_ok);
     }
 }

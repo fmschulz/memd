@@ -294,7 +294,6 @@ async fn run_memory_md<S: Store>(store: &S, tenant: &str, project: &str) -> Stri
             project_limit: 10,
             global_limit: 0,
             candidate_k: 40,
-            cross_tenant: false,
             explain_output: None,
         },
     )

@@ -91,7 +91,6 @@ pub(super) struct MemoryMdOptions {
     pub(super) project_limit: usize,
     pub(super) global_limit: usize,
     pub(super) candidate_k: usize,
-    pub(super) cross_tenant: bool,
     pub(super) explain_output: Option<PathBuf>,
 }
 
@@ -268,12 +267,6 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
         .await?
     };
 
-    let cross_tenant_takeaways = if options.cross_tenant {
-        collect_cross_tenant_takeaways(store, tenant.as_str(), candidate_k, &hit_stats).await?
-    } else {
-        Vec::new()
-    };
-
     let RankedTakeawayCollection {
         takeaways: project_takeaways,
         explanations: project_explanations,
@@ -293,7 +286,6 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
         &health_lines,
         &project_takeaways,
         &global_takeaways,
-        &cross_tenant_takeaways,
     );
     std::fs::write(&output_path, rendered)?;
 
@@ -311,15 +303,9 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
             "limits": {
                 "project": project_limit,
                 "machine_wide": global_limit,
-                "cross_tenant": if options.cross_tenant { 5 } else { 0 },
             },
             "project": project_explanations,
             "machine_wide": global_explanations,
-            "cross_tenant_note": if options.cross_tenant {
-                Some("cross-tenant output is built from already-ranked tenant summaries and is not expanded into raw candidate explanations")
-            } else {
-                None
-            },
         });
         std::fs::write(&path, serde_json::to_string_pretty(&report)?)?;
         Some(path)
@@ -334,7 +320,6 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
         "explain_output": explain_output,
         "project_takeaways": project_takeaways.len(),
         "global_takeaways": global_takeaways.len(),
-        "cross_tenant_takeaways": cross_tenant_takeaways.len(),
         "candidate_k": candidate_k
     }))
 }
@@ -362,7 +347,6 @@ pub(super) async fn run_memory_md_eval<S: Store>(
             project_limit: options.project_limit,
             global_limit: 0,
             candidate_k: options.candidate_k,
-            cross_tenant: false,
             explain_output: None,
         },
     )
@@ -427,29 +411,6 @@ pub(super) async fn run_memory_md_eval<S: Store>(
     }
 
     Ok(payload)
-}
-
-async fn collect_ranked_takeaways<S: Store>(
-    store: &S,
-    tenant_id: &str,
-    project_id: Option<&str>,
-    queries: &[(CliQueryMode, &str, &str)],
-    candidate_k: usize,
-    limit: usize,
-    hit_stats: &HashMap<String, HitStats>,
-) -> Result<Vec<Takeaway>> {
-    Ok(collect_ranked_takeaways_with_explanations(
-        store,
-        tenant_id,
-        project_id,
-        queries,
-        candidate_k,
-        limit,
-        hit_stats,
-        "internal",
-    )
-    .await?
-    .takeaways)
 }
 
 async fn collect_ranked_takeaways_with_explanations<S: Store>(
@@ -963,104 +924,12 @@ fn is_generated_digest_takeaway(tags: &[String]) -> bool {
             .any(|tag| tag.starts_with("task:role:") || tag.starts_with("task:digest:"))
 }
 
-/// Cross-tenant takeaways: pull `kind:consolidated` lessons with
-/// `priority>=8` from every tenant under the store data root, dedupe
-/// by the first 100 chars of their normalised text, and surface the
-/// strongest few.
-///
-/// This is opt-in via `--cross-tenant` because reading across tenants
-/// crosses the default privacy boundary; the caller controls when it
-/// happens.
-async fn collect_cross_tenant_takeaways<S: Store>(
-    store: &S,
-    home_tenant_id: &str,
-    candidate_k: usize,
-    hit_stats: &HashMap<String, HitStats>,
-) -> Result<Vec<Takeaway>> {
-    let Ok(tenants) = store.list_tenants().await else {
-        return Ok(Vec::new());
-    };
-    let mut by_text: HashMap<String, Takeaway> = HashMap::new();
-    for tenant in tenants {
-        let tid = tenant.as_str();
-        if tid == home_tenant_id {
-            // Already represented in the project/machine-wide
-            // sections; the cross-tenant section is about *other*
-            // tenants.
-            continue;
-        }
-        let candidates = collect_ranked_takeaways(
-            store,
-            tid,
-            None,
-            GLOBAL_QUERIES,
-            candidate_k,
-            candidate_k,
-            hit_stats,
-        )
-        .await
-        .unwrap_or_default();
-        for takeaway in candidates {
-            if !is_cross_tenant_eligible(&takeaway) {
-                continue;
-            }
-            let key = dedupe_key(&takeaway.text);
-            // Higher-priority duplicate wins.
-            by_text
-                .entry(key)
-                .and_modify(|existing| {
-                    if takeaway.priority > existing.priority {
-                        *existing = takeaway.clone();
-                    }
-                })
-                .or_insert(takeaway);
-        }
-    }
-    let mut takeaways: Vec<Takeaway> = by_text.into_values().collect();
-    takeaways.sort_by(|a, b| {
-        b.priority
-            .partial_cmp(&a.priority)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.timestamp_created.cmp(&a.timestamp_created))
-    });
-    takeaways.truncate(5);
-    Ok(takeaways)
-}
-
-/// True if a takeaway should appear in the cross-tenant section: it
-/// must be a `kind:consolidated` lesson with priority>=8.
-fn is_cross_tenant_eligible(takeaway: &Takeaway) -> bool {
-    let consolidated = takeaway
-        .tags
-        .iter()
-        .any(|t| t.starts_with("kind:consolidated"));
-    let high_priority = takeaway.tags.iter().any(|t| {
-        let value = t
-            .strip_prefix("priority:")
-            .or_else(|| t.strip_prefix("importance:"));
-        match value.and_then(|v| v.parse::<f32>().ok()) {
-            Some(n) => n >= 8.0,
-            None => false,
-        }
-    });
-    consolidated && high_priority
-}
-
-/// Normalised dedupe key: lowercased, whitespace-collapsed first 100
-/// characters of the takeaway text. Stable enough to drop near-dupes
-/// without merging genuinely distinct lessons.
-fn dedupe_key(text: &str) -> String {
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    collapsed.to_ascii_lowercase().chars().take(100).collect()
-}
-
 fn render_memory_md(
     tenant_id: &str,
     project_id: Option<&str>,
     health_lines: &[String],
     project_takeaways: &[Takeaway],
     global_takeaways: &[Takeaway],
-    cross_tenant_takeaways: &[Takeaway],
 ) -> String {
     let mut out = String::new();
     out.push_str("# memory.md\n\n");
@@ -1094,9 +963,6 @@ fn render_memory_md(
     render_section(&mut out, "Project Takeaways", project_takeaways);
     if !global_takeaways.is_empty() {
         render_section(&mut out, "Machine-Wide Takeaways", global_takeaways);
-    }
-    if !cross_tenant_takeaways.is_empty() {
-        render_section(&mut out, "Cross-Tenant Takeaways", cross_tenant_takeaways);
     }
     out
 }
@@ -1347,15 +1213,21 @@ fn takeaway_category(takeaway: &Takeaway) -> TakeawayCategory {
         || lowered.contains("passed")
         || lowered.contains("confirmed")
         || lowered.contains("reproduced")
+        || lowered.contains("0 failures")
+        || lowered.contains("no failures")
+        || lowered.contains("resolved after")
+        || lowered.contains("resolved by")
     {
         return category("Validated Fixes", "validated fix or result");
     }
-    if lowered.contains("root cause")
+    // Require a real failure signal: a bare "failure" mention ("0
+    // failures") or arrival via the *_failures retrieval query is not
+    // failure evidence — filing successes here inverts their meaning.
+    if has_tag("kind:failure")
+        || lowered.contains("root cause")
         || lowered.contains("failed because")
-        || lowered.contains("failure")
+        || lowered.contains("failure:")
         || lowered.contains("blocker")
-        || has_source("project_failures")
-        || has_source("global_failures")
     {
         return category("Known Failures", "failure or root-cause evidence");
     }
@@ -1556,28 +1428,9 @@ fn is_concrete_agent_action_text(action: &str) -> bool {
 }
 
 fn contains_action_verb(text: &str) -> bool {
+    // Shared with the write-admission gate so renderer and gate agree.
     text.split(|ch: char| !ch.is_ascii_alphabetic())
-        .any(|word| {
-            matches!(
-                word.to_ascii_lowercase().as_str(),
-                "apply"
-                    | "avoid"
-                    | "check"
-                    | "confirm"
-                    | "do"
-                    | "follow"
-                    | "include"
-                    | "prefer"
-                    | "record"
-                    | "resolve"
-                    | "reuse"
-                    | "run"
-                    | "treat"
-                    | "use"
-                    | "verify"
-                    | "write"
-            )
-        })
+        .any(|word| crate::write_admission::ACTION_VERBS.contains(&word.to_ascii_lowercase().as_str()))
 }
 
 fn is_generated_wrapper_display_item(item: &DisplayedMemoryMdItem) -> bool {
@@ -1653,7 +1506,7 @@ mod tests {
             sources: BTreeSet::from(["project_highlights".to_string()]),
             occurrences: 1,
         };
-        let rendered = render_memory_md("tenant-a", Some("project-a"), &[], &[takeaway], &[], &[]);
+        let rendered = render_memory_md("tenant-a", Some("project-a"), &[], &[takeaway], &[]);
         assert!(rendered.contains("## Project Takeaways"));
         assert!(rendered.contains("## Agent Guidance"));
         assert!(rendered.contains("agent action: `Use this as evidence only after confirming"));
@@ -1676,7 +1529,7 @@ mod tests {
             sources: BTreeSet::from(["project_highlights".to_string()]),
             occurrences: 1,
         };
-        let rendered = render_memory_md("tenant-a", Some("project-a"), &[], &[takeaway], &[], &[]);
+        let rendered = render_memory_md("tenant-a", Some("project-a"), &[], &[takeaway], &[]);
         assert!(rendered.contains("## Project Takeaways"));
         assert!(!rendered.contains("## Machine-Wide Takeaways"));
     }
@@ -1713,7 +1566,6 @@ mod tests {
             Some("project-a"),
             &[],
             &[command, fix, decision],
-            &[],
             &[],
         );
 
@@ -1772,7 +1624,7 @@ mod tests {
             "summary",
         );
 
-        let rendered = render_memory_md("tenant-a", Some("project-a"), &[], &[takeaway], &[], &[]);
+        let rendered = render_memory_md("tenant-a", Some("project-a"), &[], &[takeaway], &[]);
 
         assert!(rendered.contains(
             "agent action: `Verify tenant and project are present before reusing cached retrieval results`"
@@ -1788,7 +1640,7 @@ mod tests {
             "summary",
         );
 
-        let rendered = render_memory_md("tenant-a", Some("project-a"), &[], &[takeaway], &[], &[]);
+        let rendered = render_memory_md("tenant-a", Some("project-a"), &[], &[takeaway], &[]);
 
         assert!(rendered.contains(
             "agent action: `Write every high-priority durable memory with a concrete action sentence that tells future agents what to verify or reuse`"
@@ -1804,7 +1656,7 @@ mod tests {
             "summary",
         );
 
-        let rendered = render_memory_md("tenant-a", Some("project-a"), &[], &[takeaway], &[], &[]);
+        let rendered = render_memory_md("tenant-a", Some("project-a"), &[], &[takeaway], &[]);
 
         assert!(rendered.contains(
             "agent action: `Verify future agent sessions read the refreshed ~/.agents/skills/memd skill and use memd 0.61.0 before diagnosing memory-quality behavior`"
@@ -1825,6 +1677,52 @@ mod tests {
             sources: BTreeSet::new(),
             occurrences: 1,
         }
+    }
+
+    #[test]
+    fn success_traces_are_not_filed_under_known_failures() {
+        // A fully successful trace mentioning "0 failures" used to be
+        // filed under Known Failures with fabricated avoid-guidance —
+        // an active meaning inversion.
+        let success = make_takeaway(
+            "success",
+            "Trace: ran alpha ETL end-to-end, 0 failures after retry patch was applied.",
+            vec!["kind:run"],
+            "trace",
+        );
+        let cat = takeaway_category(&success);
+        assert_ne!(cat.heading, "Known Failures", "got: {}", cat.heading);
+        assert_eq!(cat.heading, "Validated Fixes");
+
+        // Arrival via a *_failures retrieval query alone is not
+        // failure evidence either.
+        let mut via_query = make_takeaway(
+            "via-query",
+            "Benchmark: HNSW recall comparable to IVFFlat at this corpus size.",
+            vec![],
+            "summary",
+        );
+        via_query.sources.insert("project_failures".to_string());
+        assert_ne!(takeaway_category(&via_query).heading, "Known Failures");
+    }
+
+    #[test]
+    fn real_failures_still_classify_as_known_failures() {
+        let tagged = make_takeaway(
+            "tagged",
+            "Ingest run aborted on schema mismatch.",
+            vec!["kind:failure"],
+            "trace",
+        );
+        assert_eq!(takeaway_category(&tagged).heading, "Known Failures");
+
+        let root_cause = make_takeaway(
+            "root-cause",
+            "Root cause: NFS stall truncated the segment write; job failed because fsync never returned.",
+            vec![],
+            "summary",
+        );
+        assert_eq!(takeaway_category(&root_cause).heading, "Known Failures");
     }
 
     #[test]

@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::error::{MemdError, Result};
 use crate::types::{MemoryChunk, TenantId};
 
-use super::args::{ExportFormat, TenantScopeConfig, TenantScopeMode};
+use super::args::{ExportFormat, TenantScopeConfig};
 
 pub(super) fn unwrap_content_payload(value: Value) -> Result<Value> {
     let text = value
@@ -64,6 +64,7 @@ fn render_memory_markdown(payload: &Value, title: &str) -> Result<String> {
     }
     out.push_str("- interface: `cli_only`\n");
     out.push_str("- contract: use these memories only when they match current evidence; cite chunk_id or citation_id when used.\n");
+    render_scope_status_lines(&mut out, payload.get("scope_status"));
 
     if let Some(queries) = payload.get("queries").and_then(Value::as_array) {
         out.push_str("\n## Queries\n\n");
@@ -119,6 +120,28 @@ fn render_memory_markdown(payload: &Value, title: &str) -> Result<String> {
         out.push('\n');
     }
     Ok(out)
+}
+
+/// Compact scope/degradation footer lines for the markdown renderers.
+/// Kept terse so token budgets are unaffected on the healthy path: one
+/// line for retrieval_mode, plus warning/hint lines only when present.
+fn render_scope_status_lines(out: &mut String, scope_status: Option<&Value>) {
+    let Some(status) = scope_status else {
+        return;
+    };
+    if let Some(mode) = status.get("retrieval_mode").and_then(Value::as_str) {
+        out.push_str(&format!("- retrieval_mode: `{mode}`\n"));
+    }
+    if let Some(warnings) = status.get("warnings").and_then(Value::as_array) {
+        for warning in warnings {
+            if let Some(text) = warning.as_str() {
+                out.push_str(&format!("- warning: {text}\n"));
+            }
+        }
+    }
+    if let Some(hint) = status.get("widen_hint").and_then(Value::as_str) {
+        out.push_str(&format!("- hint: {hint}\n"));
+    }
 }
 
 pub(super) fn write_rendered(path: Option<&Path>, rendered: &str) -> Result<()> {
@@ -186,18 +209,6 @@ pub(super) fn render_guardrail_block(
         "- Required write `tenant_id`: `{}`\n",
         scope_config.write_tenant
     ));
-    out.push_str(&format!(
-        "- Read scope mode: `{}`\n",
-        match scope_config.scope {
-            TenantScopeMode::Local => "local",
-            TenantScopeMode::Global => "global",
-            TenantScopeMode::Allowlist => "allowlist",
-        }
-    ));
-    out.push_str(&format!(
-        "- Effective read tenants: `{}`\n",
-        scope_config.read_tenants.join(", ")
-    ));
     out.push_str(
         "- Preferred model: for one trusted machine or trust domain, use one stable shared write tenant and narrow retrieval with `project_id`, `thread_id`, and `task_id`.\n",
     );
@@ -225,9 +236,7 @@ pub(super) fn render_guardrail_block(
         "   - Direct search command: `{memd_command} search --tenant-id {} --query \"<task>\" --compact --token-budget 2000 --format markdown`.\n",
         scope_config.write_tenant
     ));
-    if scope_config.scope == TenantScopeMode::Global {
-        out.push_str("   - In global mode, the tenant list is a snapshot from init-time data directory discovery. Re-run `memd init` to refresh.\n");
-    }
+    out.push_str("   - If project-scoped retrieval returns nothing, rerun with `--tenant-id` only (no `--project-id`) before concluding no memory exists.\n");
     out.push_str("4. Implement using retrieved context.\n");
     out.push_str("5. Persist before final response with `memd add`.\n");
     out.push_str(
