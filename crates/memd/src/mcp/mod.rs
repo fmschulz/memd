@@ -5,7 +5,6 @@
 //! direct CLI commands.
 
 pub mod dedup;
-pub mod digest_sweeper;
 pub mod error;
 pub mod handlers;
 pub mod markdown_export;
@@ -46,7 +45,7 @@ pub use crate::ops::{
     FindToolCallsResult, GroundingRef, GroundingStatus, HealthParams, HealthScopeResult,
     HighlightSearchViewResult, HotTierStatsResult, ImportInfoResult, ImportOmfParams,
     LatencyHealthResult, MemoryHealthResult, MetricsParams, OriginScope, PreviewOmfImportParams,
-    ProjectBriefParams, ProjectBriefResult, QueryMode, RepairInfo, ScopeExpansion, SearchFilters,
+    ProjectBriefParams, ProjectBriefResult, QueryMode, RepairInfo, ScopeExpansion, ScopeStatus, SearchFilters,
     SearchParams, SearchResult, SetExpiryParams, SourceParams, SourceResult, StatsParams,
     StatsResult, SubsystemSummary, SupersedeParams, SymbolLocationResult, TaskAddEvidenceParams,
     TaskArtifactResult, TaskContributorParams, TaskDatasetRefParams, TaskEntityRefParams,
@@ -55,6 +54,5 @@ pub use crate::ops::{
     TaskSearchFiltersParams, TaskSearchParams, TaskStartParams, TierDebugInfo, TieredMetricsResult,
     TieredStatsResult, TimeRange, VerificationHint,
 };
-pub use digest_sweeper::{spawn_digest_sweeper, DigestSweeperHandle};
 pub use error::McpError;
 pub use post_write_hooks::PostWriteEvent;

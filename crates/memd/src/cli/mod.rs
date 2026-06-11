@@ -44,9 +44,9 @@ mod warm;
 use args::parse_chunk_type;
 pub use args::{
     CliCommand, CliQueryMode, ExportFormat, ReportFormat, SearchReranker, StoreAccess,
-    TenantScopeMode, WarmCommand, WarmMode, WarmProcessConfig,
+    WarmCommand, WarmMode, WarmProcessConfig,
 };
-use args::{ProjectScopeConfig, SearchRerankerOptions};
+use args::{ProjectScopeConfig, SearchRerankerOptions, TenantScopeConfig};
 use audit::{render_audit_report, run_audit, strict_should_fail, AuditOptions};
 use batch::{read_batch_input, run_batch_jsonl, stream_batch_jsonl};
 use call::parse_call_arguments;
@@ -61,8 +61,8 @@ use memory_md::{
 };
 use ops_bridge::cli_call_tool;
 use paths::{
-    absolutize_project_dir, build_tenant_scope_config, normalize_absolute, path_is_inside,
-    read_omf_input, read_stdin_to_string, reject_if_any_symlink_inside_outdir, resolve_data_dir,
+    absolutize_project_dir, normalize_absolute, path_is_inside, read_omf_input,
+    read_stdin_to_string, reject_if_any_symlink_inside_outdir, resolve_data_dir,
     resolve_export_markdown_data_dirs,
 };
 #[cfg(test)]
@@ -136,6 +136,9 @@ pub(super) async fn cli_add_rendered<S: Store>(
             admission.reason
         )));
     }
+    if admission.warning.is_some() {
+        crate::write_admission::downgrade_high_priority_tags(&mut effective_tags);
+    }
     if admission.decision == crate::write_admission::AdmissionDecision::Durable {
         crate::auto_priority::stamp_auto_priority(opts.chunk_type, &opts.text, &mut effective_tags);
     }
@@ -172,6 +175,7 @@ pub(super) async fn cli_add_rendered<S: Store>(
         "chunk_id": chunk_id.to_string(),
         "admission_decision": admission.decision.as_str(),
         "admission_reason": admission.reason,
+        "admission_warning": admission.warning,
     });
     Ok(serde_json::to_string_pretty(&output)? + "\n")
 }
@@ -383,7 +387,6 @@ pub async fn run_cli<S: Store>(
             project_limit,
             global_limit,
             candidate_k,
-            cross_tenant,
             explain_output,
         } => {
             let result = refresh_memory_md_with_health(
@@ -397,7 +400,6 @@ pub async fn run_cli<S: Store>(
                     project_limit,
                     global_limit,
                     candidate_k,
-                    cross_tenant,
                     explain_output,
                 },
             )
@@ -492,7 +494,6 @@ pub async fn run_cli<S: Store>(
             dry_run,
             background,
             force,
-            promote_to_shared,
             warm: _,
         } => {
             let result = run_consolidate(
@@ -505,7 +506,6 @@ pub async fn run_cli<S: Store>(
                     dry_run,
                     background,
                     force,
-                    promote_to_shared,
                 },
             )
             .await?;
@@ -547,6 +547,9 @@ pub async fn run_cli<S: Store>(
                 store,
                 DoctorOptions {
                     project_dir,
+                    // The resolved global --data-dir: doctor must
+                    // diagnose the store this process actually uses.
+                    data_dir: tenant_manager.map(|tm| tm.data_dir().to_path_buf()),
                     format,
                 },
             )
@@ -1064,8 +1067,6 @@ pub async fn run_cli<S: Store>(
 
         CliCommand::Init {
             tenant_id,
-            scope,
-            allow_tenants,
             project_dir,
             project_id,
             memd_command,
@@ -1078,12 +1079,15 @@ pub async fn run_cli<S: Store>(
             std::fs::create_dir_all(&memd_dir)?;
 
             let effective_data_dir = resolve_data_dir(memd_data_dir.as_deref())?;
-            let scope_config = build_tenant_scope_config(
-                tenant.as_str(),
-                scope,
-                allow_tenants.as_deref(),
-                &effective_data_dir,
-            )?;
+            // Always persist data_dir so `memd export-markdown` (and any
+            // future CLI tool that needs the containment guard) can
+            // auto-discover the daemon's data directory from a
+            // nearest-ancestor `.memd/tenant_scope.json`.
+            let scope_config = TenantScopeConfig {
+                primary_tenant: tenant.to_string(),
+                write_tenant: tenant.to_string(),
+                data_dir: Some(effective_data_dir.display().to_string()),
+            };
             let guardrail_block = render_guardrail_block(&scope_config, &memd_command);
 
             let guardrail_path = memd_dir.join("memory_guardrails.md");
@@ -1092,7 +1096,6 @@ pub async fn run_cli<S: Store>(
             let project_scope = ProjectScopeConfig {
                 tenant_id: tenant.to_string(),
                 project_id,
-                read_tenants: scope_config.read_tenants.clone(),
                 interface: "cli".to_string(),
                 cli_command: memd_command.clone(),
                 agent_context_output: ".memd/context.md".to_string(),
@@ -1385,7 +1388,6 @@ mod tests {
                 project_limit: 10,
                 global_limit: 10,
                 candidate_k: 10,
-                cross_tenant: false,
                 explain_output: None,
             },
         )
@@ -1431,7 +1433,6 @@ mod tests {
                 project_limit: 10,
                 global_limit: 0,
                 candidate_k: 10,
-                cross_tenant: false,
                 explain_output: Some(PathBuf::from("memory-explain.json")),
             },
         )
@@ -1498,7 +1499,6 @@ mod tests {
                 project_limit: 10,
                 global_limit: 0,
                 candidate_k: 10,
-                cross_tenant: false,
                 explain_output: None,
             },
         )
@@ -2385,7 +2385,7 @@ mod tests {
     }
 
     #[test]
-    fn warm_socket_path_is_stable_and_config_scoped() {
+    fn warm_socket_path_is_stable_per_data_dir_without_version_input() {
         let dir = tempdir().unwrap();
         let config = WarmProcessConfig {
             data_dir: dir.path().join("data"),
@@ -2398,9 +2398,29 @@ mod tests {
         assert_eq!(same, warm_socket_path(&config));
         assert!(same.ends_with("memd.sock"));
 
+        // The path is a pure function of the data dir: nothing else —
+        // no version, protocol, model, or variant — feeds the hash, so
+        // a new binary can reach a worker left by an old one.
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(config.data_dir.display().to_string().as_bytes());
+        let hex = format!("{:x}", hasher.finalize());
+        let expected = config
+            .data_dir
+            .join("warm")
+            .join(&hex[..16])
+            .join("memd.sock");
+        assert_eq!(same, expected);
+
+        // Model/variant changes do NOT move the socket...
         let mut dense = config.clone();
         dense.search_variant = "dense-only".to_string();
-        assert_ne!(same, warm_socket_path(&dense));
+        assert_eq!(same, warm_socket_path(&dense));
+
+        // ...but a different data dir does.
+        let mut other = config.clone();
+        other.data_dir = dir.path().join("other-data");
+        assert_ne!(same, warm_socket_path(&other));
     }
 
     #[test]
@@ -2450,8 +2470,6 @@ mod tests {
             None,
             CliCommand::Init {
                 tenant_id: "demo_tenant".to_string(),
-                scope: TenantScopeMode::Local,
-                allow_tenants: None,
                 project_dir: project_dir.clone(),
                 project_id: Some("demo_project".to_string()),
                 memd_command: "memd".to_string(),
@@ -2469,7 +2487,6 @@ mod tests {
         assert!(guardrails.contains("memory.md"));
         assert!(guardrails.contains("memd agent-context"));
         assert!(guardrails.contains("memd add"));
-        assert!(guardrails.contains("Read scope mode: `local`"));
         assert!(guardrails.contains(".memd/project_scope.json"));
         assert!(!project_dir.join(".memd/mcp_config_claude.json").exists());
         assert!(!project_dir.join(".memd/mcp_config_codex.toml").exists());
@@ -2478,8 +2495,11 @@ mod tests {
             &std::fs::read_to_string(project_dir.join(".memd/tenant_scope.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(tenant_scope["scope"], "local");
-        assert_eq!(tenant_scope["read_tenants"][0], "demo_tenant");
+        assert_eq!(tenant_scope["write_tenant"], "demo_tenant");
+        // Pins the stop-writing behaviour: read-scope plumbing was
+        // removed, so fresh scope files must not carry these keys.
+        assert!(tenant_scope.get("read_tenants").is_none());
+        assert!(tenant_scope.get("scope").is_none());
 
         let project_scope: Value = serde_json::from_str(
             &std::fs::read_to_string(project_dir.join(".memd/project_scope.json")).unwrap(),
@@ -2487,6 +2507,7 @@ mod tests {
         .unwrap();
         assert_eq!(project_scope["tenant_id"], "demo_tenant");
         assert_eq!(project_scope["project_id"], "demo_project");
+        assert!(project_scope.get("read_tenants").is_none());
         assert_eq!(project_scope["interface"], "cli");
         assert_eq!(project_scope["cli_command"], "memd");
 
@@ -2507,8 +2528,6 @@ mod tests {
                 None,
                 CliCommand::Init {
                     tenant_id: tenant.to_string(),
-                    scope: TenantScopeMode::Local,
-                    allow_tenants: None,
                     project_dir: project_dir.clone(),
                     project_id: Some("shared_project".to_string()),
                     memd_command: "memd".to_string(),
@@ -2524,80 +2543,6 @@ mod tests {
         let marker_count = agents.matches("memd-guardrails:start").count();
         assert_eq!(marker_count, 1);
         assert!(agents.contains("tenant_two"));
-    }
-
-    #[tokio::test]
-    async fn init_allowlist_scope_writes_read_set() {
-        let store = MemoryStore::new();
-        let dir = tempdir().unwrap();
-        let project_dir = dir.path().join("project");
-        std::fs::create_dir_all(&project_dir).unwrap();
-
-        run_cli(
-            &store,
-            None,
-            CliCommand::Init {
-                tenant_id: "primary".to_string(),
-                scope: TenantScopeMode::Allowlist,
-                allow_tenants: Some(vec!["tenant_a".to_string(), "tenant_b".to_string()]),
-                project_dir: project_dir.clone(),
-                project_id: Some("allowlist_project".to_string()),
-                memd_command: "memd".to_string(),
-                memd_data_dir: None,
-                write_agent_files: false,
-            },
-        )
-        .await
-        .unwrap();
-
-        let tenant_scope: Value = serde_json::from_str(
-            &std::fs::read_to_string(project_dir.join(".memd/tenant_scope.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(tenant_scope["scope"], "allowlist");
-        let read_tenants = tenant_scope["read_tenants"].as_array().unwrap();
-        assert_eq!(read_tenants.len(), 3);
-        assert!(read_tenants.iter().any(|v| v == "primary"));
-        assert!(read_tenants.iter().any(|v| v == "tenant_a"));
-        assert!(read_tenants.iter().any(|v| v == "tenant_b"));
-    }
-
-    #[tokio::test]
-    async fn init_global_scope_discovers_tenants_from_data_dir() {
-        let store = MemoryStore::new();
-        let dir = tempdir().unwrap();
-        let project_dir = dir.path().join("project");
-        let data_dir = dir.path().join("data");
-        std::fs::create_dir_all(data_dir.join("tenants").join("shared_a")).unwrap();
-        std::fs::create_dir_all(data_dir.join("tenants").join("shared_b")).unwrap();
-        std::fs::create_dir_all(&project_dir).unwrap();
-
-        run_cli(
-            &store,
-            None,
-            CliCommand::Init {
-                tenant_id: "primary".to_string(),
-                scope: TenantScopeMode::Global,
-                allow_tenants: None,
-                project_dir: project_dir.clone(),
-                project_id: Some("global_project".to_string()),
-                memd_command: "memd".to_string(),
-                memd_data_dir: Some(data_dir.clone()),
-                write_agent_files: false,
-            },
-        )
-        .await
-        .unwrap();
-
-        let tenant_scope: Value = serde_json::from_str(
-            &std::fs::read_to_string(project_dir.join(".memd/tenant_scope.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(tenant_scope["scope"], "global");
-        let read_tenants = tenant_scope["read_tenants"].as_array().unwrap();
-        assert!(read_tenants.iter().any(|v| v == "primary"));
-        assert!(read_tenants.iter().any(|v| v == "shared_a"));
-        assert!(read_tenants.iter().any(|v| v == "shared_b"));
     }
 
     // --- Item 4: export-markdown --data-dir auto-discovery ---
@@ -2618,8 +2563,6 @@ mod tests {
             None,
             CliCommand::Init {
                 tenant_id: "t_local".to_string(),
-                scope: TenantScopeMode::Local,
-                allow_tenants: None,
                 project_dir: project_dir.clone(),
                 project_id: Some("p".to_string()),
                 memd_command: "memd".to_string(),
@@ -2634,7 +2577,6 @@ mod tests {
             &std::fs::read_to_string(project_dir.join(".memd/tenant_scope.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(tenant_scope["scope"], "local");
         assert_eq!(tenant_scope["data_dir"], "/tmp/memd-data-local");
     }
 

@@ -1237,6 +1237,11 @@ pub struct SearchResult {
     /// Repair-loop diagnostics when a fallback query rewrite was attempted
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub repair_info: Option<RepairInfo>,
+    /// In-band scope/degradation report so agents can tell "no memory
+    /// exists" from "memory exists one flag away" and detect degraded
+    /// retrieval.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub scope_status: Option<ScopeStatus>,
 }
 
 /// Debug information about tier performance
@@ -1294,6 +1299,30 @@ pub struct ScopeExpansion {
     pub requested_project_id: String,
     #[serde(default)]
     pub aliases: Vec<OriginScope>,
+}
+
+/// Retrieval scope and degradation report attached to every
+/// memory.search / agent-context payload. Wrong-scope and degraded
+/// retrieval previously collapsed into the same empty-but-successful
+/// response; this makes them distinguishable in-band.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeStatus {
+    pub tenant_id: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub project_id: Option<String>,
+    /// "hybrid" for ranked semantic retrieval, "text_fallback" when
+    /// queries degrade to substring matching at constant score.
+    pub retrieval_mode: String,
+    /// Tenant-wide candidate hits outside the requested project.
+    /// Counted lazily, only when a project-scoped search returns fewer
+    /// than k results.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub wider_scope_hits: Option<usize>,
+    /// Exact widening guidance when wider_scope_hits is set.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub widen_hint: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1434,11 +1463,17 @@ pub struct AddResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_warning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle_tier: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_after_ms: Option<i64>,
+    /// Set when this write created a brand-new tenant, so a mistyped
+    /// --tenant-id forking a fresh silo is visible in the payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_tenant: Option<bool>,
 }
 
 /// Result of a batch add operation
@@ -3290,17 +3325,25 @@ fn admission_lifecycle_delta(admission: &ResolvedAdmission) -> LifecycleDelta {
 }
 
 fn apply_admission_tags(chunk: MemoryChunk, admission: &ResolvedAdmission) -> MemoryChunk {
-    if admission.outcome.decision != AdmissionDecision::Ephemeral {
-        return chunk;
-    }
     let mut tags = chunk.tags.clone();
-    if !tags.iter().any(|tag| tag == "admission:ephemeral") {
-        tags.push("admission:ephemeral".to_string());
+    let mut changed = false;
+    if admission.outcome.warning.is_some() {
+        crate::write_admission::downgrade_high_priority_tags(&mut tags);
+        changed = true;
     }
-    if !tags.iter().any(|tag| tag == "retention:short_lived") {
-        tags.push("retention:short_lived".to_string());
+    if admission.outcome.decision == AdmissionDecision::Ephemeral {
+        for tag in ["admission:ephemeral", "retention:short_lived"] {
+            if !tags.iter().any(|existing| existing == tag) {
+                tags.push(tag.to_string());
+            }
+        }
+        changed = true;
     }
-    chunk.with_tags(tags)
+    if changed {
+        chunk.with_tags(tags)
+    } else {
+        chunk
+    }
 }
 
 fn admission_decision_string(admission: &ResolvedAdmission) -> String {
@@ -4004,6 +4047,67 @@ fn merge_scored_chunk_lists(
         .filter(|(chunk, _)| seen.insert(chunk.chunk_id.clone()))
         .take(limit)
         .collect()
+}
+
+/// Build the in-band [`ScopeStatus`] for a finished search. The
+/// tenant-wide probe runs only when a project-scoped search came up
+/// short of `k`, so the common full-result path costs one
+/// `list_tenants` call.
+async fn scope_status_for_search<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    project_id: Option<&str>,
+    query: &str,
+    k: usize,
+    result_count: usize,
+) -> ScopeStatus {
+    let retrieval_mode = store.retrieval_mode().to_string();
+    let mut warnings = Vec::new();
+    if retrieval_mode == "text_fallback" {
+        warnings.push(
+            "semantic retrieval unavailable; results come from substring matching at constant \
+             score and ranking is unreliable"
+                .to_string(),
+        );
+    }
+    if let Ok(tenants) = store.list_tenants().await {
+        if !tenants.iter().any(|t| t == tenant_id) {
+            warnings.push(format!(
+                "tenant '{tenant_id}' has no stored memory on this machine ({} known tenant(s)); \
+                 a mistyped --tenant-id returns empty results instead of failing",
+                tenants.len()
+            ));
+        }
+    }
+
+    let mut wider_scope_hits = None;
+    let mut widen_hint = None;
+    if let Some(project) = project_id.filter(|p| !p.trim().is_empty()) {
+        if result_count < k && !query.is_empty() {
+            if let Ok(scored) = store.search_with_scores(tenant_id, query, k.max(8)).await {
+                let outside = scored
+                    .iter()
+                    .filter(|(chunk, _)| chunk.project_id.as_option() != Some(project))
+                    .count();
+                if outside > 0 {
+                    wider_scope_hits = Some(outside);
+                    widen_hint = Some(format!(
+                        "{outside} hit(s) for this query exist in tenant '{tenant_id}' outside \
+                         project '{project}'; rerun without --project-id to search tenant-wide"
+                    ));
+                }
+            }
+        }
+    }
+
+    ScopeStatus {
+        tenant_id: tenant_id.to_string(),
+        project_id: project_id.map(str::to_string),
+        retrieval_mode,
+        wider_scope_hits,
+        widen_hint,
+        warnings,
+    }
 }
 
 async fn search_with_scores_for_project_scopes<S: Store>(
@@ -5670,6 +5774,11 @@ pub async fn handle_memory_search<S: Store>(
             "search completed with tier info"
         );
 
+        // Pre-budget retrieval count: scope_status's wider_scope_hits probe
+        // must key on whether the search itself fell short of k, not on how
+        // many rows survived token-budget packing in shape_memory_results.
+        let retrieved_count = scored_chunks.len();
+
         // Build tier debug info if timing is available
         let tier_info = timing.map(|t| {
             let source_tier = if t.cache_lookup_ms > 0 && t.hot_tier_ms == 0 && t.warm_tier_ms == 0
@@ -5714,12 +5823,22 @@ pub async fn handle_memory_search<S: Store>(
 
         let (results, budget_info) = shape_memory_results(results, &params);
         record_search_usage_event(store, &tenant_id, &params, results.len());
+        let scope_status = scope_status_for_search(
+            store,
+            &tenant_id,
+            project_id_filter,
+            &params.query,
+            params.k,
+            retrieved_count,
+        )
+        .await;
         return format_mcp_response(&SearchResult {
             results,
             budget_info,
             scope_expansion,
             tier_info,
             repair_info,
+            scope_status: Some(scope_status),
         });
     }
 
@@ -5797,6 +5916,11 @@ pub async fn handle_memory_search<S: Store>(
 
     debug!(results_count = scored_chunks.len(), "search completed");
 
+    // Pre-budget retrieval count for scope_status (see the tier-debug
+    // branch above): the wider_scope_hits probe keys on search shortage,
+    // not on token-budget packing.
+    let retrieved_count = scored_chunks.len();
+
     let artifacts = resolve_artifacts_for_ranked_chunks(store, &scored_chunks).await?;
     let mut results = build_chunk_results(
         store,
@@ -5811,12 +5935,22 @@ pub async fn handle_memory_search<S: Store>(
 
     let (results, budget_info) = shape_memory_results(results, &params);
     record_search_usage_event(store, &tenant_id, &params, results.len());
+    let scope_status = scope_status_for_search(
+        store,
+        &tenant_id,
+        project_id_filter,
+        &params.query,
+        params.k,
+        retrieved_count,
+    )
+    .await;
     format_mcp_response(&SearchResult {
         results,
         budget_info,
         scope_expansion,
         tier_info: None,
         repair_info,
+        scope_status: Some(scope_status),
     })
 }
 
@@ -5835,6 +5969,13 @@ pub async fn handle_memory_add<S: Store>(
         text_len = params.text.len(),
         "memory.add"
     );
+
+    // Snapshot before the write: a brand-new tenant is reported in the
+    // payload so a typo'd --tenant-id doesn't silently fork a new silo.
+    let created_tenant = match store.list_tenants().await {
+        Ok(tenants) if !tenants.iter().any(|t| t == &tenant_id) => Some(true),
+        _ => None,
+    };
 
     // Ensure tenant directory exists if tenant_manager is available
     if let Some(tm) = tenant_manager {
@@ -5942,9 +6083,11 @@ pub async fn handle_memory_add<S: Store>(
                 deduped_existing_id: Some(existing_id.to_string()),
                 admission_decision: Some(admission_decision_string(&admission)),
                 admission_reason: Some(admission.outcome.reason.clone()),
+                admission_warning: admission.outcome.warning.clone(),
                 lifecycle_tier: admission_lifecycle_tier_string(&admission),
                 expires_at_ms: admission.expires_at_ms,
                 review_after_ms: admission.review_after_ms,
+                created_tenant: None,
             });
         }
     }
@@ -6047,6 +6190,7 @@ pub async fn handle_memory_add<S: Store>(
             "superseded_ids": superseded_ids,
             "admission_decision": admission_decision_string(&admission),
             "admission_reason": admission.outcome.reason.clone(),
+            "admission_warning": admission.outcome.warning.clone(),
             "lifecycle_tier": admission_lifecycle_tier_string(&admission),
             "expires_at_ms": admission.expires_at_ms,
             "review_after_ms": admission.review_after_ms,
@@ -6081,9 +6225,11 @@ pub async fn handle_memory_add<S: Store>(
         deduped_existing_id: None,
         admission_decision: Some(admission_decision_string(&admission)),
         admission_reason: Some(admission.outcome.reason.clone()),
+        admission_warning: admission.outcome.warning.clone(),
         lifecycle_tier: admission_lifecycle_tier_string(&admission),
         expires_at_ms: admission.expires_at_ms,
         review_after_ms: admission.review_after_ms,
+        created_tenant,
     })
 }
 
@@ -7831,6 +7977,7 @@ pub async fn handle_task_search<S: Store>(
         scope_expansion,
         tier_info: None,
         repair_info: None,
+        scope_status: None,
     })
 }
 
@@ -10794,7 +10941,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_add_rejects_explicit_high_priority_without_agent_action() {
+    async fn memory_add_downgrades_explicit_high_priority_without_agent_action() {
         let store = make_store();
 
         let add_result = handle_memory_add(
@@ -10808,9 +10955,23 @@ mod tests {
                 ..Default::default()
             },
         )
-        .await;
-        let err = add_result.expect_err("high-priority memory without action should reject");
-        assert!(err.message().contains("Agent action"));
+        .await
+        .unwrap();
+        // Admitted, not rejected — stored at priority 7 with an
+        // in-band warning instead of losing the lesson outright.
+        let text = add_result["content"][0]["text"].as_str().unwrap();
+        let add_response: AddResult = serde_json::from_str(text).unwrap();
+        assert_eq!(add_response.admission_decision.as_deref(), Some("durable"));
+        let warning = add_response.admission_warning.expect("downgrade warning");
+        assert!(warning.contains("Agent action"));
+        let tenant = TenantId::new("quality_gate_override").unwrap();
+        let chunk = store
+            .get(&tenant, &ChunkId::parse(&add_response.chunk_id).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(chunk.tags.iter().any(|t| t == "priority:7"));
+        assert!(!chunk.tags.iter().any(|t| t == "priority:9"));
     }
 
     #[tokio::test]

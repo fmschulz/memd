@@ -100,8 +100,8 @@ Then read `memory.md` before implementation and before task-specific
 `agent-context` retrieval. The file contains:
 
 - up to 10 highest-priority project takeaways
-- optional machine-wide takeaways in the selected tenant when `--global-limit`
-  is set above 0
+- up to 5 machine-wide takeaways in the selected tenant by default (tune with
+  `--global-limit`; 0 disables)
 - a `Memory health` header (chunks added/rejected, retrieval hit-rate, learned
   lessons over the report window); if it looks unhealthy, run
   `memd report --strict`
@@ -121,8 +121,9 @@ memd add \
 
 `memory.md` renders an `agent action` line for each displayed takeaway. Make
 durable writes actionable by including an explicit `Agent action:` sentence.
-For `priority:8+` or `importance:8+` writes, this sentence is required by the
-write-quality gate:
+For `priority:8+` or `importance:8+` writes the write-quality gate requires
+this sentence; without it the write is admitted but downgraded to priority 7
+with a warning:
 
 ```bash
 memd add \
@@ -192,12 +193,10 @@ plus the dominant inherited `ctx:*` tags.
 Skipped without `--force` when fewer than 10 chunks have accumulated since
 the previous run; `.memd/data/consolidate.state.json` tracks the watermark.
 
-For cross-project transfer (opt-in), add `--promote-to-shared`: lessons
-whose `supersedes` set spans ≥2 distinct named `project_id`s are copied to
-`$MEMD_SHARED_TENANT` (default `shared`) with provenance tags
-(`kind:cross_tenant_promoted, source_tenant:<orig>, source_chunk:<id>,
-source_projects:<csv>` plus a deterministic `provenance:<source>:<sha8>`
-that makes the promotion idempotent across re-runs).
+For cross-project transfer, run a tenant-wide consolidation (explicit
+`--tenant-id`, no `--project-id`): the consolidated lessons are written
+without a `project_id` and surface in every project's `memory.md`
+through the machine-wide takeaways section.
 
 ### Counterfactual retrieval eval
 
@@ -219,17 +218,6 @@ with `kind:consolidated` rows filtered out. Higher overlap-loss means the
 consolidated layer is doing real work.
 
 This command runs on the cold path; stop the warm worker first (`memd warm stop`).
-
-### Cross-tenant takeaways
-
-```bash
-memd memory-md --project-dir . --cross-tenant
-```
-
-Adds a `## Cross-Tenant Takeaways` section sourced from
-`kind:consolidated, priority>=8` chunks across every other tenant under
-the store data root, deduped by a normalised first-100-char key. OFF by
-default — the cross-tenant read only happens when the flag is passed.
 
 ## Write Quality Contract
 
@@ -284,6 +272,8 @@ exports the scope for inspection.
 ## Retrieve Context
 
 Inside a scoped project (`.memd/project_scope.json`), omit `--tenant-id`/`--project-id`; explicit flags override the scope file.
+
+If project-scoped retrieval returns nothing, rerun with `--tenant-id` only (no `--project-id`) before concluding no memory exists.
 
 Default pre-work command:
 

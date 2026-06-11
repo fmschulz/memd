@@ -6,6 +6,81 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [0.62.0] - 2026-06-11
+
+### Added
+
+- In-band `scope_status` block in every `memd search` / `memd agent-context`
+  payload (and a terse markdown footer): reports the effective tenant/project,
+  `retrieval_mode` (`hybrid` vs `text_fallback` when semantic search is
+  degraded to substring matching), a warning when the requested tenant has no
+  stored memory on this machine, and — when a project-scoped search returns
+  fewer than `k` results — `wider_scope_hits` with the exact widening command,
+  so "no memory exists" and "memory exists one flag away" are distinguishable.
+  The `wider_scope_hits` probe keys on the pre-budget retrieval count, so
+  token-budget trimming (the default `agent-context` path) never emits a
+  false widen hint or an avoidable extra tenant-wide scan.
+- `memd add` payloads report `created_tenant: true` when a write creates a
+  brand-new tenant, so a typo'd `--tenant-id` no longer silently forks a
+  fresh silo.
+- Warm worker idle timeout (`MEMD_WARM_IDLE_TIMEOUT_SECS`, default 1800,
+  `0` disables): an idle worker exits and releases the data-dir writer flock
+  instead of holding it forever.
+- `.writer.lock` holder line now records the holder's memd version next to
+  its pid.
+
+### Changed
+
+- The warm socket path is now a pure function of the data dir — version,
+  wire protocol, embedding model, and search variant are no longer hashed in
+  — so after a binary upgrade the new CLI can ping, stop, and auto-replace a
+  worker left behind by the old binary instead of bricking machine-wide
+  writes. `warm stop`/`warm status` also sweep legacy version-hashed socket
+  dirs (`legacy_stopped`/`legacy_workers` payload keys).
+- `memd doctor` now diagnoses the resolved global `--data-dir` (was
+  hardcoded `~/.memd/data`), pings the warm worker and flags worker-vs-CLI
+  version skew, and reports the PATH binary's actual `--version` output
+  (was: the current process's compile-time version), flagging PATH skew.
+- `memd consolidate` with an explicit `--tenant-id` no longer silently
+  inherits the cwd scope file's `project_id` (mirrors `memd search`
+  semantics): tenant-wide consolidation now actually consolidates
+  tenant-wide. Tenant-wide runs warn in the summary JSON that lessons
+  written without a `project_id` only surface via tenant-wide search and
+  memory-md machine-wide takeaways.
+- `memory-md --global-limit` now defaults to 5 (was 0) and `memd
+  session-start` includes machine-wide takeaways in the auto-refreshed
+  `memory.md`, so cross-project lessons reach new projects by default.
+- The priority-8+ write gate admits-and-downgrades instead of rejecting:
+  high-priority writes without a concrete `Agent action:` sentence are
+  stored at priority 7 with an in-band `admission_warning` naming the verb
+  allowlist, which gained common imperatives (`set`, `configure`, `pin`,
+  `export`, `point`, `enable`, `disable`, `update`, `keep`). The gate and
+  the memory-md renderer now share one allowlist.
+- `memory.md`'s Known Failures section now requires a real failure signal
+  (`kind:failure` tag, `root cause`, `failed because`, `failure:`,
+  `blocker`): success traces mentioning "0 failures" or "resolved after"
+  classify as Validated Fixes instead of being filed as failures with
+  fabricated avoid-this guidance, and arrival via a `*_failures` retrieval
+  query alone no longer counts as failure evidence.
+- The agent contract (skill, installer snippet, generated guardrails) adds:
+  if project-scoped retrieval returns nothing, rerun with `--tenant-id` only
+  (no `--project-id`) before concluding no memory exists.
+
+### Removed
+
+- The structurally unreachable cross-project sharing tiers:
+  `consolidate --promote-to-shared` and the `MEMD_SHARED_TENANT` shared-tenant
+  plumbing (the multi-project trigger predicate could never fire — the
+  consolidation region is pre-filtered to one project), the
+  `memory-md --cross-tenant` section (readable only from the unpopulatable
+  shared tenant), `memd init --scope/--allow-tenants` and the
+  `read_tenants`/scope-mode fields in `tenant_scope.json`/
+  `project_scope.json` (written but consumed by zero retrieval code; old
+  scope files with the fields still parse), the dead
+  `HybridSearcher::search_with_routing` surface, and the never-spawned
+  digest sweeper (`spawn_digest_sweeper`). The unused
+  `MEMD_DIGEST_SWEEP_INTERVAL_SEC` env var is gone with it.
+
 ## [0.61.0] - 2026-05-28
 
 ### Added

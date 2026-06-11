@@ -509,6 +509,7 @@ pub(super) async fn cli_agent_context_payload<S: Store>(
     let mut seen = std::collections::HashSet::new();
     let mut merged_results = Vec::new();
     let mut query_summaries = Vec::new();
+    let mut scope_status = Value::Null;
 
     for query in queries {
         let payload = direct_memory_search_payload(
@@ -527,6 +528,16 @@ pub(super) async fn cli_agent_context_payload<S: Store>(
         )
         .await?;
         log_search_hits(&payload, tenant_id, project_id, mode);
+        // Per-query scope_status entries agree on tenant/project/mode;
+        // keep the one with the most signal (warnings or a widen hint).
+        if let Some(status) = payload.get("scope_status") {
+            if scope_status.is_null()
+                || status.get("widen_hint").is_some()
+                || status.get("warnings").is_some()
+            {
+                scope_status = status.clone();
+            }
+        }
         let results = payload
             .get("results")
             .and_then(Value::as_array)
@@ -572,6 +583,7 @@ pub(super) async fn cli_agent_context_payload<S: Store>(
         "k_per_query": k,
         "token_budget_per_query": token_budget,
         "result_count": merged_results.len(),
+        "scope_status": scope_status,
         "results": merged_results,
     }))
 }

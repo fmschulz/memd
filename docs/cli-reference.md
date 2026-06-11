@@ -20,7 +20,7 @@ For write-quality expectations and cleanup safety, see the
 | `memd get`, `memd delete`, `memd stats` | Inspect and maintain chunks. |
 | `memd export`, `memd export-markdown`, `memd export-omf`, `memd import-omf` | Portable local memory operations. |
 | `memd init` | Write `.memd/` scope files and CLI guardrail blocks. |
-| `memd doctor` | Diagnose binary discovery, data directory, global agent rules, Claude Code SessionStart hook, and current project scope; `--strict` exits 2 when any check fails. |
+| `memd doctor` | Diagnose binary discovery (incl. PATH-binary version skew), the resolved `--data-dir`, warm-worker reachability and worker-vs-CLI version skew, global agent rules, Claude Code SessionStart hook, and current project scope; `--strict` exits 2 when any check fails. |
 | `memd memory-md` | Refresh project-root `memory.md` with the strongest takeaways for session-start use. |
 | `memd eval-memory-md` | Gate startup-memory quality with `--min-useful-ratio` and `--max-generated-wrappers`. |
 | `memd eval-retrieval` | Gate retrieval quality with precision, hit-rate, recall, and MRR thresholds. |
@@ -30,15 +30,13 @@ For write-quality expectations and cleanup safety, see the
 | `memd cleanup-plan` | Generate a non-destructive cleanup approval report with archive/purge command previews and post-cleanup pass criteria. |
 | `memd purge` | Dry-run or archive-first cleanup of hidden rows; `--apply` verifies the archive before mutation, and `--include-unreadable-active` previews active metadata rows whose segment payload cannot be loaded. |
 | `memd purge-archive` | Read-only verification for `memd purge --archive` files: validates format/counts/payload flags, emits SHA-256, and can enforce expected tenant/project. |
-| `memd consolidate` | Call the configured LLM (Claude Haiku or Codex Spark, selected by `MEMD_CONSOLIDATOR`) to rewrite recent chunks into deduplicated `kind:consolidated` lessons. Sources are soft-tombstoned via `ChunkStatus::Superseded` (never deleted). Add `--promote-to-shared` to copy multi-project lessons into the `MEMD_SHARED_TENANT` tenant for cross-project transfer. |
+| `memd consolidate` | Call the configured LLM (Claude Haiku or Codex Spark, selected by `MEMD_CONSOLIDATOR`) to rewrite recent chunks into deduplicated `kind:consolidated` lessons. Sources are soft-tombstoned via `ChunkStatus::Superseded` (never deleted). With an explicit `--tenant-id` and no `--project-id` the run is tenant-wide; the resulting lessons surface via tenant-wide search and memory-md machine-wide takeaways. |
 | `memd session-start` | Auto-create a minimal `.memd/project_scope.json` when missing, refresh `memory.md` synchronously, then spawn a background consolidation when enough chunks have accumulated. Wired into Claude Code via the bundled skill installer; a Codex hook template lives at `memd-skill/examples/codex_session_start_hook.json`. |
 | `memd eval-counterfactual` | Replay a JSONL benchmark file; write an overlap@k / rank-shift report under `evals/bench/reports/`. Monitors whether `kind:consolidated` lessons are load-bearing in retrieval. |
 | `memd maintenance` | Disk hygiene: sweep orphan HNSW snapshots, report what changed. |
 
 - `memory-md --explain-output <path>` writes a JSON candidate audit with query
   source, score components, tags, and display/filter decisions.
-- `memory-md --cross-tenant` adds a Cross-Tenant Takeaways section sourced from
-  `kind:consolidated, priority>=8` chunks across other tenants.
 - `eval-retrieval` gates with `--min-precision-at-k`,
   `--min-hit-rate-at-k`, `--min-known-recall-at-k`, and `--min-mrr`.
 - `eval-write-quality` gates with `--min-rejection-or-downgrade-rate`,

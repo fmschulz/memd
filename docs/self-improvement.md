@@ -40,13 +40,13 @@ per-chunk 30-day aggregate (1 h TTL cache):
 `memd eval-counterfactual` measures whether the `kind:consolidated` chunks
 change ranks versus a same-pass filtered baseline.
 
-## 4. Cross-tenant transfer
+## 4. Cross-project transfer
 
-Opt-in via `memory-md --cross-tenant` and `consolidate --promote-to-shared`:
-lessons that recur across projects can be hoisted to a shared tenant,
-deduplicated, and surfaced in every project's `memory.md` without copying
-private context. Promotions are idempotent under a deterministic
-`provenance:<sha8>` tag.
+Tenant-wide consolidation (`memd consolidate --tenant-id <t>`, no
+`--project-id`) rewrites lessons that recur across a tenant's projects
+into `kind:consolidated` chunks, which surface in every project's
+`memory.md` through the machine-wide takeaways section (on by default,
+`--global-limit`).
 
 ## Session-start hook
 

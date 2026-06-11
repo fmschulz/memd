@@ -129,3 +129,38 @@ fn audit_strict_exits_zero_for_healthy_store() {
         "{stdout}"
     );
 }
+
+#[test]
+fn doctor_honors_global_data_dir_flag() {
+    let home = tempdir().unwrap();
+    let custom_data = home.path().join("custom_data");
+    std::fs::create_dir_all(&custom_data).unwrap();
+    assert_success(
+        add_command(
+            &custom_data,
+            "Validation: doctor data-dir probe store remains readable.",
+        )
+        .output()
+        .expect("run memd add"),
+        "seed add",
+    );
+
+    let output = Command::new(memd_bin())
+        .arg("--data-dir")
+        .arg(&custom_data)
+        .args(["doctor", "--format", "json"])
+        .env("HOME", home.path())
+        .output()
+        .expect("run memd doctor");
+    let output = assert_success(output, "doctor --data-dir");
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("doctor JSON output");
+    assert_eq!(
+        report["data_dir"]["path"],
+        custom_data.display().to_string(),
+        "doctor must diagnose the resolved --data-dir, not ~/.memd/data"
+    );
+    assert_eq!(report["data_dir"]["tenant_count"], 1);
+    assert_eq!(report["warm_worker"]["status"], "not_running");
+}

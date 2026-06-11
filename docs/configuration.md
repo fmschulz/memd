@@ -6,11 +6,10 @@
 | --- | --- | --- |
 | `MEMD_DEFAULT_TENANT` | `default` | Fallback tenant for operations without `tenant_id`. |
 | `MEMD_SQLITE_POOL_MAX` | `16` | Max SQLite connections in the pool. |
-| `MEMD_DIGEST_SWEEP_INTERVAL_SEC` | `10` | Background digest-sweeper interval; `0` disables. |
 | `MEMD_CROSS_ENCODER_DISABLE` | unset | When `1`, skip ONNX cross-encoder initialization. |
 | `ORT_DYLIB_PATH` | unset | Override ONNX Runtime shared library location. |
 | `MEMD_CONSOLIDATOR` | `auto` | LLM backend for `memd consolidate`: `claude`, `codex`, `auto`, `mock`. |
-| `MEMD_SHARED_TENANT` | unset | Destination tenant for `--promote-to-shared` consolidations. |
+| `MEMD_WARM_IDLE_TIMEOUT_SECS` | `1800` | Warm worker exits after this many seconds without requests, releasing the writer lock; `0` disables. |
 | `MEMD_WRITER_LOCK_TIMEOUT_MS` | `10000` | Total retry budget for taking the data-dir writer lock on direct writes. |
 | `MEMD_USAGE_LEDGER` | on | `off`, `0`, `false`, or `no` disables usage-event recording. |
 | `MEMD_USAGE_RETENTION_DAYS` | `90` | Usage-ledger TTL in days; older events are swept opportunistically. |

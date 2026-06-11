@@ -555,3 +555,53 @@ fn stale_socket_and_pid_file_do_not_block_single_client_respawn() {
 
     drop(guard);
 }
+
+#[test]
+fn idle_timeout_exits_worker_and_releases_writer_lock() {
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+
+    // Spawned worker inherits the client env, so a 1s idle timeout
+    // makes it exit on its own shortly after startup.
+    let output = Command::new(memd_bin())
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .args(["warm", "start"])
+        .env("MEMD_WARM_IDLE_TIMEOUT_SECS", "1")
+        .output()
+        .expect("run memd warm start");
+    assert!(
+        output.status.success(),
+        "warm start failed: stderr:\n{}\nstdout:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let guard = WorkerGuard {
+        data_dir: data_dir.clone(),
+    };
+    let pid = parse_worker_pid(&output.stdout, &data_dir);
+
+    assert!(
+        wait_for_pid_exit(pid, Duration::from_secs(15)),
+        "worker pid {pid} did not exit after the idle timeout"
+    );
+
+    // The flock must be free again: maintenance takes the data-dir
+    // writer lock directly and fails fast when it is held.
+    let maintenance = Command::new(memd_bin())
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .arg("maintenance")
+        .env("MEMD_WRITER_LOCK_TIMEOUT_MS", "2000")
+        .output()
+        .expect("run memd maintenance");
+    assert!(
+        maintenance.status.success(),
+        "maintenance could not take the writer lock after idle exit: stderr:\n{}\nstdout:\n{}",
+        String::from_utf8_lossy(&maintenance.stderr),
+        String::from_utf8_lossy(&maintenance.stdout)
+    );
+
+    drop(guard);
+}
