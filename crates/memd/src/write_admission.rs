@@ -228,9 +228,31 @@ fn is_concrete_agent_action(action: &str) -> bool {
 /// Imperative verbs that make an `Agent action:` sentence concrete.
 /// Shared with memory-md rendering so the gate and the renderer agree.
 pub(crate) const ACTION_VERBS: &[&str] = &[
-    "apply", "avoid", "check", "configure", "confirm", "disable", "do", "enable", "export",
-    "follow", "include", "keep", "pin", "point", "prefer", "record", "resolve", "reuse", "run",
-    "set", "treat", "update", "use", "verify", "write",
+    "apply",
+    "avoid",
+    "check",
+    "configure",
+    "confirm",
+    "disable",
+    "do",
+    "enable",
+    "export",
+    "follow",
+    "include",
+    "keep",
+    "pin",
+    "point",
+    "prefer",
+    "record",
+    "resolve",
+    "reuse",
+    "run",
+    "set",
+    "treat",
+    "update",
+    "use",
+    "verify",
+    "write",
 ];
 
 fn contains_action_verb(text: &str) -> bool {
@@ -440,7 +462,10 @@ mod tests {
         assert!(outcome.reason.contains("downgraded to 7"));
         let warning = outcome.warning.expect("downgrade warning");
         assert!(warning.contains("Agent action"));
-        assert!(warning.contains("set"), "warning lists the allowlist: {warning}");
+        assert!(
+            warning.contains("set"),
+            "warning lists the allowlist: {warning}"
+        );
     }
 
     #[test]

@@ -1441,7 +1441,10 @@ mod tests {
         let canonical = warm_socket_path_for_data_dir(&data_dir);
         std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
         std::fs::write(&canonical, b"").unwrap();
-        let legacy = data_dir.join("warm").join("legacyhash16char").join("memd.sock");
+        let legacy = data_dir
+            .join("warm")
+            .join("legacyhash16char")
+            .join("memd.sock");
         std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
         std::fs::write(&legacy, b"").unwrap();
 

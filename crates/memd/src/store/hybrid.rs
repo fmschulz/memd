@@ -1254,5 +1254,4 @@ mod tests {
         assert_eq!(config.sparse_k, 100);
         assert!(config.enable_sparse);
     }
-
 }
