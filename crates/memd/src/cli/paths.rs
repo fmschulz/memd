@@ -253,4 +253,3 @@ pub(super) fn resolve_export_markdown_data_dirs(explicit: Option<&Path>) -> Resu
     let cwd = std::env::current_dir().ok();
     resolve_export_markdown_data_dirs_from(explicit, cwd.as_deref())
 }
-

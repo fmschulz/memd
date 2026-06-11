@@ -43,8 +43,8 @@ mod warm;
 #[cfg(test)]
 use args::parse_chunk_type;
 pub use args::{
-    CliCommand, CliQueryMode, ExportFormat, ReportFormat, SearchReranker, StoreAccess,
-    WarmCommand, WarmMode, WarmProcessConfig,
+    CliCommand, CliQueryMode, ExportFormat, ReportFormat, SearchReranker, StoreAccess, WarmCommand,
+    WarmMode, WarmProcessConfig,
 };
 use args::{ProjectScopeConfig, SearchRerankerOptions, TenantScopeConfig};
 use audit::{render_audit_report, run_audit, strict_should_fail, AuditOptions};

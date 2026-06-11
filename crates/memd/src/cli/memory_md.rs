@@ -1430,7 +1430,9 @@ fn is_concrete_agent_action_text(action: &str) -> bool {
 fn contains_action_verb(text: &str) -> bool {
     // Shared with the write-admission gate so renderer and gate agree.
     text.split(|ch: char| !ch.is_ascii_alphabetic())
-        .any(|word| crate::write_admission::ACTION_VERBS.contains(&word.to_ascii_lowercase().as_str()))
+        .any(|word| {
+            crate::write_admission::ACTION_VERBS.contains(&word.to_ascii_lowercase().as_str())
+        })
 }
 
 fn is_generated_wrapper_display_item(item: &DisplayedMemoryMdItem) -> bool {

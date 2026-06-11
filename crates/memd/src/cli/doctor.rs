@@ -683,19 +683,22 @@ fn render_text(report: &Value) -> String {
             )
         }
     });
-    push_line(&mut out, "warm worker", &report["warm_worker"], |v| {
-        match v.get("status").and_then(|p| p.as_str()) {
-            Some("running") => format!(
-                "running (worker v{}, cli v{})",
-                v.get("worker_version").and_then(|p| p.as_str()).unwrap_or("?"),
-                v.get("cli_version").and_then(|p| p.as_str()).unwrap_or("?"),
-            ),
-            _ => v
-                .get("note")
+    push_line(&mut out, "warm worker", &report["warm_worker"], |v| match v
+        .get("status")
+        .and_then(|p| p.as_str())
+    {
+        Some("running") => format!(
+            "running (worker v{}, cli v{})",
+            v.get("worker_version")
                 .and_then(|p| p.as_str())
-                .unwrap_or("not running")
-                .to_string(),
-        }
+                .unwrap_or("?"),
+            v.get("cli_version").and_then(|p| p.as_str()).unwrap_or("?"),
+        ),
+        _ => v
+            .get("note")
+            .and_then(|p| p.as_str())
+            .unwrap_or("not running")
+            .to_string(),
     });
     let rules = &report["global_rules"];
     push_line(
