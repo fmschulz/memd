@@ -202,7 +202,14 @@ pub async fn import_omf_with_events(
             continue;
         }
 
-        let project_id = extract_project_id(&item.extensions).or_else(|| item.category.clone());
+        let mut project_id = extract_project_id(&item.extensions).or_else(|| item.category.clone());
+        // Validate the imported project id at this boundary (it comes from
+        // untrusted OMF). A malformed value (newlines, markdown control bytes,
+        // path separators) drops the scope rather than carrying injectable
+        // content into stored chunks.
+        if ProjectId::validate_opt(project_id.as_deref()).is_err() {
+            project_id = None;
+        }
         let chunk_type = extract_chunk_type(&item.extensions).unwrap_or(ChunkType::Doc);
         let canonical = canonicalize_for_type(&item.content, chunk_type);
 
@@ -225,15 +232,38 @@ pub async fn import_omf_with_events(
             LifecycleDelta::default()
         };
 
-        let mut chunk = MemoryChunk::new(tenant_id.clone(), item.content.clone(), chunk_type);
+        // Apply the same write-admission gate as memory.add. OMF import
+        // previously called the store directly, so content the gate rejects
+        // (empty text, generated-digest wrappers) entered verbatim, and
+        // high-priority writes skipped the Agent-action downgrade and the
+        // auto-priority stamp. Run the gate here so import and add agree.
+        let ingestion_mode =
+            extract_ingestion_mode(&item.extensions).unwrap_or(IngestionMode::Document);
+        let mut tags = item.tags.clone();
+        let admission = crate::write_admission::classify_write(
+            chunk_type,
+            &item.content,
+            &tags,
+            ingestion_mode,
+        );
+        if admission.decision == crate::write_admission::AdmissionDecision::Reject {
+            result.skipped += 1;
+            continue;
+        }
+        if admission.warning.is_some() {
+            crate::write_admission::downgrade_high_priority_tags(&mut tags);
+        }
+        if admission.decision == crate::write_admission::AdmissionDecision::Durable {
+            crate::auto_priority::stamp_auto_priority(chunk_type, &item.content, &mut tags);
+        }
+
+        let mut chunk = MemoryChunk::new(tenant_id.clone(), item.content.clone(), chunk_type)
+            .with_ingestion_mode(ingestion_mode);
         if let Some(ref p) = project_id {
             chunk = chunk.with_project(ProjectId::new(Some(p.clone())));
         }
-        if !item.tags.is_empty() {
-            chunk = chunk.with_tags(item.tags.clone());
-        }
-        if let Some(mode) = extract_ingestion_mode(&item.extensions) {
-            chunk = chunk.with_ingestion_mode(mode);
+        if !tags.is_empty() {
+            chunk = chunk.with_tags(tags);
         }
 
         let text = chunk.text.clone();
@@ -401,7 +431,14 @@ pub async fn preview_omf_import(
             continue;
         }
 
-        let project_id = extract_project_id(&item.extensions).or_else(|| item.category.clone());
+        let mut project_id = extract_project_id(&item.extensions).or_else(|| item.category.clone());
+        // Validate the imported project id at this boundary (it comes from
+        // untrusted OMF). A malformed value (newlines, markdown control bytes,
+        // path separators) drops the scope rather than carrying injectable
+        // content into stored chunks.
+        if ProjectId::validate_opt(project_id.as_deref()).is_err() {
+            project_id = None;
+        }
         let chunk_type = extract_chunk_type(&item.extensions).unwrap_or(ChunkType::Doc);
         let canonical = canonicalize_for_type(&item.content, chunk_type);
 

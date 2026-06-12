@@ -6,6 +6,30 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-06-11
+
+First stable release. Hardens retrieval recall, input validation, and the
+write-admission gate (external code review), and refreshes the LoCoMo benchmark
+numbers against the current code.
+
+### Fixed
+
+- **Retrieval recall**: hybrid retrieval no longer truncates the candidate pool
+  before reranking, so deeper matches are no longer silently dropped.
+- **Cross-agent prompt injection**: `ProjectId::validate` rejects `..` and
+  markdown/path-control bytes at input boundaries while still allowing repo
+  basenames (`-` and `.`), so a project id can no longer inject instructions
+  into cross-project memory.
+- **Write-admission gate**: non-finite or garbage `priority:` values (`inf`,
+  `nan`, `garbage`) can no longer short-circuit the low-signal gate to durable,
+  and oversize text is rejected before the marker scan.
+
+### Changed
+
+- Re-measured LoCoMo on the current code: memd MRR@10 0.412, Hit@10 0.613, mean
+  search 23.2 ms (previously 0.420 / 0.621 / 26.7 ms). memd still leads both
+  baselines and wins all four categories; docs and figures updated to match.
+
 ## [0.62.0] - 2026-06-11
 
 ### Added

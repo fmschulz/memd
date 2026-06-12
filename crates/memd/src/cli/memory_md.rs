@@ -568,7 +568,7 @@ fn user_priority_at_least(tags: &[String], threshold: u8) -> bool {
             .strip_prefix("priority:")
             .or_else(|| tag.strip_prefix("importance:"));
         match value.and_then(|v| v.parse::<f32>().ok()) {
-            Some(n) => n >= threshold as f32,
+            Some(n) => n.is_finite() && n >= threshold as f32,
             None => false,
         }
     })
@@ -902,11 +902,17 @@ fn explicit_priority(tags: &[String]) -> Option<f32> {
             .strip_prefix("priority:")
             .or_else(|| tag.strip_prefix("importance:"))?;
         let parsed = value.parse::<f32>().ok()?;
-        if parsed <= 10.0 {
-            Some(parsed * 10.0)
-        } else {
-            Some(parsed.min(100.0))
+        if !parsed.is_finite() {
+            // `priority:inf` / `priority:nan` must not pin a takeaway at max
+            // rank with permanent suppression immunity.
+            return None;
         }
+        let scaled = if parsed <= 10.0 {
+            parsed * 10.0
+        } else {
+            parsed.min(100.0)
+        };
+        Some(scaled.clamp(0.0, 100.0))
     })
 }
 

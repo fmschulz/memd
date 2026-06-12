@@ -333,8 +333,16 @@ impl HnswIndex {
             .into_iter()
             .filter_map(|n| {
                 let chunk_id = mapping.get_chunk_id(n.d_id)?;
-                // Convert distance to similarity (cosine distance = 1 - similarity)
-                let score = 1.0 - n.distance;
+                // Convert distance to similarity (cosine distance = 1 - similarity).
+                // A zero-norm query (or a corrupt vector) yields a NaN distance;
+                // sanitize so a NaN score can't make the downstream sort
+                // nondeterministic. Cosine similarity is bounded to [0, 1].
+                let raw = 1.0 - n.distance;
+                let score = if raw.is_finite() {
+                    raw.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
                 Some(SearchResult { chunk_id, score })
             })
             .collect();

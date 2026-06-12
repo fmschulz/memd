@@ -487,8 +487,15 @@ impl HybridSearcher {
         timing.dense_time = embed_start.elapsed(); // Embed time tracked as dense_time
 
         // Step 2: Tiered search (cache -> hot -> warm)
+        // Over-fetch the dense leg to the configured dense_k so RRF fuses a
+        // deep dense list against the deep sparse list (sparse_k), matching the
+        // non-tiered path. Fetching only `k` here would let a chunk that ranks
+        // shallow in dense but top in sparse lose a fusion it should win. The
+        // final list is truncated to `k` after fusion below.
+        let dense_fetch = self.config.dense_k.max(k);
         let project_id = context.and_then(|c| c.current_project.as_deref());
-        let tiered_result = tiered_searcher.search(&query_embedding, tenant_id, project_id, k)?;
+        let tiered_result =
+            tiered_searcher.search(&query_embedding, tenant_id, project_id, dense_fetch)?;
 
         // Convert TieredTiming
         let tiered_timing = tiered_result.timing;
@@ -511,10 +518,13 @@ impl HybridSearcher {
         // For cache hits, return directly; for non-cache, fuse with sparse
         let results: Vec<HybridSearchResult> =
             if tiered_result.cache_hit || sparse_results.is_empty() {
-                // Direct conversion from tiered results
+                // Direct conversion from tiered results. Truncate to `k`: the
+                // dense leg was over-fetched to dense_fetch for fusion, but with
+                // no sparse leg to fuse there is nothing to truncate later.
                 tiered_result
                     .results
                     .into_iter()
+                    .take(k)
                     .map(|r| HybridSearchResult {
                         chunk_id: r.chunk_id,
                         final_score: r.score,

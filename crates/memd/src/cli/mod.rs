@@ -101,6 +101,7 @@ pub(super) async fn cli_add_rendered<S: Store>(
     opts: CliAddRenderOptions,
 ) -> Result<String> {
     let tenant = TenantId::new(&opts.tenant_id)?;
+    ProjectId::validate_opt(opts.project_id.as_deref())?;
 
     // Ensure tenant directory exists
     if let Some(tm) = tenant_manager {
@@ -115,6 +116,12 @@ pub(super) async fn cli_add_rendered<S: Store>(
     }
 
     let mut effective_tags = opts.tags.unwrap_or_default();
+    // CLI `memd add` is the durable-write path and intentionally uses
+    // Document mode: low-signal text is hard-rejected here rather than stored
+    // ephemerally. Conversation mode (which downgrades low-signal progress to
+    // short-lived hidden context) is a programmatic feature exposed only on
+    // the `memory.add` MCP/`call` surface via its `mode` param, so the CLI
+    // surface and the warm-wire protocol stay narrow.
     let admission = crate::write_admission::classify_write(
         opts.chunk_type,
         &opts.text,

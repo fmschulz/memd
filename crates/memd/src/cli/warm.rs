@@ -944,8 +944,14 @@ fn warm_pid_is_running(pid: u32) -> bool {
 async fn shutdown_existing_warm_worker_best_effort(config: &WarmProcessConfig) {
     let _ = warm_request(&warm_socket_path(config), &WarmWireRequest::Shutdown).await;
     let pid = warm_pid_from_file(config);
-    let _ = wait_for_warm_pid_exit(pid, Duration::from_secs(10)).await;
-    let _ = std::fs::remove_file(warm_socket_path(config));
+    let exited = wait_for_warm_pid_exit(pid, Duration::from_secs(10)).await;
+    // Only unlink the socket once the worker process is confirmed gone. With no
+    // pid file we cannot confirm it died, so leaving the socket avoids
+    // unlinking a live worker's endpoint (the kernel flock still protects the
+    // data dir, and the next `warm start` rebinds the path via temp+rename).
+    if pid.is_some() && exited {
+        let _ = std::fs::remove_file(warm_socket_path(config));
+    }
 }
 
 fn warm_worker_needs_replacement(error: &MemdError) -> bool {
@@ -1179,18 +1185,82 @@ fn validate_warm_worker_identity(result: &Value) -> Result<()> {
 }
 
 #[cfg(unix)]
+/// Client-side timeout for a single warm-worker request. A wedged worker (e.g.
+/// one blocked on the SQLite busy_timeout) must not hang the CLI indefinitely;
+/// on timeout the request fails and `--warm auto` falls back to the cold path.
+fn warm_client_timeout() -> Duration {
+    std::env::var("MEMD_WARM_CLIENT_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_secs(30))
+}
+
+/// Defense-in-depth peer-credential check for the worker socket: only accept
+/// connections from the same uid that owns the worker. The 0700 data dir and
+/// 0600 socket are the primary boundary; this rejects a same-host process under
+/// a different uid that somehow reached the socket. A failed credential probe
+/// does not hard-fail (the perms still apply), so the check never blocks a
+/// legitimate same-uid client.
+#[cfg(unix)]
+fn peer_uid_allowed(stream: &tokio::net::UnixStream) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = stream.as_raw_fd();
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: `fd` is a valid connected socket owned by `stream`;
+        // getsockopt writes at most `len` bytes into `cred`.
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                &mut cred as *mut libc::ucred as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if rc != 0 {
+            return true;
+        }
+        // SAFETY: geteuid is always safe and takes no arguments.
+        cred.uid == unsafe { libc::geteuid() }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // SO_PEERCRED is Linux-only; the 0700/0600 perms are the boundary
+        // elsewhere. Allow (the perms still apply).
+        let _ = stream;
+        true
+    }
+}
+
+#[cfg(unix)]
 async fn warm_request(socket: &Path, request: &WarmWireRequest) -> Result<WarmWireResponse> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
 
-    let mut stream = UnixStream::connect(socket).await?;
-    let body = serde_json::to_vec(request)?;
-    stream.write_all(&body).await?;
-    stream.shutdown().await?;
+    let timeout = warm_client_timeout();
+    let exchange = async {
+        let mut stream = UnixStream::connect(socket).await?;
+        let body = serde_json::to_vec(request)?;
+        stream.write_all(&body).await?;
+        stream.shutdown().await?;
 
-    let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).await?;
-    Ok(serde_json::from_slice(&bytes)?)
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).await?;
+        Ok::<WarmWireResponse, MemdError>(serde_json::from_slice(&bytes)?)
+    };
+    match tokio::time::timeout(timeout, exchange).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(MemdError::ProtocolError(format!(
+            "warm worker did not respond within {} ms; falling back to the cold path \
+             (adjust with MEMD_WARM_CLIENT_TIMEOUT_MS or stop it with `memd warm stop`)",
+            timeout.as_millis()
+        ))),
+    }
 }
 
 #[cfg(not(unix))]
@@ -1284,6 +1354,9 @@ pub(super) async fn run_warm_worker<S: Store>(
             accepted = listener.accept(), if !shutting_down && inflight.len() < MAX_INFLIGHT_CONNECTIONS => {
                 last_activity = Instant::now();
                 match accepted {
+                    Ok((stream, _)) if !peer_uid_allowed(&stream) => {
+                        warn!("warm worker rejected a connection from a different uid");
+                    }
                     Ok((stream, _)) => {
                         inflight.push(Box::pin(handle_warm_connection(
                             store,
