@@ -9,12 +9,14 @@
 # skill vendored into several places, and those copies drift. Here the repo is
 # the single source of truth; symlinks keep the installed copies current.
 
-.PHONY: help build install install-binary install-skill install-skill-bundle \
-        install-skill-copy install-enforcement install-all menu uninstall \
-        uninstall-binary uninstall-skill uninstall-enforcement status clean
+.PHONY: help build install install-prebuilt install-binary install-skill \
+        install-skill-bundle install-skill-copy install-enforcement install-all \
+        menu uninstall uninstall-binary uninstall-skill uninstall-enforcement \
+        status clean
 
-REPO        := $(CURDIR)
-RELEASE_BIN := $(REPO)/target/release/memd
+REPO          := $(CURDIR)
+RELEASE_BIN   := $(REPO)/target/release/memd
+INSTALLER_URL := https://github.com/fmschulz/memd/releases/latest/download/memd-installer.sh
 
 PREFIX  ?= $(HOME)/.local
 BIN_DIR := $(PREFIX)/bin
@@ -63,8 +65,8 @@ menu: ## Interactive TUI to select components to install or uninstall
 
 build: ## Build the release binary (cargo build --release -p memd)
 	@if ! command -v cargo >/dev/null 2>&1; then \
-		echo "cargo not found — install Rust (https://rustup.rs) or use the prebuilt installer instead:"; \
-		echo "  curl --proto '=https' --tlsv1.2 -LsSf https://github.com/fmschulz/memd/releases/latest/download/memd-installer.sh | sh"; \
+		echo "cargo not found — install Rust (https://rustup.rs), or skip compiling entirely:"; \
+		echo "  make install-prebuilt"; \
 		exit 1; \
 	fi
 	@echo "$(BLUE)Building memd (release)...$(NC)"
@@ -74,6 +76,26 @@ install: build install-binary install-skill install-enforcement ## Install every
 	@$(MAKE) --no-print-directory status
 	@echo "$(GREEN)✓ memd fully installed (binary + skill + enforcement) — idempotent, safe to re-run$(NC)"
 	@echo "  next: run 'memd doctor --strict' to verify (exit 0 on a healthy fresh install)"
+
+install-prebuilt: ## Install everything WITHOUT compiling: prebuilt release binary if it works here, else build; + skill + enforcement
+	@ok=0; \
+	if command -v curl >/dev/null 2>&1; then \
+		echo "$(BLUE)Installing the prebuilt binary from the latest GitHub release...$(NC)"; \
+		command -v memd >/dev/null 2>&1 && memd warm stop >/dev/null 2>&1 || true; \
+		curl --proto '=https' --tlsv1.2 -LsSf "$(INSTALLER_URL)" | sh >/dev/null 2>&1 || true; \
+		if [ -x "$(BIN)" ] && "$(BIN)" --version >/dev/null 2>&1; then ok=1; fi; \
+	else \
+		echo "$(YELLOW)curl not found — skipping the prebuilt path$(NC)"; \
+	fi; \
+	if [ "$$ok" = "1" ]; then \
+		echo "  $(GREEN)✓$(NC) prebuilt binary works: $$("$(BIN)" --version) ($(BIN))"; \
+	else \
+		echo "  $(YELLOW)prebuilt unavailable or does not run on this platform — building from source$(NC)"; \
+		$(MAKE) --no-print-directory install-binary; \
+	fi
+	@$(MAKE) --no-print-directory install-skill install-enforcement status
+	@echo "$(GREEN)✓ memd installed without compiling (prebuilt-first) — idempotent, safe to re-run$(NC)"
+	@echo "  next: run 'memd doctor --strict' to verify"
 
 install-binary: build ## Binary only (escape hatch): build + install memd onto PATH
 	@if [ ! -x "$(RELEASE_BIN)" ]; then \

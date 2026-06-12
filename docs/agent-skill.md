@@ -33,9 +33,9 @@ when startup context looks noisy.
 Option A (recommended): clone and install the binary, skill, and enforcement:
 
 ```bash
-git clone https://github.com/fmschulz/memd
+git clone --depth 1 https://github.com/fmschulz/memd
 cd memd
-make install   # binary + agent skill + enforcement
+make install-prebuilt   # prebuilt binary (seconds; compiles only if needed) + skill + enforcement
 memd doctor
 ```
 
@@ -45,9 +45,11 @@ Option B: prebuilt binary only (no clone):
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/fmschulz/memd/releases/latest/download/memd-installer.sh | sh
 ```
 
-The prebuilt installer installs only the binary. To install the skill and
-enforcement, use `make install` from a clone. `make install-binary` installs
-only the binary, `make menu` opens an interactive TUI to pick components, and
+The prebuilt installer installs only the binary. For everything without
+compiling, run `make install-prebuilt` from a clone — it tests the prebuilt
+release binary and builds from source only if that fails. `make install`
+always builds from source, `make install-binary` installs only the binary,
+`make menu` opens an interactive TUI to pick components, and
 `make uninstall` removes what `make install` installed.
 
 Linux releases are static musl, so there is no `GLIBC_... not found` pitfall.

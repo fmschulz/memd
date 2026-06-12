@@ -8,9 +8,9 @@ commands.
 ## 1. Install
 
 ```bash
-git clone https://github.com/fmschulz/memd
+git clone --depth 1 https://github.com/fmschulz/memd
 cd memd
-make install   # binary + agent skill + enforcement
+make install-prebuilt   # prebuilt binary (seconds; compiles only if needed) + skill + enforcement
 memd doctor
 ```
 
@@ -20,8 +20,9 @@ Prebuilt binary only (no clone):
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/fmschulz/memd/releases/latest/download/memd-installer.sh | sh
 ```
 
-The prebuilt installer installs only the binary. To install the skill and
-enforcement, use `make install` from a clone. From source, manual:
+The prebuilt installer installs only the binary; `make install-prebuilt` from
+a clone adds the skill + enforcement without compiling (`make install` always
+builds from source). From source, manual:
 
 ```bash
 cargo build --release
@@ -163,9 +164,9 @@ The recommended install path already installed the binary, skill, and
 enforcement:
 
 ```bash
-git clone https://github.com/fmschulz/memd
+git clone --depth 1 https://github.com/fmschulz/memd
 cd memd
-make install   # binary + agent skill + enforcement
+make install-prebuilt   # prebuilt binary (seconds; compiles only if needed) + skill + enforcement
 memd doctor
 ```
 
