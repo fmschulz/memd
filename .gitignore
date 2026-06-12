@@ -63,6 +63,10 @@ DOCKER.md
 REPO_AUDIT.md
 TESTING.md
 
+# Never commit the bundled skill binary again — 10+ committed copies of it are
+# why a full clone is ~170 MB. install-skill-bundle copies it at install time.
+/memd-skill/bin/
+
 # Manuscript + external review artifacts (internal only)
 /MANUSCRIPT.md
 /fable_review/
