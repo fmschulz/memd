@@ -4060,6 +4060,8 @@ async fn scope_status_for_search<S: Store>(
     query: &str,
     k: usize,
     result_count: usize,
+    parsed_filters: &ParsedSearchFilters,
+    visibility_policy: &VisibilityPolicy,
 ) -> ScopeStatus {
     let retrieval_mode = store.retrieval_mode().to_string();
     let mut warnings = Vec::new();
@@ -4085,7 +4087,17 @@ async fn scope_status_for_search<S: Store>(
     if let Some(project) = project_id.filter(|p| !p.trim().is_empty()) {
         if result_count < k && !query.is_empty() {
             if let Ok(scored) = store.search_with_scores(tenant_id, query, k.max(8)).await {
-                let outside = scored
+                // Count only rows the real widened search would surface: apply
+                // the caller's non-project filters (chunk_type, time, episode)
+                // and the visibility policy, exactly as rerunning without
+                // --project-id would. Otherwise the hint counts superseded,
+                // expired, or filtered rows the agent would never see.
+                let scored_len = scored.len();
+                let filtered = apply_search_filters(scored, None, parsed_filters, scored_len);
+                let filtered_len = filtered.len();
+                let visible =
+                    apply_visibility_filter(store, filtered, visibility_policy, filtered_len).await;
+                let outside = visible
                     .iter()
                     .filter(|(chunk, _)| chunk.project_id.as_option() != Some(project))
                     .count();
@@ -5666,6 +5678,8 @@ pub async fn handle_memory_search<S: Store>(
     params: SearchParams,
 ) -> Result<Value, McpError> {
     let tenant_id = resolve_tenant_id(&params.tenant_id)?;
+    ProjectId::validate_opt(params.project_id.as_deref())
+        .map_err(|e| McpError::InvalidParams(e.to_string()))?;
     validate_search_k(params.k)?;
     let parsed_filters = parse_search_filters(params.filters.as_ref())?;
     let debug_tiers = params.debug_tiers.unwrap_or(false);
@@ -5830,6 +5844,8 @@ pub async fn handle_memory_search<S: Store>(
             &params.query,
             params.k,
             retrieved_count,
+            &parsed_filters,
+            &visibility_policy,
         )
         .await;
         return format_mcp_response(&SearchResult {
@@ -5942,6 +5958,8 @@ pub async fn handle_memory_search<S: Store>(
         &params.query,
         params.k,
         retrieved_count,
+        &parsed_filters,
+        &visibility_policy,
     )
     .await;
     format_mcp_response(&SearchResult {
@@ -5961,6 +5979,8 @@ pub async fn handle_memory_add<S: Store>(
     params: AddParams,
 ) -> Result<Value, McpError> {
     let tenant_id = resolve_tenant_id(&params.tenant_id)?;
+    ProjectId::validate_opt(params.project_id.as_deref())
+        .map_err(|e| McpError::InvalidParams(e.to_string()))?;
     let chunk_type = parse_chunk_type(&params.chunk_type)?;
 
     info!(
@@ -6428,6 +6448,10 @@ pub async fn handle_memory_add_batch<S: Store>(
     params: AddBatchParams,
 ) -> Result<Value, McpError> {
     let tenant_id = resolve_tenant_id(&params.tenant_id)?;
+    for chunk in &params.chunks {
+        ProjectId::validate_opt(chunk.project_id.as_deref())
+            .map_err(|e| McpError::InvalidParams(e.to_string()))?;
+    }
 
     info!(
         tenant_id = %tenant_id,
@@ -9861,14 +9885,21 @@ pub async fn handle_context_search_documents<S: Store>(
         "context.search_context_documents"
     );
 
-    // TODO(B1): apply VisibilityPolicy via apply_visibility_filter to hide
-    // superseded/expired/history chunks. memory.get (A8) enforces this at
-    // the point-lookup; the search path still leaks non-active content
-    // until Track B1 wires the overlay into search_with_scores.
     let scored_chunks = store
         .search_with_scores(&tenant_id, &params.query, fetch_k)
         .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
+    // Hide superseded/expired/history chunks, matching memory.search /
+    // memory.get. This deprecated handler has no include_* knobs, so the
+    // default policy (active-only) applies.
+    let visible_cap = scored_chunks.len();
+    let scored_chunks = apply_visibility_filter(
+        store,
+        scored_chunks,
+        &VisibilityPolicy::default(),
+        visible_cap,
+    )
+    .await;
 
     let mut filtered = Vec::new();
     for (chunk, score) in scored_chunks {
@@ -9964,14 +9995,19 @@ pub async fn handle_context_find_relevant_context<S: Store>(
         }
     }
 
-    // TODO(B1): apply VisibilityPolicy via apply_visibility_filter to hide
-    // superseded/expired/history chunks. memory.get (A8) enforces this at
-    // the point-lookup; the search path still leaks non-active content
-    // until Track B1 wires the overlay into search_with_scores.
     let scored_chunks = store
         .search_with_scores(&tenant_id, &params.task, fetch_k)
         .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
+    // Hide superseded/expired/history chunks, matching memory.search.
+    let visible_cap = scored_chunks.len();
+    let scored_chunks = apply_visibility_filter(
+        store,
+        scored_chunks,
+        &VisibilityPolicy::default(),
+        visible_cap,
+    )
+    .await;
 
     for (chunk, score) in scored_chunks {
         if !is_context_chunk(&chunk) {
@@ -10163,10 +10199,16 @@ pub async fn handle_context_get_hot_context<S: Store>(
     chunks.retain(|chunk| has_exact_tag(&chunk.tags, TAG_CTX_TIER_HOT));
     chunks.sort_by_key(|chunk| std::cmp::Reverse(chunk.timestamp_created));
 
-    let results: Vec<ChunkResult> = chunks
+    // Hide superseded/expired/history chunks, matching memory.search.
+    // apply_visibility_filter stops at `k`, so it does at most k overlay
+    // lookups over the recency-sorted candidates.
+    let scored: Vec<(MemoryChunk, f32)> = chunks.into_iter().map(|c| (c, 1.0)).collect();
+    let visible =
+        apply_visibility_filter(store, scored, &VisibilityPolicy::default(), params.k).await;
+
+    let results: Vec<ChunkResult> = visible
         .iter()
-        .take(params.k)
-        .map(|chunk| chunk_to_result(chunk, 1.0, Some("hot".to_string()), None))
+        .map(|(chunk, score)| chunk_to_result(chunk, *score, Some("hot".to_string()), None))
         .collect();
 
     format_mcp_response(&ContextGetHotContextResult { results })

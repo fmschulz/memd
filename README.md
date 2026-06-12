@@ -1,6 +1,6 @@
 # memd
 
-[![Version](https://img.shields.io/badge/version-0.62.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue)](CHANGELOG.md)
 [![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust&logoColor=white)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-fmschulz.github.io%2Fmemd-blue)](https://fmschulz.github.io/memd/)
@@ -166,7 +166,7 @@ Cross-system retrieval on upstream
 
 | System | MRR@10 | Hit@10 | Avg search | Seed |
 |---|---:|---:|---:|---:|
-| **`memd` (hybrid)** | **0.420** | **0.621** | **26.7 ms** | 108 s |
+| **`memd` (hybrid)** | **0.412** | **0.613** | **23.2 ms** | 197 s |
 | `superlocalmemory` v3.4.46 (lexical) | 0.369 | 0.599 | 804.5 ms | 1.8 s |
 | `mem0` v2.0.2 (LLM-extracted) | 0.354 | 0.591 | 40.9 ms | 13,424 s |
 
@@ -176,7 +176,7 @@ superlocalmemory ran in lexical-only fallback because its published semantic
 configuration was unreachable; full protocol:
 https://fmschulz.github.io/memd/benchmarking/.
 
-`memd` leads on MRR@10 (+14% vs SuperLocalMemory, +19% vs Mem0), Hit@10, and
+`memd` leads on MRR@10 (+12% vs SuperLocalMemory, +16% vs Mem0), Hit@10, and
 search latency. Internal task-memory benchmark (`cli_warm`: Hit@3 1.00,
 MRR 0.87, 9.7 ms), Bright-Pro biology adapter, multi-turn token benchmark, and
 reproducibility notes are documented at

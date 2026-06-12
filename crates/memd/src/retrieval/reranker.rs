@@ -191,7 +191,11 @@ impl FeatureReranker {
     fn compute_recency_bonus(&self, timestamp_created: i64, now_ms: i64) -> f32 {
         let age_ms = (now_ms - timestamp_created).max(0) as f64;
         let age_days = age_ms / (1000.0 * 60.0 * 60.0 * 24.0);
-        let decay_rate = std::f64::consts::LN_2 / self.config.recency_half_life_days as f64;
+        // Floor the half-life to a tiny positive value so a configured
+        // half-life of 0 cannot produce inf/NaN (LN_2 / 0 -> inf, and
+        // 0 * inf -> NaN at age 0), which would make ranking nondeterministic.
+        let half_life_days = (self.config.recency_half_life_days as f64).max(f64::EPSILON);
+        let decay_rate = std::f64::consts::LN_2 / half_life_days;
         (-age_days * decay_rate).exp() as f32
     }
 

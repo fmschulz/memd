@@ -17,13 +17,16 @@ turns, 1,536 queries, MRR@10 over categories 1–4:
 
 | System | MRR@10 | Hit@10 | Avg search | Seed |
 |---|---:|---:|---:|---:|
-| **`memd` (hybrid)** | **0.420** | **0.621** | **26.7 ms** | 108 s |
+| **`memd` (hybrid)** | **0.412** | **0.613** | **23.2 ms** | 197 s |
 | `superlocalmemory` v3.4.46 (lexical) | 0.369 | 0.599 | 804.5 ms | 1.8 s |
 | `mem0` v2.0.2 (LLM-extracted) | 0.354 | 0.591 | 40.9 ms | 13,424 s |
 
 `memd` wins quality on every metric and is the fastest at search. Seed cost
-trades off against retrieval quality. Full per-category numbers,
-configuration, and reproducibility caveats: [Benchmarking](benchmarking.md).
+trades off against retrieval quality. On the harder LoCoMo QA-accuracy test,
+where each system answers from its own retrieved memory and a judge scores the
+answer, `memd` again leads (43.5% vs 38.5% Mem0, 38.0% SuperLocalMemory). Full
+per-category numbers, configuration, and reproducibility caveats:
+[Benchmarking](benchmarking.md).
 
 ## Design comparison
 
@@ -52,8 +55,8 @@ ingest time to extract or curate memory units, link entities, or annotate
 facts. This has three consequences:
 
 - **Seed cost is large.** On LoCoMo, `mem0` seeded in 13,424 s against
-  `memd`'s 108 s, a 124× difference. The extra cost is the extractor running
-  over every turn.
+  `memd`'s ~100–200 s (single run, machine-load dependent), two orders of
+  magnitude less. The extra cost is the extractor running over every turn.
 - **Write quality is coupled to extractor quality.** Swapping the extractor
   model — for cost, license, or capability reasons — invalidates the prior
   memory, because the new model would have produced different units. The
@@ -73,8 +76,8 @@ Most of the systems above default to dense vector search. Dense is good at
 paraphrase but bad at the lookup shapes agents often generate: function names,
 file paths, error strings, ticket IDs, commit hashes,
 parameter values. `memd` runs dense (HNSW) and sparse (BM25 over tantivy)
-in parallel and fuses the results. The cross-system LoCoMo gap (+14% MRR@10
-over the lexical-only `superlocalmemory`, +19% over the dense-only `mem0`)
+in parallel and fuses the results. The cross-system LoCoMo gap (+12% MRR@10
+over the lexical-only `superlocalmemory`, +16% over the dense-only `mem0`)
 is the headline data point.
 
 ### Local CLI, not server

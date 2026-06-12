@@ -515,7 +515,7 @@ impl TraceQueryService {
     ) -> Result<Vec<ToolCallResult>> {
         // If session_id filter is specified, use session-specific query
         if let Some(session) = session_id {
-            let traces = self.store.find_tool_traces_by_session(session)?;
+            let traces = self.store.find_tool_traces_by_session(tenant_id, session)?;
 
             let results: Vec<ToolCallResult> = traces
                 .into_iter()

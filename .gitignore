@@ -63,6 +63,13 @@ DOCKER.md
 REPO_AUDIT.md
 TESTING.md
 
+# Manuscript + external review artifacts (internal only)
+/MANUSCRIPT.md
+/fable_review/
+
+# Generated MkDocs site (mkdocs build output)
+/site/
+
 # Evaluation results (benchmarks change frequently)
 /evals/results/
 /evals/bench/results/

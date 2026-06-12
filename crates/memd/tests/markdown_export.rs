@@ -131,8 +131,8 @@ async fn export_markdown_keeps_collision_prone_project_ids_distinct() {
         "memory.add",
         serde_json::json!({
             "tenant_id": "t",
-            "project_id": "a/b",
-            "text": "from a/b",
+            "project_id": "a.b",
+            "text": "from a.b",
             "type": "doc",
         }),
     )
@@ -142,8 +142,8 @@ async fn export_markdown_keeps_collision_prone_project_ids_distinct() {
         "memory.add",
         serde_json::json!({
             "tenant_id": "t",
-            "project_id": "a:b",
-            "text": "from a:b",
+            "project_id": "a_b",
+            "text": "from a_b",
             "type": "doc",
         }),
     )
@@ -160,7 +160,7 @@ async fn export_markdown_keeps_collision_prone_project_ids_distinct() {
     assert_eq!(
         files.len(),
         2,
-        "raw projects 'a/b' and 'a:b' must produce two files"
+        "collision-prone projects 'a.b' and 'a_b' (both sanitize to a_b) must produce two files"
     );
     let paths: Vec<String> = files
         .iter()
@@ -172,8 +172,8 @@ async fn export_markdown_keeps_collision_prone_project_ids_distinct() {
         .iter()
         .map(|f| f["content"].as_str().unwrap())
         .collect();
-    assert!(raw_projects.iter().any(|c| c.contains("project: a/b")));
-    assert!(raw_projects.iter().any(|c| c.contains("project: a:b")));
+    assert!(raw_projects.iter().any(|c| c.contains("project: a.b")));
+    assert!(raw_projects.iter().any(|c| c.contains("project: a_b")));
 }
 
 #[tokio::test]

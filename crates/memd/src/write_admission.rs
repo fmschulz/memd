@@ -67,12 +67,25 @@ impl AdmissionOutcome {
     }
 }
 
+/// Upper bound on a single memory's text. A single chunk is meant to be a
+/// bounded note/record; callers chunk large documents before writing. The cap
+/// also backstops the `Agent action:` scan against pathological multi-megabyte
+/// inputs at the add entry points (all of which route through this gate).
+pub const MAX_MEMORY_TEXT_BYTES: usize = 1024 * 1024;
+
 pub fn classify_write(
     chunk_type: ChunkType,
     text: &str,
     tags: &[String],
     mode: IngestionMode,
 ) -> AdmissionOutcome {
+    if text.len() > MAX_MEMORY_TEXT_BYTES {
+        return AdmissionOutcome::reject(format!(
+            "memory text is {} bytes, over the {}-byte limit; chunk large documents before storing",
+            text.len(),
+            MAX_MEMORY_TEXT_BYTES
+        ));
+    }
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return AdmissionOutcome::reject("empty memory text is not useful durable context");
@@ -164,7 +177,7 @@ fn explicit_high_priority(tags: &[String]) -> bool {
         tag.strip_prefix("priority:")
             .or_else(|| tag.strip_prefix("importance:"))
             .and_then(|value| value.parse::<f32>().ok())
-            .map(|value| value >= 8.0)
+            .map(|value| value.is_finite() && value >= 8.0)
             .unwrap_or(false)
     })
 }
@@ -181,7 +194,7 @@ pub fn downgrade_high_priority_tags(tags: &mut [String]) {
         };
         if tag[prefix.len()..]
             .parse::<f32>()
-            .map(|v| v >= 8.0)
+            .map(|v| v.is_finite() && v >= 8.0)
             .unwrap_or(false)
         {
             *tag = format!("{prefix}7");
@@ -206,18 +219,20 @@ fn concrete_agent_action_candidates<'a>(
         search_start = marker_start + marker.len();
     }
 
-    marker_starts.into_iter().map(move |marker_start| {
-        let body_start = marker_start + marker.len();
-        let line_end = text[body_start..]
+    // O(n) overall: the next marker position is the next element of
+    // `marker_starts`, not a fresh forward scan (the previous code re-scanned
+    // `lowered[body_start..].find(marker)` per marker, making the whole pass
+    // O(n*k) — minutes of CPU on a few MB of repeated markers). Bound the
+    // newline search by the next marker so the segments stay disjoint.
+    let count = marker_starts.len();
+    (0..count).map(move |i| {
+        let body_start = marker_starts[i] + marker.len();
+        let next_marker = marker_starts.get(i + 1).copied().unwrap_or(text.len());
+        let line_end = text[body_start..next_marker]
             .find(|ch| matches!(ch, '\n' | '\r'))
             .map(|offset| body_start + offset)
-            .unwrap_or(text.len());
-        let next_marker = lowered[body_start..]
-            .find(marker)
-            .map(|offset| body_start + offset)
-            .unwrap_or(text.len());
-        let body_end = line_end.min(next_marker);
-        text[body_start..body_end].trim()
+            .unwrap_or(next_marker);
+        text[body_start..line_end].trim()
     })
 }
 
@@ -466,6 +481,51 @@ mod tests {
             warning.contains("set"),
             "warning lists the allowlist: {warning}"
         );
+    }
+
+    #[test]
+    fn nonfinite_or_garbage_priority_does_not_bypass_the_gate() {
+        // `priority:garbage`/`priority:inf`/`priority:nan` must not count as an
+        // explicit priority and short-circuit a low-signal write to durable.
+        for bad in [
+            "priority:garbage",
+            "priority:inf",
+            "priority:nan",
+            "importance:inf",
+        ] {
+            let outcome = classify_write(
+                ChunkType::Summary,
+                "starting", // low-signal progress chatter
+                &tags(&["kind:progress", bad]),
+                IngestionMode::Document,
+            );
+            assert_eq!(
+                outcome.decision,
+                AdmissionDecision::Reject,
+                "tag {bad} must not bypass the low-signal gate"
+            );
+        }
+        // A finite high-priority value is still honoured (downgrade path).
+        let ok = classify_write(
+            ChunkType::Summary,
+            "starting",
+            &tags(&["kind:progress", "priority:8.5"]),
+            IngestionMode::Document,
+        );
+        assert_eq!(ok.decision, AdmissionDecision::Durable);
+    }
+
+    #[test]
+    fn oversize_text_is_rejected_before_the_marker_scan() {
+        let huge = "a".repeat(MAX_MEMORY_TEXT_BYTES + 1);
+        let outcome = classify_write(
+            ChunkType::Doc,
+            &huge,
+            &tags(&["kind:note"]),
+            IngestionMode::Document,
+        );
+        assert_eq!(outcome.decision, AdmissionDecision::Reject);
+        assert!(outcome.reason.contains("over the"));
     }
 
     #[test]

@@ -59,10 +59,18 @@ pub fn stamp_auto_priority(
     Some(clamped)
 }
 
-/// True if the caller already set a `priority:` or `importance:` tag.
+/// True if the caller already set a `priority:` or `importance:` tag with a
+/// finite numeric value. A non-numeric or non-finite value (`priority:garbage`,
+/// `priority:inf`, `priority:nan`) does not count: it must not short-circuit
+/// the write-admission gate, which previously trusted the tag prefix alone.
 pub fn has_explicit_priority(tags: &[String]) -> bool {
-    tags.iter()
-        .any(|tag| tag.starts_with("priority:") || tag.starts_with("importance:"))
+    tags.iter().any(|tag| {
+        tag.strip_prefix("priority:")
+            .or_else(|| tag.strip_prefix("importance:"))
+            .and_then(|value| value.parse::<f32>().ok())
+            .map(f32::is_finite)
+            .unwrap_or(false)
+    })
 }
 
 /// Compute the heuristic priority. Public for tests.

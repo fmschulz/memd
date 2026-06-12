@@ -1,6 +1,6 @@
 # memd
 
-[![Version](https://img.shields.io/badge/version-0.62.0-blue)](https://github.com/fmschulz/memd/blob/main/CHANGELOG.md){ .md-button }
+[![Version](https://img.shields.io/badge/version-1.0.0-blue)](https://github.com/fmschulz/memd/blob/main/CHANGELOG.md){ .md-button }
 [![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust&logoColor=white)](https://github.com/fmschulz/memd/blob/main/Cargo.toml){ .md-button }
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/fmschulz/memd/blob/main/LICENSE){ .md-button }
 
@@ -38,11 +38,11 @@ Cross-system LoCoMo retrieval (10 conversations, 5,882 turns, 1,536 queries):
 
 | System | MRR@10 | Hit@10 | Avg search |
 | --- | ---: | ---: | ---: |
-| **`memd` (hybrid)** | **0.420** | **0.621** | **26.7 ms** |
+| **`memd` (hybrid)** | **0.412** | **0.613** | **23.2 ms** |
 | `superlocalmemory` v3.4.46 (lexical) | 0.369 | 0.599 | 804.5 ms |
 | `mem0` v2.0.2 (LLM-extracted) | 0.354 | 0.591 | 40.9 ms |
 
-`memd` leads on MRR@10 (+14% vs SuperLocalMemory, +19% vs Mem0), Hit@10, and
+`memd` leads on MRR@10 (+12% vs SuperLocalMemory, +16% vs Mem0), Hit@10, and
 search latency. Caveats: mem0 used a self-hosted gemma4-31b, and
 superlocalmemory ran lexical-only — full protocol in [Benchmarking](benchmarking.md).
 

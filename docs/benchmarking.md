@@ -86,11 +86,11 @@ evidence IDs (MRR@10 over categories 1–4: 10 conversations, 5,882 turns,
 
 | System | MRR@10 | Hit@1 | Hit@3 | Hit@10 | Avg search | Seed |
 |---|---:|---:|---:|---:|---:|---:|
-| **`memd` (hybrid)** | **0.420** | **0.322** | **0.490** | **0.621** | **26.7 ms** | 108 s |
+| **`memd` (hybrid)** | **0.412** | **0.312** | **0.484** | **0.613** | **23.2 ms** | 197 s |
 | `superlocalmemory` v3.4.46 (lexical) | 0.369 | 0.245 | 0.469 | 0.599 | 804.5 ms | 1.8 s |
 | `mem0` v2.0.2 (LLM-extracted) | 0.354 | 0.255 | 0.412 | 0.591 | 40.9 ms | 13,424 s |
 
-`memd` leads on MRR@10 (+14% vs SuperLocalMemory, +19% vs Mem0), Hit@10, and
+`memd` leads on MRR@10 (+12% vs SuperLocalMemory, +16% vs Mem0), Hit@10, and
 search latency. Seeding cost trades off against
 quality — SuperLocalMemory has the cheapest seed (no embeddings in this
 configuration), Mem0 the most expensive (LLM extraction).
@@ -102,7 +102,7 @@ sits in the best corner of both — highest MRR@10 at the lowest latency —
 while SuperLocalMemory's lexical fallback is roughly 30× slower per query
 (bubble area is p95 search latency):
 
-![LoCoMo quality versus query latency: memd top-left at ~27 ms mean latency and 0.420 MRR@10, mem0 lower at ~41 ms, SuperLocalMemory far right as a large slow bubble at ~805 ms](figures/locomo_quality_latency.svg)
+![LoCoMo quality versus query latency: memd top-left at ~23 ms mean latency and 0.412 MRR@10, mem0 lower at ~41 ms, SuperLocalMemory far right as a large slow bubble at ~805 ms](figures/locomo_quality_latency.svg)
 
 ### Per-category
 
@@ -110,10 +110,10 @@ while SuperLocalMemory's lexical fallback is roughly 30× slower per query
 
 | Category | Description | `memd` | `mem0` | `slm` |
 |---|---|---:|---:|---:|
-| 1 | multi-hop | **0.359** | 0.292 | 0.259 |
-| 2 | specific facts | **0.513** | 0.390 | 0.433 |
-| 3 | open-domain | **0.279** | 0.255 | 0.227 |
-| 4 | long-form | **0.421** | 0.372 | 0.397 |
+| 1 | multi-hop | **0.353** | 0.292 | 0.259 |
+| 2 | specific facts | **0.501** | 0.390 | 0.433 |
+| 3 | open-domain | **0.275** | 0.255 | 0.227 |
+| 4 | long-form | **0.413** | 0.372 | 0.397 |
 
 ![LoCoMo MRR@10 by question category as a heatmap: memd is the strongest row across all four categories, peaking on category 2](figures/locomo_per_category.svg)
 
@@ -139,14 +139,55 @@ The self-contained harness is in-repo at
 `./run.sh` fetches the dataset, builds `memd`, runs the `memd` adapter, and
 attempts the optional `mem0` and SuperLocalMemory adapters when their Python
 venvs are present under `evals/benchmarks/locomo/envs/`. The numbers above are
-the `2026-05-22` run; the `memd` retrieval path is unchanged since, so they
-track the current release.
+the `2026-06-11` re-run of the `memd` adapter on the current code (after the
+H1/H2 fetch-depth fixes), with the `mem0` and SuperLocalMemory numbers frozen
+from the `2026-05-22` run (their retrieval was not re-measured). The fixes moved
+`memd` MRR@10 from 0.420 to 0.412; it still leads both competitors and wins all
+four categories. Seed time is a single-run, machine-load-dependent figure.
 
 Same-LLM caveat: `mem0` numbers above use a self-hosted vLLM
 `gemma4-31b` endpoint, not the GPT-4-class model the upstream Mem0
 README benchmarks against. Numbers are directly comparable across
 the three systems in this table but not directly comparable to the
 upstream Mem0 leaderboard.
+
+## LoCoMo QA accuracy (answer quality)
+
+Retrieval MRR scores whether the gold evidence ranks high. It does not score
+whether the memory a system retrieves actually lets an agent answer the
+question. We added that harder test. For each LoCoMo question we pass the
+system's own top-10 retrieved turns to a Codex model, generate a short answer,
+and have a second Codex call judge that answer against the gold answer. This is
+the answer-accuracy metric the Mem0 and Zep papers report. We ran a stratified
+sample of 50 questions per category (200 per system, seed 42) over categories
+1–4 and excluded the adversarial category 5. Each accuracy carries a Wilson 95%
+interval.
+
+memd answers 43.5% of questions correctly (87/200), ahead of mem0 (38.5%,
+77/200) and SuperLocalMemory (38.0%, 76/200). The ranking matches the retrieval
+result: the systems that rank evidence higher also answer more questions. At 200
+questions the Wilson intervals overlap (memd 0.368–0.504, mem0 0.320–0.454, SLM
+0.316–0.449), so we read the QA gap as corroborating the retrieval ranking
+rather than as a separately significant result. The full-set retrieval numbers
+above carry the stronger claim.
+
+![LoCoMo QA accuracy with 95% Wilson intervals: memd 0.435, mem0 0.385, SuperLocalMemory 0.380, with overlapping error bars](figures/locomo_qa_accuracy.svg)
+
+The category breakdown is mixed. memd leads multi-hop questions (category 1,
+0.38) and temporal questions (category 2, 0.58); SuperLocalMemory answers more
+single-hop long-form questions (category 4, 0.60 vs 0.54); the small open-domain
+set (category 3, 96 questions in the full dataset) is hard for every system and
+separates them least.
+
+![LoCoMo QA accuracy by question category: grouped bars showing memd leading categories 1 and 2, SuperLocalMemory leading category 4, and all three close on category 3](figures/locomo_qa_accuracy_per_category.svg)
+
+Reproduce: the QA harness runs in an external benchmark workspace, kept out of
+this repository because it reuses frozen multi-system retrieval and the large
+competing-tool environments. It reads each system's archived top-k retrieved
+turn IDs, resolves them to conversation turns, and drives Codex for answer
+generation and judging. Re-seeding the competing tools is impractical: mem0
+seeding alone took 3.7 h of LLM extraction. We therefore apply the same QA
+layer to the retrieval each system already produced.
 
 ## Offline retrieval gate (BEIR)
 

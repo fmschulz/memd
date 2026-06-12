@@ -1189,6 +1189,7 @@ impl StructuralStore {
     /// Find tool traces by session ID.
     pub fn find_tool_traces_by_session(
         &self,
+        tenant_id: &TenantId,
         session_id: &str,
     ) -> SqliteResult<Vec<ToolTraceRecord>> {
         let conn = self.conn.lock().unwrap();
@@ -1198,12 +1199,14 @@ impl StructuralStore {
             SELECT trace_id, tenant_id, project_id, session_id, tool_name, timestamp_ms,
                    input_json, output_json, error_json, context_tags, duration_ms
             FROM tool_traces
-            WHERE session_id = ?1
+            WHERE tenant_id = ?1 AND session_id = ?2
             ORDER BY timestamp_ms DESC
             "#,
         )?;
 
-        let rows = stmt.query_map([session_id], |row| self.row_to_tool_trace(row))?;
+        let rows = stmt.query_map(rusqlite::params![tenant_id.as_str(), session_id], |row| {
+            self.row_to_tool_trace(row)
+        })?;
         rows.collect()
     }
 
@@ -2094,11 +2097,25 @@ mod tests {
         store.insert_tool_trace(&trace2).unwrap();
         store.insert_tool_trace(&trace3).unwrap();
 
-        let session_a_traces = store.find_tool_traces_by_session("session_a").unwrap();
+        let session_a_traces = store
+            .find_tool_traces_by_session(&tenant, "session_a")
+            .unwrap();
         assert_eq!(session_a_traces.len(), 2);
 
-        let session_b_traces = store.find_tool_traces_by_session("session_b").unwrap();
+        let session_b_traces = store
+            .find_tool_traces_by_session(&tenant, "session_b")
+            .unwrap();
         assert_eq!(session_b_traces.len(), 1);
+
+        // A different tenant with the same session id must not see these rows.
+        let other = TenantId::new("other_tenant").unwrap();
+        assert_eq!(
+            store
+                .find_tool_traces_by_session(&other, "session_a")
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     #[test]
