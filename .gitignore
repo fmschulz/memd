@@ -43,6 +43,7 @@ test_chunk.rs
 # Python environment (uv/pixi)
 .venv/
 __pycache__/
+.ipynb_checkpoints/
 *.pyc
 *.pyo
 *.pyd

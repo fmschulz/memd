@@ -45,7 +45,7 @@ avoid.
 ```bash
 git clone --depth 1 https://github.com/fmschulz/memd   # --depth 1: skip 150+ MB of history
 cd memd
-make install   # binary + agent skill + enforcement
+make install-prebuilt   # prebuilt binary (seconds; compiles only if needed) + skill + enforcement
 memd doctor
 ```
 
@@ -191,7 +191,7 @@ Install the binary, agent skill, and enforcement in one command:
 ```bash
 git clone --depth 1 https://github.com/fmschulz/memd   # --depth 1: skip 150+ MB of history
 cd memd
-make install   # binary + agent skill + enforcement
+make install-prebuilt   # prebuilt binary (seconds; compiles only if needed) + skill + enforcement
 memd doctor
 ```
 
@@ -201,9 +201,11 @@ Prebuilt binary only (no clone):
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/fmschulz/memd/releases/latest/download/memd-installer.sh | sh
 ```
 
-The prebuilt installer installs only the binary. To install the skill and
-enforcement, use `make install` from a clone. `make install-binary` installs
-only the binary, `make menu` opens an interactive TUI to pick components, and
+The prebuilt installer installs only the binary. For everything without
+compiling, run `make install-prebuilt` from a clone — it tests the prebuilt
+release binary and builds from source only if that fails. `make install`
+always builds from source, `make install-binary` installs only the binary,
+`make menu` opens an interactive TUI to pick components, and
 `make uninstall` removes what `make install` installed.
 
 For component-target development, `make install-skill` installs the skill as
