@@ -43,7 +43,7 @@ avoid.
 ## 30-second quickstart
 
 ```bash
-git clone https://github.com/fmschulz/memd
+git clone --depth 1 https://github.com/fmschulz/memd   # --depth 1: skip 150+ MB of history
 cd memd
 make install   # binary + agent skill + enforcement
 memd doctor
@@ -189,7 +189,7 @@ The agent skill is the default way to make agents use `memd` through the CLI.
 Install the binary, agent skill, and enforcement in one command:
 
 ```bash
-git clone https://github.com/fmschulz/memd
+git clone --depth 1 https://github.com/fmschulz/memd   # --depth 1: skip 150+ MB of history
 cd memd
 make install   # binary + agent skill + enforcement
 memd doctor
