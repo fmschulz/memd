@@ -99,12 +99,8 @@ store in ReadOnly mode without taking the lock or mutating disk, and the worker
 probes SQLite `data_version` before each request so direct fallback mutations
 are visible before serving. More: [Shared topology](https://fmschulz.github.io/memd/shared-topology/)
 and [Operational contract](https://fmschulz.github.io/memd/operational-contract/).
-Measured on the dev machine (2026-06, hardening validation run): an 8-writer × 3-round
-write storm leaves 24/24 concurrent writes readable (7 of 16 were lost in the
-2026-06-09 audit before the writer lock); warm-routed `memd add` p50 is 31 ms (vs ~1.6 s cold); a write is
-searchable within p95 <70 ms.
 
-## Headline benchmark
+## Benchmark
 
 Cross-system retrieval on upstream
 [`locomo10.json`](https://github.com/snap-stanford/locomo) (10 conversations,
