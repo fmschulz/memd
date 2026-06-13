@@ -83,61 +83,7 @@ Full walkthrough: [Quick start](https://fmschulz.github.io/memd/quickstart/).
 
 ## Architecture
 
-```mermaid
-flowchart TB
-  subgraph clients["Clients"]
-    direction LR
-    ca["Coding agent"]
-    sci["AI scientist"]
-    human["Human or controller"]
-  end
-
-  subgraph cli_flow["Skill and CLI workflow"]
-    direction LR
-    agent_context["memd agent-context"]
-    search_add["memd search / memd add"]
-  end
-
-  subgraph core["memd core"]
-    direction TB
-    cli_call["memd call"]
-    handlers["Memory, task, artifact, code, context, debug operations"]
-    metrics["Metrics and cache statistics"]
-  end
-
-  subgraph retrieval["Hybrid retrieval"]
-    direction LR
-    hybrid["Hybrid searcher"]
-    dense["Dense HNSW search"]
-    sparse["BM25 sparse search"]
-    tiered["Hot tier and semantic cache"]
-    rerank["Optional rerankers"]
-  end
-
-  subgraph storage["Persistent store"]
-    direction LR
-    sqlite["SQLite metadata"]
-    segments["Segment files"]
-    wal["Write-ahead log"]
-    structural["Structural code index"]
-  end
-
-  ca --> agent_context
-  sci --> agent_context
-  human --> search_add
-  human --> cli_call
-  agent_context --> handlers
-  search_add --> handlers
-  cli_call --> handlers
-  cli_call --> metrics
-  handlers --> hybrid
-  handlers --> sqlite
-  handlers --> structural
-  hybrid --> dense
-  hybrid --> sparse
-  hybrid --> tiered
-  hybrid --> rerank
-```
+![Architecture](docs/figures/architecture.png)
 
 More: [Architecture](https://fmschulz.github.io/memd/architecture/),
 [Trust boundary](https://fmschulz.github.io/memd/trust-boundary/),
