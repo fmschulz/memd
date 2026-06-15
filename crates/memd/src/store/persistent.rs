@@ -422,6 +422,13 @@ impl ExternalMutationProbe {
 }
 
 impl PersistentStore {
+    /// Base data directory backing this store (the resolved
+    /// `~/.memd/data`-style path). Used to locate side ledgers such as
+    /// the central per-chunk hit log.
+    pub fn data_dir(&self) -> &Path {
+        &self.config.data_dir
+    }
+
     /// Borrow the hybrid searcher when hybrid retrieval is enabled.
     pub fn hybrid(&self) -> Option<&HybridSearcher> {
         self.hybrid_searcher.as_deref()

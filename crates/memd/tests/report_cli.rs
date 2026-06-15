@@ -433,9 +433,13 @@ fn markdown_contains_all_sections() {
         stdout.contains("- [ok]") || stdout.contains("- [warn]"),
         "missing diagnosis status:\n{stdout}"
     );
+    // No retrieval ran in this smoke test, so the central hit log is
+    // empty and the serve-counts line reports "none recorded in window".
+    // (Populated serve counts are covered by
+    // `report_surfaces_per_chunk_serve_counts_from_central_log`.)
     assert!(
-        stdout.contains("count-level retrieval only, not per-chunk serve ids"),
-        "missing honest granularity line:\n{stdout}"
+        stdout.contains("- per_chunk_serve_counts:"),
+        "missing per-chunk serve counts line:\n{stdout}"
     );
     assert!(
         stdout.contains("- high_priority_in_window: `"),
@@ -588,5 +592,68 @@ async fn perf_10k_chunk_store_under_bound() {
             .pointer("/growth/store_totals/active_chunks")
             .and_then(Value::as_u64),
         Some(10_000)
+    );
+}
+
+#[test]
+fn report_surfaces_per_chunk_serve_counts_from_central_log() {
+    // Regression: per-chunk hits were written cwd-relative and `report`
+    // never read them, so per_chunk_serve_counts was always "unavailable".
+    // Now search/agent_context write to the central store data_dir and
+    // `report` aggregates that log into per-chunk serve counts.
+    let tmp = tempdir().unwrap();
+    let data_dir = tmp.path().join("memd_data");
+    let unique = nonce();
+    let token = format!("serve_count_token_{unique}");
+
+    let text = format!(
+        "Validation: serve-count chunk {token} records a concrete retrievable outcome.\nAgent action: retrieve this chunk so it appears in serve counts."
+    );
+    add_success(&data_dir, "off", &text, "kind:decision,priority:7");
+
+    // A retrieval over a non-empty store returns top-k results, each of
+    // which is appended to the central hit log.
+    assert_success(
+        agent_context_command(&data_dir, "off", &token)
+            .output()
+            .expect("run memd agent-context"),
+        "agent-context",
+    );
+
+    let output = assert_success(report_json(&data_dir, "off", false), "report");
+    let value: Value = serde_json::from_slice(&output.stdout).expect("report JSON");
+
+    let distinct = value
+        .pointer("/retrieval_usefulness/distinct_served_chunks")
+        .and_then(Value::as_u64)
+        .expect("distinct_served_chunks present");
+    assert!(
+        distinct >= 1,
+        "central hit log should yield at least one served chunk, got {distinct}"
+    );
+    let total = value
+        .pointer("/retrieval_usefulness/total_serves")
+        .and_then(Value::as_u64)
+        .expect("total_serves present");
+    assert!(total >= 1, "total_serves should be >= 1, got {total}");
+    let top = value
+        .pointer("/retrieval_usefulness/top_served_chunks")
+        .and_then(Value::as_array)
+        .expect("top_served_chunks array");
+    assert!(
+        !top.is_empty(),
+        "top_served_chunks must list at least one chunk"
+    );
+    assert!(
+        top[0].get("chunk_id").and_then(Value::as_str).is_some(),
+        "served chunk entries must carry a chunk_id"
+    );
+    let summary = value
+        .pointer("/retrieval_usefulness/per_chunk_serve_counts")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        summary.contains("distinct_chunks="),
+        "summary should report real counts, got: {summary}"
     );
 }

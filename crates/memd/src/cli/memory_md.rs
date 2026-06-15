@@ -10,7 +10,9 @@ use super::paths::absolutize_project_dir;
 use super::report::memory_health_lines;
 use super::search::cli_search_payload;
 use crate::error::{MemdError, Result};
-use crate::hit_stats::{aggregate_hits_in, HitStats, DEFAULT_SUMMARY_TTL_MS};
+use crate::hit_stats::{
+    aggregate_hits_at_data_dir, aggregate_hits_in, HitStats, DEFAULT_SUMMARY_TTL_MS,
+};
 use crate::store::{Store, TenantManager};
 use crate::types::TenantId;
 
@@ -228,8 +230,16 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
 
     // Aggregate retrieval hits once per refresh; the same `HitStats`
     // map is shared with every `priority_score` call so we don't
-    // re-read the JSONL log per chunk.
-    let hit_stats = aggregate_hits_in(&project_dir, HIT_WINDOW_DAYS, DEFAULT_SUMMARY_TTL_MS);
+    // re-read the JSONL log per chunk. Prefer the central store log
+    // (keyed by globally-unique chunk_id, so other projects' records are
+    // ignored when we look up this project's chunks); fall back to the
+    // cwd-relative log only when there is no resolved data_dir.
+    let hit_stats = match tenant_manager {
+        Some(tm) => {
+            aggregate_hits_at_data_dir(tm.data_dir(), HIT_WINDOW_DAYS, DEFAULT_SUMMARY_TTL_MS)
+        }
+        None => aggregate_hits_in(&project_dir, HIT_WINDOW_DAYS, DEFAULT_SUMMARY_TTL_MS),
+    };
     let project_collection = if project_limit == 0 {
         RankedTakeawayCollection {
             takeaways: Vec::new(),
