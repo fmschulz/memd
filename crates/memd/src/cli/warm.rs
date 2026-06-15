@@ -1159,6 +1159,7 @@ fn warm_worker_identity(socket: &Path, ryw_probe_stats: Option<RywProbeStats>) -
             "checks": stats.checks,
             "external_detected": stats.external_detected,
             "repairs": stats.repairs,
+            "repair_in_progress": stats.repair_in_progress,
         });
     }
     identity
@@ -1588,6 +1589,7 @@ mod tests {
                 checks: 3,
                 external_detected: 1,
                 repairs: 1,
+                repair_in_progress: false,
             }),
         );
 
