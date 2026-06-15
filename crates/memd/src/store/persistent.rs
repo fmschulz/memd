@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use parking_lot::{Mutex, RwLock};
 use rusqlite::{Connection as ProbeConnection, OpenFlags};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -218,6 +218,11 @@ pub struct PersistentStore {
     write_epoch: Arc<AtomicU64>,
     /// Warn-only detector for metadata.db changes not attributable to this store.
     external_mutation_probe: Option<ExternalMutationProbe>,
+    /// Shared single-flight state + telemetry for store-owned HNSW repairs.
+    repair_state: Arc<HnswRepairState>,
+    /// JoinHandle of the most recent store-owned HNSW repair, aborted on
+    /// shutdown/Drop so a repair can never race the dense index-save.
+    repair_task: Mutex<Option<JoinHandle<()>>>,
     /// Last time this store attempted a usage-ledger retention sweep.
     usage_sweep_last_ms: AtomicI64,
     /// Process-wide exclusive writer lock. Last field so it drops last.
@@ -312,6 +317,121 @@ struct AsyncIndexerHandle {
     task: JoinHandle<()>,
 }
 
+/// Foreground wait budget for an on-probe HNSW repair. After this elapses
+/// the warm request is served anyway and the store-owned repair keeps
+/// running in the background. Kept well under the warm client timeout so a
+/// detected external mutation can never stall a request for minutes.
+const HNSW_REPAIR_FOREGROUND_BUDGET: Duration = Duration::from_millis(1500);
+
+/// Shared, single-flight state for store-owned HNSW repairs, shared by the
+/// startup backfill and on-probe repairs so the two can never index the same
+/// `missing` set concurrently (`run_hnsw_backfill` snapshots `missing` before
+/// inserting, so overlapping runs would double-index).
+///
+/// `inner` is a brief-hold bookkeeping lock (never held across the backfill
+/// await). `pending` re-arms the running repair: when a probe detects a fresh
+/// external mutation while a repair is already running, the in-flight repair's
+/// metadata snapshot may predate that write, so we flag that one more pass is
+/// required rather than dropping the coalesced signal (the probe has already
+/// advanced its `data_version`, so no later probe would re-detect it).
+#[derive(Debug, Default)]
+struct HnswRepairState {
+    inner: Mutex<RepairBookkeeping>,
+    /// Count of completed probe-triggered repair passes, surfaced via `warm
+    /// status`. Startup backfills are not counted as repairs.
+    repairs: AtomicU64,
+}
+
+#[derive(Debug, Default)]
+struct RepairBookkeeping {
+    /// True while a repair task owns the single-flight slot.
+    in_flight: bool,
+    /// True when an external mutation was observed during an in-flight repair
+    /// and a follow-up pass is required to cover writes added after its
+    /// snapshot.
+    pending: bool,
+}
+
+impl HnswRepairState {
+    /// Try to claim the single-flight slot. Returns `true` if the caller
+    /// became the owner and must spawn the repair; `false` if a repair is
+    /// already running (a probe additionally re-arms `pending` so the running
+    /// repair does a follow-up pass).
+    fn try_begin_or_arm(&self, kind: RepairKind) -> bool {
+        let mut g = self.inner.lock();
+        if g.in_flight {
+            if kind == RepairKind::Probe {
+                g.pending = true;
+            }
+            false
+        } else {
+            g.in_flight = true;
+            g.pending = false;
+            true
+        }
+    }
+
+    /// Called by the repair task after each pass. Returns `true` if another
+    /// pass is required (an external mutation was observed mid-pass); returns
+    /// `false` after releasing the slot when no follow-up is pending. All
+    /// transitions are under the same lock as `try_begin_or_arm`, so a probe
+    /// that arms `pending` after the slot is released instead becomes the next
+    /// owner — no signal is lost.
+    fn finish_or_continue(&self) -> bool {
+        let mut g = self.inner.lock();
+        if g.pending {
+            g.pending = false;
+            true
+        } else {
+            g.in_flight = false;
+            false
+        }
+    }
+
+    fn repair_in_progress(&self) -> bool {
+        self.inner.lock().in_flight
+    }
+}
+
+/// Panic-safety reset for the single-flight slot. The repair task defuses it
+/// (`armed = false`) on normal exit, where `finish_or_continue` has already
+/// released the slot; if the task panics or is aborted mid-pass the guard runs
+/// and frees the slot so future repairs aren't wedged.
+struct RepairInFlightGuard {
+    state: Arc<HnswRepairState>,
+    armed: bool,
+}
+
+impl Drop for RepairInFlightGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut g = self.state.inner.lock();
+            g.in_flight = false;
+            g.pending = false;
+        }
+    }
+}
+
+/// Why a repair was scheduled. Only probe-triggered repairs bump the
+/// `repairs` telemetry counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepairKind {
+    Startup,
+    Probe,
+}
+
+/// Result of trying to schedule a store-owned HNSW repair.
+enum RepairSchedule {
+    /// This call won the single-flight race and spawned the repair. The
+    /// receiver resolves to `true` on success / `false` on error once the
+    /// repair finishes.
+    Scheduled(oneshot::Receiver<bool>),
+    /// A repair was already running; this call scheduled nothing.
+    AlreadyInFlight,
+    /// Nothing to schedule: no async runtime (sync test context).
+    Skipped,
+}
+
 struct IndexJob {
     tenant_id: TenantId,
     chunk_ids: Vec<ChunkId>,
@@ -324,7 +444,6 @@ struct ExternalMutationProbe {
     write_epoch: Arc<AtomicU64>,
     checks: AtomicU64,
     external_detected: AtomicU64,
-    repairs: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -359,7 +478,6 @@ impl ExternalMutationProbe {
             write_epoch,
             checks: AtomicU64::new(0),
             external_detected: AtomicU64::new(0),
-            repairs: AtomicU64::new(0),
         })
     }
 
@@ -404,15 +522,13 @@ impl ExternalMutationProbe {
         Ok(check)
     }
 
-    fn record_repair(&self) {
-        self.repairs.fetch_add(1, Ordering::Relaxed);
-    }
-
     fn stats(&self) -> RywProbeStats {
+        // `repairs` / `repair_in_progress` are owned by `HnswRepairState`
+        // and filled in by `PersistentStore::ryw_probe_stats`.
         RywProbeStats {
             checks: self.checks.load(Ordering::Relaxed),
             external_detected: self.external_detected.load(Ordering::Relaxed),
-            repairs: self.repairs.load(Ordering::Relaxed),
+            ..RywProbeStats::default()
         }
     }
 
@@ -622,6 +738,8 @@ impl PersistentStore {
             async_indexer: None,
             write_epoch,
             external_mutation_probe,
+            repair_state: Arc::new(HnswRepairState::default()),
+            repair_task: Mutex::new(None),
             usage_sweep_last_ms: AtomicI64::new(usage_sweep_initial_ms),
             _writer_lock: writer_lock,
         };
@@ -648,44 +766,99 @@ impl PersistentStore {
     /// Tokio runtime is available (e.g., sync test contexts) — callers
     /// can invoke `backfill_hnsw_for_cold_tenants` explicitly in that case.
     fn spawn_startup_hnsw_backfill(&self) {
-        let handle = match tokio::runtime::Handle::try_current() {
-            Ok(h) => h,
-            Err(_) => {
-                // Test / sync context. The caller who wants backfill can
-                // call `backfill_hnsw_for_cold_tenants` directly.
-                return;
-            }
+        // Routed through the shared single-flight scheduler so a startup
+        // backfill and an on-probe repair can never double-index the same
+        // `missing` set. Fire-and-forget: the returned handle is tracked in
+        // `repair_task` for abort-on-shutdown.
+        let _ = self.schedule_hnsw_repair(RepairKind::Startup);
+    }
+
+    /// Spawn a store-owned, single-flight HNSW repair and return a handle to
+    /// its completion. Shared by the startup backfill and the on-probe
+    /// repair: only the thread that flips the single-flight flag gets to
+    /// spawn, so overlapping runs can't double-index. The spawned task owns
+    /// its `JoinHandle` (stored in `repair_task`) so `shutdown`/`Drop` can
+    /// abort it before the dense index-save. `RepairInFlightGuard` resets the
+    /// flag on every exit path of the task, including a panic.
+    fn schedule_hnsw_repair(&self, kind: RepairKind) -> RepairSchedule {
+        // Best-effort: with no Tokio runtime (sync test context) there is
+        // nothing to spawn onto. A caller that needs the backfill in that
+        // case calls `backfill_hnsw_for_cold_tenants` directly.
+        let runtime = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => handle,
+            Err(_) => return RepairSchedule::Skipped,
         };
 
+        // Single-flight: only the owner spawns. A concurrent startup backfill
+        // or probe repair backs off; a probe additionally arms `pending` so the
+        // running repair does a follow-up pass covering writes that landed after
+        // its metadata snapshot (otherwise the coalesced signal — whose
+        // `data_version` the probe already advanced — would be lost).
+        if !self.repair_state.try_begin_or_arm(kind) {
+            return RepairSchedule::AlreadyInFlight;
+        }
+
+        let state = Arc::clone(&self.repair_state);
+        let guard = RepairInFlightGuard {
+            state: Arc::clone(&self.repair_state),
+            armed: true,
+        };
         let dense_searcher = self.dense_searcher.clone();
         let hybrid_searcher = self.hybrid_searcher.clone();
         let metadata = Arc::clone(&self.metadata);
         let tenants = Arc::clone(&self.tenants);
+        let (tx, rx) = oneshot::channel::<bool>();
 
-        handle.spawn(async move {
-            match run_hnsw_backfill(
-                dense_searcher.as_ref(),
-                hybrid_searcher.as_ref(),
-                metadata.as_ref(),
-                tenants.as_ref(),
-            )
-            .await
-            {
-                Ok(stats) => {
-                    if stats.tenants_backfilled > 0 || stats.chunks_indexed > 0 {
-                        info!(
-                            tenants = stats.tenants_backfilled,
-                            chunks = stats.chunks_indexed,
-                            skipped = stats.chunks_skipped,
-                            "startup HNSW backfill completed"
-                        );
+        let task = runtime.spawn(async move {
+            let mut guard = guard; // owned by the task; defused on normal exit
+                                   // Drain loop: repeat while probes keep arming `pending`, so a write
+                                   // that arrives after one pass's snapshot is picked up by the next.
+                                   // The loop yields the final pass's outcome.
+            let final_ok = loop {
+                let ok = match run_hnsw_backfill(
+                    dense_searcher.as_ref(),
+                    hybrid_searcher.as_ref(),
+                    metadata.as_ref(),
+                    tenants.as_ref(),
+                )
+                .await
+                {
+                    Ok(stats) => {
+                        // Count only probe-triggered repairs; a startup backfill
+                        // is not a "repair" for telemetry purposes.
+                        if kind == RepairKind::Probe {
+                            state.repairs.fetch_add(1, Ordering::Relaxed);
+                        }
+                        if stats.tenants_backfilled > 0 || stats.chunks_indexed > 0 {
+                            info!(
+                                kind = ?kind,
+                                tenants = stats.tenants_backfilled,
+                                chunks = stats.chunks_indexed,
+                                skipped = stats.chunks_skipped,
+                                "store-owned HNSW repair completed"
+                            );
+                        }
+                        true
                     }
+                    Err(e) => {
+                        warn!(kind = ?kind, error = %e, "store-owned HNSW repair failed");
+                        false
+                    }
+                };
+                if !state.finish_or_continue() {
+                    break ok;
                 }
-                Err(e) => {
-                    warn!(error = %e, "startup HNSW backfill failed");
-                }
-            }
+            };
+            guard.armed = false; // normal exit: the slot is already released
+                                 // The receiver is gone if the foreground budget already elapsed;
+                                 // that is the expected non-blocking case, so ignore send errors.
+            let _ = tx.send(final_ok);
         });
+
+        // Track the handle so shutdown/Drop can abort the repair before the
+        // dense index-save. Replaces any prior (already-finished) handle.
+        *self.repair_task.lock() = Some(task);
+        RepairSchedule::Scheduled(rx)
     }
 
     pub fn async_indexing_enabled(&self) -> bool {
@@ -792,26 +965,37 @@ impl PersistentStore {
                 warn!(
                     prev_data_version,
                     data_version,
-                    "external metadata.db mutation detected while holding the writer lock; refreshing indexes"
+                    "external metadata.db mutation detected while holding the writer lock; scheduling background HNSW repair"
                 );
-                // Sparse/tantivy needs no action here: `SparseIndex::search()`
-                // already does `commit_if_dirty` + `reader.reload()` per
-                // query, and read paths hit SQLite directly. The repair seam
-                // refreshes in-memory HNSW coverage for chunks now present in
-                // metadata.
-                match self.backfill_hnsw_for_cold_tenants().await {
-                    Ok(_) => {
-                        probe.record_repair();
-                        ExternalMutationOutcome::External { repaired: true }
-                    }
-                    Err(error) => {
-                        warn!(
-                            error = %error,
-                            "failed to repair after external metadata.db mutation"
-                        );
-                        ExternalMutationOutcome::External { repaired: false }
-                    }
-                }
+                // Do NOT await the backfill in the foreground request path: on
+                // a large or cold tenant it can run for minutes and trip the
+                // warm client timeout. Schedule a store-owned, single-flight
+                // repair and wait only a bounded budget for it to finish; if it
+                // is still running when the budget elapses we serve the request
+                // anyway and the repair continues in the background.
+                //
+                // Freshness relaxation: when we serve before the repair lands,
+                // this one request's dense/hybrid results may miss chunks that
+                // another writer just added. Sparse/tantivy is unaffected
+                // (`SparseIndex::search()` does `commit_if_dirty` +
+                // `reader.reload()` per query) and SQLite reads hit metadata
+                // directly, so those paths stay correct. Same-worker
+                // read-your-writes is also unaffected — our own writes index on
+                // the synchronous write path.
+                // `repaired` is true only when the repair finished within the
+                // bounded budget. A repair that is still running, was already
+                // in flight, or was skipped serves now with `repaired: false`;
+                // `warm status` reflects an ongoing repair via
+                // `repair_in_progress`. Timing out the wait drops only the
+                // receiver — the spawned repair task runs to completion.
+                let repaired = match self.schedule_hnsw_repair(RepairKind::Probe) {
+                    RepairSchedule::Scheduled(rx) => matches!(
+                        tokio::time::timeout(HNSW_REPAIR_FOREGROUND_BUDGET, rx).await,
+                        Ok(Ok(true))
+                    ),
+                    RepairSchedule::AlreadyInFlight | RepairSchedule::Skipped => false,
+                };
+                ExternalMutationOutcome::External { repaired }
             }
             Err(error) => {
                 warn!(
@@ -824,9 +1008,11 @@ impl PersistentStore {
     }
 
     pub fn ryw_probe_stats(&self) -> Option<RywProbeStats> {
-        self.external_mutation_probe
-            .as_ref()
-            .map(ExternalMutationProbe::stats)
+        let probe = self.external_mutation_probe.as_ref()?;
+        let mut stats = probe.stats();
+        stats.repairs = self.repair_state.repairs.load(Ordering::Relaxed);
+        stats.repair_in_progress = self.repair_state.repair_in_progress();
+        Some(stats)
     }
 
     fn start_async_indexer_if_enabled(&self) -> Option<AsyncIndexerHandle> {
@@ -1242,6 +1428,27 @@ impl PersistentStore {
         if self.config.read_only {
             tracing::debug!("read-only PersistentStore shutdown skips persistence writes");
             return Ok(());
+        }
+
+        // Stop any in-flight store-owned HNSW repair before saving indices, so
+        // the repair does not concurrently mutate the dense index while
+        // `save_all()` serializes it. `abort()` is cooperative (the task stops
+        // at its next await), so wait a bounded moment for it to unwind: on the
+        // multi-threaded warm-worker runtime the aborted task is cancelled on
+        // another worker thread and clears the slot well within this budget,
+        // giving a real barrier. If it does not clear in time (e.g. a
+        // single-worker runtime that cannot poll the aborted task while this
+        // thread blocks) we fall through best-effort — the dense index is
+        // internally locked so the save cannot tear, and any batch not yet
+        // persisted is re-indexed cheaply by the cache-aware backfill on the
+        // next start.
+        let repair_task = self.repair_task.lock().take();
+        if let Some(task) = repair_task {
+            task.abort();
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while self.repair_state.repair_in_progress() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
         }
 
         // Save dense indices
@@ -3998,6 +4205,10 @@ mod tests {
             wal_checkpoint_interval: 10,
             enable_dense_search: false, // Disable for unit tests
             enable_hybrid_search: false,
+            // Keep the shared single-flight slot free at open() so probe/repair
+            // tests are deterministic (a startup backfill would otherwise hold
+            // the in-flight flag until the first runtime poll).
+            backfill_hnsw_on_startup: false,
             ..Default::default()
         };
         let store = PersistentStore::open(config).unwrap();
@@ -4104,6 +4315,10 @@ mod tests {
             .unwrap();
         drop(conn);
 
+        // The repair is now scheduled as a store-owned background task rather
+        // than awaited in the foreground. With dense search disabled the
+        // backfill is an instant no-op, so it finishes within the foreground
+        // budget and reports `repaired: true`; `repairs` is counted on completion.
         assert_eq!(
             store.probe_external_mutation().await,
             ExternalMutationOutcome::External { repaired: true }
@@ -4112,6 +4327,7 @@ mod tests {
         assert_eq!(stats.checks, 2);
         assert_eq!(stats.external_detected, 1);
         assert_eq!(stats.repairs, 1);
+        assert!(!stats.repair_in_progress);
     }
 
     #[tokio::test]
@@ -4142,6 +4358,90 @@ mod tests {
             ExternalMutationOutcome::Unavailable
         );
         assert_eq!(store.ryw_probe_stats(), None);
+    }
+
+    #[tokio::test]
+    async fn hnsw_repair_is_single_flight() {
+        let (store, _dir) = make_test_store();
+
+        // The first schedule wins the single-flight race and spawns the
+        // repair; a second schedule issued before the task is polled sees the
+        // in-flight flag and schedules nothing. (Current-thread test runtime:
+        // the spawned task does not run until the await below.)
+        let first = store.schedule_hnsw_repair(RepairKind::Probe);
+        let second = store.schedule_hnsw_repair(RepairKind::Probe);
+        assert!(matches!(first, RepairSchedule::Scheduled(_)));
+        assert!(matches!(second, RepairSchedule::AlreadyInFlight));
+
+        // Draining the first repair resets the flag, so a later schedule wins
+        // again — the guard is not stuck after completion.
+        if let RepairSchedule::Scheduled(rx) = first {
+            assert!(matches!(rx.await, Ok(true)));
+        }
+        assert!(!store.repair_state.repair_in_progress());
+        let third = store.schedule_hnsw_repair(RepairKind::Probe);
+        assert!(matches!(third, RepairSchedule::Scheduled(_)));
+    }
+
+    #[tokio::test]
+    async fn probe_does_not_block_when_repair_in_flight() {
+        let (store, dir) = make_test_store();
+
+        // Occupy the single-flight slot with a repair that has not been polled
+        // yet (holding its handle keeps the in-flight flag set on the
+        // current-thread runtime until we await).
+        let _held = store.schedule_hnsw_repair(RepairKind::Probe);
+        assert!(store.repair_state.repair_in_progress());
+
+        // Make metadata.db look externally mutated.
+        let conn = Connection::open(dir.path().join("metadata.db")).unwrap();
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ryw_probe_inflight_test(x INTEGER)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO ryw_probe_inflight_test(x) VALUES (1)", [])
+            .unwrap();
+        drop(conn);
+
+        // The probe detects the external mutation but a repair is already
+        // running, so it serves immediately as `InFlight` instead of
+        // scheduling or blocking on another backfill.
+        assert_eq!(
+            store.probe_external_mutation().await,
+            ExternalMutationOutcome::External { repaired: false }
+        );
+        assert!(store.ryw_probe_stats().unwrap().repair_in_progress);
+    }
+
+    #[test]
+    fn repair_bookkeeping_rearms_pending_then_releases() {
+        let state = HnswRepairState::default();
+
+        // First owner claims the single-flight slot.
+        assert!(state.try_begin_or_arm(RepairKind::Probe));
+        assert!(state.repair_in_progress());
+
+        // A probe arriving mid-repair is coalesced but arms a follow-up pass
+        // (this is the regression guard: the signal must not be dropped).
+        assert!(!state.try_begin_or_arm(RepairKind::Probe));
+
+        // The running repair sees `pending` and must do another pass; the slot
+        // stays held so no second task can start.
+        assert!(state.finish_or_continue());
+        assert!(state.repair_in_progress());
+
+        // No further arming -> the next finish releases the slot.
+        assert!(!state.finish_or_continue());
+        assert!(!state.repair_in_progress());
+
+        // A startup backfill losing the race does NOT arm a follow-up pass
+        // (only externally-observed writes need one).
+        assert!(state.try_begin_or_arm(RepairKind::Probe));
+        assert!(!state.try_begin_or_arm(RepairKind::Startup));
+        assert!(!state.finish_or_continue());
+        assert!(!state.repair_in_progress());
     }
 
     fn make_long_document() -> String {

@@ -66,8 +66,12 @@ directories or `metadata.db`; mutating operations on a ReadOnly store return a
 typed error.
 
 The worker probes SQLite `data_version` before each request. If an external
-direct-fallback mutation happened, it refreshes indexes before serving so
-read-your-writes holds across warm and direct-write paths.
+direct-fallback mutation happened, it schedules a single-flight background HNSW
+repair and serves the request without blocking on it (waiting only a short
+bounded budget rather than the full backfill). SQLite and sparse reads reflect
+the external write immediately; dense/hybrid coverage of externally-added chunks
+catches up once the background repair lands. The worker always indexes its own
+warm-routed writes synchronously, so same-worker read-your-writes is unaffected.
 Measured on the dev machine (2026-06, hardening validation run): an 8-writer × 3-round
 write storm leaves 24/24 concurrent writes readable (7 of 16 were lost in the
 2026-06-09 audit before the writer lock); warm-routed `memd add` p50 is 31 ms (vs ~1.6 s cold); a write is
