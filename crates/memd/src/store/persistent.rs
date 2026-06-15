@@ -2758,13 +2758,36 @@ async fn run_hnsw_backfill(
             continue;
         }
 
-        // Per-chunk membership is the authoritative cold signal.
-        // Count-only heuristics fail when HNSW's `next_id` has grown past
-        // the active count due to deletes (dense deletes never decrement
-        // the counter).
+        // Load the persisted index (mapping + embedding cache) BEFORE deciding
+        // what is missing. The per-tenant index is created lazily on first
+        // search/index, so without this a clean persisted tenant looks 100%
+        // missing and we needlessly re-embed every chunk. Best-effort: a load
+        // failure leaves the index empty, so the cache-aware check below
+        // reports all chunks missing and we re-embed (today's safe fallback).
+        if let Err(e) = dense.ensure_index_loaded(&tenant_id) {
+            warn!(
+                tenant_id = %tenant_id,
+                error = %e,
+                "HNSW backfill: failed to load persisted index; treating all chunks as missing"
+            );
+        }
+
+        // Cache-aware membership is the authoritative cold signal: a chunk is
+        // "missing" only when it has no LIVE cached embedding (no mapping
+        // entry, or a mapping entry whose embedding-cache slot is empty after a
+        // missing/corrupt embeddings.bin). Mapping-only membership
+        // (`contains_chunk`) would treat cache-less chunks as present and skip
+        // re-embedding them, leaving the HNSW without usable vectors. Count
+        // heuristics also fail when `next_id` grew past the active count due to
+        // deletes (dense deletes never decrement the counter).
+        let all_ids: Vec<ChunkId> = metas.iter().map(|m| m.chunk_id.clone()).collect();
+        let missing_ids: std::collections::HashSet<ChunkId> = dense
+            .chunks_missing_embeddings(&tenant_id, &all_ids)
+            .into_iter()
+            .collect();
         let missing: Vec<_> = metas
             .into_iter()
-            .filter(|m| !dense.contains_chunk(&tenant_id, &m.chunk_id))
+            .filter(|m| missing_ids.contains(&m.chunk_id))
             .collect();
 
         if missing.is_empty() {
@@ -5312,6 +5335,68 @@ mod tests {
             stats
         );
         assert_eq!(stats.tenants_backfilled, 1);
+    }
+
+    #[tokio::test]
+    async fn chunks_missing_embeddings_is_cache_aware() {
+        // The backfill's cold signal is cache-aware membership: a chunk counts
+        // as "missing" only when it has no live cached embedding. Indexed
+        // chunks (mapping + cache) are NOT missing; unindexed chunk ids ARE;
+        // and a tenant whose index is not loaded reports every id missing.
+        use crate::embeddings::MockEmbedder;
+        use crate::store::dense::{DenseSearchConfig, DenseSearcher};
+
+        let dir = tempdir().unwrap();
+        let config = PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            enable_dense_search: true,
+            enable_hybrid_search: false,
+            enable_tiered_search: false,
+            ..Default::default()
+        };
+        let mut store = PersistentStore::open(config).unwrap();
+        let embedder = Arc::new(MockEmbedder::new());
+        let dense = Arc::new(DenseSearcher::with_embedder(
+            Arc::clone(&embedder) as Arc<dyn crate::embeddings::Embedder>,
+            DenseSearchConfig {
+                persist: false,
+                ..Default::default()
+            },
+        ));
+        store.dense_searcher = Some(Arc::clone(&dense));
+
+        let tenant = make_tenant();
+        let id1 = Store::add(&store, make_chunk(&tenant, "indexed one"))
+            .await
+            .unwrap();
+        let id2 = Store::add(&store, make_chunk(&tenant, "indexed two"))
+            .await
+            .unwrap();
+
+        // Both added chunks have live cached embeddings → neither is missing.
+        assert!(
+            dense
+                .chunks_missing_embeddings(&tenant, &[id1.clone(), id2.clone()])
+                .is_empty(),
+            "indexed chunks must not be reported missing"
+        );
+
+        // A fabricated id that was never indexed IS missing.
+        let ghost = ChunkId::new();
+        assert_eq!(
+            dense.chunks_missing_embeddings(&tenant, &[id1.clone(), ghost.clone()]),
+            vec![ghost],
+            "only the unindexed chunk is missing"
+        );
+
+        // A tenant with no loaded index reports every id missing (the cold
+        // case the backfill resolves by `ensure_index_loaded` first).
+        let other = TenantId::new("other_tenant").unwrap();
+        assert_eq!(
+            dense.chunks_missing_embeddings(&other, &[id1.clone()]),
+            vec![id1],
+            "unloaded tenant reports all ids missing"
+        );
     }
 
     #[tokio::test]
