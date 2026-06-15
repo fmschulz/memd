@@ -415,6 +415,47 @@ impl DenseSearcher {
         })
     }
 
+    /// Ensure the tenant's persisted HNSW index (mapping + embedding cache)
+    /// is loaded into memory. The backfill calls this before deciding what is
+    /// "missing", so a clean persisted index is not needlessly re-embedded.
+    pub(crate) fn ensure_index_loaded(&self, tenant_id: &TenantId) -> Result<()> {
+        self.get_or_create_index(tenant_id)?;
+        Ok(())
+    }
+
+    /// Of `chunk_ids`, return those WITHOUT a live cached embedding in the
+    /// loaded index — no mapping entry, OR a mapping entry whose embedding
+    /// cache slot is empty (e.g. after a missing/corrupt `embeddings.bin`,
+    /// where the loader keeps the mapping but resets the cache). Takes the
+    /// per-tenant locks once. If the index is not loaded, every chunk is
+    /// reported missing — callers should `ensure_index_loaded` first.
+    ///
+    /// This is the cache-aware membership the backfill needs: `contains_chunk`
+    /// (mapping-only) would wrongly treat cache-less chunks as present and
+    /// skip re-embedding them, leaving the index without usable vectors.
+    pub(crate) fn chunks_missing_embeddings(
+        &self,
+        tenant_id: &TenantId,
+        chunk_ids: &[ChunkId],
+    ) -> Vec<ChunkId> {
+        let indices = self.indices.read();
+        let Some(index) = indices.get(&tenant_id.to_string()) else {
+            return chunk_ids.to_vec();
+        };
+        let mapping = index.get_mapping().read();
+        let cache = index.get_embedding_cache().read();
+        chunk_ids
+            .iter()
+            .filter(|chunk_id| {
+                mapping
+                    .get_internal_id(chunk_id)
+                    .and_then(|internal_id| cache.get(internal_id))
+                    .is_none()
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Embed a query text (exposes embedder for tiered search)
     pub async fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
         self.embedder.embed_query(text).await
