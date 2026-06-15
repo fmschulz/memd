@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,6 +11,7 @@ use super::args::ReportFormat;
 use super::audit::{collect_scanned_chunks, resolve_tenants, storage_report};
 use super::memory_md::explicit_agent_action;
 use crate::error::{MemdError, Result};
+use crate::hit_stats::{serve_counts_since, HitStats};
 use crate::omf::time::format_rfc3339_ms;
 use crate::store::usage::{usage_retention_ms, UsageEvent, UsageEventRecord, UsageOp};
 use crate::store::{Store, TenantManager};
@@ -117,7 +118,22 @@ struct RetrievalUsefulnessSection {
     hit_rate: Option<f64>,
     distinct_queries: usize,
     agent_context_calls: usize,
+    /// One-line availability/summary note for the per-chunk serve log.
     per_chunk_serve_counts: String,
+    /// Distinct chunks served at least once in the window.
+    distinct_served_chunks: usize,
+    /// Total per-chunk serve events in the window (sum of hit counts).
+    total_serves: usize,
+    /// Most-served chunks in the window, highest first.
+    top_served_chunks: Vec<ServedChunkStat>,
+}
+
+/// One chunk's retrieval-serve tally from the central hit log.
+#[derive(Debug, Serialize)]
+struct ServedChunkStat {
+    chunk_id: String,
+    hit_count: u32,
+    selected_count: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -243,9 +259,19 @@ async fn collect_report<S: Store>(
         });
     }
 
+    // Per-chunk serve counts come from the central hit log under the
+    // store data_dir, scoped to the same window, tenant, and project as the
+    // usage-event metrics above (the central log mixes tenants/projects).
+    let serve_stats = serve_counts_since(
+        ps.data_dir(),
+        since_ms,
+        options.tenant_id.as_deref(),
+        options.project_id.as_deref(),
+    );
+
     let growth = build_growth(&usage_events, lifecycle_counts, store_totals);
     let learning_digest = build_learning_digest(&scanned_tenants, since_ms, options.top);
-    let retrieval_usefulness = build_retrieval_usefulness(&usage_events);
+    let retrieval_usefulness = build_retrieval_usefulness(&usage_events, &serve_stats, options.top);
     let self_diagnosis = build_self_diagnosis(DiagnosisInputs {
         options,
         growth: &growth,
@@ -475,7 +501,11 @@ fn build_learning_digest(
     }
 }
 
-fn build_retrieval_usefulness(events: &[UsageEventRecord]) -> RetrievalUsefulnessSection {
+fn build_retrieval_usefulness(
+    events: &[UsageEventRecord],
+    serve_stats: &HashMap<String, HitStats>,
+    top: usize,
+) -> RetrievalUsefulnessSection {
     let mut searches_total = 0usize;
     let mut zero_hits = 0usize;
     let mut hashes = BTreeSet::new();
@@ -497,15 +527,44 @@ fn build_retrieval_usefulness(events: &[UsageEventRecord]) -> RetrievalUsefulnes
         }
     }
 
+    let distinct_served_chunks = serve_stats.len();
+    let total_serves: usize = serve_stats.values().map(|s| s.hit_count as usize).sum();
+    // Rank by serve count, then selected count, then chunk_id for a
+    // stable order; take the top N for display.
+    let mut ranked: Vec<(&String, &HitStats)> = serve_stats.iter().collect();
+    ranked.sort_by(|a, b| {
+        b.1.hit_count
+            .cmp(&a.1.hit_count)
+            .then(b.1.selected_count.cmp(&a.1.selected_count))
+            .then(a.0.cmp(b.0))
+    });
+    let top_served_chunks = ranked
+        .iter()
+        .take(top)
+        .map(|(chunk_id, stats)| ServedChunkStat {
+            chunk_id: (*chunk_id).clone(),
+            hit_count: stats.hit_count,
+            selected_count: stats.selected_count,
+        })
+        .collect();
+
+    let per_chunk_serve_counts = if distinct_served_chunks == 0 {
+        "none recorded in window (central hit log empty; scattered pre-centralization logs are not counted)"
+            .to_string()
+    } else {
+        format!("distinct_chunks={distinct_served_chunks}; total_serves={total_serves}")
+    };
+
     RetrievalUsefulnessSection {
         searches: searches_total,
         zero_hits,
         hit_rate: (searches_total > 0).then(|| 1.0 - zero_hits as f64 / searches_total as f64),
         distinct_queries: hashes.len(),
         agent_context_calls,
-        per_chunk_serve_counts:
-            "unavailable: usage ledger records count-level retrieval only, not per-chunk serve ids"
-                .to_string(),
+        per_chunk_serve_counts,
+        distinct_served_chunks,
+        total_serves,
+        top_served_chunks,
     }
 }
 
@@ -786,6 +845,13 @@ fn render_markdown(report: &Report) -> String {
         "- per_chunk_serve_counts: {}",
         report.retrieval_usefulness.per_chunk_serve_counts
     );
+    for served in &report.retrieval_usefulness.top_served_chunks {
+        let _ = writeln!(
+            out,
+            "  - `{}`: served={}, selected={}",
+            served.chunk_id, served.hit_count, served.selected_count
+        );
+    }
 
     out.push_str("\n## Self-diagnosis\n\n");
     for line in &report.self_diagnosis.lines {

@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use tracing::info;
 
 use crate::error::{MemdError, Result};
-use crate::hit_stats::{query_mode_label, record_hits, HitRecord};
+use crate::hit_stats::{query_mode_label, record_hits, record_hits_to_data_dir, HitRecord};
 use crate::mcp::handlers::{handle_memory_search, SearchParams};
 use crate::store::usage::{UsageEvent, UsageOp};
 use crate::store::Store;
@@ -127,15 +127,23 @@ async fn cli_search_payload_inner<S: Store>(
 
     info!(count = result_count, "search complete");
     if log_hits {
-        log_search_hits(&payload, &tenant_id, project_id.as_deref(), mode);
+        log_search_hits(store, &payload, &tenant_id, project_id.as_deref(), mode);
     }
     Ok(payload)
 }
 
 /// Append one [`HitRecord`] per chunk in `payload["results"]` to the
-/// project-root hit log. Best-effort: every IO error inside
-/// `record_hits` is swallowed so retrieval never fails for this.
-fn log_search_hits(payload: &Value, tenant_id: &str, project_id: Option<&str>, mode: CliQueryMode) {
+/// central store hit log (resolved from the persistent store's
+/// `data_dir`), falling back to the cwd-relative log only for an
+/// in-memory store. Best-effort: every IO error inside the hit-stats
+/// writer is swallowed so retrieval never fails for this.
+fn log_search_hits<S: Store>(
+    store: &S,
+    payload: &Value,
+    tenant_id: &str,
+    project_id: Option<&str>,
+    mode: CliQueryMode,
+) {
     let Some(results) = payload.get("results").and_then(Value::as_array) else {
         return;
     };
@@ -171,7 +179,13 @@ fn log_search_hits(payload: &Value, tenant_id: &str, project_id: Option<&str>, m
             })
         })
         .collect();
-    record_hits(&records);
+    // Route hits to the central store data_dir so they aggregate in one
+    // ledger regardless of the process cwd. In-memory stores have no
+    // data_dir, so fall back to the cwd-relative log (harmless for tests).
+    match store.as_persistent() {
+        Some(ps) => record_hits_to_data_dir(ps.data_dir(), &records),
+        None => record_hits(&records),
+    }
 }
 
 const MEMRERANKER_HELPER: &str = r#"
@@ -527,7 +541,7 @@ pub(super) async fn cli_agent_context_payload<S: Store>(
             true,
         )
         .await?;
-        log_search_hits(&payload, tenant_id, project_id, mode);
+        log_search_hits(store, &payload, tenant_id, project_id, mode);
         // Per-query scope_status entries agree on tenant/project/mode;
         // keep the one with the most signal (warnings or a widen hint).
         if let Some(status) = payload.get("scope_status") {

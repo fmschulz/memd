@@ -6550,6 +6550,7 @@ pub async fn handle_memory_add_batch<S: Store>(
         let mut admission_decisions = Vec::with_capacity(prepared.len());
         let mut admission_reasons = Vec::with_capacity(prepared.len());
         for (chunk, delta, has_lifecycle, project_id, admission) in prepared {
+            let bytes = chunk.text.len();
             let candidates = crate::mcp::dedup::compute_dedup_candidates(
                 ps,
                 &tenant_id,
@@ -6593,6 +6594,19 @@ pub async fn handle_memory_add_batch<S: Store>(
             } else {
                 vec![candidates[0].to_string()]
             };
+            // Record the add event only after the write commits, so an
+            // aborted batch (later chunk rejected/failed) never inflates
+            // `memd report` growth with an admitted chunk that was never
+            // stored. Every chunk in this branch is inserted or superseded
+            // (a new chunk id either way), so all are counted.
+            record_add_usage_event(
+                store,
+                &tenant_id,
+                project_id.clone(),
+                add_usage_outcome(&admission).to_string(),
+                1,
+                bytes,
+            );
             chunk_ids.push(new_id.to_string());
             superseded_ids.push(linked);
             admission_decisions.push(admission_decision_string(&admission));
@@ -6623,6 +6637,11 @@ pub async fn handle_memory_add_batch<S: Store>(
         Vec<String>,
         bool,
     )> = Vec::with_capacity(params.chunks.len());
+    // Deferred add-event metadata (project, bytes, outcome) per chunk.
+    // Usage events are recorded only after the writes commit below, so an
+    // aborted batch never inflates `memd report` growth.
+    let mut add_event_meta: Vec<(Option<String>, usize, String)> =
+        Vec::with_capacity(params.chunks.len());
     for chunk_params in params.chunks {
         let chunk_type = parse_chunk_type(&chunk_params.chunk_type)?;
         let caller_requested_lifecycle =
@@ -6661,6 +6680,13 @@ pub async fn handle_memory_add_batch<S: Store>(
             ))
         })?;
         drop_optional_default_retention_for_in_memory_store(store, &mut admission);
+        // Capture the add event now; it is recorded after the write commits
+        // (see below), keyed positionally to chunk_ids/dedupe_decisions.
+        add_event_meta.push((
+            chunk_params.project_id.clone(),
+            chunk.text.len(),
+            add_usage_outcome(&admission).to_string(),
+        ));
         chunk = apply_admission_tags(chunk, &admission);
         chunk = chunk.with_ingestion_mode(ingestion_mode);
         let delta = admission_lifecycle_delta(&admission);
@@ -6747,6 +6773,21 @@ pub async fn handle_memory_add_batch<S: Store>(
             .await
             .map_err(|e| McpError::ToolError(e.to_string()))?
     };
+
+    // Record one add usage event per committed chunk, now that the writes
+    // have succeeded — deferring past the writes means an aborted batch never
+    // inflates `memd report` growth. Chunks reused via exact-content dedup
+    // wrote nothing new, so they are skipped. add_event_meta is positionally
+    // aligned with dedupe_decisions and chunk_ids.
+    for (i, (project, bytes, outcome)) in add_event_meta.into_iter().enumerate() {
+        let reused = dedupe_decisions
+            .get(i)
+            .is_some_and(|d| d == "reused_existing_exact_content");
+        if reused {
+            continue;
+        }
+        record_add_usage_event(store, &tenant_id, project, outcome, 1, bytes);
+    }
 
     info!(count = chunk_ids.len(), "batch add completed");
 

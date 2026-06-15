@@ -1379,6 +1379,106 @@ async fn memory_add_batch_validation_failure_leaves_no_partial_writes() {
 }
 
 #[tokio::test]
+async fn memory_add_batch_records_admitted_usage_events() {
+    // Regression: memory.add_batch wrote chunks without emitting any
+    // `add` usage events, so bulk/workflow writes were invisible to
+    // `memd report` growth (report undercounted vs `memd audit`). Each
+    // admitted batch chunk must now emit one add/admitted event, exactly
+    // like a single memory.add.
+    let (server, _tmp) = test_server().await;
+    let resp = call_tool(
+        &server,
+        "memory.add_batch",
+        json!({
+            "tenant_id": "t",
+            "project_id": "p",
+            "chunks": [
+                {
+                    "text": "Validation: batch ledger chunk one records a concrete admitted outcome.\nAgent action: verify report growth counts batch adds.",
+                    "type": "summary",
+                    "tags": ["kind:progress"]
+                },
+                {
+                    "text": "Validation: batch ledger chunk two records a concrete admitted outcome.\nAgent action: verify report growth counts batch adds.",
+                    "type": "summary",
+                    "tags": ["kind:progress"]
+                }
+            ]
+        }),
+    )
+    .await;
+    let ids = parse_result_text(&resp)["chunk_ids"]
+        .as_array()
+        .expect("chunk_ids")
+        .clone();
+    assert_eq!(ids.len(), 2, "both chunks should be written");
+
+    let events = server
+        .store()
+        .metadata()
+        .usage_events_since(0, Some("t"), None)
+        .expect("read usage events");
+    let add_events = events.iter().filter(|e| e.op == "add").count();
+    assert_eq!(
+        add_events, 2,
+        "each batch chunk must emit an add usage event (was 0 before the fix)"
+    );
+    let admitted = events
+        .iter()
+        .filter(|e| e.op == "add" && e.outcome == "admitted")
+        .count();
+    assert_eq!(
+        admitted, 2,
+        "admitted batch chunks must be counted as admitted"
+    );
+}
+
+#[tokio::test]
+async fn memory_add_batch_aborts_without_recording_add_events() {
+    // Regression (review finding): usage events were emitted in the
+    // pre-pass before any write committed, so a batch that aborts on a
+    // later chunk still counted the earlier chunk as admitted in
+    // `memd report`. After the fix, add events are recorded only after
+    // the per-chunk write commits, so an aborted batch records nothing.
+    let (server, _tmp) = test_server().await;
+    let resp = call_tool(
+        &server,
+        "memory.add_batch",
+        json!({
+            "tenant_id": "t",
+            "chunks": [
+                {
+                    "text": "Validation: first batch chunk is a concrete admitted outcome.\nAgent action: ensure an abort never logs this as admitted.",
+                    "type": "summary",
+                    "tags": ["kind:progress"]
+                },
+                // Second chunk fails validation (invalid episode_id),
+                // aborting the whole batch before any write commits.
+                { "text": "second chunk", "type": "summary", "episode_id": "bad id with spaces" }
+            ]
+        }),
+    )
+    .await;
+    assert!(
+        parse_error(&resp).is_some(),
+        "batch must error when a chunk fails validation: {resp}"
+    );
+
+    let add_events = server
+        .store()
+        .metadata()
+        .usage_events_since(0, Some("t"), None)
+        .expect("read usage events")
+        .iter()
+        .filter(|e| e.op == "add")
+        .count();
+    assert_eq!(
+        add_events, 0,
+        "an aborted batch must not record any add usage events"
+    );
+}
+
+#[tokio::test]
 async fn memory_add_batch_persists_temporal_overlay_fields_per_chunk() {
     let (server, _tmp) = test_server().await;
     let resp = call_tool(
