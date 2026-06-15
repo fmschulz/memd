@@ -1186,8 +1186,10 @@ fn validate_warm_worker_identity(result: &Value) -> Result<()> {
 
 #[cfg(unix)]
 /// Client-side timeout for a single warm-worker request. A wedged worker (e.g.
-/// one blocked on the SQLite busy_timeout) must not hang the CLI indefinitely;
-/// on timeout the request fails and `--warm auto` falls back to the cold path.
+/// one blocked on the SQLite busy_timeout) must not hang the CLI indefinitely.
+/// On timeout the request FAILS and the error propagates (there is no automatic
+/// cold-path fallback); the worker is often not wedged but busy repairing
+/// indexes — see the timeout message below.
 fn warm_client_timeout() -> Duration {
     std::env::var("MEMD_WARM_CLIENT_TIMEOUT_MS")
         .ok()
@@ -1256,8 +1258,9 @@ async fn warm_request(socket: &Path, request: &WarmWireRequest) -> Result<WarmWi
     match tokio::time::timeout(timeout, exchange).await {
         Ok(result) => result,
         Err(_elapsed) => Err(MemdError::ProtocolError(format!(
-            "warm worker did not respond within {} ms; falling back to the cold path \
-             (adjust with MEMD_WARM_CLIENT_TIMEOUT_MS or stop it with `memd warm stop`)",
+            "warm worker did not respond within {} ms; it may be busy repairing indexes \
+             (check the worker log via `memd warm status`). Raise MEMD_WARM_CLIENT_TIMEOUT_MS, \
+             retry with `--warm off`, or stop it with `memd warm stop`.",
             timeout.as_millis()
         ))),
     }
