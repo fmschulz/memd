@@ -10,7 +10,7 @@ commands.
 ```bash
 git clone --depth 1 https://github.com/fmschulz/memd
 cd memd
-make install-prebuilt   # prebuilt binary (seconds; compiles only if needed) + skill + enforcement
+make install   # prebuilt binary (seconds; compiles only if needed) + skill + enforcement
 memd doctor
 ```
 
@@ -20,9 +20,10 @@ Prebuilt binary only (no clone):
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/fmschulz/memd/releases/latest/download/memd-installer.sh | sh
 ```
 
-The prebuilt installer installs only the binary; `make install-prebuilt` from
-a clone adds the skill + enforcement without compiling (`make install` always
-builds from source). From source, manual:
+The prebuilt installer installs only the binary; `make install` from a clone
+adds the skill + enforcement and stays prebuilt-first, compiling only if the
+prebuilt binary can't run here (`make install-prebuilt` is a kept alias;
+`make install-source` forces a from-source build). From source, manual:
 
 ```bash
 cargo build --release
@@ -166,7 +167,7 @@ enforcement:
 ```bash
 git clone --depth 1 https://github.com/fmschulz/memd
 cd memd
-make install-prebuilt   # prebuilt binary (seconds; compiles only if needed) + skill + enforcement
+make install   # prebuilt binary (seconds; compiles only if needed) + skill + enforcement
 memd doctor
 ```
 
@@ -176,8 +177,10 @@ Prebuilt binary only (no clone):
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/fmschulz/memd/releases/latest/download/memd-installer.sh | sh
 ```
 
-The prebuilt installer installs only the binary. To install the skill and
-enforcement, use `make install` from a clone. `make install-binary` installs
+The prebuilt installer installs only the binary. To add the skill and
+enforcement, use `make install` from a clone — it is prebuilt-first and
+compiles only as a fallback (`make install-prebuilt` is a kept alias;
+`make install-source` forces compiling). `make install-binary` installs
 only the binary, `make menu` opens an interactive TUI to pick components, and
 `make uninstall` removes what `make install` installed.
 
