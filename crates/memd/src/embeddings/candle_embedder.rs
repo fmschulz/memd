@@ -27,6 +27,17 @@ const MAX_CONCURRENT: usize = MODEL_POOL_SIZE;
 // Global counter for round-robin model selection
 static MODEL_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+/// Parse a CUDA ordinal from a `MEMD_EMBED_DEVICE` value such as `cuda:2`,
+/// `gpu:1`, or a bare `3`. Falls back to device 0 when no index is present
+/// (e.g. plain `cuda`/`gpu`). Input is expected pre-trimmed + lowercased.
+fn parse_cuda_index(pref: &str) -> usize {
+    pref.rsplit(':')
+        .next()
+        .and_then(|tail| tail.parse::<usize>().ok())
+        .or_else(|| pref.parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
 /// Standalone mean pooling function
 fn mean_pool(embeddings: &Tensor, attention_mask: &Tensor) -> Result<Tensor> {
     // embeddings: [batch, seq_len, hidden]
@@ -103,16 +114,54 @@ impl CandleEmbedder {
             "initializing Candle embedder"
         );
 
-        // Safe device selection with CPU fallback
-        let device = match Device::cuda_if_available(0) {
-            Ok(dev) => {
-                tracing::info!("using CUDA device for embeddings");
-                dev
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "CUDA not available, falling back to CPU");
+        // Device selection. `MEMD_EMBED_DEVICE` lets a host pin embeddings to
+        // a specific device WITHOUT touching the global `CUDA_VISIBLE_DEVICES`
+        // (which affects every other GPU program on the box — and which
+        // Candle/cudarc does not reliably honor here anyway):
+        //   cpu              → always CPU (best on shared/contended GPU hosts,
+        //                      where grabbing a busy GPU makes embedding — and
+        //                      the warm-worker HNSW backfill — wildly slow)
+        //   cuda | gpu       → CUDA device 0
+        //   cuda:N | gpu:N | N → CUDA device N (e.g. an idle GPU)
+        //   unset | auto     → historical behavior: CUDA 0 if available, else CPU
+        let device = match std::env::var("MEMD_EMBED_DEVICE")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+        {
+            Some(pref) if pref == "cpu" => {
+                tracing::info!("MEMD_EMBED_DEVICE=cpu — using CPU for embeddings");
                 Device::Cpu
             }
+            Some(pref) if !pref.is_empty() && pref != "auto" => {
+                let idx = parse_cuda_index(&pref);
+                match Device::new_cuda(idx) {
+                    Ok(dev) => {
+                        tracing::info!(
+                            cuda_index = idx,
+                            "MEMD_EMBED_DEVICE — using CUDA device for embeddings"
+                        );
+                        dev
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            cuda_index = idx,
+                            "MEMD_EMBED_DEVICE requested CUDA device unavailable, falling back to CPU"
+                        );
+                        Device::Cpu
+                    }
+                }
+            }
+            _ => match Device::cuda_if_available(0) {
+                Ok(dev) => {
+                    tracing::info!("using CUDA device for embeddings");
+                    dev
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "CUDA not available, falling back to CPU");
+                    Device::Cpu
+                }
+            },
         };
 
         // Download model files from Hugging Face via the memd download helper.
@@ -393,6 +442,17 @@ impl Embedder for CandleEmbedder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_cuda_index_handles_all_forms() {
+        assert_eq!(parse_cuda_index("cuda"), 0);
+        assert_eq!(parse_cuda_index("gpu"), 0);
+        assert_eq!(parse_cuda_index("cuda:2"), 2);
+        assert_eq!(parse_cuda_index("gpu:1"), 1);
+        assert_eq!(parse_cuda_index("3"), 3);
+        // Unparseable index falls back to device 0.
+        assert_eq!(parse_cuda_index("cuda:x"), 0);
+    }
 
     #[tokio::test]
     #[ignore = "requires model download and network access"]
