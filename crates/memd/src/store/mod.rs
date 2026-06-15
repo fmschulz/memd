@@ -114,7 +114,14 @@ pub enum ExternalMutationOutcome {
     Unavailable,
     Clean,
     OwnWrites,
-    External { repaired: bool },
+    /// An external metadata.db mutation was observed. `repaired` is true when
+    /// the follow-up HNSW repair completed within the warm request's bounded
+    /// foreground budget; it is false when the repair was left to finish in
+    /// the background (or one was already running), in which case `warm
+    /// status` reports `repair_in_progress`.
+    External {
+        repaired: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -122,6 +129,8 @@ pub struct RywProbeStats {
     pub checks: u64,
     pub external_detected: u64,
     pub repairs: u64,
+    /// True when a store-owned HNSW repair is currently running.
+    pub repair_in_progress: bool,
 }
 
 pub(crate) fn score_candidate_chunk(query: &str, chunk: &MemoryChunk) -> f32 {

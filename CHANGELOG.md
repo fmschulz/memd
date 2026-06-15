@@ -6,6 +6,50 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-06-15
+
+Makes the warm worker's index repair non-blocking, cuts HNSW cold-start cost,
+and adds embedding-device pinning and a prebuilt-first installer.
+
+### Added
+
+- **`MEMD_EMBED_DEVICE`**: pin the embedding device (`cpu`, `cuda`, `cuda:N`)
+  instead of always taking `cuda:0`, so memd can stay off a contended GPU on
+  shared machines.
+- **Prebuilt-first `make install`**: installs the released binary when it runs
+  on the host and compiles from source only as a fallback, so a first install
+  no longer requires a Rust toolchain.
+- **`warm status` repair signal**: the `ryw_probe` payload now reports
+  `repair_in_progress`, so an in-flight background index repair is observable.
+
+### Changed
+
+- **Non-blocking external-mutation repair**: when the warm worker detects an
+  external `metadata.db` mutation it now schedules a single-flight background
+  HNSW repair and serves the request after a short bounded wait, instead of
+  running the full backfill synchronously in the request path. Previously a
+  detected mutation could block a warm request for minutes and trip the client
+  timeout (notably on shared/NFS data directories). The worker still indexes
+  its own warm-routed writes synchronously, so same-worker read-your-writes is
+  unchanged; dense/hybrid coverage of externally-added chunks catches up once
+  the background repair lands (SQLite and sparse reads are immediate).
+- **Honest warm client-timeout message**: the timeout no longer asserts a
+  successful cold-path fallback that may not have happened; it points at the
+  worker log and `memd warm status`.
+
+### Fixed
+
+- **`add_batch` usage events**: batched adds now record per-chunk usage events
+  (mirroring single `add`), so the usefulness report and the central per-chunk
+  hit log no longer undercount batched writes.
+
+### Performance
+
+- **Cheap HNSW cold-start**: the cold-start backfill reuses persisted
+  embeddings (`embeddings.bin`) and re-embeds only the genuine delta via a
+  cache-aware membership check, instead of re-embedding every chunk from text.
+  A clean restart on a 140-chunk tenant drops from ~50 s to no re-embeds.
+
 ## [1.0.0] - 2026-06-11
 
 First stable release. Hardens retrieval recall, input validation, and the
