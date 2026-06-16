@@ -95,17 +95,67 @@ jobs:
         if: steps.beir-cache.outputs.cache-hit != 'true'
         run: bash ./evals/bench/scripts/fetch_offline_benchmark_datasets.sh
 
-      - name: Cache embedding model
+      - name: Restore embedding model cache
         # Cache key includes the embedding-model env var so a model swap
-        # (e.g. BEIR_EMBEDDING_MODEL=qwen3) gets a fresh cache entry
-        # instead of silently reusing stale weights.
-        uses: actions/cache@v4
+        # (e.g. BEIR_EMBEDDING_MODEL=qwen3) gets a fresh cache entry instead
+        # of silently reusing stale weights. Split restore/save (paired with
+        # the explicit save below) replaces a single cache step so a freshly
+        # downloaded model is persisted even when a later benchmark/gate step
+        # fails — important on main, whose cache scope cannot see the
+        # feature-branch cache that populated this key on the PR.
+        id: model-cache
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/memd/models
           key: memd-embed-${{ env.BEIR_EMBEDDING_MODEL }}-v1
 
       - name: Build memd + memd-evals (release)
         run: cargo build --release -p memd -p memd-evals
+
+      - name: Prefetch embedding model
+        # The benchmark embeds lazily, which silently degrades to a near-zero
+        # nDCG — a phantom "regression" — if the one-time model download flakes
+        # on a cache miss. Force the download up front with retries and fail
+        # loudly so a missing model is an explicit error, not a fake gate
+        # failure. Runs only on a cache miss (e.g. the first run on main).
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          ok=0
+          for attempt in 1 2 3; do
+            if ./target/release/memd --data-dir "$tmp" \
+                 --embedding-model "$BEIR_EMBEDDING_MODEL" \
+                 add --tenant-id warmup --project-id warmup \
+                 --chunk-type summary --text "warm up the embedding model" \
+                 --warm off >/dev/null 2>&1; then
+              ok=1
+              break
+            fi
+            echo "embedding-model prefetch attempt ${attempt} failed; retrying in 15s"
+            sleep 15
+          done
+          rm -rf "$tmp"
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::embedding model could not be downloaded after 3 attempts"
+            exit 1
+          fi
+          if [ -z "$(ls -A ~/.cache/memd/models 2>/dev/null)" ]; then
+            echo "::error::~/.cache/memd/models is empty after prefetch"
+            exit 1
+          fi
+          echo "embedding model ready: $(ls ~/.cache/memd/models)"
+
+      - name: Save embedding model cache
+        # Persist the freshly downloaded model immediately (before the
+        # benchmark), so a later benchmark/gate failure cannot cost the cache
+        # entry. This is the modern, non-deprecated equivalent of
+        # `save-always: true`.
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/memd/models
+          key: memd-embed-${{ env.BEIR_EMBEDDING_MODEL }}-v1
 
       - name: Run benchmark (fiqa + scidocs)
         run: |
