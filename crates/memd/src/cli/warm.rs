@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::error::{MemdError, Result};
 use crate::store::{RywProbeStats, Store, TenantManager};
@@ -783,6 +783,18 @@ pub async fn try_run_warm_client(config: &WarmProcessConfig, cmd: &CliCommand) -
         return Ok(false);
     }
 
+    // Don't spin up a resident worker for an ephemeral (per-test / per-run)
+    // data dir under Auto: one worker per dir is the OOM vector, and the cold
+    // path is correct there. `required` still honors; opt in with
+    // MEMD_WARM_ALLOW_EPHEMERAL=1.
+    if mode == WarmMode::Auto && is_ephemeral_data_dir(&config.data_dir) {
+        debug!(
+            data_dir = %config.data_dir.display(),
+            "skipping auto-warm for ephemeral data dir"
+        );
+        return Ok(false);
+    }
+
     if let Err((error, start_error)) = ensure_warm_worker(config).await {
         if mode == WarmMode::Auto {
             warn!(
@@ -1034,6 +1046,29 @@ async fn warm_start(config: &WarmProcessConfig) -> Result<Value> {
             shutdown_existing_warm_worker_best_effort(config).await;
         }
         Err(_) => {}
+    }
+
+    // Backstop ceiling on resident warm workers so a misconfig — notably a
+    // disabled idle timeout — cannot accumulate workers until the host OOMs
+    // (2026-06-16: 639 workers / 215 GiB). Best-effort: counts live workers
+    // under the shared temp-fallback root + THIS data dir's root (not every
+    // data dir on the host), and count→spawn is not atomic, so concurrent
+    // spawns for distinct dirs may briefly overshoot. That is bounded — the
+    // real runaway vector (many ephemeral / long-path dirs → the shared temp
+    // root) is fully counted. On refusal the caller falls back to cold (Auto)
+    // or surfaces the error (Required).
+    let live = count_live_warm_workers(&config.data_dir);
+    let cap = warm_max_workers_from_env();
+    if live >= cap {
+        warn!(
+            live_workers = live,
+            cap, "warm worker cap reached; refusing to spawn (cold fallback)"
+        );
+        return Err(MemdError::ProtocolError(format!(
+            "warm worker cap reached ({live}/{cap} live under the shared temp root \
+             + this data dir); refusing to spawn. Raise MEMD_WARM_MAX_WORKERS or \
+             reap leaked workers (see `memd warm status`)."
+        )));
     }
 
     let socket = warm_socket_path(config);
@@ -1303,6 +1338,100 @@ async fn warm_idle_sleep(timeout: Option<Duration>, last_activity: Instant) {
     }
 }
 
+/// Default ceiling on concurrent warm workers, counted under the shared
+/// temp-fallback socket root plus the current data dir's own socket root.
+/// Each worker pins the embedding model in RAM (~400MB on CPU); this bounds
+/// the runaway-accumulation vector (many ephemeral / long-path data dirs all
+/// falling back to the shared temp root) so no env/config — notably a
+/// disabled idle timeout — can OOM the host. See 2026-06-16: 639 workers /
+/// 215 GiB.
+const DEFAULT_WARM_MAX_WORKERS: usize = 16;
+
+fn warm_max_workers_from_env() -> usize {
+    parse_max_workers(std::env::var("MEMD_WARM_MAX_WORKERS").ok().as_deref())
+}
+
+/// Absent, unparseable, or `0` → default. Unlike the idle timeout, the cap
+/// cannot be disabled: a disabled cap is exactly the footgun this guards.
+fn parse_max_workers(value: Option<&str>) -> usize {
+    value
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_WARM_MAX_WORKERS)
+}
+
+/// Count live warm workers across the roots where runaway accumulation
+/// concentrates: the shared temp-fallback root (used by long-path / ephemeral
+/// data dirs — the incident vector) and this data dir's own socket root.
+/// Reuses the per-worker `memd.pid` files and is strictly read-only, so it
+/// never races the orphan-eviction ownership check.
+fn count_live_warm_workers(data_dir: &Path) -> usize {
+    let temp_root = std::env::temp_dir().join("memd-warm");
+    let data_root = data_dir.join("warm");
+    let mut total = count_live_workers_under(&temp_root);
+    if data_root != temp_root {
+        total += count_live_workers_under(&data_root);
+    }
+    total
+}
+
+fn count_live_workers_under(root: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| {
+            let pid = std::fs::read_to_string(entry.path().join("memd.pid"))
+                .ok()
+                .and_then(|text| text.lines().next()?.trim().parse::<u32>().ok());
+            pid.is_some_and(warm_pid_is_live_memd)
+        })
+        .count()
+}
+
+/// Stricter than `warm_pid_is_running` (bare `/proc/<pid>` existence): confirm
+/// the pid is a live `memd` process, so a leaked pid file whose number was
+/// recycled by an unrelated program doesn't inflate the worker count and trip
+/// the cap prematurely.
+fn warm_pid_is_live_memd(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .map(|comm| comm.trim_end().starts_with("memd"))
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// A worker owns its published socket iff the published pid file still names
+/// it. After a bind+rename race the loser is orphaned (alive, holding the
+/// model, unreachable); this is checked independently of the idle timeout so
+/// orphans are reaped even when the idle reaper is disabled.
+fn warm_worker_still_owns(socket: &Path, my_pid: u32) -> bool {
+    std::fs::read_to_string(warm_pid_path_for_socket(socket))
+        .ok()
+        .and_then(|text| text.lines().next()?.trim().parse::<u32>().ok())
+        == Some(my_pid)
+}
+
+/// Heuristic for data dirs created per test / per research run: auto-warming
+/// them spawns a resident worker per dir, the 2026-06-16 OOM vector. Keyed on
+/// the `pytest-of-` sandbox marker so it targets pytest-driven callers without
+/// disabling warm for memd's own `tempfile` tests or users who legitimately
+/// keep a store under the temp dir (those stay bounded by the worker cap).
+/// `--warm required` always honors; `MEMD_WARM_ALLOW_EPHEMERAL=1` opts back in.
+fn is_ephemeral_data_dir(data_dir: &Path) -> bool {
+    if std::env::var_os("MEMD_WARM_ALLOW_EPHEMERAL").is_some() {
+        return false;
+    }
+    data_dir.to_string_lossy().contains("pytest-of-")
+}
+
 #[cfg(unix)]
 pub(super) async fn run_warm_worker<S: Store>(
     store: &S,
@@ -1349,6 +1478,16 @@ pub(super) async fn run_warm_worker<S: Store>(
     let idle_timeout = warm_idle_timeout_from_env();
     let mut last_activity = Instant::now();
 
+    // Independent of the idle timeout: a worker whose published pid file no
+    // longer names it has been replaced (bind+rename race) and must exit, so
+    // orphans don't accumulate even when the idle reaper is disabled
+    // (MEMD_WARM_IDLE_TIMEOUT_SECS=0). Polled in the serve loop, so it reaps an
+    // *idle* orphan within ~60s; it doesn't preempt a worker stuck in a long
+    // command (bounded by the client timeout), and the worker cap bounds total
+    // workers regardless.
+    let mut ownership_check = tokio::time::interval(Duration::from_secs(60));
+    ownership_check.tick().await; // first tick is immediate; consume it
+
     loop {
         if shutting_down && inflight.is_empty() {
             break;
@@ -1385,18 +1524,32 @@ pub(super) async fn run_warm_worker<S: Store>(
                 }
             }
 
-            // Orphaned workers must not hold the writer flock forever:
-            // exit cleanly after a quiet period so the lock releases
-            // even when nobody runs `memd warm stop`.
+            // Idle reaper: an otherwise-idle worker exits after the quiet
+            // period to free the model + writer flock. Disabled by
+            // MEMD_WARM_IDLE_TIMEOUT_SECS=0; orphan reaping does NOT depend on
+            // it (see the ownership branch below), so disabling idle cannot
+            // strand orphaned workers.
             _ = warm_idle_sleep(idle_timeout, last_activity), if idle_timeout.is_some() && inflight.is_empty() => {
                 info!("warm worker idle timeout reached; exiting");
                 break;
             }
+
+            _ = ownership_check.tick(), if !shutting_down => {
+                if !warm_worker_still_owns(socket, pid) {
+                    info!("warm worker replaced by a newer instance; exiting");
+                    shutting_down = true;
+                }
+            }
         }
     }
 
-    let _ = std::fs::remove_file(socket);
-    let _ = std::fs::remove_file(warm_pid_path_for_socket(socket));
+    // Only remove the published socket/pid if they still name us: an orphaned
+    // worker (replaced by a newer instance) must not delete the new owner's
+    // files.
+    if warm_worker_still_owns(socket, pid) {
+        let _ = std::fs::remove_file(socket);
+        let _ = std::fs::remove_file(warm_pid_path_for_socket(socket));
+    }
     Ok(())
 }
 
@@ -1509,6 +1662,52 @@ mod tests {
             parse_idle_timeout_secs(Some(" 42 ")),
             Some(Duration::from_secs(42))
         );
+    }
+
+    #[test]
+    fn parse_max_workers_defaults_and_floors() {
+        assert_eq!(parse_max_workers(None), DEFAULT_WARM_MAX_WORKERS);
+        // `0` must NOT disable the cap (the idle-timeout footgun).
+        assert_eq!(parse_max_workers(Some("0")), DEFAULT_WARM_MAX_WORKERS);
+        assert_eq!(parse_max_workers(Some("garbage")), DEFAULT_WARM_MAX_WORKERS);
+        assert_eq!(parse_max_workers(Some(" 8 ")), 8);
+    }
+
+    #[test]
+    fn warm_worker_still_owns_matches_published_pid() {
+        let dir = tempdir().unwrap();
+        let socket = dir.path().join("warm").join("memd.sock");
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        // No pid file yet → not owner.
+        assert!(!warm_worker_still_owns(&socket, 1234));
+        // Pid file names us → owner.
+        std::fs::write(warm_pid_path_for_socket(&socket), "1234\n").unwrap();
+        assert!(warm_worker_still_owns(&socket, 1234));
+        // Replaced by a newer instance → no longer owner (drives orphan evict).
+        std::fs::write(warm_pid_path_for_socket(&socket), "5678\n").unwrap();
+        assert!(!warm_worker_still_owns(&socket, 1234));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn count_live_workers_under_counts_live_and_skips_dead() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        // Live: our own pid (its /proc entry exists).
+        let live_sub = root.join("live");
+        std::fs::create_dir_all(&live_sub).unwrap();
+        std::fs::write(
+            live_sub.join("memd.pid"),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap();
+        // Dead: a pid that cannot be running.
+        let dead_sub = root.join("dead");
+        std::fs::create_dir_all(&dead_sub).unwrap();
+        std::fs::write(dead_sub.join("memd.pid"), "4000000000\n").unwrap();
+        // A subdir with no pid file is ignored.
+        std::fs::create_dir_all(root.join("empty")).unwrap();
+        assert_eq!(count_live_workers_under(root), 1);
     }
 
     #[test]
