@@ -10,6 +10,13 @@ use tempfile::tempdir;
 const WRITERS: usize = 8;
 
 fn memd_bin() -> String {
+    // Isolate the worker cap from concurrent memd activity: the cap counts
+    // live workers under the shared temp-fallback root, so a parallel test run
+    // (or another process on a shared dev box) could otherwise trip it here.
+    // The cap logic itself is unit-tested in the warm module.
+    use std::sync::Once;
+    static UNCAP: Once = Once::new();
+    UNCAP.call_once(|| std::env::set_var("MEMD_WARM_MAX_WORKERS", "1000000"));
     env!("CARGO_BIN_EXE_memd").to_string()
 }
 
