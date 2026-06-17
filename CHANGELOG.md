@@ -6,6 +6,36 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-06-17
+
+Bounds warm-worker memory so a misconfigured idle timeout can no longer
+accumulate resident workers until the host runs out of memory.
+
+### Fixed
+
+- **Warm-worker accumulation / OOM**: the warm worker keeps the embedding model
+  (~400 MB on CPU) resident, and the idle timeout was the *only* reaper for
+  idle/orphaned workers. With `MEMD_WARM_IDLE_TIMEOUT_SECS=0` every per-data-dir
+  worker became immortal, so many ephemeral data dirs (e.g. per-test / per-run
+  `.memd` directories) could pile up hundreds of workers and exhaust host RAM.
+  Three independent guards now prevent this and make `idle=0` safe again:
+  - a resident-worker **cap** (`MEMD_WARM_MAX_WORKERS`, default 16, cannot be
+    disabled): `warm start` refuses to spawn beyond the cap and the client falls
+    back to the cold path (or errors under `--warm required`);
+  - **idle-independent orphan eviction**: a worker whose published pid file no
+    longer names it has been replaced (bind+rename race) and exits within ~60 s,
+    even when the idle reaper is disabled;
+  - an **ephemeral-data-dir guard**: auto-warm is skipped for `pytest-of-` data
+    dirs (the accumulation vector), overridable with `MEMD_WARM_ALLOW_EPHEMERAL=1`.
+
+### Added
+
+- **`MEMD_WARM_MAX_WORKERS`**: hard ceiling on concurrent warm workers (default
+  16); `0` or an invalid value falls back to the default — the cap cannot be
+  disabled.
+- **`MEMD_WARM_ALLOW_EPHEMERAL`**: opt ephemeral (`pytest-of-`) data dirs back
+  into auto-warm.
+
 ## [1.1.0] - 2026-06-15
 
 Makes the warm worker's index repair non-blocking, cuts HNSW cold-start cost,
