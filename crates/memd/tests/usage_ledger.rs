@@ -9,6 +9,11 @@ use serde_json::Value;
 use tempfile::tempdir;
 
 fn memd_bin() -> String {
+    // Isolate the worker cap from concurrent memd activity (see warm module
+    // unit tests for the cap logic itself).
+    use std::sync::Once;
+    static UNCAP: Once = Once::new();
+    UNCAP.call_once(|| std::env::set_var("MEMD_WARM_MAX_WORKERS", "1000000"));
     env!("CARGO_BIN_EXE_memd").to_string()
 }
 
