@@ -631,21 +631,6 @@ impl PersistentStore {
             0
         };
         let write_epoch = Arc::new(AtomicU64::new(0));
-        let external_mutation_probe = if config.read_only {
-            None
-        } else {
-            match ExternalMutationProbe::open(&metadata_path, Arc::clone(&write_epoch)) {
-                Ok(probe) => Some(probe),
-                Err(error) => {
-                    warn!(
-                        path = %metadata_path.display(),
-                        error = %error,
-                        "RYW external mutation probe unavailable"
-                    );
-                    None
-                }
-            }
-        };
 
         // Initialize dense searcher if enabled
         let dense_searcher = if config.enable_dense_search {
@@ -726,7 +711,7 @@ impl PersistentStore {
         // Initialize compaction runner
         let compaction_runner = Some(CompactionRunner::new(CompactionConfig::default()));
 
-        let store = Self {
+        let mut store = Self {
             config,
             tenants: Arc::new(RwLock::new(HashMap::new())),
             metadata,
@@ -737,7 +722,7 @@ impl PersistentStore {
             compaction_runner,
             async_indexer: None,
             write_epoch,
-            external_mutation_probe,
+            external_mutation_probe: None,
             repair_state: Arc::new(HnswRepairState::default()),
             repair_task: Mutex::new(None),
             usage_sweep_last_ms: AtomicI64::new(usage_sweep_initial_ms),
@@ -747,8 +732,27 @@ impl PersistentStore {
         // Recover existing tenants
         store.discover_and_recover_tenants()?;
 
+        // Baseline the external-mutation probe only after startup recovery.
+        // Recovery can replay WAL records, update metadata, and finalize
+        // segments using the store's own connections; snapshotting before that
+        // makes the first warm-worker request misclassify startup recovery as
+        // an external writer and run expensive repair work on the request path.
+        if !store.config.read_only {
+            store.external_mutation_probe =
+                match ExternalMutationProbe::open(&metadata_path, Arc::clone(&store.write_epoch)) {
+                    Ok(probe) => Some(probe),
+                    Err(error) => {
+                        warn!(
+                            path = %metadata_path.display(),
+                            error = %error,
+                            "RYW external mutation probe unavailable"
+                        );
+                        None
+                    }
+                };
+        }
+
         let async_indexer = store.start_async_indexer_if_enabled();
-        let mut store = store;
         store.async_indexer = async_indexer;
 
         if !store.config.read_only && store.config.backfill_hnsw_on_startup {
@@ -4328,6 +4332,39 @@ mod tests {
         assert_eq!(stats.external_detected, 1);
         assert_eq!(stats.repairs, 1);
         assert!(!stats.repair_in_progress);
+    }
+
+    #[tokio::test]
+    async fn probe_baseline_is_after_startup_wal_recovery() {
+        let dir = tempdir().unwrap();
+        let config = || PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            segment_max_chunks: 100,
+            min_finalize_chunks: 256,
+            wal_checkpoint_interval: 0,
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            ..Default::default()
+        };
+        let tenant = make_tenant();
+        {
+            let store = PersistentStore::open(config()).unwrap();
+            store
+                .add(make_chunk(&tenant, "chunk recovered before probe baseline"))
+                .await
+                .unwrap();
+        }
+
+        let store = PersistentStore::open(config()).unwrap();
+
+        assert_eq!(
+            store.probe_external_mutation().await,
+            ExternalMutationOutcome::Clean
+        );
+        let stats = store.ryw_probe_stats().unwrap();
+        assert_eq!(stats.checks, 1);
+        assert_eq!(stats.external_detected, 0);
+        assert_eq!(stats.repairs, 0);
     }
 
     #[tokio::test]
