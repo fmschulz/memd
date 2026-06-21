@@ -43,6 +43,15 @@ DISPLAY_NAME = {
     "superlocalmemory": "SuperLocalMemory",
 }
 
+# LoCoMo question categories (upstream locomo10 naming). Shared by both LoCoMo
+# notebooks so every figure labels the categories identically.
+LOCOMO_CATEGORY = {
+    "1": "multi-hop",
+    "2": "temporal",
+    "3": "open-domain",
+    "4": "single-hop",
+}
+
 
 def apply_house_style() -> None:
     """Set rcParams once per notebook for a consistent, clean look."""
@@ -53,6 +62,8 @@ def apply_house_style() -> None:
             "savefig.bbox": "tight",
             "figure.facecolor": "white",
             "axes.facecolor": "white",
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Helvetica", "Arial", "DejaVu Sans"],
             "font.size": 11,
             "axes.titlesize": 13,
             "axes.titleweight": "bold",
