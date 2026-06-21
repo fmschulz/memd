@@ -14,8 +14,8 @@ use crate::store::{RywProbeStats, Store, TenantManager};
 use crate::types::ChunkType;
 
 use super::args::{
-    CliCommand, CliQueryMode, ExportFormat, ReportFormat, SearchRerankerOptions, WarmCommand,
-    WarmMode, WarmProcessConfig,
+    CliCommand, CliQueryMode, ExportFormat, ReportFormat, SearchRerankerOptions, StoreAccess,
+    WarmCommand, WarmMode, WarmProcessConfig,
 };
 use super::batch::{read_batch_input, run_batch_jsonl};
 use super::consolidate::{run_consolidate, ConsolidateOptions};
@@ -816,13 +816,30 @@ pub async fn try_run_warm_client(config: &WarmProcessConfig, cmd: &CliCommand) -
         return Ok(false);
     };
 
-    let response = warm_request(
+    let response = match warm_request(
         &warm_socket_path(config),
         &WarmWireRequest::Command {
             command: wire_command,
         },
     )
-    .await?;
+    .await
+    {
+        Ok(response) => response,
+        Err(error) if mode == WarmMode::Auto && cmd.store_access() == StoreAccess::ReadOnly => {
+            warn!(
+                error = %error,
+                "warm worker request failed; falling back to cold CLI"
+            );
+            return Ok(false);
+        }
+        Err(error) if mode == WarmMode::Auto => {
+            return Err(MemdError::ProtocolError(format!(
+                "warm worker request failed after dispatch for a write command; not falling back \
+                 to the cold path because the command may still complete in the worker: {error}"
+            )));
+        }
+        Err(error) => return Err(error),
+    };
     if !response.ok {
         return Err(MemdError::ProtocolError(
             response
@@ -1222,10 +1239,9 @@ fn validate_warm_worker_identity(result: &Value) -> Result<()> {
 
 #[cfg(unix)]
 /// Client-side timeout for a single warm-worker request. A wedged worker (e.g.
-/// one blocked on the SQLite busy_timeout) must not hang the CLI indefinitely.
-/// On timeout the request FAILS and the error propagates (there is no automatic
-/// cold-path fallback); the worker is often not wedged but busy repairing
-/// indexes — see the timeout message below.
+/// one blocked on the SQLite busy_timeout) must not hang the CLI indefinitely;
+/// on timeout the request fails and the command dispatcher decides whether a
+/// cold fallback is safe.
 fn warm_client_timeout() -> Duration {
     std::env::var("MEMD_WARM_CLIENT_TIMEOUT_MS")
         .ok()
@@ -1295,8 +1311,8 @@ async fn warm_request(socket: &Path, request: &WarmWireRequest) -> Result<WarmWi
         Ok(result) => result,
         Err(_elapsed) => Err(MemdError::ProtocolError(format!(
             "warm worker did not respond within {} ms; it may be busy repairing indexes \
-             (check the worker log via `memd warm status`). Raise MEMD_WARM_CLIENT_TIMEOUT_MS, \
-             retry with `--warm off`, or stop it with `memd warm stop`.",
+             (check the worker log via `memd warm status`). Raise MEMD_WARM_CLIENT_TIMEOUT_MS \
+             or stop it with `memd warm stop`.",
             timeout.as_millis()
         ))),
     }
@@ -1636,7 +1652,10 @@ async fn write_warm_response(
 mod tests {
     use super::*;
     use crate::cli::SearchReranker;
+    use std::sync::Mutex;
     use tempfile::tempdir;
+
+    static WARM_TIMEOUT_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn test_warm_config(data_dir: PathBuf) -> WarmProcessConfig {
         WarmProcessConfig {
@@ -1644,6 +1663,47 @@ mod tests {
             config_path: None,
             embedding_model: "all-minilm".to_string(),
             search_variant: "hybrid-feature".to_string(),
+        }
+    }
+
+    fn add_command(warm: WarmMode) -> CliCommand {
+        CliCommand::Add {
+            tenant_id: Some("t".to_string()),
+            text: "useful durable note".to_string(),
+            chunk_type: ChunkType::Summary,
+            project_id: None,
+            tags: Some(vec!["kind:note".to_string()]),
+            source_uri: None,
+            source_path: None,
+            warm,
+        }
+    }
+
+    #[cfg(unix)]
+    async fn serve_ping_then_hang_on_command(socket: PathBuf) {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::UnixListener;
+
+        if let Some(parent) = socket.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap();
+
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).await.unwrap();
+            match serde_json::from_slice::<WarmWireRequest>(&bytes).unwrap() {
+                WarmWireRequest::Ping => {
+                    let response = WarmWireResponse::ok_result(warm_worker_identity(&socket, None));
+                    assert!(write_warm_response(&mut stream, response).await);
+                }
+                WarmWireRequest::Command { .. } => {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+                other => panic!("unexpected warm request in test: {other:?}"),
+            }
         }
     }
 
@@ -1759,6 +1819,92 @@ mod tests {
             continue_on_error: false,
             output: None,
             warm,
+        }
+    }
+
+    #[test]
+    fn warm_routed_store_access_matches_timeout_retry_safety() {
+        let read_only = vec![
+            search_command(false, WarmMode::Auto),
+            CliCommand::AgentContext {
+                tenant_id: Some("t".to_string()),
+                project_id: None,
+                query: vec!["q".to_string()],
+                k: 1,
+                token_budget: 100,
+                mode: CliQueryMode::Generic,
+                no_text: false,
+                include_artifact: false,
+                format: ExportFormat::Json,
+                output: None,
+                log_dir: None,
+                warm: WarmMode::Auto,
+            },
+            CliCommand::Report {
+                tenant_id: Some("t".to_string()),
+                project_id: Some("p".to_string()),
+                since: "24h".to_string(),
+                format: ReportFormat::Json,
+                strict: true,
+                top: 5,
+                output: None,
+                warm: WarmMode::Auto,
+            },
+        ];
+
+        for command in read_only {
+            assert_eq!(command.store_access(), StoreAccess::ReadOnly);
+        }
+
+        let writers = vec![
+            add_command(WarmMode::Auto),
+            CliCommand::Delete {
+                tenant_id: Some("t".to_string()),
+                chunk_id: "019e6d12-c1a7-7330-8bd8-4c9cdb45bc3c".to_string(),
+                warm: WarmMode::Auto,
+            },
+            CliCommand::ImportOmf {
+                tenant_id: Some("t".to_string()),
+                input: Some(PathBuf::from("input.json")),
+                include_archived: true,
+                fuzzy_threshold: None,
+                dry_run: false,
+                warm: WarmMode::Auto,
+            },
+            CliCommand::Purge {
+                tenant_id: "t".to_string(),
+                project_id: Some("p".to_string()),
+                older_than_days: 30,
+                limit: 100,
+                include_unreadable_active: true,
+                archive: None,
+                apply: false,
+                vacuum_metadata: false,
+                rewrite_segments: false,
+                warm: WarmMode::Auto,
+            },
+            CliCommand::Consolidate {
+                tenant_id: Some("t".to_string()),
+                project_id: Some("p".to_string()),
+                project_dir: PathBuf::from("/tmp/project"),
+                max_region: 50,
+                dry_run: true,
+                background: false,
+                force: false,
+                warm: WarmMode::Auto,
+            },
+            CliCommand::Call {
+                tool: "memory.search".to_string(),
+                json: Some("{}".to_string()),
+                input: None,
+                output: None,
+                warm: WarmMode::Auto,
+            },
+            batch_command(false, WarmMode::Auto),
+        ];
+
+        for command in writers {
+            assert_eq!(command.store_access(), StoreAccess::Writer);
         }
     }
 
@@ -2079,6 +2225,46 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_read_only_command_timeout_falls_back_to_cold_path() {
+        let _guard = WARM_TIMEOUT_ENV_LOCK.lock().unwrap();
+        std::env::set_var("MEMD_WARM_CLIENT_TIMEOUT_MS", "50");
+        let dir = tempdir().unwrap();
+        let config = test_warm_config(dir.path().join("data"));
+        let socket = warm_socket_path(&config);
+        let server = tokio::spawn(serve_ping_then_hang_on_command(socket));
+
+        let result = try_run_warm_client(&config, &search_command(false, WarmMode::Auto))
+            .await
+            .unwrap();
+
+        std::env::remove_var("MEMD_WARM_CLIENT_TIMEOUT_MS");
+        server.abort();
+        assert!(!result);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_write_command_timeout_does_not_retry_cold_path() {
+        let _guard = WARM_TIMEOUT_ENV_LOCK.lock().unwrap();
+        std::env::set_var("MEMD_WARM_CLIENT_TIMEOUT_MS", "50");
+        let dir = tempdir().unwrap();
+        let config = test_warm_config(dir.path().join("data"));
+        let socket = warm_socket_path(&config);
+        let server = tokio::spawn(serve_ping_then_hang_on_command(socket));
+
+        let error = try_run_warm_client(&config, &add_command(WarmMode::Auto))
+            .await
+            .unwrap_err();
+
+        std::env::remove_var("MEMD_WARM_CLIENT_TIMEOUT_MS");
+        server.abort();
+        let message = error.to_string();
+        assert!(message.contains("write command"));
+        assert!(message.contains("may still complete"));
+    }
+
     #[test]
     fn warm_client_log_name_tracks_command_kind() {
         let search = search_command(false, WarmMode::Auto);
@@ -2112,16 +2298,7 @@ mod tests {
         };
         assert_eq!(warm_client_log_name(&report), "memd_report");
 
-        let add = CliCommand::Add {
-            tenant_id: Some("t".to_string()),
-            text: "useful durable note".to_string(),
-            chunk_type: ChunkType::Summary,
-            project_id: None,
-            tags: Some(vec!["kind:note".to_string()]),
-            source_uri: None,
-            source_path: None,
-            warm: WarmMode::Auto,
-        };
+        let add = add_command(WarmMode::Auto);
         assert_eq!(warm_client_log_name(&add), "memd_cli");
     }
 }
