@@ -13,7 +13,7 @@ cd "$SCRIPT_DIR"
 # Regenerate the .ipynb from cell sources, then execute in place.
 uv run --with nbformat python build_notebooks.py
 
-for nb in locomo_cross_system.ipynb beir_retrieval_gate.ipynb; do
+for nb in locomo_cross_system.ipynb beir_retrieval_gate.ipynb locomo_qa_accuracy.ipynb; do
   echo "== executing $nb =="
   uv run --with matplotlib,numpy,nbconvert,nbformat,ipykernel \
     jupyter nbconvert --to notebook --execute --inplace \

@@ -1,0 +1,104 @@
+{
+  "dataset": "locomo10",
+  "metric": "qa_accuracy_llm_judged",
+  "judge": "codex",
+  "model": "codex-default",
+  "k": 10,
+  "per_category": 50,
+  "seed": 42,
+  "systems": {
+    "mem0": {
+      "accuracy": 0.385,
+      "correct": 77,
+      "n": 200,
+      "answer_call_failures": 0,
+      "judge_call_failures": 0,
+      "per_category": {
+        "1": {
+          "accuracy": 0.32,
+          "correct": 16,
+          "n": 50
+        },
+        "2": {
+          "accuracy": 0.48,
+          "correct": 24,
+          "n": 50
+        },
+        "3": {
+          "accuracy": 0.26,
+          "correct": 13,
+          "n": 50
+        },
+        "4": {
+          "accuracy": 0.48,
+          "correct": 24,
+          "n": 50
+        }
+      },
+      "ci_lower": 0.3203319691791383,
+      "ci_upper": 0.4540026121820756
+    },
+    "memd": {
+      "accuracy": 0.435,
+      "correct": 87,
+      "n": 200,
+      "answer_call_failures": 0,
+      "judge_call_failures": 0,
+      "per_category": {
+        "1": {
+          "accuracy": 0.38,
+          "correct": 19,
+          "n": 50
+        },
+        "2": {
+          "accuracy": 0.58,
+          "correct": 29,
+          "n": 50
+        },
+        "3": {
+          "accuracy": 0.24,
+          "correct": 12,
+          "n": 50
+        },
+        "4": {
+          "accuracy": 0.54,
+          "correct": 27,
+          "n": 50
+        }
+      },
+      "ci_lower": 0.368156071588974,
+      "ci_upper": 0.5042939091804078
+    },
+    "superlocalmemory": {
+      "accuracy": 0.38,
+      "correct": 76,
+      "n": 200,
+      "answer_call_failures": 0,
+      "judge_call_failures": 0,
+      "per_category": {
+        "1": {
+          "accuracy": 0.18,
+          "correct": 9,
+          "n": 50
+        },
+        "2": {
+          "accuracy": 0.54,
+          "correct": 27,
+          "n": 50
+        },
+        "3": {
+          "accuracy": 0.2,
+          "correct": 10,
+          "n": 50
+        },
+        "4": {
+          "accuracy": 0.6,
+          "correct": 30,
+          "n": 50
+        }
+      },
+      "ci_lower": 0.3155889366123922,
+      "ci_upper": 0.4489341048080049
+    }
+  }
+}

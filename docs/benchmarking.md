@@ -25,9 +25,10 @@ bash evals/notebooks/run_notebooks.sh
 
 The figures below are produced by the notebooks in
 [`evals/notebooks/`](https://github.com/fmschulz/memd/tree/main/evals/notebooks)
-(`locomo_cross_system.ipynb`, `beir_retrieval_gate.ipynb`), which read the
-checked-in JSON snapshots under `evals/notebooks/data/` and render to
-`docs/figures/`. Re-running them after a fresh benchmark refreshes every plot.
+(`locomo_cross_system.ipynb`, `beir_retrieval_gate.ipynb`,
+`locomo_qa_accuracy.ipynb`), which read the checked-in JSON snapshots under
+`evals/notebooks/data/` and render to `docs/figures/`. Re-running them after a
+fresh benchmark refreshes every plot.
 
 ## Task memory (internal corpus)
 
@@ -111,9 +112,9 @@ while SuperLocalMemory's lexical fallback is roughly 30× slower per query
 | Category | Description | `memd` | `mem0` | `slm` |
 |---|---|---:|---:|---:|
 | 1 | multi-hop | **0.353** | 0.292 | 0.259 |
-| 2 | specific facts | **0.501** | 0.390 | 0.433 |
+| 2 | temporal | **0.501** | 0.390 | 0.433 |
 | 3 | open-domain | **0.275** | 0.255 | 0.227 |
-| 4 | long-form | **0.413** | 0.372 | 0.397 |
+| 4 | single-hop | **0.413** | 0.372 | 0.397 |
 
 ![LoCoMo MRR@10 by question category as a heatmap: memd is the strongest row across all four categories, peaking on category 2](figures/locomo_per_category.svg)
 
@@ -176,7 +177,7 @@ above carry the stronger claim.
 The category breakdown is mixed. memd leads multi-hop questions (category 1,
 0.38) and temporal questions (category 2, 0.58); SuperLocalMemory answers more
 single-hop long-form questions (category 4, 0.60 vs 0.54); the small open-domain
-set (category 3, 96 questions in the full dataset) is hard for every system and
+set (category 3, 92 questions in the full dataset) is hard for every system and
 separates them least.
 
 ![LoCoMo QA accuracy by question category: grouped bars showing memd leading categories 1 and 2, SuperLocalMemory leading category 4, and all three close on category 3](figures/locomo_qa_accuracy_per_category.svg)
@@ -187,7 +188,9 @@ competing-tool environments. It reads each system's archived top-k retrieved
 turn IDs, resolves them to conversation turns, and drives Codex for answer
 generation and judging. Re-seeding the competing tools is impractical: mem0
 seeding alone took 3.7 h of LLM extraction. We therefore apply the same QA
-layer to the retrieval each system already produced.
+layer to the retrieval each system already produced. The compact aggregate
+snapshot used to regenerate the QA figures is checked in at
+`evals/notebooks/data/locomo_qa_accuracy_2026-06-11.json`.
 
 ## Offline retrieval gate (BEIR)
 
