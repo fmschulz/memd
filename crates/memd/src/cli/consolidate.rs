@@ -143,7 +143,7 @@ async fn consolidate_core<S: Store>(
         summary["warning"] = json!(
             "consolidated lessons written without project_id; project-scoped searches \
              will not see them (they surface via tenant-wide search and memory-md \
-             machine-wide takeaways)"
+             Machine-Wide Fact Library)"
         );
     }
     Ok(summary)

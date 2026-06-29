@@ -189,7 +189,7 @@ turn IDs, resolves them to conversation turns, and drives Codex for answer
 generation and judging. Re-seeding the competing tools is impractical: mem0
 seeding alone took 3.7 h of LLM extraction. We therefore apply the same QA
 layer to the retrieval each system already produced. The compact aggregate
-snapshot used to regenerate the QA figures is checked in at
+snapshot for regenerating the QA figures is checked in at
 `evals/notebooks/data/locomo_qa_accuracy_2026-06-11.json`.
 
 ## Offline retrieval gate (BEIR)

@@ -45,8 +45,8 @@ change ranks versus a same-pass filtered baseline.
 Tenant-wide consolidation (`memd consolidate --tenant-id <t>`, no
 `--project-id`) rewrites lessons that recur across a tenant's projects
 into `kind:consolidated` chunks, which surface in every project's
-`memory.md` through the machine-wide takeaways section (on by default,
-`--global-limit`).
+`memory.md` through the capped `Machine-Wide Fact Library` (default
+`--global-limit 2`; set `--global-limit 0` to disable).
 
 ## Session-start hook
 
