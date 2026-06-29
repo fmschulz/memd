@@ -21,8 +21,8 @@ For write-quality expectations and cleanup safety, see the
 | `memd export`, `memd export-markdown`, `memd export-omf`, `memd import-omf` | Portable local memory operations. |
 | `memd init` | Write `.memd/` scope files and CLI guardrail blocks. |
 | `memd doctor` | Diagnose binary discovery (incl. PATH-binary version skew), the resolved `--data-dir`, warm-worker reachability and worker-vs-CLI version skew, global agent rules, Claude Code SessionStart hook, and current project scope; `--strict` exits 2 when any check fails. |
-| `memd memory-md` | Refresh project-root `memory.md` with the strongest takeaways for session-start use. |
-| `memd eval-memory-md` | Gate startup-memory quality with `--min-useful-ratio` and `--max-generated-wrappers`. |
+| `memd memory-md` | Refresh project-root `memory.md` with `Latest Project State` plus ranked fact libraries for session-start use. |
+| `memd eval-memory-md` | Gate startup-memory quality with `--min-useful-ratio`, `--max-generated-wrappers`, and optional `--agent-usefulness`. |
 | `memd eval-retrieval` | Gate retrieval quality with precision, hit-rate, recall, and MRR thresholds. |
 | `memd eval-write-quality` | Gate write admission, duplicate reuse, storage growth, and retention compaction. |
 | `memd audit` | Report tenant/project storage shape, generated-wrapper noise, alias groups, unreadable active rows, and routine progress summaries that still lack an expiry; `--strict` exits 2 when `unreadable_active_chunks > 0`. |
@@ -30,13 +30,23 @@ For write-quality expectations and cleanup safety, see the
 | `memd cleanup-plan` | Generate a non-destructive cleanup approval report with archive/purge command previews and post-cleanup pass criteria. |
 | `memd purge` | Dry-run or archive-first cleanup of hidden rows; `--apply` verifies the archive before mutation, and `--include-unreadable-active` previews active metadata rows whose segment payload cannot be loaded. |
 | `memd purge-archive` | Read-only verification for `memd purge --archive` files: validates format/counts/payload flags, emits SHA-256, and can enforce expected tenant/project. |
-| `memd consolidate` | Call the configured LLM (Claude Haiku or Codex Spark, selected by `MEMD_CONSOLIDATOR`) to rewrite recent chunks into deduplicated `kind:consolidated` lessons. Sources are soft-tombstoned via `ChunkStatus::Superseded` (never deleted). With an explicit `--tenant-id` and no `--project-id` the run is tenant-wide; the resulting lessons surface via tenant-wide search and memory-md machine-wide takeaways. |
+| `memd consolidate` | Call the configured LLM (Claude Haiku or Codex Spark, selected by `MEMD_CONSOLIDATOR`) to rewrite recent chunks into deduplicated `kind:consolidated` lessons. Sources are soft-tombstoned via `ChunkStatus::Superseded` (never deleted). With an explicit `--tenant-id` and no `--project-id` the run is tenant-wide; the resulting lessons surface via tenant-wide search and the memory-md `Machine-Wide Fact Library`. |
 | `memd session-start` | Auto-create a minimal `.memd/project_scope.json` when missing, refresh `memory.md` synchronously, then spawn a background consolidation when enough chunks have accumulated. Wired into Claude Code via the bundled skill installer; a Codex hook template lives at `memd-skill/examples/codex_session_start_hook.json`. |
 | `memd eval-counterfactual` | Replay a JSONL benchmark file; write an overlap@k / rank-shift report under `evals/bench/reports/`. Monitors whether `kind:consolidated` lessons are load-bearing in retrieval. |
 | `memd maintenance` | Disk hygiene: sweep orphan HNSW snapshots, report what changed. |
 
 - `memory-md --explain-output <path>` writes a JSON candidate audit with query
-  source, score components, tags, and display/filter decisions.
+  source, score components, tags, display/filter decisions, structured project
+  state, and agent-usefulness metrics.
+- `memory-md` renders `Latest Project State` before fact libraries. That
+  section includes scope, freshness, git status, latest task/handoff signals,
+  source-backed next actions, and warnings for scope drift or unreadable
+  memory payloads.
+- `eval-memory-md --agent-usefulness` fails when startup context lacks current
+  state, git state for a git repo, source-backed next actions when open tasks
+  exist, scope-health warnings, or when displayed startup items include
+  continuation fragments or generated boilerplate actions. `--gold-file` can
+  run the same checks over local multi-project fixtures.
 - `eval-retrieval` gates with `--min-precision-at-k`,
   `--min-hit-rate-at-k`, `--min-known-recall-at-k`, and `--min-mrr`.
 - `eval-write-quality` gates with `--min-rejection-or-downgrade-rate`,
@@ -78,10 +88,9 @@ matched event tag under each result's `expanded_siblings` field.
 - `task.add_evidence` for concrete evidence against a task.
 - `task.get`, `task.search`, `task.resume`.
 
-### `artifact.*` — focused collaboration tools (v0.4)
+### `artifact.*` — focused collaboration tools
 
-The single 50-field `artifact.create` has been split into four focused tools
-with tight schemas:
+Artifact collaboration uses four specialized tools with tight schemas:
 
 - `artifact.review` — request a review; attach summary and requested action.
 - `artifact.revision` — supersede a prior artifact with `superseded_by` lineage.

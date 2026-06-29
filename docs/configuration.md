@@ -48,7 +48,7 @@ log_format = "json"
 
 [server]
 # Compatibility/scope routing. The table name remains [server] for existing
-# config files; the binary no longer exposes network or stdio server mode.
+# config files; this CLI-only binary exposes no network or stdio server mode.
 allow_cross_tenant_project_fallback = false
 
 [[server.project_aliases]]

@@ -273,7 +273,7 @@ That verifier checks:
 - `memd session-start` creates a project scope in a temp project
 - `memd doctor --strict --format json` passes against a temp project scope
 - `memd add` stores a test memory
-- `memd memory-md` renders a `Memory health` header
+- `memd memory-md` renders `Latest Project State` and `Memory health` headers
 - `memd search` recovers it
 - `memd agent-context` writes a CLI-only context file and JSONL audit log
 

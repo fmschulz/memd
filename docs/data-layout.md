@@ -23,8 +23,8 @@ Persistent mode writes to:
 
 Default data dir: `~/.memd/data`. Override with `--data-dir`.
 
-Retrieval/list scans are tolerant of stale metadata rows whose segment payload
-is no longer readable: unreadable chunks are logged and skipped. Direct
+Retrieval/list scans are tolerant of stale metadata rows with unreadable segment
+payloads: unreadable chunks are logged and skipped. Direct
 `memory.get` remains strict so point lookups still surface storage corruption
 instead of silently returning the wrong record.
 

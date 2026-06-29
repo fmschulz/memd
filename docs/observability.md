@@ -72,12 +72,19 @@ Eval commands such as `memd eval-counterfactual` execute real searches through
 the same ops layer. Their events land in the ledger and inflate search counts
 in the report window; tagging or filtering eval-origin events is future work.
 
-## Session-start health header
+## Session-start state and health
 
-`memd memory-md` prepends a compact `## Memory health` section with summary
-lines derived from `memd report`; those lines have no prefix. It adds
-`[warn]`-prefixed lines only when warnings exist. This is best-effort and is
-silently skipped if report generation fails.
+`memd memory-md` starts with `## Latest Project State`, a deterministic
+startup briefing collected from the project directory. It includes scope,
+freshness, git branch and clean/dirty state, active task or handoff signals,
+source-backed next actions, and warnings for scope drift or unreadable memory
+payloads.
+
+Below that, `## Memory health` summarizes lines derived from `memd report`.
+This is best-effort and is silently skipped if report generation fails. If
+`Latest Project State` reports `memory degraded`, inspect the store with
+`memd audit --format markdown` or `memd report --strict`; the warning means
+active metadata rows exist whose segment payloads could not be read.
 
 ## Stats, health, metrics
 
@@ -136,7 +143,8 @@ memd memory-md \
 ```
 
 The JSON report lists each retrieved candidate with source query, raw rank,
-score components, tags, generated-digest status, matched sources, and the final
-display/filter decision. This is the fastest way to see whether generated
-wrappers, stale records, or below-threshold candidates are affecting startup
-context.
+score components, tags, generated-digest status, quality flags, topic key,
+matched sources, structured project state, agent-usefulness metrics, and the
+final display/filter decision. This is the fastest way to see whether
+generated wrappers, continuation fragments, duplicate topics, stale records, or
+below-threshold candidates are affecting startup context.

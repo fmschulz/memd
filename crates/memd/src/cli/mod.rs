@@ -424,6 +424,8 @@ pub async fn run_cli<S: Store>(
             top_n,
             min_useful_ratio,
             max_generated_wrappers,
+            agent_usefulness,
+            gold_file,
         } => {
             let result = run_memory_md_eval(
                 store,
@@ -438,6 +440,8 @@ pub async fn run_cli<S: Store>(
                     top_n,
                     min_useful_ratio,
                     max_generated_wrappers,
+                    agent_usefulness,
+                    gold_file,
                 },
             )
             .await?;
@@ -1375,7 +1379,8 @@ mod tests {
                 MemoryChunk::new(
                     tenant,
                     "Machine wide reusable takeaways best practices recurring issues important paths \
-                     how to solve: stop stale warm workers before replacing the bundled binary.",
+                     how to solve: stop stale warm workers before replacing the bundled binary. \
+                     Agent action: Check for stale warm workers before replacing a bundled binary.",
                     ChunkType::Summary,
                 )
                 .with_tags(vec!["kind:finish".to_string(), "priority:7".to_string()]),
@@ -1402,10 +1407,10 @@ mod tests {
         .unwrap();
 
         let content = std::fs::read_to_string(dir.path().join("memory.md")).unwrap();
-        assert!(content.contains("## Project Takeaways"));
+        assert!(content.contains("## Project Fact Library"));
         assert!(content.contains("use project-scoped metadata before payload reads"));
         assert!(content.contains("memory_md_project"));
-        assert!(content.contains("## Machine-Wide Takeaways"));
+        assert!(content.contains("## Machine-Wide Fact Library"));
         assert!(content.contains("stop stale warm workers before replacing the bundled binary"));
         assert!(content.contains("priority:"));
     }
@@ -1513,10 +1518,10 @@ mod tests {
         .unwrap();
 
         let content = std::fs::read_to_string(dir.path().join("memory.md")).unwrap();
-        assert!(content.contains("## Project Takeaways"));
+        assert!(content.contains("## Project Fact Library"));
         assert!(content.contains("keep session startup scoped to project lessons"));
         assert!(content.contains("memory_md_default_project"));
-        assert!(!content.contains("## Machine-Wide Takeaways"));
+        assert!(!content.contains("## Machine-Wide Fact Library"));
         assert!(!content.contains("this should require explicit global-limit"));
     }
 
@@ -1581,6 +1586,175 @@ mod tests {
                 top_n: 10,
                 min_useful_ratio: 0.8,
                 max_generated_wrappers: 0,
+                agent_usefulness: false,
+                gold_file: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn eval_memory_md_agent_usefulness_passes_synthetic_fixture() {
+        let store = MemoryStore::new();
+        let tenant = TenantId::new("memory_md_agent_eval_tenant").unwrap();
+        let project = ProjectId::from("memory_md_agent_eval_project");
+        store
+            .add(
+                MemoryChunk::new(
+                    tenant.clone(),
+                    "Project architecture configuration deployment key decisions tradeoffs: \
+                     Validation: startup state fixture has concrete work. \
+                     Agent action: Verify the source-backed next action before resuming.",
+                    ChunkType::Summary,
+                )
+                .with_project(project.clone())
+                .with_tags(vec!["kind:finish".to_string(), "priority:9".to_string()]),
+            )
+            .await
+            .unwrap();
+
+        let dir = tempdir().unwrap();
+        let tasks_dir = dir.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join("todo.md"),
+            "# Synthetic Work\n\n- [ ] verify startup state fixture\n",
+        )
+        .unwrap();
+
+        run_cli(
+            &store,
+            None,
+            CliCommand::EvalMemoryMd {
+                tenant_id: Some("memory_md_agent_eval_tenant".to_string()),
+                project_id: Some("memory_md_agent_eval_project".to_string()),
+                project_dir: dir.path().to_path_buf(),
+                output: PathBuf::from("memory.md"),
+                project_limit: 10,
+                candidate_k: 20,
+                top_n: 10,
+                min_useful_ratio: 0.8,
+                max_generated_wrappers: 0,
+                agent_usefulness: true,
+                gold_file: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn eval_memory_md_agent_usefulness_fails_without_latest_work() {
+        let store = MemoryStore::new();
+        let tenant = TenantId::new("memory_md_agent_eval_missing_tenant").unwrap();
+        let project = ProjectId::from("memory_md_agent_eval_missing_project");
+        store
+            .add(
+                MemoryChunk::new(
+                    tenant.clone(),
+                    "Project architecture configuration deployment key decisions tradeoffs: \
+                     Validation: startup state fixture has a useful fact. \
+                     Agent action: Verify the latest work signal before resuming.",
+                    ChunkType::Summary,
+                )
+                .with_project(project.clone())
+                .with_tags(vec!["kind:finish".to_string(), "priority:9".to_string()]),
+            )
+            .await
+            .unwrap();
+
+        let dir = tempdir().unwrap();
+        let error = run_cli(
+            &store,
+            None,
+            CliCommand::EvalMemoryMd {
+                tenant_id: Some("memory_md_agent_eval_missing_tenant".to_string()),
+                project_id: Some("memory_md_agent_eval_missing_project".to_string()),
+                project_dir: dir.path().to_path_buf(),
+                output: PathBuf::from("memory.md"),
+                project_limit: 10,
+                candidate_k: 20,
+                top_n: 10,
+                min_useful_ratio: 0.8,
+                max_generated_wrappers: 0,
+                agent_usefulness: true,
+                gold_file: None,
+            },
+        )
+        .await
+        .expect_err("missing latest work should fail agent-usefulness gate");
+        assert!(
+            error.to_string().contains("latest work signal is missing"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_memory_md_gold_file_passes_synthetic_project() {
+        let store = MemoryStore::new();
+        let tenant = TenantId::new("memory_md_gold_eval_tenant").unwrap();
+        let project = ProjectId::from("memory_md_gold_eval_project");
+        store
+            .add(
+                MemoryChunk::new(
+                    tenant.clone(),
+                    "Project architecture configuration deployment key decisions tradeoffs: \
+                     Validation: gold-file startup fixture has concrete work. \
+                     Agent action: Verify the gold-file project before accepting startup context.",
+                    ChunkType::Summary,
+                )
+                .with_project(project.clone())
+                .with_tags(vec!["kind:finish".to_string(), "priority:9".to_string()]),
+            )
+            .await
+            .unwrap();
+
+        let dir = tempdir().unwrap();
+        let tasks_dir = dir.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join("todo.md"),
+            "# Gold Work\n\n- [ ] verify gold fixture\n",
+        )
+        .unwrap();
+        let gold_path = dir.path().join("gold.json");
+        std::fs::write(
+            &gold_path,
+            format!(
+                r#"{{
+  "projects": [
+    {{
+      "name": "gold",
+      "project_dir": "{}",
+      "must_contain": ["Latest Project State", "tasks/todo.md"],
+      "must_not_contain": ["Translate this takeaway into a task-specific rule"],
+      "expected_git": false,
+      "max_fragments": 0,
+      "max_unrelated_machine_items": 1
+    }}
+  ]
+}}"#,
+                dir.path().display()
+            ),
+        )
+        .unwrap();
+
+        run_cli(
+            &store,
+            None,
+            CliCommand::EvalMemoryMd {
+                tenant_id: Some("memory_md_gold_eval_tenant".to_string()),
+                project_id: Some("memory_md_gold_eval_project".to_string()),
+                project_dir: dir.path().to_path_buf(),
+                output: PathBuf::from("memory.md"),
+                project_limit: 10,
+                candidate_k: 20,
+                top_n: 10,
+                min_useful_ratio: 0.8,
+                max_generated_wrappers: 0,
+                agent_usefulness: true,
+                gold_file: Some(gold_path),
             },
         )
         .await

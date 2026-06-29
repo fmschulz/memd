@@ -1,6 +1,6 @@
 # memd
 
-[![Version](https://img.shields.io/badge/version-1.1.1-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.2.0-blue)](CHANGELOG.md)
 [![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust&logoColor=white)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-fmschulz.github.io%2Fmemd-blue)](https://fmschulz.github.io/memd/)
@@ -23,7 +23,7 @@ private CLI-managed warm worker driven by ordinary CLI commands.
 | --- | --- | --- |
 | Raw memory | Store and search chunks: code, docs, notes, traces, decisions | `memd add`, `memd search`, `memd get`, `memd stats` |
 | Agent context | Bounded pre-work context + JSON audit logs | `memd agent-context --output .memd/context.md` |
-| Startup memory | Refresh project `memory.md` with ranked takeaways and a concrete `Agent action:` line per takeaway | `memd memory-md`, `memd eval-memory-md` |
+| Startup memory | Refresh project `memory.md` with latest project state, ranked fact libraries, and concrete action guidance | `memd memory-md`, `memd eval-memory-md --agent-usefulness` |
 | Usefulness report | Usage-ledger and store self-diagnosis for growth, learning, retrieval, and warnings | `memd report --strict` |
 | Warm CLI | Keep store/index state hot for repeated local calls | `memd warm start`, `memd warm status` |
 | Batch CLI | Many structured operations in one loaded process | `memd batch --jsonl requests.jsonl` |
