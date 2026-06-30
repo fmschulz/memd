@@ -6710,11 +6710,17 @@ pub async fn handle_memory_add_batch<S: Store>(
         .map(|(_, _, _, admission, _, _)| admission.outcome.reason.clone())
         .collect::<Vec<_>>();
 
-    let mut dedupe_decisions = Vec::with_capacity(prepared.len());
-    let mut deduped_existing_ids = Vec::with_capacity(prepared.len());
+    let prepared_len = prepared.len();
+    let mut dedupe_decisions = Vec::with_capacity(prepared_len);
+    let mut deduped_existing_ids = Vec::with_capacity(prepared_len);
     let mut any_default_deduped = false;
 
-    let chunk_ids = if let Some(ps) = store.as_persistent() {
+    let chunk_ids = if any_lifecycle {
+        let ps = store.as_persistent().ok_or_else(|| {
+            McpError::ToolError(
+                "memory.add_batch with temporal fields requires a persistent store".into(),
+            )
+        })?;
         let mut ids = Vec::with_capacity(prepared.len());
         for (chunk, delta, has_lifecycle, _, caller_tags, caller_requested_lifecycle) in prepared {
             if !caller_requested_lifecycle {
@@ -6745,25 +6751,99 @@ pub async fn handle_memory_add_batch<S: Store>(
             deduped_existing_ids.push(None);
         }
         ids
-    } else if any_lifecycle {
-        let ps = store.as_persistent().ok_or_else(|| {
-            McpError::ToolError(
-                "memory.add_batch with temporal fields requires a persistent store".into(),
-            )
-        })?;
-        // Per-chunk through add_chunk_with_lifecycle so the per-row
-        // overlay is applied. Failures still leave earlier rows
-        // committed — same contract as the bulk add_batch fast path.
-        let mut ids = Vec::with_capacity(prepared.len());
-        for (chunk, delta, _, _, _, _) in prepared {
-            let id = ps
-                .add_chunk_with_lifecycle(chunk, delta)
-                .await
-                .map_err(|e| McpError::ToolError(e.to_string()))?;
-            ids.push(id);
+    } else if store.as_persistent().is_some() {
+        dedupe_decisions = vec!["inserted".to_string(); prepared_len];
+        deduped_existing_ids = vec![None; prepared_len];
+
+        let mut ids_by_position: Vec<Option<ChunkId>> = vec![None; prepared_len];
+        let mut pending_insert_positions = Vec::new();
+        let mut pending_insert_chunks = Vec::new();
+        let mut pending_for_dedupe: Vec<(usize, MemoryChunk)> = Vec::new();
+        let mut pending_aliases: Vec<(usize, usize)> = Vec::new();
+
+        for (position, (chunk, _, _, _, caller_tags, _)) in prepared.into_iter().enumerate() {
+            if let Some(existing_id) =
+                find_default_content_duplicate(store, &chunk, &caller_tags).await?
+            {
+                let existing_id_string = existing_id.to_string();
+                ids_by_position[position] = Some(existing_id);
+                dedupe_decisions[position] = "reused_existing_exact_content".to_string();
+                deduped_existing_ids[position] = Some(existing_id_string);
+                any_default_deduped = true;
+                continue;
+            }
+
+            let mut pending_duplicate_position = None;
+            if !default_content_dedupe_exempt(&chunk, &caller_tags) {
+                for (prior_position, prior_chunk) in &pending_for_dedupe {
+                    if prior_chunk.text == chunk.text
+                        && prior_chunk.chunk_type == chunk.chunk_type
+                        && prior_chunk.project_id == chunk.project_id
+                        && (chunk.source == Source::empty() || chunk.source == prior_chunk.source)
+                        && caller_tags_already_preserved(prior_chunk, &caller_tags)
+                    {
+                        pending_duplicate_position = Some(*prior_position);
+                        break;
+                    }
+                }
+            }
+
+            if let Some(prior_position) = pending_duplicate_position {
+                pending_aliases.push((position, prior_position));
+                dedupe_decisions[position] = "reused_existing_exact_content".to_string();
+                any_default_deduped = true;
+                continue;
+            }
+
+            pending_insert_positions.push(position);
+            pending_for_dedupe.push((position, chunk.clone()));
+            pending_insert_chunks.push(chunk);
         }
-        ids
+
+        let inserted_ids = store
+            .add_batch(pending_insert_chunks)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        if inserted_ids.len() != pending_insert_positions.len() {
+            return Err(McpError::ToolError(format!(
+                "memory.add_batch inserted {} chunks but expected {}",
+                inserted_ids.len(),
+                pending_insert_positions.len()
+            )));
+        }
+        for (position, id) in pending_insert_positions
+            .into_iter()
+            .zip(inserted_ids.into_iter())
+        {
+            ids_by_position[position] = Some(id);
+        }
+        for (position, prior_position) in pending_aliases {
+            let id = ids_by_position
+                .get(prior_position)
+                .and_then(|id| id.clone())
+                .ok_or_else(|| {
+                    McpError::ToolError(
+                        "memory.add_batch missing inserted id for within-batch duplicate".into(),
+                    )
+                })?;
+            deduped_existing_ids[position] = Some(id.to_string());
+            ids_by_position[position] = Some(id);
+        }
+
+        ids_by_position
+            .into_iter()
+            .enumerate()
+            .map(|(position, maybe_id)| {
+                maybe_id.ok_or_else(|| {
+                    McpError::ToolError(format!(
+                        "memory.add_batch did not produce chunk id for position {position}"
+                    ))
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, McpError>>()?
     } else {
+        dedupe_decisions = vec!["inserted".to_string(); prepared_len];
+        deduped_existing_ids = vec![None; prepared_len];
         // No lifecycle overlay anywhere → bulk path. The chunks already
         // carry the per-row ingestion_mode label (set in the pre-pass);
         // store.add_batch threads that through to ChunkMetadata.

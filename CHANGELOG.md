@@ -6,6 +6,26 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-06-30
+
+Retrieval robustness and performance improvements.
+
+### Fixed
+
+- **Lexical query parsing**: BM25 search falls back to an alphanumeric-only query
+  when both strict and lenient Tantivy parsing fail (e.g. queries with brackets
+  or other special characters) instead of erroring — fewer failed lexical
+  searches and better recall on messy queries.
+- **Batch-add deduplication**: `memory.add_batch` now deduplicates exact-content
+  chunks both against the store and within the same batch before a single bulk
+  insert, so batch writes no longer create duplicate chunks.
+
+### Changed
+
+- **Skip the dense path when disabled**: hybrid search skips dense indexing and
+  dense search entirely when `dense_k == 0`, avoiding wasted embedding/search
+  work in sparse-only configurations.
+
 ## [1.2.0] - 2026-06-28
 
 Turns `memory.md` into a deterministic agent startup briefing and adds a
