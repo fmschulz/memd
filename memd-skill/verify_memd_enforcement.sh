@@ -86,6 +86,7 @@ memd --data-dir "${DATA_DIR}" memory-md \
   --output "${TMP_DIR}/memory.md" >/dev/null
 
 test -s "${TMP_DIR}/memory.md"
+grep -Fq "## Latest Project State" "${TMP_DIR}/memory.md"
 grep -Fq "## Memory health" "${TMP_DIR}/memory.md"
 
 memd --data-dir "${DATA_DIR}" search \

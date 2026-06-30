@@ -24,7 +24,11 @@ The CLI also includes threshold-gated maintenance evals for the local
 memory-quality contract:
 
 - `memd eval-memory-md` checks default startup context usefulness and
-  generated-wrapper suppression.
+  generated-wrapper suppression. With `--agent-usefulness`, it also gates the
+  deterministic startup briefing: latest project state, git state, next
+  actions, scope health, continuation-fragment suppression, boilerplate-action
+  suppression, and the default machine-wide item cap. `--gold-file` can run
+  the same structural checks over local multi-project fixtures.
 - `memd eval-retrieval` checks fixed known-useful retrieval queries and
   sparse-judgment metrics. It reports precision@k, but the default bundled
   sparse judgments gate on hit-rate unless you pass explicit recall, MRR, or

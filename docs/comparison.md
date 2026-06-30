@@ -2,7 +2,7 @@
 
 `memd` is one of several systems aimed at giving agents memory that survives
 the context window. The closest neighbours are `mem0`, `superlocalmemory`,
-`Letta` (formerly `MemGPT`), `Zep`, the newer research-grade systems
+`Letta` / `MemGPT`, `Zep`, the newer research-grade systems
 `A-Mem`, `Cognee`, and `Memary`, and raw vector databases used as memory
 backends (`Chroma`, `FAISS`, `Qdrant`, others).
 

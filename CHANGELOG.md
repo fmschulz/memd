@@ -6,6 +6,40 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-06-28
+
+Turns `memory.md` into a deterministic agent startup briefing and adds a
+release gate for startup-memory usefulness.
+
+### Added
+
+- **Latest Project State**: `memd memory-md` now starts with the resolved
+  tenant/project scope, project directory, generation time, git branch/dirty
+  summary, latest task or handoff signal, source-backed next actions, and
+  project-scoped memory readability warnings.
+- **Agent-usefulness gate**: `memd eval-memory-md --agent-usefulness` checks
+  startup output for current project state, git state in git repositories, open
+  task next actions, sourced next actions, suppressed fragments, suppressed
+  boilerplate, and bounded machine-wide facts.
+- **Gold-file evaluation**: `memd eval-memory-md --gold-file <path>` runs the
+  agent-usefulness gate across local multi-project fixtures.
+- **Explain-output project state**: `memory-md --explain-output` now includes
+  structured project state, startup-quality flags, topic keys, and
+  agent-usefulness metrics for debugging noisy startup context.
+
+### Changed
+
+- **Startup fact libraries**: the rendered sections are now `Project Fact
+  Library` and `Machine-Wide Fact Library`. Machine-wide facts default to two
+  items, while project facts are deduplicated by topic and filtered for
+  generated wrappers, continuation fragments, generic boilerplate actions, and
+  unrelated machine-wide records.
+- **Session-start defaults**: `memd session-start` uses the same capped
+  machine-wide fact default as `memory-md`.
+- **Memory health scan**: project-scoped readable/unreadable counts are bounded
+  for session-start use and report a partial-scan warning instead of doing
+  unbounded payload reads.
+
 ## [1.1.1] - 2026-06-17
 
 Bounds warm-worker memory so a misconfigured idle timeout can no longer

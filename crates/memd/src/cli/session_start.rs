@@ -150,9 +150,9 @@ pub(super) async fn run_session_start_inner<S: Store>(
             project_dir: project_dir.clone(),
             output: PathBuf::from("memory.md"),
             project_limit: 10,
-            // Machine-wide takeaways are on by default so a fresh
-            // project's memory.md surfaces tenant-wide lessons.
-            global_limit: 5,
+            // Machine-wide takeaways are capped by default so they
+            // cannot dominate project startup context.
+            global_limit: 2,
             candidate_k: 40,
             explain_output: None,
         },
