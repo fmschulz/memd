@@ -36,6 +36,19 @@ fn escape_query_text(query: &str) -> String {
     escaped
 }
 
+fn plain_query_text(query: &str) -> String {
+    query
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                ' '
+            }
+        })
+        .collect()
+}
+
 fn parse_text_query(parser: &QueryParser, query: &str) -> Result<Box<dyn Query>> {
     match parser.parse_query(query) {
         Ok(parsed) => Ok(parsed),
@@ -48,6 +61,19 @@ fn parse_text_query(parser: &QueryParser, query: &str) -> Result<Box<dyn Query>>
             let (lenient_query, parse_errors) = parser.parse_query_lenient(&escaped_query);
             if parse_errors.is_empty() {
                 return Ok(lenient_query);
+            }
+
+            let plain_query = plain_query_text(query);
+            if !plain_query.trim().is_empty() {
+                if let Ok(parsed) = parser.parse_query(&plain_query) {
+                    return Ok(parsed);
+                }
+
+                let (plain_lenient_query, plain_parse_errors) =
+                    parser.parse_query_lenient(&plain_query);
+                if plain_parse_errors.is_empty() {
+                    return Ok(plain_lenient_query);
+                }
             }
 
             Err(MemdError::ValidationError(format!(
@@ -687,6 +713,40 @@ mod tests {
 
         let results = index.search(&tenant, "\"identity verification", 10);
         assert!(results.is_ok(), "unbalanced quote query should not error");
+    }
+
+    #[test]
+    fn test_benchmark_choice_query_with_brackets_does_not_error() {
+        let index = Bm25Index::new().unwrap();
+        let tenant = create_test_tenant();
+        let chunk_id = ChunkId::new();
+        index
+            .insert(
+                &tenant,
+                &chunk_id,
+                &[
+                    "Debbie sat with Stuart and Brent Tarleton on the porch of Tara.".to_string(),
+                    "Debbie gazed out the window, eager to see her friend arrive.".to_string(),
+                ],
+            )
+            .unwrap();
+
+        let query = "Search Archival Memory, complete the task below:\n\
+These are the events that have already occurred:\n\
+1. Debbie sat with Stuart and Brent Tarleton on the porch of Tara.\n\n\
+Below is a list of possible subsequent events:\n\
+['Debbie gazed out the window, eager to see her friend arrive.', \
+\"Debbie leaned against the fence, excitedly watching for her neighbor's dog.\"]";
+
+        let results = index.search(&tenant, query, 10);
+        assert!(
+            results.is_ok(),
+            "benchmark multiple-choice query should not error"
+        );
+        assert!(
+            !results.unwrap().is_empty(),
+            "plain-token fallback should still retrieve matches"
+        );
     }
 
     /// Regression test for the "Index already exists" silent-failure bug:
