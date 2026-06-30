@@ -331,7 +331,9 @@ impl HybridSearcher {
             return Ok(());
         }
 
-        self.dense.index_batch(tenant_id, chunks).await?;
+        if self.config.dense_k > 0 {
+            self.dense.index_batch(tenant_id, chunks).await?;
+        }
 
         if self.config.enable_sparse {
             if let Some(ref sparse) = self.sparse {
@@ -598,12 +600,16 @@ impl HybridSearcher {
         let total_start = Instant::now();
         let mut timing = HybridTiming::default();
 
-        // Step 1: Dense search
         let dense_start = Instant::now();
-        let (dense_results, _embed_time, _search_time) = self
-            .dense
-            .search_with_timing(tenant_id, query, self.config.dense_k)
-            .await?;
+        let dense_results = if self.config.dense_k > 0 {
+            let (dense_results, _embed_time, _search_time) = self
+                .dense
+                .search_with_timing(tenant_id, query, self.config.dense_k)
+                .await?;
+            dense_results
+        } else {
+            Vec::new()
+        };
         timing.dense_time = dense_start.elapsed();
 
         // Step 2: Sparse search (if enabled)
