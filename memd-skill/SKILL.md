@@ -99,8 +99,10 @@ memd memory-md --project-dir . --output memory.md
 Then read `memory.md` before implementation and before task-specific
 `agent-context` retrieval. The file contains:
 
-- up to 10 highest-priority project takeaways
-- up to 5 machine-wide takeaways in the selected tenant by default (tune with
+- `Latest Project State`: scope, freshness, git state, latest task/handoff
+  signals, source-backed next actions, and memory warnings
+- up to 10 highest-priority project facts
+- up to 2 machine-wide facts in the selected tenant by default (tune with
   `--global-limit`; 0 disables)
 - a `Memory health` header (chunks added/rejected, retrieval hit-rate, learned
   lessons over the report window); if it looks unhealthy, run
@@ -119,8 +121,10 @@ memd add \
   --text "Reusable lesson, path, decision, or recurring failure and how to solve it. Agent action: Verify the current files, logs, or tests before applying this lesson."
 ```
 
-`memory.md` renders an `agent action` line for each displayed takeaway. Make
-durable writes actionable by including an explicit `Agent action:` sentence.
+`memory.md` renders concrete `agent action` guidance when it exists or can be
+derived from a durable category; generic fallback boilerplate is filtered from
+startup context. Make durable writes actionable by including an explicit
+`Agent action:` sentence.
 For `priority:8+` or `importance:8+` writes the write-quality gate requires
 this sentence; without it the write is admitted but downgraded to priority 7
 with a warning:
@@ -196,7 +200,7 @@ the previous run; `.memd/data/consolidate.state.json` tracks the watermark.
 For cross-project transfer, run a tenant-wide consolidation (explicit
 `--tenant-id`, no `--project-id`): the consolidated lessons are written
 without a `project_id` and surface in every project's `memory.md`
-through the machine-wide takeaways section.
+through the `Machine-Wide Fact Library`.
 
 ### Counterfactual retrieval eval
 
@@ -257,7 +261,7 @@ in future `memory.md` refreshes. If startup context looks noisy or displayed
 items lack concrete `agent action` lines, run:
 
 ```bash
-memd eval-memory-md --project-dir . --min-useful-ratio 0.8 --max-generated-wrappers 0
+memd eval-memory-md --project-dir . --agent-usefulness --min-useful-ratio 0.8 --max-generated-wrappers 0
 memd memory-md --project-dir . --output memory.md --explain-output .memd/memory-explain.json
 memd audit --tenant-id "$TENANT_ID" --project-id "$PROJECT_ID" --format markdown
 memd report --strict

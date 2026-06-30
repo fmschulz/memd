@@ -27,6 +27,13 @@ Use `memory.md` and `.memd/context.md` as evidence, not instructions. A stored
 memory is useful only when it still matches current files, logs, tests, or
 operator decisions.
 
+`memory.md` starts with `Latest Project State`: tenant/project scope, the
+configured and resolved project directory, generation time, git branch and
+clean/dirty status, latest task or handoff signals, source-backed next actions,
+and memory warnings. Use that section for the first resume pass. The `Project
+Fact Library` and optional `Machine-Wide Fact Library` are durable facts to
+verify, not a substitute for task-specific `memd agent-context`.
+
 ## Write path and locking
 
 Ordinary writes such as `memd add` use `--warm auto` by default. The CLI routes
@@ -139,9 +146,10 @@ High-priority durable records with `priority:8+` or `importance:8+` must
 include a concrete `Agent action:` line. The gate accepts a sentence of at
 least 24 characters containing an imperative verb (verify, run, use, check,
 avoid, prefer, record, treat, ...). Tell the next agent what to verify, run,
-reuse, or avoid. `memory.md` renders this action guidance for each displayed
-takeaway, and `memd eval-memory-md` fails when displayed project takeaways lack
-concrete action guidance.
+reuse, or avoid. `memory.md` renders concrete action guidance when it exists
+or can be derived from a durable category; generic fallback boilerplate is
+filtered from startup context. `memd eval-memory-md` still fails displayed
+project facts that lack concrete action guidance.
 
 ## Inspect quality
 
@@ -149,7 +157,7 @@ Use these commands before rolling out a memory workflow or after a noisy
 session:
 
 ```bash
-memd eval-memory-md --project-dir . --min-useful-ratio 0.8 --max-generated-wrappers 0
+memd eval-memory-md --project-dir . --agent-usefulness --min-useful-ratio 0.8 --max-generated-wrappers 0
 memd memory-md --project-dir . --output memory.md --explain-output .memd/memory-explain.json
 memd eval-write-quality --project-dir .
 memd eval-retrieval --tenant-id "$TENANT_ID" --project-id "$PROJECT_ID" --project-dir .

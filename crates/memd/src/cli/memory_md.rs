@@ -1,8 +1,12 @@
-use std::collections::{BTreeSet, HashMap};
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs;
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::args::{CliQueryMode, ProjectScopeConfig};
@@ -73,6 +77,11 @@ const HIT_WINDOW_DAYS: u32 = 30;
 
 /// Age in ms above which a chunk with zero hits is considered stale.
 const STALE_CHUNK_AGE_MS: i64 = 30 * 86_400_000;
+const PROJECT_STATE_FILE_CAP_BYTES: u64 = 256 * 1024;
+const HANDOFF_FILE_CAP_BYTES: u64 = 128 * 1024;
+const GIT_STATUS_TIMEOUT: Duration = Duration::from_millis(1_500);
+const READABLE_SCAN_PAGE_SIZE: usize = 1_000;
+const READABLE_SCAN_MAX_METADATA_ROWS: usize = 10_000;
 
 const TAKEAWAY_CATEGORIES: &[(&str, u8)] = &[
     ("Decisions", 0),
@@ -107,6 +116,79 @@ pub(super) struct MemoryMdEvalOptions {
     pub(super) top_n: usize,
     pub(super) min_useful_ratio: f64,
     pub(super) max_generated_wrappers: usize,
+    pub(super) agent_usefulness: bool,
+    pub(super) gold_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct ProjectState {
+    generated_unix_ms: u128,
+    tenant_id: String,
+    project_id: Option<String>,
+    configured_project_dir: Option<String>,
+    resolved_project_dir: String,
+    scope_warnings: Vec<String>,
+    git: GitState,
+    latest_task: Option<StateSignal>,
+    latest_handoff: Option<StateSignal>,
+    latest_vcs: Option<StateSignal>,
+    next_actions: Vec<NextAction>,
+    memory: MemoryState,
+    collection_warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct GitState {
+    available: bool,
+    not_git_repo: bool,
+    branch: Option<String>,
+    clean: Option<bool>,
+    changed_entries: usize,
+    summary: String,
+    warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct StateSignal {
+    source_path: String,
+    line: Option<usize>,
+    heading: Option<String>,
+    text: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct NextAction {
+    source_path: String,
+    line: usize,
+    heading: Option<String>,
+    text: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+struct MemoryState {
+    metadata_active_chunks: Option<usize>,
+    readable_active_chunks: Option<usize>,
+    unreadable_active_chunks: Option<usize>,
+    scan_warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct AgentUsefulnessMetrics {
+    latest_project_state_present: bool,
+    scope_present: bool,
+    git_state_present: bool,
+    git_state_present_or_not_git_repo: bool,
+    latest_work_present: bool,
+    next_action_present: bool,
+    no_open_tasks_detected: bool,
+    scope_health_present: bool,
+    memory_degraded_warning_present: bool,
+    fragment_count: usize,
+    duplicate_cluster_count: usize,
+    boilerplate_action_count: usize,
+    unrelated_machine_items: usize,
+    source_backed_next_actions: bool,
+    answerability_passed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +245,8 @@ struct MemoryMdCandidateExplanation {
     filter_reason: Option<String>,
     display_rank: Option<usize>,
     generated_digest: bool,
+    quality_flags: Vec<String>,
+    topic_key: Option<String>,
     tags: Vec<String>,
     matched_sources: Vec<String>,
 }
@@ -198,6 +282,7 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
 ) -> Result<Value> {
     let project_dir = absolutize_project_dir(&options.project_dir)?;
     let scope = read_project_scope(&project_dir)?;
+    let generated_unix_ms = now_ms();
     let tenant_id = options
         .tenant_id
         .or_else(|| scope.as_ref().map(|scope| scope.tenant_id.clone()))
@@ -208,7 +293,7 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
         })?;
     let project_id = options
         .project_id
-        .or_else(|| scope.and_then(|scope| scope.project_id));
+        .or_else(|| scope.as_ref().and_then(|scope| scope.project_id.clone()));
     let tenant = TenantId::new(&tenant_id)?;
     let candidate_k = options.candidate_k.clamp(1, 200);
     let project_limit = options.project_limit.min(10);
@@ -240,6 +325,16 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
         }
         None => aggregate_hits_in(&project_dir, HIT_WINDOW_DAYS, DEFAULT_SUMMARY_TTL_MS),
     };
+    let project_state = collect_project_state(
+        store,
+        &tenant,
+        tenant.as_str(),
+        project_id.as_deref(),
+        &project_dir,
+        scope.as_ref(),
+        generated_unix_ms,
+    )
+    .await;
     let project_collection = if project_limit == 0 {
         RankedTakeawayCollection {
             takeaways: Vec::new(),
@@ -285,14 +380,15 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
         takeaways: global_takeaways,
         explanations: global_explanations,
     } = global_collection;
+    let agent_usefulness =
+        evaluate_agent_usefulness(&project_state, &project_takeaways, &global_takeaways);
     let output_path = if options.output.is_absolute() {
         options.output
     } else {
         project_dir.join(options.output)
     };
     let rendered = render_memory_md(
-        tenant.as_str(),
-        project_id.as_deref(),
+        &project_state,
         &health_lines,
         &project_takeaways,
         &global_takeaways,
@@ -308,12 +404,14 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
         let report = json!({
             "tenant_id": tenant.to_string(),
             "project_id": project_id.clone(),
-            "generated_unix_ms": now_ms(),
+            "generated_unix_ms": generated_unix_ms,
             "candidate_k": candidate_k,
             "limits": {
                 "project": project_limit,
                 "machine_wide": global_limit,
             },
+            "project_state": project_state.clone(),
+            "agent_usefulness": agent_usefulness.clone(),
             "project": project_explanations,
             "machine_wide": global_explanations,
         });
@@ -326,11 +424,14 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
     Ok(json!({
         "tenant_id": tenant.to_string(),
         "project_id": project_id,
+        "generated_unix_ms": generated_unix_ms,
         "output": output_path,
         "explain_output": explain_output,
         "project_takeaways": project_takeaways.len(),
         "global_takeaways": global_takeaways.len(),
-        "candidate_k": candidate_k
+        "candidate_k": candidate_k,
+        "project_state": project_state,
+        "agent_usefulness": agent_usefulness
     }))
 }
 
@@ -339,6 +440,10 @@ pub(super) async fn run_memory_md_eval<S: Store>(
     tenant_manager: Option<&TenantManager>,
     options: MemoryMdEvalOptions,
 ) -> Result<Value> {
+    if options.gold_file.is_some() {
+        return run_memory_md_gold_eval(store, tenant_manager, &options).await;
+    }
+
     let project_dir = absolutize_project_dir(&options.project_dir)?;
     let output = options.output.clone();
     let rendered_path = if output.is_absolute() {
@@ -355,7 +460,7 @@ pub(super) async fn run_memory_md_eval<S: Store>(
             project_dir,
             output,
             project_limit: options.project_limit,
-            global_limit: 0,
+            global_limit: if options.agent_usefulness { 2 } else { 0 },
             candidate_k: options.candidate_k,
             explain_output: None,
         },
@@ -394,10 +499,26 @@ pub(super) async fn run_memory_md_eval<S: Store>(
             report.missing_action_count
         ));
     }
+    let agent_usefulness = if options.agent_usefulness {
+        let metrics: AgentUsefulnessMetrics = serde_json::from_value(
+            refresh
+                .get("agent_usefulness")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+        )
+        .map_err(|error| {
+            MemdError::ValidationError(format!("invalid agent_usefulness metrics: {error}"))
+        })?;
+        failures.extend(agent_usefulness_failures(&metrics));
+        Some(metrics)
+    } else {
+        None
+    };
 
     let payload = json!({
         "passed": failures.is_empty(),
         "output": rendered_path,
+        "agent_usefulness": agent_usefulness,
         "top_n": top_n,
         "displayed_count": report.displayed_count,
         "useful_count": report.useful_count,
@@ -421,6 +542,796 @@ pub(super) async fn run_memory_md_eval<S: Store>(
     }
 
     Ok(payload)
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryMdGoldFile {
+    projects: Vec<MemoryMdGoldProject>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryMdGoldProject {
+    name: Option<String>,
+    project_dir: PathBuf,
+    must_contain: Option<Vec<String>>,
+    must_not_contain: Option<Vec<String>>,
+    expected_git: Option<bool>,
+    max_fragments: Option<usize>,
+    max_unrelated_machine_items: Option<usize>,
+}
+
+async fn run_memory_md_gold_eval<S: Store>(
+    store: &S,
+    tenant_manager: Option<&TenantManager>,
+    options: &MemoryMdEvalOptions,
+) -> Result<Value> {
+    let gold_path = options
+        .gold_file
+        .as_ref()
+        .expect("caller checked gold_file");
+    let gold_text = fs::read_to_string(gold_path)?;
+    let gold: MemoryMdGoldFile = serde_json::from_str(&gold_text).map_err(|error| {
+        MemdError::ValidationError(format!("failed to parse {}: {error}", gold_path.display()))
+    })?;
+
+    let mut project_results = Vec::new();
+    let mut failures = Vec::new();
+    for (idx, project) in gold.projects.iter().enumerate() {
+        let name = project
+            .name
+            .clone()
+            .unwrap_or_else(|| project.project_dir.display().to_string());
+        let output = std::env::temp_dir().join(format!("memd-memory-md-gold-{idx}.md"));
+        let refresh = refresh_memory_md_with_health(
+            store,
+            tenant_manager,
+            MemoryMdOptions {
+                tenant_id: options.tenant_id.clone(),
+                project_id: options.project_id.clone(),
+                project_dir: project.project_dir.clone(),
+                output: output.clone(),
+                project_limit: options.project_limit,
+                global_limit: 2,
+                candidate_k: options.candidate_k,
+                explain_output: None,
+            },
+        )
+        .await?;
+        let content = fs::read_to_string(&output)?;
+        let metrics: AgentUsefulnessMetrics = serde_json::from_value(
+            refresh
+                .get("agent_usefulness")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+        )
+        .map_err(|error| {
+            MemdError::ValidationError(format!("invalid agent_usefulness metrics: {error}"))
+        })?;
+        let mut project_failures = agent_usefulness_failures(&metrics);
+        if let Some(expected_git) = project.expected_git {
+            if let Some(failure) = expected_git_failure(&metrics, expected_git) {
+                project_failures.push(failure);
+            }
+        }
+        if let Some(max_fragments) = project.max_fragments {
+            if metrics.fragment_count > max_fragments {
+                project_failures.push(format!(
+                    "fragment_count {} exceeds {}",
+                    metrics.fragment_count, max_fragments
+                ));
+            }
+        }
+        if let Some(max_unrelated) = project.max_unrelated_machine_items {
+            if metrics.unrelated_machine_items > max_unrelated {
+                project_failures.push(format!(
+                    "unrelated_machine_items {} exceeds {}",
+                    metrics.unrelated_machine_items, max_unrelated
+                ));
+            }
+        }
+        for needle in project.must_contain.as_deref().unwrap_or(&[]) {
+            if !content.contains(needle) {
+                project_failures.push(format!("missing required text `{needle}`"));
+            }
+        }
+        for needle in project.must_not_contain.as_deref().unwrap_or(&[]) {
+            if content.contains(needle) {
+                project_failures.push(format!("forbidden text present `{needle}`"));
+            }
+        }
+        for failure in &project_failures {
+            failures.push(format!("{name}: {failure}"));
+        }
+        project_results.push(json!({
+            "name": name,
+            "project_dir": project.project_dir.display().to_string(),
+            "output": output,
+            "agent_usefulness": metrics,
+            "failures": project_failures,
+        }));
+    }
+
+    let payload = json!({
+        "passed": failures.is_empty(),
+        "gold_file": gold_path,
+        "projects": project_results,
+        "failures": failures,
+    });
+    if !failures.is_empty() {
+        return Err(MemdError::ValidationError(format!(
+            "memory-md gold-file thresholds failed: {}",
+            serde_json::to_string(&payload)?
+        )));
+    }
+    Ok(payload)
+}
+
+fn agent_usefulness_failures(metrics: &AgentUsefulnessMetrics) -> Vec<String> {
+    let mut failures = Vec::new();
+    if !metrics.latest_project_state_present {
+        failures.push("latest project state is missing".to_string());
+    }
+    if !metrics.scope_present {
+        failures.push("scope is missing".to_string());
+    }
+    if !metrics.git_state_present_or_not_git_repo {
+        failures.push("git state is missing for a git project".to_string());
+    }
+    if !metrics.latest_work_present {
+        failures.push("latest work signal is missing".to_string());
+    }
+    if !metrics.next_action_present && !metrics.no_open_tasks_detected {
+        failures.push("next actions are missing while open tasks exist".to_string());
+    }
+    if !metrics.scope_health_present {
+        failures.push("scope health is missing".to_string());
+    }
+    if metrics.fragment_count > 0 {
+        failures.push(format!(
+            "fragment_count {} exceeds threshold 0",
+            metrics.fragment_count
+        ));
+    }
+    if metrics.boilerplate_action_count > 0 {
+        failures.push(format!(
+            "boilerplate_action_count {} exceeds threshold 0",
+            metrics.boilerplate_action_count
+        ));
+    }
+    if metrics.unrelated_machine_items > 2 {
+        failures.push(format!(
+            "unrelated_machine_items {} exceeds threshold 2",
+            metrics.unrelated_machine_items
+        ));
+    }
+    if !metrics.source_backed_next_actions {
+        failures.push("one or more next actions lack source path or line".to_string());
+    }
+    if !metrics.answerability_passed {
+        failures.push("answerability_passed=false".to_string());
+    }
+    failures
+}
+
+fn expected_git_failure(metrics: &AgentUsefulnessMetrics, expected_git: bool) -> Option<String> {
+    match (expected_git, metrics.git_state_present) {
+        (true, false) => Some("expected git state but git_state_present=false".to_string()),
+        (false, true) => Some("expected no git state but git_state_present=true".to_string()),
+        _ => None,
+    }
+}
+
+async fn collect_project_state<S: Store>(
+    store: &S,
+    tenant: &TenantId,
+    tenant_id: &str,
+    project_id: Option<&str>,
+    project_dir: &Path,
+    scope: Option<&ProjectScopeConfig>,
+    generated_unix_ms: u128,
+) -> ProjectState {
+    let configured_project_dir = scope.map(|scope| scope.project_dir.clone());
+    let mut collection_warnings = Vec::new();
+    let mut scope_warnings = Vec::new();
+    if let Some(configured) = configured_project_dir.as_deref() {
+        if let Some(warning) = scope_path_drift_warning(configured, project_dir) {
+            scope_warnings.push(warning);
+        }
+    }
+
+    let git = collect_git_state(project_dir, "git");
+    let latest_vcs = git
+        .available
+        .then(|| collect_latest_git_commit(project_dir, "git"))
+        .flatten();
+    let task_scan = collect_task_state(project_dir);
+    collection_warnings.extend(task_scan.warnings);
+    let handoff_scan = collect_handoff_state(project_dir);
+    collection_warnings.extend(handoff_scan.warnings);
+    let memory = collect_memory_state(store, tenant, project_id).await;
+
+    ProjectState {
+        generated_unix_ms,
+        tenant_id: tenant_id.to_string(),
+        project_id: project_id.map(str::to_string),
+        configured_project_dir,
+        resolved_project_dir: canonical_or_lexical_path(project_dir).display().to_string(),
+        scope_warnings,
+        git,
+        latest_task: task_scan.latest_task,
+        latest_handoff: handoff_scan.latest_handoff,
+        latest_vcs,
+        next_actions: task_scan.next_actions,
+        memory,
+        collection_warnings,
+    }
+}
+
+#[derive(Debug, Default)]
+struct TaskScan {
+    latest_task: Option<StateSignal>,
+    next_actions: Vec<NextAction>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct HandoffScan {
+    latest_handoff: Option<StateSignal>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct Heading {
+    level: usize,
+    title: String,
+    line: usize,
+}
+
+fn collect_task_state(project_dir: &Path) -> TaskScan {
+    let path = project_dir.join("tasks/todo.md");
+    if !path.exists() {
+        return TaskScan::default();
+    }
+    let relative = relative_path(project_dir, &path);
+    let mut warnings = Vec::new();
+    let text = match read_text_capped(&path, PROJECT_STATE_FILE_CAP_BYTES) {
+        Ok((text, truncated)) => {
+            if truncated {
+                warnings.push(format!(
+                    "{} was truncated to {} bytes while collecting project state",
+                    relative, PROJECT_STATE_FILE_CAP_BYTES
+                ));
+            }
+            text
+        }
+        Err(error) => {
+            return TaskScan {
+                warnings: vec![format!("could not read {relative}: {error}")],
+                ..TaskScan::default()
+            };
+        }
+    };
+
+    let mut stack: Vec<Heading> = Vec::new();
+    let mut headings = Vec::new();
+    let mut next_actions = Vec::new();
+
+    for (idx, line) in text.lines().enumerate() {
+        let line_no = idx + 1;
+        if let Some(heading) = parse_heading(line, line_no) {
+            while stack
+                .last()
+                .map(|existing| existing.level >= heading.level)
+                .unwrap_or(false)
+            {
+                stack.pop();
+            }
+            stack.push(heading.clone());
+            headings.push(heading);
+            continue;
+        }
+
+        if let Some(action) = parse_next_action(line) {
+            let heading = stack.last().map(|heading| heading.title.clone());
+            next_actions.push(NextAction {
+                source_path: relative.clone(),
+                line: line_no,
+                heading,
+                text: action,
+            });
+        }
+    }
+
+    let latest_task = if let Some(first_action) = next_actions.first() {
+        Some(StateSignal {
+            source_path: first_action.source_path.clone(),
+            line: Some(first_action.line),
+            heading: first_action.heading.clone(),
+            text: format!("open action: {}", first_action.text),
+        })
+    } else if let Some(heading) = headings
+        .iter()
+        .rev()
+        .find(|heading| active_heading(&heading.title))
+    {
+        Some(StateSignal {
+            source_path: relative,
+            line: Some(heading.line),
+            heading: Some(heading.title.clone()),
+            text: "latest active section".to_string(),
+        })
+    } else {
+        headings
+            .iter()
+            .rev()
+            .find(|heading| completed_or_dated_heading(&heading.title))
+            .map(|heading| StateSignal {
+                source_path: relative,
+                line: Some(heading.line),
+                heading: Some(heading.title.clone()),
+                text: "latest completed or dated section".to_string(),
+            })
+    };
+
+    TaskScan {
+        latest_task,
+        next_actions,
+        warnings,
+    }
+}
+
+fn collect_handoff_state(project_dir: &Path) -> HandoffScan {
+    let dir = project_dir.join("docs/handoffs");
+    if !dir.exists() {
+        return HandoffScan::default();
+    }
+    let mut warnings = Vec::new();
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return HandoffScan {
+                warnings: vec![format!(
+                    "could not read {}: {error}",
+                    relative_path(project_dir, &dir)
+                )],
+                ..HandoffScan::default()
+            };
+        }
+    };
+
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            warnings.push("could not read one docs/handoffs entry".to_string());
+            continue;
+        };
+        let path = entry.path();
+        if path
+            .components()
+            .any(|component| component.as_os_str() == "_archive")
+        {
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(UNIX_EPOCH);
+        candidates.push((modified, path));
+    }
+    candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+
+    let Some((_, path)) = candidates.into_iter().next() else {
+        return HandoffScan {
+            warnings,
+            ..HandoffScan::default()
+        };
+    };
+    let relative = relative_path(project_dir, &path);
+    let text = match read_text_capped(&path, HANDOFF_FILE_CAP_BYTES) {
+        Ok((text, truncated)) => {
+            if truncated {
+                warnings.push(format!(
+                    "{} was truncated to {} bytes while collecting handoff state",
+                    relative, HANDOFF_FILE_CAP_BYTES
+                ));
+            }
+            text
+        }
+        Err(error) => {
+            warnings.push(format!("could not read {relative}: {error}"));
+            return HandoffScan {
+                warnings,
+                ..HandoffScan::default()
+            };
+        }
+    };
+
+    let mut title = None;
+    let mut status_lines = Vec::new();
+    for (idx, line) in text.lines().enumerate() {
+        if title.is_none() {
+            title = parse_heading(line, idx + 1).map(|heading| (idx + 1, heading.title));
+        }
+        let trimmed = line.trim();
+        let lowered = trimmed.to_ascii_lowercase();
+        if lowered.starts_with("status:")
+            || lowered.starts_with("- status:")
+            || lowered.starts_with("next:")
+            || lowered.starts_with("next step:")
+            || lowered.starts_with("follow-up:")
+        {
+            status_lines.push(trimmed.trim_start_matches("- ").to_string());
+        }
+        if status_lines.len() >= 2 {
+            break;
+        }
+    }
+
+    let (line, title_text) = title.unwrap_or((1, relative.clone()));
+    let signal_text = if status_lines.is_empty() {
+        "latest handoff".to_string()
+    } else {
+        status_lines.join(" | ")
+    };
+    HandoffScan {
+        latest_handoff: Some(StateSignal {
+            source_path: relative,
+            line: Some(line),
+            heading: Some(title_text),
+            text: signal_text,
+        }),
+        warnings,
+    }
+}
+
+async fn collect_memory_state<S: Store>(
+    store: &S,
+    tenant: &TenantId,
+    project_id: Option<&str>,
+) -> MemoryState {
+    let snapshot = match store.health_snapshot(tenant, project_id, 0).await {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => return MemoryState::default(),
+        Err(error) => {
+            return MemoryState {
+                scan_warning: Some(format!("memory health scan failed: {error}")),
+                ..MemoryState::default()
+            };
+        }
+    };
+    let metadata_active = snapshot.counts.active_chunks;
+    let mut readable = 0usize;
+    let mut warning = None;
+    let mut offset = 0usize;
+    let scan_limit = metadata_active.min(READABLE_SCAN_MAX_METADATA_ROWS);
+    while offset < scan_limit {
+        let limit = READABLE_SCAN_PAGE_SIZE.min(scan_limit.saturating_sub(offset));
+        match store
+            .list_chunks_for_project(tenant, project_id, limit, offset)
+            .await
+        {
+            Ok(chunks) => readable = readable.saturating_add(chunks.len()),
+            Err(error) => {
+                warning = Some(format!(
+                    "readable memory scan failed at offset {offset}: {error}"
+                ));
+                break;
+            }
+        }
+        offset = offset.saturating_add(limit);
+    }
+    if metadata_active > scan_limit && warning.is_none() {
+        warning = Some(format!(
+            "readable memory scan partial: checked {scan_limit} of {metadata_active} active chunks; unreadable count may be understated"
+        ));
+    }
+    let unreadable = scan_limit.saturating_sub(readable);
+    MemoryState {
+        metadata_active_chunks: Some(metadata_active),
+        readable_active_chunks: Some(readable),
+        unreadable_active_chunks: Some(unreadable),
+        scan_warning: warning,
+    }
+}
+
+fn collect_git_state(project_dir: &Path, git_binary: &str) -> GitState {
+    let mut command = Command::new(git_binary);
+    command
+        .arg("-C")
+        .arg(project_dir)
+        .args(["status", "--short", "--branch"]);
+    let output = match run_command_with_timeout(command, GIT_STATUS_TIMEOUT) {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return GitState {
+                available: false,
+                not_git_repo: false,
+                branch: None,
+                clean: None,
+                changed_entries: 0,
+                summary: "git unavailable: executable not found".to_string(),
+                warning: Some("git unavailable: executable not found".to_string()),
+            };
+        }
+        Err(error) => {
+            return GitState {
+                available: false,
+                not_git_repo: false,
+                branch: None,
+                clean: None,
+                changed_entries: 0,
+                summary: format!("git unavailable: {error}"),
+                warning: Some(format!("git unavailable: {error}")),
+            };
+        }
+    };
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if output.timed_out {
+        return GitState {
+            available: false,
+            not_git_repo: false,
+            branch: None,
+            clean: None,
+            changed_entries: 0,
+            summary: "git unavailable: status timed out".to_string(),
+            warning: Some("git unavailable: status timed out".to_string()),
+        };
+    }
+    if !output.status_success {
+        let not_git_repo = stderr.contains("not a git repository");
+        let reason = if not_git_repo {
+            "not a git repository".to_string()
+        } else if stderr.is_empty() {
+            "git status failed".to_string()
+        } else {
+            stderr
+        };
+        return GitState {
+            available: false,
+            not_git_repo,
+            branch: None,
+            clean: None,
+            changed_entries: 0,
+            summary: format!("git unavailable: {reason}"),
+            warning: Some(format!("git unavailable: {reason}")),
+        };
+    }
+
+    let mut lines = stdout.lines();
+    let branch = lines
+        .next()
+        .and_then(|line| line.strip_prefix("## "))
+        .map(|line| line.split("...").next().unwrap_or(line).trim().to_string())
+        .filter(|branch| !branch.is_empty());
+    let changed_entries = lines.filter(|line| !line.trim().is_empty()).count();
+    let clean = changed_entries == 0;
+    let branch_label = branch.as_deref().unwrap_or("<unknown>");
+    let summary = if clean {
+        format!("branch `{branch_label}`; clean")
+    } else {
+        format!("branch `{branch_label}`; dirty ({changed_entries} changed entries)")
+    };
+    GitState {
+        available: true,
+        not_git_repo: false,
+        branch,
+        clean: Some(clean),
+        changed_entries,
+        summary,
+        warning: None,
+    }
+}
+
+fn collect_latest_git_commit(project_dir: &Path, git_binary: &str) -> Option<StateSignal> {
+    let mut command = Command::new(git_binary);
+    command.arg("-C").arg(project_dir).args([
+        "log",
+        "-1",
+        "--date=short",
+        "--pretty=format:%h %cd %s",
+    ]);
+    let output = run_command_with_timeout(command, GIT_STATUS_TIMEOUT).ok()?;
+    if output.timed_out || !output.status_success {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+    Some(StateSignal {
+        source_path: ".git".to_string(),
+        line: None,
+        heading: Some("latest commit".to_string()),
+        text,
+    })
+}
+
+struct TimedCommandOutput {
+    status_success: bool,
+    timed_out: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn run_command_with_timeout(
+    mut command: Command,
+    timeout: Duration,
+) -> std::io::Result<TimedCommandOutput> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_reader = thread::spawn(move || read_child_pipe(stdout));
+    let stderr_reader = thread::spawn(move || read_child_pipe(stderr));
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let stdout = join_child_pipe(stdout_reader)?;
+            let stderr = join_child_pipe(stderr_reader)?;
+            return Ok(TimedCommandOutput {
+                status_success: status.success(),
+                timed_out: false,
+                stdout,
+                stderr,
+            });
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            let stdout = join_child_pipe(stdout_reader)?;
+            let stderr = join_child_pipe(stderr_reader)?;
+            return Ok(TimedCommandOutput {
+                status_success: false,
+                timed_out: true,
+                stdout,
+                stderr,
+            });
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn read_child_pipe(mut pipe: Option<impl Read>) -> io::Result<Vec<u8>> {
+    let mut buffer = Vec::new();
+    if let Some(pipe) = pipe.as_mut() {
+        pipe.read_to_end(&mut buffer)?;
+    }
+    Ok(buffer)
+}
+
+fn join_child_pipe(handle: thread::JoinHandle<io::Result<Vec<u8>>>) -> io::Result<Vec<u8>> {
+    handle
+        .join()
+        .map_err(|_| io::Error::new(io::ErrorKind::Other, "command output reader panicked"))?
+}
+
+fn parse_heading(line: &str, line_no: usize) -> Option<Heading> {
+    let trimmed = line.trim_start();
+    let level = trimmed.chars().take_while(|ch| *ch == '#').count();
+    if level == 0 || !trimmed[level..].starts_with(' ') {
+        return None;
+    }
+    let title = trimmed[level..].trim().to_string();
+    (!title.is_empty()).then_some(Heading {
+        level,
+        title,
+        line: line_no,
+    })
+}
+
+fn parse_next_action(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.starts_with("- [x]")
+        || trimmed.starts_with("- [X]")
+        || trimmed.starts_with("* [x]")
+        || trimmed.starts_with("* [X]")
+    {
+        return None;
+    }
+    let body = trimmed
+        .strip_prefix("- [ ]")
+        .or_else(|| trimmed.strip_prefix("* [ ]"))
+        .map(str::trim)
+        .or_else(|| strip_bullet(trimmed));
+    let candidate = body.unwrap_or(trimmed).trim();
+    let lowered = candidate.to_ascii_lowercase();
+    let explicit = lowered.starts_with("next step:")
+        || lowered.starts_with("follow-up:")
+        || lowered.starts_with("followup:")
+        || lowered.starts_with("todo:")
+        || lowered.starts_with("todo ")
+        || lowered.starts_with("pending:")
+        || lowered.starts_with("pending ");
+    if trimmed.starts_with("- [ ]") || trimmed.starts_with("* [ ]") || explicit {
+        Some(candidate.trim_end_matches('.').trim().to_string()).filter(|s| !s.is_empty())
+    } else {
+        None
+    }
+}
+
+fn strip_bullet(line: &str) -> Option<&str> {
+    line.strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .map(str::trim)
+}
+
+fn active_heading(title: &str) -> bool {
+    let lowered = title.to_ascii_lowercase();
+    lowered.contains("in progress")
+        || lowered.contains("todo")
+        || lowered.contains("pending")
+        || lowered.contains("open")
+}
+
+fn completed_or_dated_heading(title: &str) -> bool {
+    let lowered = title.to_ascii_lowercase();
+    lowered.contains("done")
+        || lowered.contains("complete")
+        || lowered.contains("completed")
+        || lowered.contains("202")
+}
+
+fn read_text_capped(path: &Path, cap: u64) -> std::io::Result<(String, bool)> {
+    let mut file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(cap.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    let truncated = bytes.len() as u64 > cap;
+    if truncated {
+        bytes.truncate(cap as usize);
+    }
+    Ok((String::from_utf8_lossy(&bytes).to_string(), truncated))
+}
+
+fn scope_path_drift_warning(configured: &str, resolved_project_dir: &Path) -> Option<String> {
+    let configured_path = PathBuf::from(configured);
+    let configured_abs = if configured_path.is_absolute() {
+        configured_path
+    } else {
+        resolved_project_dir.join(configured_path)
+    };
+    let configured_norm = canonical_or_lexical_path(&configured_abs);
+    let resolved_norm = canonical_or_lexical_path(resolved_project_dir);
+    (configured_norm != resolved_norm).then(|| {
+        format!(
+            "scope mismatch: configured project_dir `{}` differs from resolved project_dir `{}`",
+            configured_norm.display(),
+            resolved_norm.display()
+        )
+    })
+}
+
+fn canonical_or_lexical_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| lexical_normalize_path(path))
+}
+
+fn lexical_normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(Path::new("/")),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
+}
+
+fn relative_path(project_dir: &Path, path: &Path) -> String {
+    path.strip_prefix(project_dir)
+        .unwrap_or(path)
+        .display()
+        .to_string()
 }
 
 async fn collect_ranked_takeaways_with_explanations<S: Store>(
@@ -475,7 +1386,11 @@ async fn collect_ranked_takeaways_with_explanations<S: Store>(
         })
         .collect::<Vec<_>>();
     let scored_takeaways = takeaways.clone();
-    let suppressed_ids = suppress_finishes_covered_by_libraries(&mut takeaways);
+    let mut suppressed_reasons = suppress_finishes_covered_by_libraries(&mut takeaways)
+        .into_iter()
+        .map(|id| (id, "covered_by_library".to_string()))
+        .collect::<HashMap<_, _>>();
+    suppressed_reasons.extend(filter_startup_takeaways(&mut takeaways, section));
     takeaways.sort_by(|left, right| {
         right
             .priority
@@ -493,7 +1408,7 @@ async fn collect_ranked_takeaways_with_explanations<S: Store>(
     finalize_candidate_explanations(
         &mut explanations,
         &scored_takeaways,
-        &suppressed_ids,
+        &suppressed_reasons,
         &displayed_ids,
         &breakdowns,
     );
@@ -536,6 +1451,131 @@ fn suppress_finishes_covered_by_libraries(takeaways: &mut Vec<Takeaway>) -> BTre
     takeaways.retain(|takeaway| !suppressed.contains(&takeaway.chunk_id));
     suppressed
 }
+
+fn filter_startup_takeaways(
+    takeaways: &mut Vec<Takeaway>,
+    section: &str,
+) -> HashMap<String, String> {
+    let mut suppressed = HashMap::new();
+    for takeaway in takeaways.iter() {
+        let reason = if has_boilerplate_action(takeaway) {
+            Some("boilerplate_action")
+        } else if section == "machine_wide" && !is_machine_wide_startup_relevant(takeaway) {
+            Some("machine_wide_unrelated")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            suppressed.insert(takeaway.chunk_id.clone(), reason.to_string());
+        }
+    }
+    takeaways.retain(|takeaway| !suppressed.contains_key(&takeaway.chunk_id));
+    suppressed.extend(suppress_duplicate_topic_takeaways(takeaways));
+    suppressed
+}
+
+fn suppress_duplicate_topic_takeaways(takeaways: &mut Vec<Takeaway>) -> HashMap<String, String> {
+    let mut best_by_topic: BTreeMap<String, String> = BTreeMap::new();
+    for takeaway in takeaways.iter() {
+        let key = topic_key(takeaway);
+        match best_by_topic.get(&key) {
+            Some(existing_id) => {
+                let existing = takeaways
+                    .iter()
+                    .find(|candidate| candidate.chunk_id == *existing_id)
+                    .expect("best id came from takeaways");
+                if takeaway_preferred(takeaway, existing) {
+                    best_by_topic.insert(key, takeaway.chunk_id.clone());
+                }
+            }
+            None => {
+                best_by_topic.insert(key, takeaway.chunk_id.clone());
+            }
+        }
+    }
+
+    let mut suppressed = HashMap::new();
+    for takeaway in takeaways.iter() {
+        let key = topic_key(takeaway);
+        if best_by_topic.get(&key) != Some(&takeaway.chunk_id) {
+            suppressed.insert(takeaway.chunk_id.clone(), format!("duplicate_topic:{key}"));
+        }
+    }
+    takeaways.retain(|takeaway| !suppressed.contains_key(&takeaway.chunk_id));
+    suppressed
+}
+
+fn takeaway_preferred(candidate: &Takeaway, current: &Takeaway) -> bool {
+    candidate
+        .priority
+        .partial_cmp(&current.priority)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| candidate.timestamp_created.cmp(&current.timestamp_created))
+        .then_with(|| current.chunk_id.cmp(&candidate.chunk_id))
+        .is_gt()
+}
+
+fn topic_key(takeaway: &Takeaway) -> String {
+    let mut tag_key = takeaway
+        .tags
+        .iter()
+        .filter(|tag| {
+            tag.starts_with("topic:")
+                || tag.starts_with("repo:")
+                || tag.starts_with("task:id:")
+                || tag.starts_with("ctx:subsystem:")
+                || tag.starts_with("ctx:file:")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    tag_key.sort();
+    tag_key.dedup();
+    if !tag_key.is_empty() {
+        return tag_key.into_iter().take(4).collect::<Vec<_>>().join("|");
+    }
+
+    normalized_topic_terms(&takeaway.text)
+}
+
+fn normalized_topic_terms(text: &str) -> String {
+    let first_line = text.lines().next().unwrap_or(text);
+    let mut words = Vec::new();
+    for raw in first_line.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+        let word = raw.to_ascii_lowercase();
+        if word.len() < 4 || TOPIC_STOPWORDS.contains(&word.as_str()) {
+            continue;
+        }
+        words.push(word);
+        if words.len() >= 8 {
+            break;
+        }
+    }
+    if words.is_empty() {
+        summarize_text(text, 64).to_ascii_lowercase()
+    } else {
+        words.join("-")
+    }
+}
+
+const TOPIC_STOPWORDS: &[&str] = &[
+    "after",
+    "also",
+    "because",
+    "before",
+    "from",
+    "into",
+    "keep",
+    "lesson",
+    "lessons",
+    "memory",
+    "project",
+    "records",
+    "task",
+    "that",
+    "this",
+    "validation",
+    "with",
+];
 
 /// True only for system-generated library digests. The
 /// `task:status:generated` requirement guards against a user-authored
@@ -650,6 +1690,13 @@ fn merge_payload_candidates(
             explanations.push(explanation);
             continue;
         }
+        if is_fragment_like_candidate(&tags, text) {
+            explanation.display_status = "filtered".to_string();
+            explanation.filter_reason = Some("fragment_like".to_string());
+            explanation.quality_flags.push("fragment_like".to_string());
+            explanations.push(explanation);
+            continue;
+        }
         // Defence-in-depth: the lifecycle visibility filter already
         // hides superseded chunks, but skip anything still carrying a
         // `kind:superseded` tag so consolidated output never competes
@@ -708,6 +1755,21 @@ fn candidate_explanation(
     tags: &[String],
     text: &str,
 ) -> MemoryMdCandidateExplanation {
+    let generated_digest = is_generated_digest_takeaway(tags)
+        || text
+            .to_ascii_lowercase()
+            .contains("task digest status generated");
+    let mut quality_flags = Vec::new();
+    if is_fragment_like_candidate(tags, text) {
+        quality_flags.push("fragment_like".to_string());
+    }
+    if generated_digest
+        || text
+            .to_ascii_lowercase()
+            .contains("task digest status generated")
+    {
+        quality_flags.push("generated_wrapper".to_string());
+    }
     MemoryMdCandidateExplanation {
         section: section.to_string(),
         source: source.to_string(),
@@ -743,10 +1805,9 @@ fn candidate_explanation(
         display_status: "candidate".to_string(),
         filter_reason: None,
         display_rank: None,
-        generated_digest: is_generated_digest_takeaway(tags)
-            || text
-                .to_ascii_lowercase()
-                .contains("task digest status generated"),
+        generated_digest,
+        quality_flags,
+        topic_key: None,
         tags: tags.to_vec(),
         matched_sources: vec![source.to_string()],
     }
@@ -755,7 +1816,7 @@ fn candidate_explanation(
 fn finalize_candidate_explanations(
     explanations: &mut [MemoryMdCandidateExplanation],
     scored_takeaways: &[Takeaway],
-    suppressed_ids: &BTreeSet<String>,
+    suppressed_reasons: &HashMap<String, String>,
     displayed_ids: &HashMap<String, usize>,
     breakdowns: &HashMap<String, PriorityBreakdown>,
 ) {
@@ -771,10 +1832,12 @@ fn finalize_candidate_explanations(
             explanation.priority_score = Some(takeaway.priority);
             explanation.priority_breakdown = breakdowns.get(&takeaway.chunk_id).cloned();
             explanation.matched_sources = takeaway.sources.iter().cloned().collect();
+            explanation.topic_key = Some(topic_key(takeaway));
         }
-        if suppressed_ids.contains(&explanation.chunk_id) {
+        if let Some(reason) = suppressed_reasons.get(&explanation.chunk_id) {
             explanation.display_status = "filtered".to_string();
-            explanation.filter_reason = Some("covered_by_library".to_string());
+            explanation.filter_reason = Some(reason.clone());
+            explanation.quality_flags.push(reason.clone());
         } else if let Some(rank) = displayed_ids.get(&explanation.chunk_id) {
             explanation.display_status = "displayed".to_string();
             explanation.display_rank = Some(*rank);
@@ -940,9 +2003,80 @@ fn is_generated_digest_takeaway(tags: &[String]) -> bool {
             .any(|tag| tag.starts_with("task:role:") || tag.starts_with("task:digest:"))
 }
 
+fn is_fragment_like_takeaway(takeaway: &Takeaway) -> bool {
+    is_fragment_like_candidate(&takeaway.tags, &takeaway.text)
+}
+
+fn is_fragment_like_candidate(tags: &[String], text: &str) -> bool {
+    if tags.iter().any(|tag| {
+        tag.strip_prefix("chunk_index:")
+            .and_then(|value| value.parse::<usize>().ok())
+            .map(|idx| idx > 0)
+            .unwrap_or(false)
+    }) {
+        return true;
+    }
+
+    let trimmed = text.trim_start();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.starts_with("...")
+        || trimmed
+            .chars()
+            .next()
+            .map(|ch| matches!(ch, ',' | ';' | ':' | ')' | ']' | '}'))
+            .unwrap_or(false)
+    {
+        return true;
+    }
+
+    let lowered = trimmed.to_ascii_lowercase();
+    const CONTINUATION_PREFIXES: &[&str] = &[
+        "and ",
+        "but ",
+        "which ",
+        "where ",
+        "then ",
+        "therefore ",
+        "from there ",
+        "as a result ",
+    ];
+    CONTINUATION_PREFIXES
+        .iter()
+        .any(|prefix| lowered.starts_with(prefix))
+}
+
+fn has_boilerplate_action(takeaway: &Takeaway) -> bool {
+    explicit_agent_action(&takeaway.text).is_none()
+        && takeaway_category(takeaway).reason == "ranked project takeaway"
+}
+
+fn is_machine_wide_startup_relevant(takeaway: &Takeaway) -> bool {
+    if takeaway.project_id.is_none() {
+        return true;
+    }
+    if user_priority_at_least(&takeaway.tags, USER_PRESERVE_PRIORITY_THRESHOLD)
+        && takeaway.tags.iter().any(|tag| {
+            tag == "global"
+                || tag == "always"
+                || tag == "machine"
+                || tag == "kind:consolidated"
+                || tag.starts_with("global:")
+                || tag.starts_with("machine:")
+        })
+    {
+        return true;
+    }
+    let lowered = takeaway.text.to_ascii_lowercase();
+    lowered.contains("machine-wide")
+        || lowered.contains("all projects")
+        || lowered.contains("global default")
+        || lowered.contains("always ")
+}
+
 fn render_memory_md(
-    tenant_id: &str,
-    project_id: Option<&str>,
+    project_state: &ProjectState,
     health_lines: &[String],
     project_takeaways: &[Takeaway],
     global_takeaways: &[Takeaway],
@@ -950,6 +2084,7 @@ fn render_memory_md(
     let mut out = String::new();
     out.push_str("# memory.md\n\n");
     out.push_str("Generated by `memd memory-md`.\n\n");
+    render_latest_project_state(&mut out, project_state);
     if !health_lines.is_empty() {
         out.push_str("## Memory health\n\n");
         for line in health_lines {
@@ -957,30 +2092,219 @@ fn render_memory_md(
         }
         out.push('\n');
     }
-    out.push_str("## Scope\n\n");
-    out.push_str(&format!("- tenant_id: `{tenant_id}`\n"));
-    out.push_str(&format!(
-        "- project_id: `{}`\n",
-        project_id.unwrap_or("<none>")
-    ));
-    out.push_str(&format!("- generated_unix_ms: `{}`\n\n", now_ms()));
     out.push_str("## Session-Start Use\n\n");
     out.push_str("- Read this file before task-specific retrieval.\n");
     out.push_str("- Refresh it at the start of substantive sessions with `memd memory-md`.\n");
     out.push_str("- Then run task-specific `memd agent-context` or `memd search`.\n\n");
     out.push_str("## Agent Guidance\n\n");
-    out.push_str("- Each displayed takeaway includes `agent action`: a concrete instruction derived from the stored memory.\n");
-    out.push_str("- Treat the action as a starting rule, then verify it against current files, logs, or tests before applying it.\n\n");
+    out.push_str("- Treat fact-library items as durable memory to verify against current files, logs, or tests before applying.\n");
+    out.push_str("- Use `Latest Project State` for the first resume pass; use `memd agent-context` for task-specific retrieval.\n\n");
     out.push_str("## Scoring\n\n");
     out.push_str("- Explicit `priority:N` or `importance:N` tags dominate when present.\n");
     out.push_str("- Decisions, finishes, evidence, recurring tags, multi-query matches, and search score increase priority.\n");
     out.push_str("- Repeated lessons should be recorded again with a higher `priority:N` tag when they keep mattering.\n\n");
 
-    render_section(&mut out, "Project Takeaways", project_takeaways);
+    render_section(&mut out, "Project Fact Library", project_takeaways);
     if !global_takeaways.is_empty() {
-        render_section(&mut out, "Machine-Wide Takeaways", global_takeaways);
+        render_section(&mut out, "Machine-Wide Fact Library", global_takeaways);
     }
     out
+}
+
+fn render_latest_project_state(out: &mut String, state: &ProjectState) {
+    out.push_str("## Latest Project State\n\n");
+    out.push_str("### Scope & Freshness\n\n");
+    out.push_str(&format!("- tenant_id: `{}`\n", state.tenant_id));
+    out.push_str(&format!(
+        "- project_id: `{}`\n",
+        state.project_id.as_deref().unwrap_or("<none>")
+    ));
+    if let Some(configured) = state.configured_project_dir.as_deref() {
+        out.push_str(&format!("- configured_project_dir: `{configured}`\n"));
+    } else {
+        out.push_str("- configured_project_dir: `<none>`\n");
+    }
+    out.push_str(&format!(
+        "- resolved_project_dir: `{}`\n",
+        state.resolved_project_dir
+    ));
+    out.push_str(&format!(
+        "- generated_unix_ms: `{}`\n\n",
+        state.generated_unix_ms
+    ));
+
+    out.push_str("### Worktree\n\n");
+    out.push_str(&format!("- git: {}\n\n", state.git.summary));
+
+    out.push_str("### Latest Work\n\n");
+    if let Some(task) = &state.latest_task {
+        out.push_str(&format!("- task: {}\n", render_state_signal(task)));
+    } else {
+        out.push_str("- task: none detected in `tasks/todo.md`\n");
+    }
+    if let Some(handoff) = &state.latest_handoff {
+        out.push_str(&format!("- handoff: {}\n", render_state_signal(handoff)));
+    } else {
+        out.push_str("- handoff: none detected under `docs/handoffs/`\n");
+    }
+    if let Some(vcs) = &state.latest_vcs {
+        out.push_str(&format!("- vcs: {}\n", render_state_signal(vcs)));
+    }
+    out.push('\n');
+
+    out.push_str("### Next Actions\n\n");
+    if state.next_actions.is_empty() {
+        out.push_str("- No open next actions detected from `tasks/todo.md`.\n\n");
+    } else {
+        for (idx, action) in state.next_actions.iter().take(3).enumerate() {
+            out.push_str(&format!(
+                "{}. {} ([{}:{}])\n",
+                idx + 1,
+                inline_code_text(&action.text),
+                action.source_path,
+                action.line
+            ));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("### Memory Warnings\n\n");
+    let warnings = project_state_warnings(state);
+    if warnings.is_empty() {
+        out.push_str("- none detected\n\n");
+    } else {
+        for warning in warnings {
+            out.push_str(&format!("- {warning}\n"));
+        }
+        out.push('\n');
+    }
+}
+
+fn render_state_signal(signal: &StateSignal) -> String {
+    let source = match signal.line {
+        Some(line) => format!("{}:{}", signal.source_path, line),
+        None => signal.source_path.clone(),
+    };
+    match signal.heading.as_deref() {
+        Some(heading) if !heading.is_empty() => {
+            format!(
+                "{} - {} ([{}])",
+                heading,
+                inline_code_text(&signal.text),
+                source
+            )
+        }
+        _ => format!("{} ([{}])", inline_code_text(&signal.text), source),
+    }
+}
+
+fn project_state_warnings(state: &ProjectState) -> Vec<String> {
+    let mut warnings = Vec::new();
+    warnings.extend(state.scope_warnings.iter().cloned());
+    if let Some(warning) = &state.git.warning {
+        warnings.push(warning.clone());
+    }
+    if let Some(unreadable) = state.memory.unreadable_active_chunks {
+        if unreadable > 0 {
+            warnings.push(format!(
+                "memory degraded: {unreadable} active chunks could not be read from payload segments"
+            ));
+        }
+    }
+    if let Some(warning) = &state.memory.scan_warning {
+        warnings.push(warning.clone());
+    }
+    warnings.extend(state.collection_warnings.iter().cloned());
+    warnings
+}
+
+fn evaluate_agent_usefulness(
+    state: &ProjectState,
+    project_takeaways: &[Takeaway],
+    global_takeaways: &[Takeaway],
+) -> AgentUsefulnessMetrics {
+    // These metrics are computed from the same structured state and filtered
+    // startup items used by the renderer. They are a deterministic regression
+    // gate for startup answerability, not an independent semantic judge.
+    let latest_project_state_present = true;
+    let scope_present = !state.tenant_id.is_empty() && !state.resolved_project_dir.is_empty();
+    let git_state_present = state.git.available;
+    let git_state_present_or_not_git_repo = state.git.available || state.git.not_git_repo;
+    let latest_work_present =
+        state.latest_task.is_some() || state.latest_handoff.is_some() || state.latest_vcs.is_some();
+    let next_action_present = !state.next_actions.is_empty();
+    let no_open_tasks_detected = state.next_actions.is_empty();
+    let scope_health_present = scope_health_checked(state);
+    let memory_degraded_warning_present = state
+        .memory
+        .unreadable_active_chunks
+        .map(|count| count > 0)
+        .unwrap_or(false);
+    let fragment_count = project_takeaways
+        .iter()
+        .chain(global_takeaways.iter())
+        .filter(|takeaway| is_fragment_like_takeaway(takeaway))
+        .count();
+    let duplicate_cluster_count = visible_duplicate_cluster_count(project_takeaways)
+        + visible_duplicate_cluster_count(global_takeaways);
+    let boilerplate_action_count = project_takeaways
+        .iter()
+        .chain(global_takeaways.iter())
+        .filter(|takeaway| has_boilerplate_action(takeaway))
+        .count();
+    let unrelated_machine_items = global_takeaways
+        .iter()
+        .filter(|takeaway| !is_machine_wide_startup_relevant(takeaway))
+        .count();
+    let source_backed_next_actions = state
+        .next_actions
+        .iter()
+        .all(|action| !action.source_path.is_empty() && action.line > 0);
+    let answerability_passed = latest_project_state_present
+        && scope_present
+        && git_state_present_or_not_git_repo
+        && latest_work_present
+        && (next_action_present || no_open_tasks_detected)
+        && fragment_count == 0
+        && boilerplate_action_count == 0;
+
+    AgentUsefulnessMetrics {
+        latest_project_state_present,
+        scope_present,
+        git_state_present,
+        git_state_present_or_not_git_repo,
+        latest_work_present,
+        next_action_present,
+        no_open_tasks_detected,
+        scope_health_present,
+        memory_degraded_warning_present,
+        fragment_count,
+        duplicate_cluster_count,
+        boilerplate_action_count,
+        unrelated_machine_items,
+        source_backed_next_actions,
+        answerability_passed,
+    }
+}
+
+fn scope_health_checked(state: &ProjectState) -> bool {
+    if let Some(configured) = state.configured_project_dir.as_deref() {
+        scope_path_drift_warning(configured, Path::new(&state.resolved_project_dir)).is_none()
+            || state
+                .scope_warnings
+                .iter()
+                .any(|warning| warning.starts_with("scope mismatch:"))
+    } else {
+        true
+    }
+}
+
+fn visible_duplicate_cluster_count(takeaways: &[Takeaway]) -> usize {
+    let mut counts = BTreeMap::new();
+    for takeaway in takeaways {
+        *counts.entry(topic_key(takeaway)).or_insert(0usize) += 1;
+    }
+    counts.values().filter(|count| **count > 1).count()
 }
 
 fn render_section(out: &mut String, title: &str, takeaways: &[Takeaway]) {
@@ -1343,7 +2667,8 @@ fn parse_project_takeaways(content: &str, top_n: usize) -> Vec<DisplayedMemoryMd
                 }
                 break;
             }
-            in_project = line.trim() == "## Project Takeaways";
+            let heading = line.trim();
+            in_project = heading == "## Project Takeaways" || heading == "## Project Fact Library";
             continue;
         }
         if !in_project {
@@ -1499,6 +2824,11 @@ fn now_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::{
+        DuplicateHealth, HealthCounts, IndexCoverageHealth, PayloadHealth, StoreHealthSnapshot,
+        StoreStats,
+    };
+    use crate::types::{ChunkId, MemoryChunk};
 
     #[test]
     fn explicit_priority_scales_small_values_and_caps_large_values() {
@@ -1507,6 +2837,285 @@ mod tests {
             explicit_priority(&["importance:120".to_string()]),
             Some(100.0)
         );
+    }
+
+    #[test]
+    fn git_state_handles_clean_dirty_no_repo_and_missing_git() {
+        let no_repo = tempfile::tempdir().unwrap();
+        let no_repo_state = collect_git_state(no_repo.path(), "git");
+        if no_repo_state.warning.as_deref() == Some("git unavailable: executable not found") {
+            return;
+        }
+        assert!(no_repo_state.not_git_repo);
+        assert!(!no_repo_state.available);
+
+        let missing = collect_git_state(no_repo.path(), "definitely-not-a-git-binary");
+        assert!(!missing.available);
+        assert!(missing
+            .warning
+            .as_deref()
+            .unwrap_or_default()
+            .contains("executable not found"));
+
+        let repo = tempfile::tempdir().unwrap();
+        let init = Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .arg("init")
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+        let clean = collect_git_state(repo.path(), "git");
+        assert!(clean.available);
+        assert_eq!(clean.clean, Some(true));
+
+        fs::write(repo.path().join("dirty.txt"), "dirty").unwrap();
+        let dirty = collect_git_state(repo.path(), "git");
+        assert!(dirty.available);
+        assert_eq!(dirty.clean, Some(false));
+        assert!(dirty.changed_entries > 0);
+    }
+
+    #[test]
+    fn task_state_uses_nested_heading_for_first_open_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks_dir = dir.path().join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        fs::write(
+            tasks_dir.join("todo.md"),
+            "# Completed\n\n- [x] old\n\n# Current\n\n## Deep Work\n\n- [ ] implement nested action\n",
+        )
+        .unwrap();
+
+        let scan = collect_task_state(dir.path());
+        let latest = scan.latest_task.expect("latest task");
+        assert_eq!(latest.heading.as_deref(), Some("Deep Work"));
+        assert_eq!(scan.next_actions.len(), 1);
+        assert_eq!(scan.next_actions[0].line, 9);
+        assert_eq!(scan.next_actions[0].source_path, "tasks/todo.md");
+    }
+
+    #[test]
+    fn task_state_ignores_checked_boxes_and_incidental_pending_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks_dir = dir.path().join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        fs::write(
+            tasks_dir.join("todo.md"),
+            "# Current\n\n- [x] resolved the pending migration\n- note: this pending migration is already closed\n- [ ] real open item\n",
+        )
+        .unwrap();
+
+        let scan = collect_task_state(dir.path());
+        assert_eq!(scan.next_actions.len(), 1);
+        assert_eq!(scan.next_actions[0].text, "real open item");
+    }
+
+    #[test]
+    fn handoff_state_renders_title_once_and_stable_spacing() {
+        let dir = tempfile::tempdir().unwrap();
+        let handoff_dir = dir.path().join("docs/handoffs");
+        fs::create_dir_all(&handoff_dir).unwrap();
+        fs::write(
+            handoff_dir.join("2026-06-28-release.md"),
+            "# Handoff 2026-06-28\n\nStatus: active\nNext step: ship release\n",
+        )
+        .unwrap();
+
+        let scan = collect_handoff_state(dir.path());
+        let handoff = scan.latest_handoff.expect("latest handoff");
+        assert_eq!(handoff.heading.as_deref(), Some("Handoff 2026-06-28"));
+        assert_eq!(handoff.text, "Status: active | Next step: ship release");
+
+        let rendered_signal = render_state_signal(&handoff);
+        assert!(!rendered_signal.contains("Handoff 2026-06-28 - Handoff 2026-06-28"));
+
+        let mut state = make_project_state();
+        state.latest_handoff = Some(handoff);
+        state.latest_vcs = None;
+        let mut rendered = String::new();
+        render_latest_project_state(&mut rendered, &state);
+        assert!(rendered.contains("- handoff: Handoff 2026-06-28 -"));
+        assert!(rendered.contains("Status: active"));
+        assert!(rendered.contains("Next step: ship release"));
+        assert!(!rendered.contains("\n\n\n### Next Actions"));
+    }
+
+    #[test]
+    fn scope_path_normalization_warns_only_on_real_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let configured_same = format!("{}/.", dir.path().display());
+        assert!(scope_path_drift_warning(&configured_same, dir.path()).is_none());
+
+        let drift = dir.path().join("other");
+        let warning =
+            scope_path_drift_warning(drift.to_str().unwrap(), dir.path()).expect("drift warning");
+        assert!(warning.contains("scope mismatch"));
+    }
+
+    #[test]
+    fn fragment_candidates_are_filtered_before_ranking() {
+        let payload = serde_json::json!({
+            "results": [
+                {
+                    "chunk_id": "fragment",
+                    "tenant_id": "t",
+                    "project_id": "p",
+                    "text": "and then continued from a prior chunk",
+                    "score": 10.0,
+                    "chunk_type": "summary",
+                    "timestamp_created": 1,
+                    "tags": ["chunk_index:1", "kind:finish"]
+                }
+            ]
+        });
+        let mut by_chunk = HashMap::new();
+        let mut explanations = Vec::new();
+        merge_payload_candidates(
+            &mut by_chunk,
+            &mut explanations,
+            &payload,
+            "project",
+            "project_highlights",
+            "project takeaways",
+            CliQueryMode::FindHighlights,
+        );
+        assert!(by_chunk.is_empty());
+        let explanation = explanations.first().expect("explanation");
+        assert_eq!(explanation.filter_reason.as_deref(), Some("fragment_like"));
+        assert!(explanation
+            .quality_flags
+            .iter()
+            .any(|flag| flag == "fragment_like"));
+    }
+
+    #[test]
+    fn conditional_sentences_are_not_filtered_as_fragments() {
+        assert!(!is_fragment_like_candidate(
+            &[],
+            "When rerunning failed tasks, use --force to overwrite stale outputs."
+        ));
+        assert!(!is_fragment_like_candidate(
+            &[],
+            "While debugging CI, inspect the failing job log before changing code."
+        ));
+        assert!(!is_fragment_like_candidate(
+            &[],
+            "Because the release workflow publishes from main, push a release branch first."
+        ));
+        assert!(is_fragment_like_candidate(
+            &[],
+            "and then continued from a prior chunk"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_timeout_drains_large_output_while_waiting() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(
+            "i=0; while [ \"$i\" -lt 20000 ]; do printf 'dirty-file-%05d xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' \"$i\"; i=$((i + 1)); done",
+        );
+
+        let output = run_command_with_timeout(command, Duration::from_secs(5)).unwrap();
+
+        assert!(!output.timed_out);
+        assert!(output.status_success);
+        assert!(output.stdout.len() > 128 * 1024);
+    }
+
+    #[test]
+    fn expected_git_failure_checks_true_and_false_expectations() {
+        let mut metrics = make_agent_metrics();
+        metrics.git_state_present = false;
+        assert_eq!(
+            expected_git_failure(&metrics, true).as_deref(),
+            Some("expected git state but git_state_present=false")
+        );
+        assert!(expected_git_failure(&metrics, false).is_none());
+
+        metrics.git_state_present = true;
+        assert_eq!(
+            expected_git_failure(&metrics, false).as_deref(),
+            Some("expected no git state but git_state_present=true")
+        );
+        assert!(expected_git_failure(&metrics, true).is_none());
+    }
+
+    #[test]
+    fn startup_filters_collapse_duplicates_and_boilerplate_actions() {
+        let mut takeaways = vec![
+            make_takeaway(
+                "keep",
+                "Validation: MEMD_EMBED_DEVICE cpu override fixed GPU contention. Agent action: Use MEMD_EMBED_DEVICE=cpu when GPU contention blocks embedding.",
+                vec!["topic:embed-device", "priority:9"],
+                "summary",
+            ),
+            make_takeaway(
+                "drop-duplicate",
+                "Validation: MEMD_EMBED_DEVICE cuda override fixed GPU contention. Agent action: Use MEMD_EMBED_DEVICE when GPU contention blocks embedding.",
+                vec!["topic:embed-device", "priority:8"],
+                "summary",
+            ),
+            make_takeaway(
+                "drop-boilerplate",
+                "Routine note without a concrete action or category signal.",
+                vec![],
+                "summary",
+            ),
+        ];
+        for (idx, takeaway) in takeaways.iter_mut().enumerate() {
+            takeaway.priority = (90 - idx) as f32;
+        }
+
+        let suppressed = filter_startup_takeaways(&mut takeaways, "project");
+        let ids = takeaways
+            .iter()
+            .map(|takeaway| takeaway.chunk_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["keep"]);
+        assert_eq!(
+            suppressed.get("drop-boilerplate").map(String::as_str),
+            Some("boilerplate_action")
+        );
+        assert!(suppressed
+            .get("drop-duplicate")
+            .map(|reason| reason.starts_with("duplicate_topic:"))
+            .unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn memory_state_reports_project_scoped_unreadable_chunks() {
+        let store = FakeHealthStore::new(2, Vec::new());
+        let tenant = TenantId::new("t").unwrap();
+        let state = collect_memory_state(&store, &tenant, Some("p")).await;
+        assert_eq!(state.metadata_active_chunks, Some(2));
+        assert_eq!(state.readable_active_chunks, Some(0));
+        assert_eq!(state.unreadable_active_chunks, Some(2));
+
+        let project_state = ProjectState {
+            memory: state,
+            ..make_project_state()
+        };
+        assert!(project_state_warnings(&project_state)
+            .iter()
+            .any(|warning| warning.contains("memory degraded: 2 active chunks")));
+    }
+
+    #[tokio::test]
+    async fn memory_state_caps_large_readable_scan_and_warns_partial() {
+        let store = FakeHealthStore::new(READABLE_SCAN_MAX_METADATA_ROWS + 5, Vec::new());
+        let tenant = TenantId::new("t").unwrap();
+        let state = collect_memory_state(&store, &tenant, Some("p")).await;
+        assert_eq!(
+            state.unreadable_active_chunks,
+            Some(READABLE_SCAN_MAX_METADATA_ROWS)
+        );
+        assert!(state
+            .scan_warning
+            .as_deref()
+            .unwrap_or_default()
+            .contains("readable memory scan partial"));
     }
 
     #[test]
@@ -1524,8 +3133,9 @@ mod tests {
             sources: BTreeSet::from(["project_highlights".to_string()]),
             occurrences: 1,
         };
-        let rendered = render_memory_md("tenant-a", Some("project-a"), &[], &[takeaway], &[]);
-        assert!(rendered.contains("## Project Takeaways"));
+        let state = make_project_state();
+        let rendered = render_memory_md(&state, &[], &[takeaway], &[]);
+        assert!(rendered.contains("## Project Fact Library"));
         assert!(rendered.contains("## Agent Guidance"));
         assert!(rendered.contains("agent action: `Use this as evidence only after confirming"));
         assert!(rendered.contains("chunk-a"));
@@ -1547,9 +3157,10 @@ mod tests {
             sources: BTreeSet::from(["project_highlights".to_string()]),
             occurrences: 1,
         };
-        let rendered = render_memory_md("tenant-a", Some("project-a"), &[], &[takeaway], &[]);
-        assert!(rendered.contains("## Project Takeaways"));
-        assert!(!rendered.contains("## Machine-Wide Takeaways"));
+        let state = make_project_state();
+        let rendered = render_memory_md(&state, &[], &[takeaway], &[]);
+        assert!(rendered.contains("## Project Fact Library"));
+        assert!(!rendered.contains("## Machine-Wide Fact Library"));
     }
 
     #[test]
@@ -1579,13 +3190,8 @@ mod tests {
         );
         command.priority = 60.0;
 
-        let rendered = render_memory_md(
-            "tenant-a",
-            Some("project-a"),
-            &[],
-            &[command, fix, decision],
-            &[],
-        );
+        let state = make_project_state();
+        let rendered = render_memory_md(&state, &[], &[command, fix, decision], &[]);
 
         assert!(rendered.contains("### Decisions"));
         assert!(rendered.contains("### Validated Fixes"));
@@ -1642,7 +3248,8 @@ mod tests {
             "summary",
         );
 
-        let rendered = render_memory_md("tenant-a", Some("project-a"), &[], &[takeaway], &[]);
+        let state = make_project_state();
+        let rendered = render_memory_md(&state, &[], &[takeaway], &[]);
 
         assert!(rendered.contains(
             "agent action: `Verify tenant and project are present before reusing cached retrieval results`"
@@ -1658,7 +3265,8 @@ mod tests {
             "summary",
         );
 
-        let rendered = render_memory_md("tenant-a", Some("project-a"), &[], &[takeaway], &[]);
+        let state = make_project_state();
+        let rendered = render_memory_md(&state, &[], &[takeaway], &[]);
 
         assert!(rendered.contains(
             "agent action: `Write every high-priority durable memory with a concrete action sentence that tells future agents what to verify or reuse`"
@@ -1674,11 +3282,157 @@ mod tests {
             "summary",
         );
 
-        let rendered = render_memory_md("tenant-a", Some("project-a"), &[], &[takeaway], &[]);
+        let state = make_project_state();
+        let rendered = render_memory_md(&state, &[], &[takeaway], &[]);
 
         assert!(rendered.contains(
             "agent action: `Verify future agent sessions read the refreshed ~/.agents/skills/memd skill and use memd 0.61.0 before diagnosing memory-quality behavior`"
         ));
+    }
+
+    fn make_project_state() -> ProjectState {
+        ProjectState {
+            generated_unix_ms: 123,
+            tenant_id: "tenant-a".to_string(),
+            project_id: Some("project-a".to_string()),
+            configured_project_dir: Some("/tmp/project-a".to_string()),
+            resolved_project_dir: "/tmp/project-a".to_string(),
+            scope_warnings: Vec::new(),
+            git: GitState {
+                available: true,
+                not_git_repo: false,
+                branch: Some("main".to_string()),
+                clean: Some(true),
+                changed_entries: 0,
+                summary: "branch `main`; clean".to_string(),
+                warning: None,
+            },
+            latest_task: Some(StateSignal {
+                source_path: "tasks/todo.md".to_string(),
+                line: Some(1),
+                heading: Some("Current Work".to_string()),
+                text: "open action: run validation".to_string(),
+            }),
+            latest_handoff: None,
+            latest_vcs: None,
+            next_actions: vec![NextAction {
+                source_path: "tasks/todo.md".to_string(),
+                line: 2,
+                heading: Some("Current Work".to_string()),
+                text: "run validation".to_string(),
+            }],
+            memory: MemoryState::default(),
+            collection_warnings: Vec::new(),
+        }
+    }
+
+    fn make_agent_metrics() -> AgentUsefulnessMetrics {
+        AgentUsefulnessMetrics {
+            latest_project_state_present: true,
+            scope_present: true,
+            git_state_present: true,
+            git_state_present_or_not_git_repo: true,
+            latest_work_present: true,
+            next_action_present: true,
+            no_open_tasks_detected: false,
+            scope_health_present: true,
+            memory_degraded_warning_present: false,
+            fragment_count: 0,
+            duplicate_cluster_count: 0,
+            boilerplate_action_count: 0,
+            unrelated_machine_items: 0,
+            source_backed_next_actions: true,
+            answerability_passed: true,
+        }
+    }
+
+    struct FakeHealthStore {
+        active_chunks: usize,
+        readable_chunks: Vec<MemoryChunk>,
+    }
+
+    impl FakeHealthStore {
+        fn new(active_chunks: usize, readable_chunks: Vec<MemoryChunk>) -> Self {
+            Self {
+                active_chunks,
+                readable_chunks,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Store for FakeHealthStore {
+        async fn add(&self, chunk: MemoryChunk) -> Result<ChunkId> {
+            Ok(chunk.chunk_id)
+        }
+
+        async fn add_batch(&self, chunks: Vec<MemoryChunk>) -> Result<Vec<ChunkId>> {
+            Ok(chunks.into_iter().map(|chunk| chunk.chunk_id).collect())
+        }
+
+        async fn get(
+            &self,
+            _tenant_id: &TenantId,
+            _chunk_id: &ChunkId,
+        ) -> Result<Option<MemoryChunk>> {
+            Ok(None)
+        }
+
+        async fn search(
+            &self,
+            _tenant_id: &TenantId,
+            _query: &str,
+            _k: usize,
+        ) -> Result<Vec<MemoryChunk>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_chunks_for_project(
+            &self,
+            _tenant_id: &TenantId,
+            _project_id: Option<&str>,
+            limit: usize,
+            offset: usize,
+        ) -> Result<Vec<MemoryChunk>> {
+            Ok(self
+                .readable_chunks
+                .iter()
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+
+        async fn delete(&self, _tenant_id: &TenantId, _chunk_id: &ChunkId) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn stats(&self, _tenant_id: &TenantId) -> Result<StoreStats> {
+            Ok(StoreStats {
+                active_chunks: self.active_chunks,
+                ..StoreStats::default()
+            })
+        }
+
+        async fn health_snapshot(
+            &self,
+            _tenant_id: &TenantId,
+            _project_id: Option<&str>,
+            _duplicate_limit: usize,
+        ) -> Result<Option<StoreHealthSnapshot>> {
+            Ok(Some(StoreHealthSnapshot {
+                counts: HealthCounts {
+                    active_chunks: self.active_chunks,
+                    total_chunks: self.active_chunks,
+                    ..HealthCounts::default()
+                },
+                chunk_types_active: HashMap::new(),
+                chunk_types_all: HashMap::new(),
+                duplicates: DuplicateHealth::default(),
+                index_coverage: IndexCoverageHealth::default(),
+                payload: PayloadHealth::default(),
+            }))
+        }
     }
 
     fn make_takeaway(chunk_id: &str, text: &str, tags: Vec<&str>, chunk_type: &str) -> Takeaway {

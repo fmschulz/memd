@@ -308,8 +308,8 @@ pub enum CliCommand {
     /// Refresh a project `memory.md` file with the highest-priority takeaways.
     ///
     /// This is intended for agent session startup. It distills up to 10
-    /// project-scoped takeaways from memd, writes them to `memory.md`,
-    /// and prints a JSON summary. Up to 5 machine-wide takeaways are
+    /// project-scoped fact-library items from memd, writes them to `memory.md`,
+    /// and prints a JSON summary. Up to 2 machine-wide fact-library items are
     /// included by default; tune with `--global-limit` (0 disables).
     MemoryMd {
         /// Tenant identifier. Defaults to `.memd/project_scope.json` when present.
@@ -332,9 +332,9 @@ pub enum CliCommand {
         #[arg(long, default_value_t = 10)]
         project_limit: usize,
 
-        /// Maximum machine-wide takeaways to keep, capped at 10.
-        /// Defaults to 5; 0 disables the section.
-        #[arg(long, default_value_t = 5)]
+        /// Maximum machine-wide fact-library items to keep, capped at 10.
+        /// Defaults to 2; 0 disables the section.
+        #[arg(long, default_value_t = 2)]
         global_limit: usize,
 
         /// Candidate memories to retrieve per query before scoring
@@ -384,6 +384,14 @@ pub enum CliCommand {
         /// Maximum generated wrapper records allowed in displayed project items.
         #[arg(long, default_value_t = 0)]
         max_generated_wrappers: usize,
+
+        /// Enable structured startup-briefing usefulness checks.
+        #[arg(long)]
+        agent_usefulness: bool,
+
+        /// Optional JSON file with local project expectations.
+        #[arg(long)]
+        gold_file: Option<PathBuf>,
     },
 
     /// Evaluate fixed retrieval queries with known useful chunk IDs.
