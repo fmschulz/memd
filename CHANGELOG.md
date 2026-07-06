@@ -6,6 +6,62 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-06
+
+Retrieval recall, bi-temporal memory, and warm-worker availability.
+
+### Added
+
+- **Event time on writes**: `memory.add` / `memory.add_batch` accept an
+  optional `event_time_ms` — when the underlying event occurred, as distinct
+  from ingestion time — persisted to the chunk's bi-temporal
+  `timestamp_observed`. `memory.search` gains an opt-in `render_event_time`
+  that prefixes each result's text with its observed date (`[YYYY-MM-DD]`)
+  at recall, so answer models see when events happened without dates
+  polluting the indexed text.
+- **Source-aware result dedup**: `memory.search --dedupe-by-source` collapses
+  ranked results sharing a `source.uri` to the best-ranked one before the
+  final top-k trim (default off; for one-document-per-add workloads).
+- **Per-request timing in batch**: `memd batch` response rows report
+  `elapsed_ms` per request, so latency percentiles don't depend on buffered
+  stdout timing.
+- **Repo-local LoCoMo benchmark harness** (`benchmarks/locomo/`):
+  fetch-on-run dataset, hermetic per-run stores, retrieval and QA
+  answer-usefulness evals, date-at-render and external-contexts QA modes,
+  and documented same-harness reference comparisons.
+
+### Fixed
+
+- **Warm-worker availability**: a dense-index write hold (repair pass or
+  bulk insert) could park the worker's single event-loop task and freeze
+  every client — ping included — until the 30s client timeout. Searches now
+  bound their index lock waits and fail fast with a busy error carried on
+  the warm wire (`busy` reply flag, wire-compatible both directions);
+  auto-mode reads fall back to the cold path immediately; the worker
+  defaults to async indexing (explicit `MEMD_ASYNC_INDEXING` wins) so adds
+  acknowledge after WAL + metadata and the background indexer absorbs the
+  lock wait; searches wait a bounded window for a just-acked add's index
+  job to land, preserving read-your-writes.
+- **Crash consistency**: sparse-index self-heal on open (a tenant with
+  active rows but an empty sparse index is re-indexed through the hybrid
+  path instead of silently degrading to dense-only), segment finalize
+  syncs payload before `meta` (no torn payloads in loadable segments), and
+  WAL checkpoints finalize the active segment first (recovery no longer
+  discards committed rows).
+- **Deterministic ranking**: every ranking sort carries a fixed tie-break,
+  so equal-scored results no longer reorder run-to-run.
+
+### Performance
+
+- **BM25 per-chunk collapse pre-RRF**: BM25 indexes each sentence of a
+  chunk as its own document, so a multi-sentence chunk could occupy several
+  sparse candidate slots and be double-counted by the RRF accumulator.
+  Sparse search now over-fetches and collapses per-sentence hits to
+  distinct chunks at their best rank. Measured on the MemoryData LoCoMo
+  eval (Qwen3-8B, n=600, paired against a same-session control):
+  recall@1 +10.4, recall@5 +3.2, recall@10 +1.5 — all 95%-CI significant —
+  at flat latency.
+
 ## [1.2.1] - 2026-06-30
 
 Retrieval robustness and performance improvements.
