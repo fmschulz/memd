@@ -404,6 +404,7 @@ fn sort_desc(results: &mut [RankedResult]) {
         b.final_score
             .partial_cmp(&a.final_score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.chunk_id.cmp(&b.chunk_id))
     });
 }
 
@@ -619,6 +620,51 @@ mod tests {
             cross_encoder_weight: 0.0,
             ..Default::default()
         }
+    }
+
+    #[test]
+    #[ignore = "enabled by the RRF-normalization change"]
+    fn feature_reranker_bonuses_do_not_dominate_clear_rrf_gaps() {
+        // Raw RRF scores live near weight/(k+rank) with k=60, so a rank-1
+        // both-sources hit (~0.033) and a mid-rank single-source hit
+        // (~0.015) differ by less than any single bonus weight. With
+        // relevance normalized to the candidate-set max, a fresh-but-less-
+        // relevant chunk must NOT outrank a clearly more relevant old one.
+        let reranker = FeatureReranker::default_config();
+        let now_ms = 1_000_000_000_000i64;
+
+        let chunks = vec![
+            ChunkWithMeta {
+                chunk_id: make_chunk_id(1),
+                rrf_score: 0.0328, // top fused candidate
+                timestamp_created: now_ms - (60 * MS_PER_DAY),
+                project_id: None,
+                chunk_type: ChunkType::Doc,
+                text: None,
+            },
+            ChunkWithMeta {
+                chunk_id: make_chunk_id(2),
+                rrf_score: 0.0151, // weaker candidate, freshly ingested
+                timestamp_created: now_ms,
+                project_id: None,
+                chunk_type: ChunkType::Doc,
+                text: None,
+            },
+        ];
+
+        let context = RerankerContext {
+            current_project: None,
+            preferred_types: vec![],
+            now_ms,
+            query_text: None,
+        };
+
+        let results = reranker.rerank(chunks, &context);
+        assert_eq!(
+            results[0].chunk_id,
+            make_chunk_id(1),
+            "recency bonus flipped a 2x relevance gap"
+        );
     }
 
     #[test]

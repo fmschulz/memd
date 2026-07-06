@@ -4040,6 +4040,7 @@ fn merge_scored_chunk_lists(
                     .timestamp_created
                     .cmp(&left_chunk.timestamp_created)
             })
+            .then_with(|| left_chunk.chunk_id.cmp(&right_chunk.chunk_id))
     });
     let mut seen = HashSet::new();
     merged
@@ -5527,6 +5528,7 @@ fn merge_preferred_and_raw(
                     .timestamp_created
                     .cmp(&left_chunk.timestamp_created)
             })
+            .then_with(|| left_chunk.chunk_id.cmp(&right_chunk.chunk_id))
     });
     merged.truncate(limit);
     merged

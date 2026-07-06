@@ -183,6 +183,7 @@ pub(crate) fn rank_candidate_chunks(
                     .timestamp_created
                     .cmp(&left_chunk.timestamp_created)
             })
+            .then_with(|| left_chunk.chunk_id.cmp(&right_chunk.chunk_id))
     });
     if !query.trim().is_empty() {
         scored.retain(|(_, score)| *score > 0.0);
