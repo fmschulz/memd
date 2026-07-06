@@ -148,26 +148,27 @@ impl SegmentWriter {
     /// # Returns
     /// The finalized SegmentMeta
     pub fn finalize(mut self) -> Result<SegmentMeta> {
-        // Write index file first (before moving payload_writer)
-        self.write_index_file()?;
-
-        // Update metadata
-        self.meta.chunk_count = self.index_records.len() as u32;
-        self.meta.finalized = true;
-        self.write_meta_file()?;
-
-        // Flush and sync payload file
+        // Durability order matters: the `meta` file is the load trigger
+        // (`load_segments` only loads directories that have one), so it
+        // must be the LAST thing made durable. Syncing `meta` before the
+        // payload leaves a crash window where the segment loads but its
+        // payload tail is torn — active metadata rows that can never be
+        // read again.
         self.payload_writer
             .flush()
             .map_err(|e| MemdError::StorageError(format!("failed to flush payload: {}", e)))?;
-
-        let payload_file = self.payload_writer.into_inner().map_err(|e| {
-            MemdError::StorageError(format!("failed to get payload file: {}", e.error()))
-        })?;
-
-        payload_file
+        self.payload_writer
+            .get_ref()
             .sync_all()
             .map_err(|e| MemdError::StorageError(format!("failed to sync payload: {}", e)))?;
+
+        self.write_index_file()?;
+
+        // Update metadata — written and synced only after payload + idx
+        // are durable.
+        self.meta.chunk_count = self.index_records.len() as u32;
+        self.meta.finalized = true;
+        self.write_meta_file()?;
 
         // Sync parent directory (ensures directory entry is persisted)
         Self::sync_directory_path(&self.dir)?;

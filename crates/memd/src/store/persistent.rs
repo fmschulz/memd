@@ -761,6 +761,22 @@ impl PersistentStore {
         if !store.config.read_only && store.config.backfill_canonical_text_on_startup {
             store.spawn_startup_canonical_backfill();
         }
+        // Sparse self-heal trigger. Unlike the opt-in HNSW startup
+        // backfill, this check is cheap (one doc-count query per tenant)
+        // and only schedules the shared single-flight repair when a
+        // tenant is actually degraded: active metadata rows but an empty
+        // sparse index — the state a crash leaves behind after the
+        // tantivy directory is lost, which would otherwise silently
+        // downgrade hybrid search to dense-only forever.
+        if !store.config.read_only
+            && sparse_self_heal_enabled()
+            && store.any_tenant_sparse_cold()
+        {
+            warn!(
+                "sparse index empty for tenant(s) with active chunks — scheduling rebuild"
+            );
+            store.spawn_startup_hnsw_backfill();
+        }
 
         Ok(store)
     }
@@ -902,6 +918,36 @@ impl PersistentStore {
             self.tenants.as_ref(),
         )
         .await
+    }
+
+    /// True when any tenant has active metadata rows but an empty sparse
+    /// index — the degraded state left behind when the tantivy directory
+    /// is lost and silently recreated empty on open.
+    fn any_tenant_sparse_cold(&self) -> bool {
+        let Some(sparse) = self
+            .hybrid_searcher
+            .as_ref()
+            .and_then(|h| h.sparse_index())
+        else {
+            return false;
+        };
+        let tenant_strs: Vec<String> = self.tenants.read().keys().cloned().collect();
+        for tenant_str in tenant_strs {
+            let Ok(tenant_id) = TenantId::new(&tenant_str) else {
+                continue;
+            };
+            let has_active = self
+                .metadata
+                .list(&tenant_id, 1, 0)
+                .map(|rows| !rows.is_empty())
+                .unwrap_or(false);
+            // Treat a doc-count error as "not cold" so a broken index
+            // cannot trigger repair loops.
+            if has_active && sparse.doc_count(&tenant_id).unwrap_or(1) == 0 {
+                return true;
+            }
+        }
+        false
     }
 
     /// Populate `canonical_text` for any chunk row whose value is NULL.
@@ -2927,6 +2973,17 @@ fn load_chunk_text_for_index(
     Ok(None)
 }
 
+/// Sparse self-heal is on by default; `MEMD_SPARSE_SELF_HEAL=0` (or
+/// false/no/off) disables the startup degradation check.
+fn sparse_self_heal_enabled() -> bool {
+    std::env::var("MEMD_SPARSE_SELF_HEAL")
+        .map(|v| {
+            let normalized = v.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(true)
+}
+
 async fn run_hnsw_backfill(
     dense_searcher: Option<&Arc<DenseSearcher>>,
     hybrid_searcher: Option<&Arc<HybridSearcher>>,
@@ -2996,10 +3053,32 @@ async fn run_hnsw_backfill(
             .chunks_missing_embeddings(&tenant_id, &all_ids)
             .into_iter()
             .collect();
-        let missing: Vec<_> = metas
-            .into_iter()
-            .filter(|m| missing_ids.contains(&m.chunk_id))
-            .collect();
+
+        // Sparse self-heal: a crash (for example a warm worker killed
+        // mid-repair) can leave the tantivy directory missing while
+        // metadata rows stay active; reopening recreates the index EMPTY
+        // and hybrid search silently serves dense-only from then on. When
+        // a tenant has active chunks but zero sparse docs, re-index the
+        // whole tenant through the hybrid path, which rebuilds both index
+        // sides. Dense-side cost is bounded by the embedding cache.
+        let sparse_cold = hybrid_searcher
+            .and_then(|h| h.sparse_index())
+            .map(|s| s.doc_count(&tenant_id).unwrap_or(1) == 0)
+            .unwrap_or(false);
+
+        let missing: Vec<_> = if sparse_cold {
+            info!(
+                tenant_id = %tenant_id,
+                active_chunks = metas.len(),
+                "sparse index empty for tenant with active chunks — rebuilding both index sides"
+            );
+            metas
+        } else {
+            metas
+                .into_iter()
+                .filter(|m| missing_ids.contains(&m.chunk_id))
+                .collect()
+        };
 
         if missing.is_empty() {
             continue;
@@ -3072,6 +3151,21 @@ async fn run_hnsw_backfill(
                 had_batch_failure = tenant_had_batch_failure,
                 "HNSW backfill complete for tenant"
             );
+            // A sparse rebuild is durable only after a tantivy commit; the
+            // normal write path commits lazily (shutdown / maintenance),
+            // which is exactly what a crash bypasses. Commit eagerly so a
+            // healed index survives another kill.
+            if sparse_cold {
+                if let Some(sparse) = hybrid_searcher.and_then(|h| h.sparse_index()) {
+                    if let Err(e) = sparse.commit() {
+                        warn!(
+                            tenant_id = %tenant_id,
+                            error = %e,
+                            "failed to commit rebuilt sparse index"
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -3309,6 +3403,15 @@ impl PersistentStore {
         if checkpoints == 0 {
             return Ok(());
         }
+
+        // A checkpoint asserts "every record at or before me is durable in
+        // finalized segments": recovery drops those records and then
+        // truncates the WAL. Appending one while the active segment is
+        // still unfinalized would discard the only durable copy of those
+        // adds on the next open (the unfinalized segment has no `meta`
+        // file, so `load_segments` skips it). Finalize first so the
+        // checkpoint's claim is true before it is written.
+        tenant.finalize_active_segment()?;
 
         let timestamp = current_time_ms();
         for _ in 0..checkpoints {
@@ -6101,5 +6204,69 @@ mod tests {
              an unfinalized recovery segment would have lost it"
         );
         assert_eq!(recovered.unwrap().text, "durability sentinel");
+    }
+
+    #[tokio::test]
+    async fn sparse_backfill_rebuilds_empty_index_for_active_tenant() {
+        // The degraded state a crash leaves behind: active metadata rows
+        // and payloads on disk, but an empty sparse index (the tantivy
+        // directory was lost and silently recreated empty on open). The
+        // backfill must detect the cold sparse side and rebuild it from
+        // surviving payloads.
+        let (mut store, dir) = make_test_store();
+        let tenant = make_tenant();
+
+        for text in [
+            "the zanzibar expedition left in june",
+            "unrelated second memory about compilers",
+            "a third note mentioning harbor logistics",
+        ] {
+            let chunk = MemoryChunk::new(tenant.clone(), text.to_string(), ChunkType::Doc);
+            store.add(chunk).await.unwrap();
+        }
+
+        // Inject searchers AFTER the writes so nothing was sparse-indexed
+        // at add time — the same observable state as a lost tantivy dir.
+        let sparse =
+            Arc::new(Bm25Index::with_path(Some(dir.path().join("sparse_index"))).unwrap());
+        let embedder = Arc::new(MockEmbedder::new());
+        let dense = Arc::new(DenseSearcher::with_embedder(
+            embedder,
+            DenseSearchConfig {
+                persist: false,
+                ..Default::default()
+            },
+        ));
+        let hybrid = HybridSearcher::new(
+            dense.clone(),
+            Some(sparse.clone()),
+            HybridConfig {
+                enable_tiered: false,
+                reranker: RerankerConfig {
+                    mode: RerankerMode::Feature,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        store.dense_searcher = Some(dense);
+        store.hybrid_searcher = Some(Arc::new(hybrid));
+
+        assert_eq!(sparse.doc_count(&tenant).unwrap(), 0);
+        assert!(
+            store.any_tenant_sparse_cold(),
+            "active rows + empty sparse index must register as cold"
+        );
+
+        let stats = store.backfill_hnsw_for_cold_tenants().await.unwrap();
+        assert_eq!(stats.chunks_indexed, 3);
+
+        assert_eq!(sparse.doc_count(&tenant).unwrap(), 3);
+        assert!(!store.any_tenant_sparse_cold());
+        let hits = sparse.search(&tenant, "zanzibar", 5).unwrap();
+        assert!(
+            !hits.is_empty(),
+            "rebuilt sparse index must serve lexical hits"
+        );
     }
 }

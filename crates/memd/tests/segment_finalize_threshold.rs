@@ -185,3 +185,48 @@ async fn checkpoint_enabled_forces_finalize_even_below_threshold() {
          to avoid data loss; expected at least 1 finalized segment, got {finalized}"
     );
 }
+
+#[tokio::test]
+async fn checkpoint_finalizes_active_segment_immediately() {
+    // A WAL checkpoint claims "everything before me is durable in
+    // finalized segments" — recovery drops those records and truncates
+    // the WAL. If the checkpoint is appended while the active segment is
+    // still unfinalized (no `meta` file), a crash before shutdown loses
+    // the only durable copy of those adds. The checkpoint path must
+    // therefore finalize BEFORE appending, not rely on graceful
+    // shutdown to do it later.
+    let tmp = tempdir().unwrap();
+    let config = PersistentStoreConfig {
+        data_dir: tmp.path().to_path_buf(),
+        enable_dense_search: false,
+        enable_hybrid_search: false,
+        backfill_hnsw_on_startup: false,
+        backfill_canonical_text_on_startup: false,
+        segment_max_chunks: 10_000,
+        min_finalize_chunks: 1_000_000,
+        wal_checkpoint_interval: 1,
+        ..Default::default()
+    };
+    let store = Arc::new(PersistentStore::open(config).expect("persistent store"));
+    let tenant = TenantId::new("t5".to_string()).unwrap();
+
+    let chunk = MemoryChunk::new(tenant.clone(), "checkpointed".to_string(), ChunkType::Doc);
+    store.add(chunk).await.unwrap();
+
+    // No shutdown: the checkpoint written by the add itself must have
+    // sealed the segment (meta file present) at this point.
+    let seg_dir = tmp.path().join("tenants").join("t5").join("segments");
+    let mut finalized = 0;
+    if seg_dir.exists() {
+        for entry in std::fs::read_dir(&seg_dir).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().join("meta").exists() {
+                finalized += 1;
+            }
+        }
+    }
+    assert!(
+        finalized >= 1,
+        "a written checkpoint requires an already-finalized segment; got {finalized}"
+    );
+}
