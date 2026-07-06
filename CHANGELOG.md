@@ -6,6 +6,32 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-07-06
+
+Fixes a 1.3.0 regression in warm-worker write acknowledgements.
+
+### Fixed
+
+- **Write acks imply searchability again**: 1.3.0 defaulted the warm worker
+  to async indexing, which acknowledged `memory.add` / `add_batch` before
+  the chunks were indexed — a bulk load followed by immediate searches read
+  a partially built index (BEIR fiqa+scidocs paired nDCG@10 0.42 → 0.26;
+  caught by the retrieval gate on the release push). Adds now hold their
+  acknowledgement until the background index job completes. The await
+  yields, so the worker's event loop, ping, and concurrent commands stay
+  live while the indexer works — 1.3.0's availability properties are
+  preserved. The search-side read-your-writes wait this replaces is
+  removed.
+- **Cold-path searches wait again**: the bounded search-lock / busy-reply
+  behavior is now scoped to warm-worker processes. Single-shot CLI searches
+  racing an in-process repair wait for the lock, as before 1.3.0, instead
+  of failing with `memd:dense-index-busy`.
+
+With correct acknowledgements, the 1.3.0 retrieval improvements measure
+above the pre-1.3.0 baseline on the document-retrieval gate as well:
+fiqa nDCG@10 0.497 → 0.709 (Recall@10 0.882 → 0.941), scidocs nDCG@10
+0.373 → 0.453.
+
 ## [1.3.0] - 2026-07-06
 
 Retrieval recall, bi-temporal memory, and warm-worker availability.
