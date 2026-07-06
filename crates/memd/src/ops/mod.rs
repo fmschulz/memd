@@ -223,6 +223,14 @@ pub struct SearchParams {
     /// `expanded_siblings`. The ranked hit list itself is unchanged.
     #[serde(default)]
     pub expand_event_siblings: bool,
+    /// Collapse ranked results that share a `source.uri`, keeping only the
+    /// best-ranked chunk per source before the final trim to `k`. Large
+    /// documents are stored as several chunks that all carry the parent
+    /// URI; without collapsing, fragments of one document can crowd the
+    /// top-k while other relevant sources never surface. Chunks without a
+    /// source URI are never collapsed.
+    #[serde(default)]
+    pub dedupe_by_source: bool,
     /// Opt into a smaller response shape. Full mode remains the default.
     #[serde(default)]
     pub compact: bool,
@@ -264,6 +272,7 @@ impl Default for SearchParams {
             include_history: None,
             oversample_factor: None,
             expand_event_siblings: false,
+            dedupe_by_source: false,
             compact: false,
             token_budget: None,
             include_text: None,
@@ -5501,6 +5510,25 @@ fn suppress_generated_digest_projection_chunks(
         .collect()
 }
 
+/// Collapse ranked chunks that share a `source.uri` to the best-ranked one.
+///
+/// Large documents are stored as several chunks that all carry the parent
+/// URI; without collapsing, fragments of one document crowd the top-k while
+/// other relevant sources never surface. Input must already be sorted best
+/// first (it is: callers pass the merged, score-sorted candidate list), so
+/// keeping the first occurrence keeps the best. Chunks without a source URI
+/// are never collapsed.
+fn dedupe_scored_chunks_by_source_uri(scored: Vec<(MemoryChunk, f32)>) -> Vec<(MemoryChunk, f32)> {
+    let mut seen = HashSet::new();
+    scored
+        .into_iter()
+        .filter(|(chunk, _)| match chunk.source.uri.as_deref() {
+            Some(uri) if !uri.is_empty() => seen.insert(uri.to_string()),
+            _ => true,
+        })
+        .collect()
+}
+
 fn merge_preferred_and_raw(
     preferred: Vec<(MemoryChunk, f32)>,
     raw: Vec<(MemoryChunk, f32)>,
@@ -5779,6 +5807,15 @@ pub async fn handle_memory_search<S: Store>(
             scored_chunks = suppress_generated_digest_projection_chunks(scored_chunks);
         }
 
+        // Optional source-level collapse before the final trim: operate on
+        // the oversampled candidate list so distinct sources refill the
+        // freed slots.
+        let scored_chunks = if params.dedupe_by_source {
+            dedupe_scored_chunks_by_source_uri(scored_chunks)
+        } else {
+            scored_chunks
+        };
+
         // Apply lifecycle visibility filter with oversample-and-refill to
         // trim from `pre_visibility_cap` down to `params.k`, hiding
         // Superseded/Expired/History rows unless the caller opted in.
@@ -5924,6 +5961,14 @@ pub async fn handle_memory_search<S: Store>(
     if mode == QueryMode::Generic {
         scored_chunks = suppress_generated_digest_projection_chunks(scored_chunks);
     }
+
+    // Optional source-level collapse before the final trim (matching the
+    // tier-debug branch above).
+    let scored_chunks = if params.dedupe_by_source {
+        dedupe_scored_chunks_by_source_uri(scored_chunks)
+    } else {
+        scored_chunks
+    };
 
     // Apply lifecycle visibility filter with oversample-and-refill
     // (standard path, no tier-debug). This is the matching call site to
@@ -10861,6 +10906,7 @@ mod tests {
             include_text: None,
             include_artifact: None,
             suppress_usage_event: false,
+            ..Default::default()
         };
 
         let result = handle_memory_search(&store, params).await.unwrap();
@@ -10892,6 +10938,7 @@ mod tests {
             include_text: None,
             include_artifact: None,
             suppress_usage_event: false,
+            ..Default::default()
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -10920,6 +10967,7 @@ mod tests {
             include_text: None,
             include_artifact: None,
             suppress_usage_event: false,
+            ..Default::default()
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -11038,6 +11086,7 @@ mod tests {
             include_text: None,
             include_artifact: None,
             suppress_usage_event: false,
+            ..Default::default()
         };
 
         let search_result = handle_memory_search(&store, search_params).await.unwrap();
@@ -11628,6 +11677,7 @@ mod tests {
                 include_text: None,
                 include_artifact: None,
                 suppress_usage_event: false,
+                ..Default::default()
             },
         )
         .await
@@ -11694,6 +11744,7 @@ mod tests {
                 include_text: None,
                 include_artifact: None,
                 suppress_usage_event: false,
+                ..Default::default()
             },
         )
         .await
@@ -11755,6 +11806,7 @@ mod tests {
                 include_text: None,
                 include_artifact: None,
                 suppress_usage_event: false,
+                ..Default::default()
             },
         )
         .await
@@ -11836,6 +11888,7 @@ mod tests {
                 include_text: None,
                 include_artifact: None,
                 suppress_usage_event: false,
+                ..Default::default()
             },
         )
         .await
@@ -11907,6 +11960,7 @@ mod tests {
                 include_text: None,
                 include_artifact: None,
                 suppress_usage_event: false,
+                ..Default::default()
             },
         )
         .await
@@ -11976,6 +12030,7 @@ mod tests {
                 include_text: None,
                 include_artifact: None,
                 suppress_usage_event: false,
+                ..Default::default()
             },
         )
         .await
@@ -12365,6 +12420,7 @@ mod tests {
             include_text: None,
             include_artifact: None,
             suppress_usage_event: false,
+            ..Default::default()
         };
 
         let result = handle_memory_search(&store, params).await;
@@ -12454,6 +12510,7 @@ mod tests {
             include_text: None,
             include_artifact: None,
             suppress_usage_event: false,
+            ..Default::default()
         };
 
         let result = handle_memory_search(&store, search_params).await.unwrap();
@@ -12503,6 +12560,7 @@ mod tests {
             include_text: None,
             include_artifact: None,
             suppress_usage_event: false,
+            ..Default::default()
         };
 
         let result = handle_memory_search(&store, search_params).await.unwrap();
@@ -13312,6 +13370,7 @@ mod tests {
                 include_text: None,
                 include_artifact: None,
                 suppress_usage_event: false,
+                ..Default::default()
             },
         )
         .await
@@ -13462,6 +13521,31 @@ mod tests {
 
         assert_eq!(merged[0].0.chunk_id, raw.chunk_id);
         assert_eq!(merged[0].1, 20.0);
+    }
+
+    #[test]
+    fn dedupe_by_source_uri_keeps_best_ranked_per_source() {
+        let tenant = TenantId::new("memd").unwrap();
+        let mk = |uri: Option<&str>, text: &str| {
+            let mut chunk = MemoryChunk::new(tenant.clone(), text, ChunkType::Doc);
+            chunk.source.uri = uri.map(str::to_string);
+            chunk
+        };
+        // Sorted best-first, as the call sites guarantee.
+        let scored = vec![
+            (mk(Some("doc:a"), "a fragment 1"), 0.9),
+            (mk(Some("doc:a"), "a fragment 2"), 0.8),
+            (mk(None, "no uri kept"), 0.7),
+            (mk(Some("doc:b"), "b fragment"), 0.6),
+            (mk(None, "no uri also kept"), 0.5),
+        ];
+
+        let out = dedupe_scored_chunks_by_source_uri(scored);
+
+        let scores: Vec<f32> = out.iter().map(|(_, s)| *s).collect();
+        assert_eq!(scores, vec![0.9, 0.7, 0.6, 0.5]);
+        assert_eq!(out[0].0.source.uri.as_deref(), Some("doc:a"));
+        assert_eq!(out[2].0.source.uri.as_deref(), Some("doc:b"));
     }
 
     #[tokio::test]
@@ -14076,6 +14160,7 @@ mod tests {
                 include_text: None,
                 include_artifact: None,
                 suppress_usage_event: false,
+                ..Default::default()
             },
         )
         .await
@@ -14161,6 +14246,7 @@ mod tests {
                 include_text: None,
                 include_artifact: None,
                 suppress_usage_event: false,
+                ..Default::default()
             },
         )
         .await

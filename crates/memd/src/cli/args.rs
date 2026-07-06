@@ -192,6 +192,11 @@ pub enum CliCommand {
         #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
         compact: bool,
 
+        /// Collapse results sharing a source URI to the best-ranked one, so
+        /// fragments of one document don't crowd out other relevant sources
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        dedupe_by_source: bool,
+
         /// Approximate result token budget; also enables compact shaping
         #[arg(long)]
         token_budget: Option<usize>,

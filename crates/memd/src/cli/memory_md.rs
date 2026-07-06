@@ -1355,6 +1355,7 @@ async fn collect_ranked_takeaways_with_explanations<S: Store>(
             (*query).to_string(),
             candidate_k,
             false,
+            false,
             None,
             *mode,
             false,
