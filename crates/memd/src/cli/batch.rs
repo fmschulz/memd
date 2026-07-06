@@ -79,14 +79,17 @@ pub(super) async fn run_batch_jsonl<S: Store>(
             continue;
         }
 
+        let started = std::time::Instant::now();
         match cli_call_tool(store, tenant_manager, &request.tool, arguments).await {
             Ok(value) => {
+                let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
                 let payload = unwrap_content_payload(value.clone()).unwrap_or(value);
                 let row = json!({
                     "ok": true,
                     "index": index,
                     "line": line_number + 1,
                     "tool": request.tool,
+                    "elapsed_ms": elapsed_ms,
                     "result": payload,
                 });
                 out.push_str(&serde_json::to_string(&row)?);
@@ -96,11 +99,13 @@ pub(super) async fn run_batch_jsonl<S: Store>(
                 if !continue_on_error {
                     return Err(MemdError::ProtocolError(error.to_string()));
                 }
+                let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
                 let row = json!({
                     "ok": false,
                     "index": index,
                     "line": line_number + 1,
                     "tool": request.tool,
+                    "elapsed_ms": elapsed_ms,
                     "error": error.to_string(),
                 });
                 out.push_str(&serde_json::to_string(&row)?);
