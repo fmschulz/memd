@@ -7,6 +7,29 @@ is the public headline; the [BEIR offline gate](#offline-retrieval-gate-beir)
 is the per-PR regression tripwire; the others are internal-corpus or scoped
 checks.
 
+## Repo-local harness (2026-07 protocol)
+
+A self-contained, fetch-on-run LoCoMo harness now lives at
+[`benchmarks/locomo/`](../benchmarks/locomo/README.md). Its numbers use a
+**different protocol** from the historical tables below (per-conversation
+search scope, a pinned local answer model, upstream token-F1 metrics) and are
+**not comparable** to them; within the new harness every comparison is
+same-machine, same-model, same-split, with paired bootstrap CIs.
+
+Headline result (10 conversations, 5,882 turns; answer quality over all
+1,531 category 1-4 questions, k=20 retrieved turns, zero failed rows):
+
+| configuration | F1 | EM | evidence R@10 | MRR@10 | search p50 |
+|---|---:|---:|---:|---:|---:|
+| turns stored plain | 42.48 | 23.71 | 60.33 | 0.4511 | 33 ms |
+| + event time rendered at recall | **50.41** | **29.26** | 60.33 | 0.4511 | 33 ms |
+
+Rendering each memory's event time as metadata when building answer context
+(rather than embedding dates into the indexed text, which costs -1.5% MRR@10)
+raises answer F1 by **+7.9 points** (95% CI [6.6, 9.4]) — temporal questions
+go from F1 13.5 to 49.3. Storing time in the text itself was measured and
+rejected; the harness README documents both arms.
+
 ## Quick runs
 
 ```bash
@@ -78,6 +101,8 @@ excludes fresh indexing and reuses the already-built store.
 - [Multi-turn token benchmark](https://github.com/fmschulz/memd/tree/main/evals/bench/memd-multiturn-token-savings)
 
 ## Cross-system retrieval (LoCoMo)
+||||||| parent of 1e04a3f (docs(bench): add repo-local harness results section (new protocol, marked non-comparable))
+## Cross-system retrieval
 
 Direct retrieval benchmark on upstream
 [`locomo10.json`](https://github.com/snap-stanford/locomo): each system is
