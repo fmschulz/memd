@@ -232,6 +232,8 @@ async fn main() {
             // retries make herd losers linger and steal the flock after
             // `memd warm stop`.
             store_config.writer_lock_timeout_cap = Some(Duration::from_millis(2_000));
+            let async_indexing_env = std::env::var("MEMD_ASYNC_INDEXING").ok();
+            store_config.apply_warm_worker_availability_defaults(async_indexing_env.as_deref());
         }
         match PersistentStore::open(store_config) {
             Ok(store) => {
