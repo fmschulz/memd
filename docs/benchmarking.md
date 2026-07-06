@@ -23,6 +23,11 @@ Headline result (10 conversations, 5,882 turns; answer quality over all
 |---|---:|---:|---:|---:|---:|
 | turns stored plain | 42.48 | 23.71 | 60.33 | 0.4511 | 33 ms |
 | + event time rendered at recall | **50.41** | **29.26** | 60.33 | 0.4511 | 33 ms |
+| superlocalmemory v3.6.22 (lexical), same harness | 46.39 | 26.58 | 54.40 | 0.3862 | 1,085 ms |
+
+Against the same-harness reference (identical questions, answer model,
+prompt, and date rendering), memd leads on every metric — paired F1 delta
++4.01 points (95% CI [2.39, 5.66]) — while serving retrieval ~33x faster.
 
 Rendering each memory's event time as metadata when building answer context
 (rather than embedding dates into the indexed text, which costs -1.5% MRR@10)
