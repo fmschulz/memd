@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anndists::dist::distances::DistCosine;
 use hnsw_rs::api::AnnT;
@@ -18,6 +19,16 @@ use crate::compaction::hnsw_rebuild::{HnswRebuilder, RebuildResult};
 use crate::error::{MemdError, Result};
 use crate::index::embedding_cache::EmbeddingCache;
 use crate::types::ChunkId;
+
+/// Longest a search waits for the index read locks before failing with
+/// [`MemdError::IndexBusy`]. Ordinary insert holds are micro/millisecond
+/// scale, so 50ms is still an order of magnitude of headroom — while
+/// keeping the worst-case stall small: `try_read_for` parks the calling
+/// thread, and in the warm worker that thread runs the event loop, so
+/// concurrent contended searches serialize their parks (bounded by this
+/// budget x 2 locks x in-flight commands, versus the former unbounded
+/// park until the writer finished).
+const SEARCH_LOCK_BUDGET: Duration = Duration::from_millis(50);
 
 /// Configuration for HNSW index
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -323,9 +334,28 @@ impl HnswIndex {
         }
 
         // Lock in same order as insert: mapping first, then hnsw
-        // This prevents deadlock when insert and search run concurrently
-        let mapping = self.mapping.read();
-        let hnsw = self.hnsw.read();
+        // This prevents deadlock when insert and search run concurrently.
+        //
+        // Bounded waits: a bulk insert holds the hnsw write lock for the
+        // duration of its batch — minutes for a large `insert_batch`. An
+        // unbounded read() here parks the calling thread for that long; in
+        // the warm worker that thread runs the accept loop, so one blocked
+        // search froze every request (including ping) until the client's
+        // 30s timeout. Failing with IndexBusy after a short bounded park
+        // keeps the worker responsive and lets clients fall back to the
+        // cold read path.
+        let mapping = self
+            .mapping
+            .try_read_for(SEARCH_LOCK_BUDGET)
+            .ok_or_else(|| MemdError::IndexBusy {
+                reason: "a writer holds the dense index mapping lock".to_string(),
+            })?;
+        let hnsw =
+            self.hnsw
+                .try_read_for(SEARCH_LOCK_BUDGET)
+                .ok_or_else(|| MemdError::IndexBusy {
+                    reason: "an index repair or bulk insert holds the dense index lock".to_string(),
+                })?;
 
         let neighbors: Vec<Neighbour> = hnsw.search(query_embedding, k, self.config.ef_search);
 
@@ -879,6 +909,36 @@ mod tests {
                 *x /= norm;
             }
         }
+    }
+
+    #[test]
+    fn search_fails_busy_while_writer_holds_index_lock() {
+        let config = HnswConfig {
+            max_elements: 100,
+            dimension: 4,
+            ..Default::default()
+        };
+        let index = HnswIndex::new(config);
+        let mut emb = vec![1.0, 0.0, 0.0, 0.0];
+        normalize(&mut emb);
+        index.insert(&ChunkId::new(), &emb).unwrap();
+
+        // Simulate a long-running repair: hold the hnsw write lock across
+        // the search. The search must fail busy within the bounded budget
+        // instead of parking until the writer releases.
+        let _writer = index.hnsw.write();
+        let start = std::time::Instant::now();
+        let result = index.search(&emb, 5);
+        let waited = start.elapsed();
+
+        match result {
+            Err(MemdError::IndexBusy { .. }) => {}
+            other => panic!("expected IndexBusy, got {other:?}"),
+        }
+        assert!(
+            waited < Duration::from_secs(5),
+            "busy classification must be prompt, waited {waited:?}"
+        );
     }
 
     #[test]

@@ -142,6 +142,13 @@ struct WarmWireResponse {
     result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// The command failed only because the store's dense index was busy
+    /// (repair/bulk insert holding its lock). Clients treat this like a
+    /// momentarily unavailable worker: reads fall back to the cold path
+    /// immediately instead of surfacing an error. `default` keeps the wire
+    /// compatible with workers and clients that predate the field.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    busy: bool,
 }
 
 impl WarmWireResponse {
@@ -152,6 +159,7 @@ impl WarmWireResponse {
             log_payload: None,
             result: Some(result),
             error: None,
+            busy: false,
         }
     }
 
@@ -162,6 +170,7 @@ impl WarmWireResponse {
             log_payload,
             result: None,
             error: None,
+            busy: false,
         }
     }
 
@@ -172,6 +181,25 @@ impl WarmWireResponse {
             log_payload: None,
             result: None,
             error: Some(error.to_string()),
+            busy: false,
+        }
+    }
+
+    /// Failure response for a command that hit a busy dense index.
+    fn busy_error(error: impl ToString) -> Self {
+        Self {
+            busy: true,
+            ..Self::error(error)
+        }
+    }
+
+    /// Classify a command failure: busy-marked errors become busy replies.
+    fn for_command_error(error: &MemdError) -> Self {
+        let message = error.to_string();
+        if MemdError::message_indicates_index_busy(&message) {
+            Self::busy_error(message)
+        } else {
+            Self::error(message)
         }
     }
 }
@@ -847,6 +875,23 @@ pub async fn try_run_warm_client(config: &WarmProcessConfig, cmd: &CliCommand) -
         }
         Err(error) => return Err(error),
     };
+    // A busy reply means the worker is healthy but a repair/bulk insert
+    // holds its dense index lock. Auto-mode reads fall back to the cold
+    // path immediately — it opens the last persisted state read-only and
+    // shares no in-process lock with the worker. Note the fallback is not
+    // read-your-writes-preserving: the persisted snapshot may predate a
+    // just-acked add (best-effort, matches degraded-mode semantics).
+    // Writes (and required mode) surface the busy error verbatim; it
+    // already advises retrying.
+    if !response.ok && response.busy {
+        if mode == WarmMode::Auto && cmd.store_access() == StoreAccess::ReadOnly {
+            warn!("warm worker busy (index repair in flight); falling back to cold read path");
+            return Ok(false);
+        }
+        return Err(MemdError::ProtocolError(response.error.unwrap_or_else(
+            || "warm worker busy: dense index repair in flight; retry shortly".to_string(),
+        )));
+    }
     if !response.ok {
         return Err(MemdError::ProtocolError(
             response
@@ -1618,7 +1663,7 @@ async fn handle_warm_connection<S: Store>(
             let _ = store.probe_external_mutation().await;
             let response = match execute_warm_wire_command(store, tenant_manager, command).await {
                 Ok((output, log_payload)) => WarmWireResponse::ok_output(output, log_payload),
-                Err(error) => WarmWireResponse::error(error),
+                Err(error) => WarmWireResponse::for_command_error(&error),
             };
             drop(permit);
             response
@@ -1712,6 +1757,118 @@ mod tests {
                 other => panic!("unexpected warm request in test: {other:?}"),
             }
         }
+    }
+
+    #[cfg(unix)]
+    async fn serve_ping_then_busy_on_command(socket: PathBuf) {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::UnixListener;
+
+        if let Some(parent) = socket.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap();
+
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).await.unwrap();
+            match serde_json::from_slice::<WarmWireRequest>(&bytes).unwrap() {
+                WarmWireRequest::Ping => {
+                    let response = WarmWireResponse::ok_result(warm_worker_identity(&socket, None));
+                    assert!(write_warm_response(&mut stream, response).await);
+                }
+                WarmWireRequest::Command { .. } => {
+                    let response = WarmWireResponse::for_command_error(&MemdError::IndexBusy {
+                        reason: "test repair holds the index lock".to_string(),
+                    });
+                    assert!(write_warm_response(&mut stream, response).await);
+                }
+                other => panic!("unexpected warm request in test: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn warm_wire_response_busy_field_is_wire_compatible() {
+        // Responses from workers that predate the field deserialize busy=false.
+        let legacy: WarmWireResponse =
+            serde_json::from_str(r#"{"ok":false,"error":"boom"}"#).unwrap();
+        assert!(!legacy.busy);
+
+        // Busy replies round-trip, and non-busy errors omit the field so old
+        // clients see the exact shape they always did.
+        let busy_json = serde_json::to_string(&WarmWireResponse::busy_error("busy")).unwrap();
+        assert!(busy_json.contains("\"busy\":true"));
+        let plain_json = serde_json::to_string(&WarmWireResponse::error("boom")).unwrap();
+        assert!(!plain_json.contains("busy"));
+    }
+
+    #[test]
+    fn command_errors_classify_busy_by_marker() {
+        let busy = WarmWireResponse::for_command_error(&MemdError::IndexBusy {
+            reason: "repair in flight".to_string(),
+        });
+        assert!(busy.busy);
+        assert!(!busy.ok);
+
+        // The marker survives a stringly re-wrap by an intermediate layer.
+        let wrapped = WarmWireResponse::for_command_error(&MemdError::ProtocolError(format!(
+            "command failed: {}",
+            MemdError::IndexBusy {
+                reason: "repair".to_string()
+            }
+        )));
+        assert!(wrapped.busy);
+
+        let plain =
+            WarmWireResponse::for_command_error(&MemdError::StorageError("disk full".to_string()));
+        assert!(!plain.busy);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_read_only_command_busy_falls_back_instantly() {
+        let dir = tempdir().unwrap();
+        let config = test_warm_config(dir.path().join("data"));
+        let socket = warm_socket_path(&config);
+        let server = tokio::spawn(serve_ping_then_busy_on_command(socket));
+
+        let start = Instant::now();
+        let result = try_run_warm_client(&config, &search_command(false, WarmMode::Auto))
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+
+        server.abort();
+        // Cold fallback requested (Ok(false)) without waiting out any
+        // client timeout — the busy reply itself is immediate.
+        assert!(!result);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "busy fallback must not wait for timeouts, took {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_write_command_busy_surfaces_clear_error() {
+        let dir = tempdir().unwrap();
+        let config = test_warm_config(dir.path().join("data"));
+        let socket = warm_socket_path(&config);
+        let server = tokio::spawn(serve_ping_then_busy_on_command(socket));
+
+        let error = try_run_warm_client(&config, &add_command(WarmMode::Auto))
+            .await
+            .unwrap_err();
+
+        server.abort();
+        let message = error.to_string();
+        assert!(
+            MemdError::message_indicates_index_busy(&message),
+            "write busy error must carry the busy marker: {message}"
+        );
     }
 
     #[test]

@@ -20,6 +20,18 @@ pub enum MemdError {
     #[error("storage error: {0}")]
     StorageError(String),
 
+    /// The dense index is momentarily unavailable because a writer (index
+    /// repair or bulk insert) holds its lock. Callers should retry shortly
+    /// or fall back to a degraded path rather than block behind the writer.
+    /// The display text starts with [`MemdError::INDEX_BUSY_MARKER`] so the
+    /// condition stays classifiable after crossing stringifying error
+    /// boundaries (ops `McpError` -> CLI -> warm wire).
+    #[error("{}: {reason}; retry shortly", MemdError::INDEX_BUSY_MARKER)]
+    IndexBusy {
+        /// What held the index lock.
+        reason: String,
+    },
+
     /// Operation protocol errors.
     #[error("protocol error: {0}")]
     ProtocolError(String),
@@ -89,6 +101,23 @@ impl From<candle_core::Error> for MemdError {
     }
 }
 
+impl MemdError {
+    /// Stable prefix of [`MemdError::IndexBusy`]'s display text. The ops and
+    /// CLI layers stringify errors between enums, so the warm worker and its
+    /// clients classify busy-ness by this marker rather than by variant.
+    /// Deliberately a code-like token: error messages can embed
+    /// user-controlled text (chunk bodies, echoed fields), and prose like
+    /// "dense index busy" could collide; `memd:dense-index-busy` cannot
+    /// plausibly appear in natural content.
+    pub const INDEX_BUSY_MARKER: &'static str = "memd:dense-index-busy";
+
+    /// True when an error message (possibly wrapped by other layers)
+    /// originated from [`MemdError::IndexBusy`].
+    pub fn message_indicates_index_busy(message: &str) -> bool {
+        message.contains(Self::INDEX_BUSY_MARKER)
+    }
+}
+
 /// Result type alias for memd operations
 pub type Result<T> = std::result::Result<T, MemdError>;
 
@@ -107,5 +136,23 @@ mod tests {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
         let err: MemdError = io_err.into();
         assert!(matches!(err, MemdError::IoError(_)));
+    }
+
+    #[test]
+    fn index_busy_classifiable_through_stringification() {
+        let err = MemdError::IndexBusy {
+            reason: "index repair in flight".to_string(),
+        };
+        // Direct display carries the marker...
+        assert!(MemdError::message_indicates_index_busy(&err.to_string()));
+        // ...and survives one more stringly wrap, as done by ops/CLI layers.
+        let wrapped = MemdError::ProtocolError(format!("warm worker command failed: {err}"));
+        assert!(MemdError::message_indicates_index_busy(
+            &wrapped.to_string()
+        ));
+        // Unrelated errors are not classified busy.
+        assert!(!MemdError::message_indicates_index_busy(
+            &MemdError::StorageError("disk full".into()).to_string()
+        ));
     }
 }

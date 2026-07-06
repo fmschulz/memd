@@ -195,6 +195,35 @@ impl Default for PersistentStoreConfig {
     }
 }
 
+impl PersistentStoreConfig {
+    /// Availability defaults for a warm-worker process.
+    ///
+    /// The worker's event loop and its command futures share one task, so a
+    /// synchronous add-indexing path that parks on the dense index write
+    /// lock (held by a repair or bulk insert for minutes) froze the whole
+    /// worker — accept loop, ping, everything — until clients timed out.
+    /// Async indexing acknowledges writes after WAL + metadata and lets the
+    /// background indexer absorb the lock wait, so the worker defaults it
+    /// on. An operator who explicitly set `MEMD_ASYNC_INDEXING` (either
+    /// way) keeps that choice: pass the raw env value; `None` means unset.
+    /// Explicitly disabling it on a worker is warned about, because the
+    /// write path then indexes synchronously on the event-loop task again
+    /// and a long index write hold can freeze the worker for its duration.
+    pub fn apply_warm_worker_availability_defaults(&mut self, async_indexing_env: Option<&str>) {
+        match async_indexing_env {
+            None => self.enable_async_indexing = true,
+            Some(_) if !self.enable_async_indexing => {
+                warn!(
+                    "MEMD_ASYNC_INDEXING is explicitly disabled for this warm worker: \
+                     adds index synchronously on the event loop, so a long dense-index \
+                     write hold (repair/bulk insert) can freeze the worker for its duration"
+                );
+            }
+            Some(_) => {}
+        }
+    }
+}
+
 /// Persistent store with crash recovery
 pub struct PersistentStore {
     config: PersistentStoreConfig,
@@ -2303,6 +2332,42 @@ impl Store for PersistentStore {
         self.add_chunks_internal(chunks).await
     }
 
+    async fn wait_for_index_quiescence(&self, tenant_id: &TenantId, budget: Duration) -> bool {
+        if self.async_indexer.is_none() {
+            return true;
+        }
+        // A large backlog (bulk import) cannot drain to zero inside any
+        // reasonable budget, so waiting would burn the whole window — and
+        // in the warm worker, hold one of the few command permits — for a
+        // read-your-writes that provably cannot land. Probe once and skip
+        // the wait when the tenant is clearly mid-bulk-ingest; the common
+        // RYW case (a just-acked interactive add) has a handful of pending
+        // rows at most.
+        const RYW_SKIP_THRESHOLD: usize = 32;
+        match self
+            .metadata
+            .list_pending_index_chunk_ids(tenant_id, RYW_SKIP_THRESHOLD)
+        {
+            Ok(pending) if pending.is_empty() => return true,
+            Ok(pending) if pending.len() >= RYW_SKIP_THRESHOLD => return false,
+            Ok(_) => {}
+            // Metadata unavailable: never stall reads on the RYW probe.
+            Err(_) => return true,
+        }
+        let deadline = Instant::now() + budget;
+        loop {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            match self.metadata.list_pending_index_chunk_ids(tenant_id, 1) {
+                Ok(pending) if pending.is_empty() => return true,
+                Ok(_) => {}
+                Err(_) => return true,
+            }
+        }
+    }
+
     async fn add_feedback(&self, feedback: FeedbackEntry) -> Result<()> {
         self.ensure_writable("add_feedback")?;
         self.metadata.insert_feedback(&feedback)
@@ -4294,6 +4359,32 @@ mod tests {
     use std::fs;
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    #[test]
+    fn warm_worker_defaults_enable_async_indexing_only_when_env_unset() {
+        // Env unset → the worker turns async indexing on for availability.
+        let mut config = PersistentStoreConfig {
+            enable_async_indexing: false,
+            ..Default::default()
+        };
+        config.apply_warm_worker_availability_defaults(None);
+        assert!(config.enable_async_indexing);
+
+        // An explicit operator setting wins, in both directions.
+        let mut config = PersistentStoreConfig {
+            enable_async_indexing: false,
+            ..Default::default()
+        };
+        config.apply_warm_worker_availability_defaults(Some("0"));
+        assert!(!config.enable_async_indexing);
+
+        let mut config = PersistentStoreConfig {
+            enable_async_indexing: true,
+            ..Default::default()
+        };
+        config.apply_warm_worker_availability_defaults(Some("1"));
+        assert!(config.enable_async_indexing);
+    }
 
     fn make_test_store() -> (PersistentStore, tempfile::TempDir) {
         let dir = tempdir().unwrap();
