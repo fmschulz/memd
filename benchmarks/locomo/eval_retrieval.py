@@ -22,7 +22,7 @@ import common
 import metrics
 
 
-def evaluate(run_dir: Path, k: int, label: str):
+def evaluate(run_dir: Path, k: int, label: str, scope: str = "project"):
     data = common.load_dataset()
     store_dir = run_dir / "store"
     mapping = json.loads((run_dir / "chunk_to_dia.json").read_text())
@@ -60,18 +60,16 @@ def evaluate(run_dir: Path, k: int, label: str):
                 continue
             questions.append((qa, valid))
 
-        requests = [
-            {
-                "tool": "memory.search",
-                "arguments": {
-                    "tenant_id": common.TENANT,
-                    "project_id": project,
-                    "query": str(qa.get("question") or ""),
-                    "k": k,
-                },
+        requests = []
+        for qa, _valid in questions:
+            arguments = {
+                "tenant_id": common.TENANT,
+                "query": str(qa.get("question") or ""),
+                "k": k,
             }
-            for qa, _valid in questions
-        ]
+            if scope == "project":
+                arguments["project_id"] = project
+            requests.append({"tool": "memory.search", "arguments": arguments})
         if not requests:
             continue
         rows, row_times = common.run_batch(requests, store_dir)
@@ -90,7 +88,13 @@ def evaluate(run_dir: Path, k: int, label: str):
                 dia = mapping.get(cid)
                 if dia is not None:
                     ranked_dias.append(dia)
-            lat = (t - prev_t) if prev_t is not None else t
+            # Prefer memd's own per-request timing (batch rows report
+            # elapsed_ms); stdout stream deltas are meaningless because the
+            # batch runner buffers all output until the end.
+            elapsed_ms = row.get("elapsed_ms")
+            lat = (elapsed_ms / 1000.0) if elapsed_ms is not None else (
+                (t - prev_t) if prev_t is not None else t
+            )
             if idx == 0:
                 first_row_latencies.append(lat)
             else:
@@ -114,6 +118,7 @@ def evaluate(run_dir: Path, k: int, label: str):
     n = len(per_question)
     summary = {
         "label": label,
+        "scope": scope,
         "k": k,
         "questions": n,
         "excluded": len(excluded),
@@ -176,8 +181,13 @@ if __name__ == "__main__":
     run_dir = Path(sys.argv[1]).resolve()
     k = 10
     label = "baseline"
+    scope = "project"
     if "--k" in sys.argv:
         k = int(sys.argv[sys.argv.index("--k") + 1])
     if "--label" in sys.argv:
         label = sys.argv[sys.argv.index("--label") + 1]
-    evaluate(run_dir, k, label)
+    if "--scope" in sys.argv:
+        scope = sys.argv[sys.argv.index("--scope") + 1]
+    if scope not in ("project", "global"):
+        sys.exit(f"unknown scope: {scope}")
+    evaluate(run_dir, k, label, scope)

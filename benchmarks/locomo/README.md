@@ -39,12 +39,16 @@ documented numbers (`docs/benchmarking.md`: MRR@10 0.412). A seed-time
 scoring never depends on search-payload metadata.
 
 Retrieval eval (`eval_retrieval.py`): for each category 1-4 question, one
-`memory.search` scoped to the question's conversation project (k=10, default
-mode), all questions of a conversation streamed through one `memd batch`
-process. Reports MRR@10, Hit@1/3/10, per-category MRR@10/Hit@10, and
-latency (mean/p50/p95 from stdout row-timestamp deltas; each conversation's
-first row carries store-open cost and is reported separately). Questions
-with no valid evidence `dia_id` are excluded and logged in the results file.
+`memory.search` (k=10, default mode), all questions of a conversation
+streamed through one `memd batch` process. `--scope project` (primary
+protocol) scopes each search to the question's conversation; `--scope
+global` searches tenant-wide across all 5,882 turns (closest reconstruction
+of the documented protocol: reproduced MRR@10 0.429 global vs 0.4511
+project vs 0.412 documented). Reports MRR@10, Hit@1/3/10, per-category
+MRR@10/Hit@10, and latency (mean/p50/p95 preferring memd's per-request
+`elapsed_ms` from batch rows; each conversation's first search carries
+index-load warmup and is reported separately). Questions with no valid
+evidence `dia_id` are excluded and logged in the results file.
 
 ## Metrics
 
