@@ -80,8 +80,12 @@ def run_batch(requests, data_dir: Path, timeout=3600):
     of monotonic timestamps when each stdout line was read (for latency
     percentiles without per-process startup noise).
     """
+    # --warm off: direct in-process writes/reads. The default (--warm auto)
+    # spawns a background warm worker whose 30s client timeout aborts large
+    # seeding batches while it rebuilds indexes; a daemon also breaks
+    # run-to-run isolation.
     proc = subprocess.Popen(
-        [str(MEMD_BIN), "batch", "--jsonl", "-", "--continue-on-error"],
+        [str(MEMD_BIN), "batch", "--jsonl", "-", "--continue-on-error", "--warm", "off"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
