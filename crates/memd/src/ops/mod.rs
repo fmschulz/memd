@@ -223,6 +223,12 @@ pub struct SearchParams {
     /// `expanded_siblings`. The ranked hit list itself is unchanged.
     #[serde(default)]
     pub expand_event_siblings: bool,
+    /// When true, prefix each result's `text` with its observed (event) date
+    /// (`[YYYY-MM-DD]`) at recall, for chunks stored with an `event_time_ms`.
+    /// Off by default; opt-in for temporal-QA consumers. Chunks without an
+    /// observed time are returned unchanged.
+    #[serde(default)]
+    pub render_event_time: bool,
     /// Collapse ranked results that share a `source.uri`, keeping only the
     /// best-ranked chunk per source before the final trim to `k`. Large
     /// documents are stored as several chunks that all carry the parent
@@ -272,6 +278,7 @@ impl Default for SearchParams {
             include_history: None,
             oversample_factor: None,
             expand_event_siblings: false,
+            render_event_time: false,
             dedupe_by_source: false,
             compact: false,
             token_budget: None,
@@ -326,6 +333,11 @@ pub struct AddParams {
     /// surface it to prompt review.
     #[serde(default)]
     pub review_after_ms: Option<i64>,
+    /// Optional event time (ms since epoch): when the underlying event
+    /// occurred, as distinct from ingestion time. Persisted as the chunk's
+    /// `timestamp_observed` for bi-temporal retrieval and render-at-recall.
+    #[serde(default)]
+    pub event_time_ms: Option<i64>,
     /// Optional ingestion mode label (e.g. `"conversation"`, `"document"`).
     /// Accepted as part of the C1 surface so Track E can consume it
     /// without a second schema churn. No behaviour wired to it yet at the
@@ -408,6 +420,10 @@ pub struct BatchChunkParams {
     /// semantics as `AddParams::review_after_ms`.
     #[serde(default)]
     pub review_after_ms: Option<i64>,
+    /// Optional event time (ms since epoch) for this chunk. Same semantics
+    /// as `AddParams::event_time_ms` — persisted as `timestamp_observed`.
+    #[serde(default)]
+    pub event_time_ms: Option<i64>,
     /// Optional ingestion mode label for this chunk. Same semantics as
     /// `AddParams::mode` — accepted now, consumed by Track E.
     #[serde(default)]
@@ -5703,6 +5719,34 @@ fn record_add_usage_event<S: Store>(
 // ---------- Handler Functions ----------
 
 /// Handle memory.search tool call
+/// Prefix each ranked chunk's text with its observed (event) date for recall,
+/// so a consuming answer model sees when the event happened. No-op for chunks
+/// without a `timestamp_observed`. Opt-in via `SearchParams::render_event_time`.
+fn render_observed_time_into_text(chunks: &mut [(MemoryChunk, f32)]) {
+    for (chunk, _score) in chunks.iter_mut() {
+        if let Some(ms) = chunk.timestamp_observed {
+            chunk.text = format!("[{}] {}", format_epoch_ms_date(ms), chunk.text);
+        }
+    }
+}
+
+/// Format Unix milliseconds as a `YYYY-MM-DD` UTC date without a date crate,
+/// via the civil-from-days algorithm (Howard Hinnant, public domain).
+fn format_epoch_ms_date(ms: i64) -> String {
+    let days = ms.div_euclid(86_400_000);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+    format!("{:04}-{:02}-{:02}", year, month, day)
+}
+
 pub async fn handle_memory_search<S: Store>(
     store: &S,
     params: SearchParams,
@@ -5819,8 +5863,11 @@ pub async fn handle_memory_search<S: Store>(
         // Apply lifecycle visibility filter with oversample-and-refill to
         // trim from `pre_visibility_cap` down to `params.k`, hiding
         // Superseded/Expired/History rows unless the caller opted in.
-        let scored_chunks =
+        let mut scored_chunks =
             apply_visibility_filter(store, scored_chunks, &visibility_policy, params.k).await;
+        if params.render_event_time {
+            render_observed_time_into_text(&mut scored_chunks);
+        }
 
         debug!(
             results_count = scored_chunks.len(),
@@ -5974,8 +6021,11 @@ pub async fn handle_memory_search<S: Store>(
     // (standard path, no tier-debug). This is the matching call site to
     // the debug_tiers branch above and shares the same policy +
     // oversample cap.
-    let scored_chunks =
+    let mut scored_chunks =
         apply_visibility_filter(store, scored_chunks, &visibility_policy, params.k).await;
+    if params.render_event_time {
+        render_observed_time_into_text(&mut scored_chunks);
+    }
 
     debug!(results_count = scored_chunks.len(), "search completed");
 
@@ -6065,6 +6115,10 @@ pub async fn handle_memory_add<S: Store>(
     }
 
     chunk = chunk.with_source(params_to_source(params.source));
+
+    if let Some(ms) = params.event_time_ms {
+        chunk.timestamp_observed = Some(ms);
+    }
 
     if !params.tags.is_empty() {
         let mut tags = chunk.tags.clone();
@@ -6559,6 +6613,9 @@ pub async fn handle_memory_add_batch<S: Store>(
                 chunk = chunk.with_tags(tags);
             }
             chunk = chunk.with_source(params_to_source(chunk_params.source));
+            if let Some(ms) = chunk_params.event_time_ms {
+                chunk.timestamp_observed = Some(ms);
+            }
             if !chunk_params.tags.is_empty() {
                 let mut tags = chunk.tags.clone();
                 tags.extend(chunk_params.tags);
@@ -6704,6 +6761,9 @@ pub async fn handle_memory_add_batch<S: Store>(
             chunk = chunk.with_tags(tags);
         }
         chunk = chunk.with_source(params_to_source(chunk_params.source));
+        if let Some(ms) = chunk_params.event_time_ms {
+            chunk.timestamp_observed = Some(ms);
+        }
         if !chunk_params.tags.is_empty() {
             let mut tags = chunk.tags.clone();
             tags.extend(chunk_params.tags);
@@ -10712,6 +10772,36 @@ pub fn handle_find_errors(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_format_epoch_ms_date() {
+        // 2023-05-08 00:00:00 UTC = 1_683_504_000_000 ms
+        assert_eq!(format_epoch_ms_date(1_683_504_000_000), "2023-05-08");
+        // Unix epoch and a leap-year boundary.
+        assert_eq!(format_epoch_ms_date(0), "1970-01-01");
+        assert_eq!(format_epoch_ms_date(1_583_020_800_000), "2020-03-01");
+        // A mid-day timestamp resolves to the same calendar date.
+        assert_eq!(
+            format_epoch_ms_date(1_683_504_000_000 + 13 * 3_600_000),
+            "2023-05-08"
+        );
+    }
+
+    #[test]
+    fn test_render_observed_time_into_text() {
+        let tenant = TenantId::new("render_event_time").unwrap();
+        let mut dated =
+            MemoryChunk::new(tenant.clone(), "had lunch with Alex", ChunkType::Message);
+        dated.timestamp_observed = Some(1_683_504_000_000); // 2023-05-08
+        let plain = MemoryChunk::new(tenant, "no event time here", ChunkType::Message);
+
+        let mut chunks = vec![(dated, 1.0_f32), (plain, 0.5_f32)];
+        render_observed_time_into_text(&mut chunks);
+
+        assert_eq!(chunks[0].0.text, "[2023-05-08] had lunch with Alex");
+        // A chunk without an observed time is returned unchanged.
+        assert_eq!(chunks[1].0.text, "no event time here");
+    }
     use crate::config::ProjectAliasScopeConfig;
     use crate::metrics::{MetricsCollector, QueryMetrics};
     use crate::store::persistent::{PersistentStore, PersistentStoreConfig};
@@ -11058,6 +11148,7 @@ mod tests {
 
             mode: None,
             supersede_near_duplicates: None,
+            event_time_ms: None,
         };
 
         let add_result = handle_memory_add(&store, None, add_params).await.unwrap();
@@ -11631,6 +11722,7 @@ mod tests {
 
                 mode: None,
                 supersede_near_duplicates: None,
+                event_time_ms: None,
             },
         )
         .await
@@ -11652,6 +11744,7 @@ mod tests {
 
                 mode: None,
                 supersede_near_duplicates: None,
+                event_time_ms: None,
             },
         )
         .await
@@ -11714,6 +11807,7 @@ mod tests {
 
                     mode: None,
                     supersede_near_duplicates: None,
+                    event_time_ms: None,
                 },
             )
             .await
@@ -11838,6 +11932,7 @@ mod tests {
 
                 mode: None,
                 supersede_near_duplicates: None,
+                event_time_ms: None,
             },
         )
         .await
@@ -11859,6 +11954,7 @@ mod tests {
 
                 mode: None,
                 supersede_near_duplicates: None,
+                event_time_ms: None,
             },
         )
         .await
@@ -11935,6 +12031,7 @@ mod tests {
 
                 mode: None,
                 supersede_near_duplicates: None,
+                event_time_ms: None,
             },
         )
         .await
@@ -12005,6 +12102,7 @@ mod tests {
 
                 mode: None,
                 supersede_near_duplicates: None,
+                event_time_ms: None,
             },
         )
         .await
@@ -12074,6 +12172,7 @@ mod tests {
 
             mode: None,
             supersede_near_duplicates: None,
+            event_time_ms: None,
         };
 
         let result = handle_memory_add(&store, None, add_params).await.unwrap();
@@ -12120,6 +12219,7 @@ mod tests {
                     review_after_ms: None,
 
                     mode: None,
+                    event_time_ms: None,
                 },
                 BatchChunkParams {
                     text: "chunk 2".to_string(),
@@ -12132,6 +12232,7 @@ mod tests {
                     review_after_ms: None,
 
                     mode: None,
+                    event_time_ms: None,
                 },
             ],
         };
@@ -12160,6 +12261,7 @@ mod tests {
 
             mode: None,
             supersede_near_duplicates: None,
+            event_time_ms: None,
         };
 
         let add_result = handle_memory_add(&store, None, add_params).await.unwrap();
@@ -12216,6 +12318,7 @@ mod tests {
 
                 mode: None,
                 supersede_near_duplicates: None,
+                event_time_ms: None,
             },
         )
         .await
@@ -12259,6 +12362,7 @@ mod tests {
 
                 mode: None,
                 supersede_near_duplicates: None,
+                event_time_ms: None,
             };
             handle_memory_add(&store, None, add_params).await.unwrap();
         }
@@ -12445,6 +12549,7 @@ mod tests {
 
             mode: None,
             supersede_near_duplicates: None,
+            event_time_ms: None,
         };
 
         let result = handle_memory_add(&store, None, params).await;
@@ -12487,6 +12592,7 @@ mod tests {
 
             mode: None,
             supersede_near_duplicates: None,
+            event_time_ms: None,
         };
 
         handle_memory_add(&store, None, add_params).await.unwrap();
@@ -12537,6 +12643,7 @@ mod tests {
 
             mode: None,
             supersede_near_duplicates: None,
+            event_time_ms: None,
         };
 
         handle_memory_add(&store, None, add_params).await.unwrap();
@@ -12601,6 +12708,7 @@ mod tests {
 
                 mode: None,
                 supersede_near_duplicates: None,
+                event_time_ms: None,
             },
         )
         .await
@@ -12630,6 +12738,7 @@ mod tests {
 
                 mode: None,
                 supersede_near_duplicates: None,
+                event_time_ms: None,
             },
         )
         .await
@@ -12659,6 +12768,7 @@ mod tests {
 
                 mode: None,
                 supersede_near_duplicates: None,
+                event_time_ms: None,
             },
         )
         .await
@@ -12714,6 +12824,7 @@ mod tests {
 
                 mode: None,
                 supersede_near_duplicates: None,
+                event_time_ms: None,
             },
         )
         .await
@@ -12770,6 +12881,7 @@ mod tests {
 
                     mode: None,
                     supersede_near_duplicates: None,
+                    event_time_ms: None,
                 },
             )
             .await
@@ -12864,6 +12976,7 @@ mod tests {
 
                 mode: None,
                 supersede_near_duplicates: None,
+                event_time_ms: None,
             },
         )
         .await
@@ -13345,6 +13458,7 @@ mod tests {
 
                 mode: None,
                 supersede_near_duplicates: None,
+                event_time_ms: None,
             },
         )
         .await
