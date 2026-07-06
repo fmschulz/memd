@@ -26,6 +26,12 @@ store and retrieval untouched. This models a memory system that keeps
 event time as structured metadata and renders it at recall; the plain
 store keeps its retrieval quality while the answer model gets absolute
 time anchors for relative expressions in turn text.
+
+--external-contexts <file> skips memd retrieval and scores answers over a
+reference system's retrieved contexts (JSON: question_id ->
+{ranked_dias, context_lines}), so competing systems share the exact same
+answer model, prompt, cache, and metrics. With --date-render, per-line
+dates are joined by exact content match against the dataset.
 """
 
 import concurrent.futures
@@ -148,10 +154,25 @@ def evaluate(
     label: str,
     workers: int,
     date_render: bool = False,
+    external_contexts: Path | None = None,
 ):
     data = common.load_dataset()
     store_dir = run_dir / "store"
-    mapping = json.loads((run_dir / "chunk_to_dia.json").read_text())
+    mapping = {}
+    if external_contexts is None:
+        mapping = json.loads((run_dir / "chunk_to_dia.json").read_text())
+    external = (
+        json.loads(Path(external_contexts).read_text()) if external_contexts else None
+    )
+
+    # (conversation, exact stored text) -> dia, for external date joins.
+    content_dia = {}
+    for conv in data:
+        for _key, session_dt, turn in common.iter_turns(conv["conversation"]):
+            text = common.turn_text(turn, session_dt, "plain")
+            key = (conv["sample_id"], text)
+            if text.strip() and key not in content_dia:
+                content_dia[key] = turn["dia_id"]
 
     # dia_id -> session datetime, per conversation (dia ids repeat across
     # conversations, so key by (sample_id, dia_id)).
@@ -195,9 +216,31 @@ def evaluate(
         sys.exit(f"unknown split: {split}")
 
     # Retrieval pass: one batch per conversation, k=20 contexts.
-    by_conv = {}
-    for q in questions:
-        by_conv.setdefault(q["project"], []).append(q)
+    if external is not None:
+        missing = 0
+        for q in questions:
+            entry = external.get(q["question_id"])
+            if entry is None:
+                q["ranked_dias"] = []
+                q["context_lines"] = []
+                missing += 1
+                continue
+            q["ranked_dias"] = entry.get("ranked_dias") or []
+            lines = (entry.get("context_lines") or [])[:k]
+            if date_render:
+                rendered = []
+                for line in lines:
+                    dia = content_dia.get((q["conversation"], line))
+                    dt = dia_datetime.get((q["conversation"], dia)) if dia else None
+                    rendered.append(f"[{dt}] {line}" if dt else line)
+                lines = rendered
+            q["context_lines"] = lines
+        print(f"external contexts: {len(questions)-missing} matched, {missing} missing")
+        by_conv = {}
+    else:
+        by_conv = {}
+        for q in questions:
+            by_conv.setdefault(q["project"], []).append(q)
     for project in sorted(by_conv):
         qs = by_conv[project]
         requests = [
@@ -324,7 +367,10 @@ def evaluate(
             "split": split,
             "engine": engine,
             "k": k,
-            "memd_version": common.memd_version(store_dir),
+            "external_contexts": str(external_contexts) if external_contexts else None,
+            "memd_version": (
+                common.memd_version(store_dir) if external_contexts is None else None
+            ),
         },
     )
     print(json.dumps(summary, indent=2))
@@ -349,4 +395,7 @@ if __name__ == "__main__":
         label=opt("--label", "qa"),
         workers=int(opt("--workers", 4)),
         date_render="--date-render" in args,
+        external_contexts=(
+            Path(opt("--external-contexts", "")) if "--external-contexts" in args else None
+        ),
     )
