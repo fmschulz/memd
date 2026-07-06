@@ -3,6 +3,7 @@
 //! Implements the SparseIndex trait with Tantivy's inverted index for
 //! keyword-based retrieval. Uses CodeTokenizer for code-aware tokenization.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -23,6 +24,21 @@ use crate::types::{ChunkId, TenantId};
 
 /// Default memory budget for index writer (50MB).
 const DEFAULT_WRITER_MEMORY_BYTES: usize = 50_000_000;
+
+/// Over-fetch factor for sparse search. BM25 indexes each sentence of a chunk
+/// as its own document, so `search` fetches this many times `k` sentence hits
+/// and collapses them to at most `k` distinct chunks. 8 comfortably covers
+/// multi-sentence turns; the collapse loop breaks early once `k` chunks are
+/// found, so the extra window costs nothing on the common (mostly-distinct) path.
+const SPARSE_CHUNK_OVERFETCH: usize = 8;
+
+/// Absolute ceiling on the sparse over-fetch window. A query matching many
+/// sentences of only a few chunks would otherwise drive up to
+/// `k * SPARSE_CHUNK_OVERFETCH` stored-document retrievals before the collapse
+/// loop can fill `k` distinct chunks; this bounds that worst case. Sized well
+/// above `sparse_k` (200) times the typical sentences-per-turn, so it never
+/// limits the distinct-chunk yield on conversational corpora.
+const SPARSE_FETCH_CEILING: usize = 1024;
 
 fn escape_query_text(query: &str) -> String {
     const SPECIAL_CHARS: &str = "\\+-&|!(){}[]^\"~*?:/";
@@ -320,6 +336,11 @@ impl SparseIndex for Bm25Index {
         query: &str,
         k: usize,
     ) -> Result<Vec<SparseSearchResult>> {
+        // Nothing to return, and TopDocs::with_limit(0) panics in tantivy.
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+
         self.commit_if_dirty()?;
 
         // Reload to see recent commits (BEFORE getting searcher)
@@ -342,13 +363,30 @@ impl SparseIndex for Bm25Index {
         let combined_query =
             BooleanQuery::new(vec![(Occur::Must, tenant_query), (Occur::Must, text_query)]);
 
-        // Execute search
+        // BM25 indexes each sentence of a chunk as its own document, so a
+        // multi-sentence chunk can match on several sentences and take several
+        // of the top slots. Left uncollapsed that (a) burns sparse candidate
+        // slots — fewer distinct chunks reach RRF fusion, hurting recall — and
+        // (b) double-counts the chunk in fusion, whose accumulator sums a
+        // contribution per occurrence. Over-fetch a wider window and keep each
+        // chunk once, at its best-scoring sentence (= min rank), returning up
+        // to `k` distinct chunks. The window is a heuristic — a query dominated
+        // by a few many-sentence chunks can still yield fewer than `k` — so the
+        // ceiling bounds the worst-case retrieval count while `.max(k)` keeps
+        // room for at least `k` distinct chunks when `k` exceeds the ceiling.
+        let fetch_limit = k
+            .saturating_mul(SPARSE_CHUNK_OVERFETCH)
+            .min(SPARSE_FETCH_CEILING)
+            .max(k);
         let top_docs = searcher
-            .search(&combined_query, &TopDocs::with_limit(k))
+            .search(&combined_query, &TopDocs::with_limit(fetch_limit))
             .map_err(|e| MemdError::StorageError(format!("search: {}", e)))?;
 
-        // Convert results
-        let mut results = Vec::with_capacity(top_docs.len());
+        // `top_docs` is ordered by score descending, so the first hit seen for
+        // a chunk is its best; skip any later (worse-ranked) sentence of a
+        // chunk already kept.
+        let mut results = Vec::with_capacity(k);
+        let mut seen: HashSet<ChunkId> = HashSet::with_capacity(k);
         for (score, doc_address) in top_docs {
             let doc = searcher
                 .doc::<tantivy::TantivyDocument>(doc_address)
@@ -367,11 +405,19 @@ impl SparseIndex for Bm25Index {
 
             let chunk_id = ChunkId::parse(chunk_id_str)?;
 
+            if !seen.insert(chunk_id.clone()) {
+                continue;
+            }
+
             results.push(SparseSearchResult {
                 chunk_id,
                 score,
                 sentence_idx,
             });
+
+            if results.len() >= k {
+                break;
+            }
         }
 
         Ok(results)
@@ -592,6 +638,46 @@ mod tests {
             results[0].sentence_idx, 1,
             "should match sentence at index 1"
         );
+    }
+
+    #[test]
+    fn test_multi_sentence_chunk_collapses_to_one() {
+        let index = Bm25Index::new().unwrap();
+        let tenant = create_test_tenant();
+        let multi = ChunkId::new();
+        let single = ChunkId::new();
+
+        // `multi` matches the query on all three sentences; without the
+        // per-chunk collapse each would take its own slot and the chunk would
+        // be counted three times in downstream RRF fusion. `single` is a
+        // distinct chunk with one matching sentence that must survive collapse.
+        index
+            .insert(
+                &tenant,
+                &multi,
+                &[
+                    "oranges are great".to_string(),
+                    "I really love oranges".to_string(),
+                    "more oranges please".to_string(),
+                ],
+            )
+            .unwrap();
+        index
+            .insert(&tenant, &single, &["oranges once".to_string()])
+            .unwrap();
+
+        let results = index.search(&tenant, "oranges", 10).unwrap();
+        assert_eq!(
+            results.iter().filter(|r| r.chunk_id == multi).count(),
+            1,
+            "a multi-sentence chunk must collapse to a single result"
+        );
+        assert_eq!(
+            results.iter().filter(|r| r.chunk_id == single).count(),
+            1,
+            "a distinct single-sentence chunk must not be collapsed away"
+        );
+        assert_eq!(results.len(), 2, "exactly the two distinct chunks survive");
     }
 
     #[test]
