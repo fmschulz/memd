@@ -5747,13 +5747,6 @@ fn format_epoch_ms_date(ms: i64) -> String {
     format!("{:04}-{:02}-{:02}", year, month, day)
 }
 
-/// Read-your-writes window for stores with a deferred indexing lane: how
-/// long a search waits for the tenant's queued index jobs to land before
-/// proceeding without them. Sized to cover the background indexer's poll
-/// interval plus a cold embedding-model load, while staying well under the
-/// warm client's request timeout. Synchronous-indexing stores never wait.
-const RYW_INDEX_WAIT_BUDGET: Duration = Duration::from_secs(5);
-
 pub async fn handle_memory_search<S: Store>(
     store: &S,
     params: SearchParams,
@@ -5762,15 +5755,6 @@ pub async fn handle_memory_search<S: Store>(
     ProjectId::validate_opt(params.project_id.as_deref())
         .map_err(|e| McpError::InvalidParams(e.to_string()))?;
     validate_search_k(params.k)?;
-    // Read-your-writes, best-effort: a just-acknowledged add may still be
-    // in the async indexing queue; give it a bounded window to land so the
-    // search sees it. No-op when indexing is synchronous, skipped when the
-    // tenant has a bulk backlog that cannot drain in-budget. The result is
-    // advisory only — when the window expires the search simply proceeds
-    // with whatever is indexed.
-    let _ = store
-        .wait_for_index_quiescence(&tenant_id, RYW_INDEX_WAIT_BUDGET)
-        .await;
     let parsed_filters = parse_search_filters(params.filters.as_ref())?;
     let debug_tiers = params.debug_tiers.unwrap_or(false);
     let mode = params.mode.unwrap_or_default();

@@ -46,6 +46,7 @@ impl Default for HotTierConfig {
                 max_elements: 50_000,
                 dimension: 384,
                 persist_graph_dump: true,
+                search_lock_budget_ms: None,
             },
         }
     }
@@ -353,6 +354,7 @@ mod tests {
                 max_elements: 100,
                 dimension: 4,
                 persist_graph_dump: true,
+                search_lock_budget_ms: None,
             },
         }
     }
