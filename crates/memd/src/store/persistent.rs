@@ -768,13 +768,8 @@ impl PersistentStore {
         // sparse index — the state a crash leaves behind after the
         // tantivy directory is lost, which would otherwise silently
         // downgrade hybrid search to dense-only forever.
-        if !store.config.read_only
-            && sparse_self_heal_enabled()
-            && store.any_tenant_sparse_cold()
-        {
-            warn!(
-                "sparse index empty for tenant(s) with active chunks — scheduling rebuild"
-            );
+        if !store.config.read_only && sparse_self_heal_enabled() && store.any_tenant_sparse_cold() {
+            warn!("sparse index empty for tenant(s) with active chunks — scheduling rebuild");
             store.spawn_startup_hnsw_backfill();
         }
 
@@ -924,11 +919,7 @@ impl PersistentStore {
     /// index — the degraded state left behind when the tantivy directory
     /// is lost and silently recreated empty on open.
     fn any_tenant_sparse_cold(&self) -> bool {
-        let Some(sparse) = self
-            .hybrid_searcher
-            .as_ref()
-            .and_then(|h| h.sparse_index())
-        else {
+        let Some(sparse) = self.hybrid_searcher.as_ref().and_then(|h| h.sparse_index()) else {
             return false;
         };
         let tenant_strs: Vec<String> = self.tenants.read().keys().cloned().collect();
@@ -6227,8 +6218,7 @@ mod tests {
 
         // Inject searchers AFTER the writes so nothing was sparse-indexed
         // at add time — the same observable state as a lost tantivy dir.
-        let sparse =
-            Arc::new(Bm25Index::with_path(Some(dir.path().join("sparse_index"))).unwrap());
+        let sparse = Arc::new(Bm25Index::with_path(Some(dir.path().join("sparse_index"))).unwrap());
         let embedder = Arc::new(MockEmbedder::new());
         let dense = Arc::new(DenseSearcher::with_embedder(
             embedder,

@@ -177,6 +177,7 @@ mod tests {
             k: 2,
             project_id: None,
             compact: false,
+            dedupe_by_source: false,
             token_budget: None,
             mode: CliQueryMode::Generic,
             no_text: false,
