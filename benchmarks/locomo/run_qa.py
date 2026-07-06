@@ -18,6 +18,14 @@ are counted and reported, never dropped.
 Usage:
   python3 run_qa.py <run_dir> --split smoke|dev|promoted [--k 20]
       [--engine codex|claude] [--label name] [--workers 4]
+      [--date-render]
+
+--date-render prefixes each retrieved turn with its session datetime at
+CONTEXT-BUILD time (a harness-side join from the dataset), leaving the
+store and retrieval untouched. This models a memory system that keeps
+event time as structured metadata and renders it at recall; the plain
+store keeps its retrieval quality while the answer model gets absolute
+time anchors for relative expressions in turn text.
 """
 
 import concurrent.futures
@@ -132,10 +140,25 @@ def stratified_dev_sample(questions, fraction=0.2, seed=42):
     return sorted(picked, key=lambda q: q["question_id"])
 
 
-def evaluate(run_dir: Path, split: str, k: int, engine: str, label: str, workers: int):
+def evaluate(
+    run_dir: Path,
+    split: str,
+    k: int,
+    engine: str,
+    label: str,
+    workers: int,
+    date_render: bool = False,
+):
     data = common.load_dataset()
     store_dir = run_dir / "store"
     mapping = json.loads((run_dir / "chunk_to_dia.json").read_text())
+
+    # dia_id -> session datetime, per conversation (dia ids repeat across
+    # conversations, so key by (sample_id, dia_id)).
+    dia_datetime = {}
+    for conv in data:
+        for _key, session_dt, turn in common.iter_turns(conv["conversation"]):
+            dia_datetime[(conv["sample_id"], turn["dia_id"])] = session_dt
 
     # Collect questions (cats 1-4) with valid evidence.
     questions = []
@@ -197,7 +220,16 @@ def evaluate(run_dir: Path, split: str, k: int, engine: str, label: str, workers
             q["ranked_dias"] = [
                 mapping[r["chunk_id"]] for r in results if r.get("chunk_id") in mapping
             ]
-            q["context_lines"] = [r.get("text") or "" for r in results]
+            if date_render:
+                lines = []
+                for r in results:
+                    text = r.get("text") or ""
+                    dia = mapping.get(r.get("chunk_id"))
+                    dt = dia_datetime.get((q["conversation"], dia)) if dia else None
+                    lines.append(f"[{dt}] {text}" if dt else text)
+                q["context_lines"] = lines
+            else:
+                q["context_lines"] = [r.get("text") or "" for r in results]
         print(f"retrieved {project}: {len(qs)} questions")
 
     # Answer pass (cached, parallel workers).
@@ -246,6 +278,7 @@ def evaluate(run_dir: Path, split: str, k: int, engine: str, label: str, workers
         "split": split,
         "engine": engine,
         "prompt_version": PROMPT_VERSION,
+        "date_render": date_render,
         "k": k,
         "questions": n,
         "failed_rows": len(failed),
@@ -315,4 +348,5 @@ if __name__ == "__main__":
         engine=opt("--engine", "codex"),
         label=opt("--label", "qa"),
         workers=int(opt("--workers", 4)),
+        date_render="--date-render" in args,
     )
