@@ -102,6 +102,13 @@ pub struct PersistentStoreConfig {
     pub async_index_batch_size: usize,
     /// Poll interval for async indexer in milliseconds
     pub async_index_poll_ms: u64,
+    /// Bound the dense search-path lock waits so a contended search fails
+    /// fast with `IndexBusy` instead of parking its thread behind a long
+    /// index write hold. Off by default: single-shot CLI processes should
+    /// wait out in-process repairs/bulk inserts rather than error. The
+    /// warm worker enables it (its event loop must never park) via
+    /// `apply_warm_worker_availability_defaults`.
+    pub bounded_search_locks: bool,
     /// On startup, backfill the HNSW index for tenants whose in-memory
     /// dense state is colder than their metadata (observed when the
     /// previous daemon crashed or was killed before `save_all()` ran).
@@ -189,11 +196,18 @@ impl Default for PersistentStoreConfig {
             enable_async_indexing,
             async_index_batch_size,
             async_index_poll_ms,
+            bounded_search_locks: false,
             backfill_hnsw_on_startup,
             backfill_canonical_text_on_startup,
         }
     }
 }
+
+/// Search-lock budget applied to worker processes when
+/// `bounded_search_locks` is enabled: an order of magnitude above ordinary
+/// insert holds (micro/millisecond scale) while keeping the worst-case
+/// event-loop stall small under a repair-length write hold.
+const WORKER_SEARCH_LOCK_BUDGET_MS: u64 = 50;
 
 impl PersistentStoreConfig {
     /// Availability defaults for a warm-worker process.
@@ -210,6 +224,10 @@ impl PersistentStoreConfig {
     /// write path then indexes synchronously on the event-loop task again
     /// and a long index write hold can freeze the worker for its duration.
     pub fn apply_warm_worker_availability_defaults(&mut self, async_indexing_env: Option<&str>) {
+        // The worker's searches must never park its event-loop thread
+        // behind an index write hold; contended reads fail fast with a
+        // busy reply and clients fall back to the cold path.
+        self.bounded_search_locks = true;
         match async_indexing_env {
             None => self.enable_async_indexing = true,
             Some(_) if !self.enable_async_indexing => {
@@ -465,6 +483,12 @@ struct IndexJob {
     tenant_id: TenantId,
     chunk_ids: Vec<ChunkId>,
     index_rows: Vec<(ChunkId, String)>,
+    /// When present, signalled after the job's rows are indexed (`Ok`) or
+    /// marked failed (`Err`). Write handlers hold their acknowledgement on
+    /// this so "add returned" keeps implying "chunk is searchable" under
+    /// the async lane — awaiting a channel, not parking a thread, so a
+    /// warm worker's event loop stays responsive while the indexer works.
+    completion: Option<oneshot::Sender<std::result::Result<(), String>>>,
 }
 
 struct ExternalMutationProbe {
@@ -665,7 +689,10 @@ impl PersistentStore {
         let dense_searcher = if config.enable_dense_search {
             use super::dense::DenseSearchConfig;
 
-            let dense_config = DenseSearchConfig::default();
+            let mut dense_config = DenseSearchConfig::default();
+            if config.bounded_search_locks {
+                dense_config.hnsw.search_lock_budget_ms = Some(WORKER_SEARCH_LOCK_BUDGET_MS);
+            }
             match DenseSearcher::new(dense_config) {
                 Ok(searcher) => {
                     let searcher = searcher
@@ -2332,42 +2359,6 @@ impl Store for PersistentStore {
         self.add_chunks_internal(chunks).await
     }
 
-    async fn wait_for_index_quiescence(&self, tenant_id: &TenantId, budget: Duration) -> bool {
-        if self.async_indexer.is_none() {
-            return true;
-        }
-        // A large backlog (bulk import) cannot drain to zero inside any
-        // reasonable budget, so waiting would burn the whole window — and
-        // in the warm worker, hold one of the few command permits — for a
-        // read-your-writes that provably cannot land. Probe once and skip
-        // the wait when the tenant is clearly mid-bulk-ingest; the common
-        // RYW case (a just-acked interactive add) has a handful of pending
-        // rows at most.
-        const RYW_SKIP_THRESHOLD: usize = 32;
-        match self
-            .metadata
-            .list_pending_index_chunk_ids(tenant_id, RYW_SKIP_THRESHOLD)
-        {
-            Ok(pending) if pending.is_empty() => return true,
-            Ok(pending) if pending.len() >= RYW_SKIP_THRESHOLD => return false,
-            Ok(_) => {}
-            // Metadata unavailable: never stall reads on the RYW probe.
-            Err(_) => return true,
-        }
-        let deadline = Instant::now() + budget;
-        loop {
-            if Instant::now() >= deadline {
-                return false;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-            match self.metadata.list_pending_index_chunk_ids(tenant_id, 1) {
-                Ok(pending) if pending.is_empty() => return true,
-                Ok(_) => {}
-                Err(_) => return true,
-            }
-        }
-    }
-
     async fn add_feedback(&self, feedback: FeedbackEntry) -> Result<()> {
         self.ensure_writable("add_feedback")?;
         self.metadata.insert_feedback(&feedback)
@@ -2512,10 +2503,12 @@ impl Store for PersistentStore {
 
         if self.async_indexing_enabled() {
             if let Some(indexer) = self.async_indexer.as_ref() {
+                let (ack_tx, ack_rx) = oneshot::channel();
                 let job = IndexJob {
                     tenant_id: tenant_id.clone(),
                     chunk_ids: chunk_ids_for_state.clone(),
                     index_rows,
+                    completion: Some(ack_tx),
                 };
                 if indexer.job_tx.send(job).is_err() {
                     let error_message = "async indexer queue is closed";
@@ -2526,6 +2519,9 @@ impl Store for PersistentStore {
                         &chunk_ids_for_state,
                         error_message,
                     );
+                } else {
+                    // Same ack-after-index contract as the add lane.
+                    await_index_ack(&tenant_id, ack_rx).await;
                 }
             } else {
                 let error_message = "async indexing enabled but worker unavailable";
@@ -2987,6 +2983,9 @@ async fn run_async_index_job(
         // queued async indexing.
         write_epoch.fetch_add(1, Ordering::Release);
         mark_index_failed_many(metadata, &job.tenant_id, &job.chunk_ids, &error_message);
+        if let Some(tx) = job.completion {
+            let _ = tx.send(Err(error_message));
+        }
         return;
     }
 
@@ -2998,6 +2997,36 @@ async fn run_async_index_job(
             error = %e,
             "failed to mark chunks indexed"
         );
+    }
+    if let Some(tx) = job.completion {
+        let _ = tx.send(Ok(()));
+    }
+}
+
+/// Wait for an enqueued index job's completion signal, mirroring the sync
+/// indexing arm's semantics: an index failure is a warning (the chunk is
+/// durable in WAL + metadata and marked `index_failed` for recovery), never
+/// an error on the add itself. A dropped channel means the indexer shut
+/// down mid-job; the sweeper or startup backfill re-covers the rows.
+async fn await_index_ack(
+    tenant_id: &TenantId,
+    rx: oneshot::Receiver<std::result::Result<(), String>>,
+) {
+    match rx.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            warn!(
+                tenant_id = %tenant_id,
+                error = %error,
+                "async index job failed; chunks remain durable and marked for re-index"
+            );
+        }
+        Err(_) => {
+            warn!(
+                tenant_id = %tenant_id,
+                "async indexer shut down before acknowledging; sweeper will re-cover"
+            );
+        }
     }
 }
 
@@ -3384,6 +3413,7 @@ async fn sweep_pending_index_jobs(
                     tenant_id: tenant_id.clone(),
                     chunk_ids,
                     index_rows,
+                    completion: None,
                 },
                 write_epoch,
             )
@@ -3567,10 +3597,12 @@ impl PersistentStore {
 
             if self.async_indexing_enabled() {
                 if let Some(indexer) = self.async_indexer.as_ref() {
+                    let (ack_tx, ack_rx) = oneshot::channel();
                     let job = IndexJob {
                         tenant_id: tenant_id.clone(),
                         chunk_ids: chunk_ids_for_state.clone(),
                         index_rows,
+                        completion: Some(ack_tx),
                     };
                     if indexer.job_tx.send(job).is_err() {
                         let error_message = "async indexer queue is closed";
@@ -3581,6 +3613,14 @@ impl PersistentStore {
                             &chunk_ids_for_state,
                             error_message,
                         );
+                    } else {
+                        // Hold the acknowledgement until the chunks are
+                        // searchable — "add returned" must keep implying
+                        // "search finds it" (the 1.3.0 async default broke
+                        // that: bulk loads ack'd early and searches read a
+                        // half-built index). The await yields; it does not
+                        // park the caller's thread.
+                        await_index_ack(&tenant_id, ack_rx).await;
                     }
                 } else {
                     let error_message = "async indexing enabled but worker unavailable";

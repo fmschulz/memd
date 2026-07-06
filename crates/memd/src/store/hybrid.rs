@@ -228,6 +228,7 @@ impl HybridSearcher {
                 ef_construction: 200,
                 ef_search: 30, // Lower than warm tier for faster queries
                 persist_graph_dump: true,
+                search_lock_budget_ms: None,
             },
             ..Default::default()
         };

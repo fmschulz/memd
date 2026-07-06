@@ -20,16 +20,6 @@ use crate::error::{MemdError, Result};
 use crate::index::embedding_cache::EmbeddingCache;
 use crate::types::ChunkId;
 
-/// Longest a search waits for the index read locks before failing with
-/// [`MemdError::IndexBusy`]. Ordinary insert holds are micro/millisecond
-/// scale, so 50ms is still an order of magnitude of headroom — while
-/// keeping the worst-case stall small: `try_read_for` parks the calling
-/// thread, and in the warm worker that thread runs the event loop, so
-/// concurrent contended searches serialize their parks (bounded by this
-/// budget x 2 locks x in-flight commands, versus the former unbounded
-/// park until the writer finished).
-const SEARCH_LOCK_BUDGET: Duration = Duration::from_millis(50);
-
 /// Configuration for HNSW index
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HnswConfig {
@@ -52,6 +42,16 @@ pub struct HnswConfig {
     /// field deserialize to true via `default_persist_graph_dump`.
     #[serde(default = "default_persist_graph_dump")]
     pub persist_graph_dump: bool,
+    /// Bounded wait for the search-path read locks, in milliseconds.
+    /// `None` (the default) waits for the locks unboundedly — correct for
+    /// single-shot CLI processes, where waiting out an in-process repair
+    /// or bulk insert beats a spurious error. The warm worker sets a small
+    /// budget so a contended search fails fast with
+    /// [`MemdError::IndexBusy`] instead of parking the event-loop thread
+    /// (clients then fall back to the cold read path). Runtime policy,
+    /// not an index property: never persisted.
+    #[serde(skip)]
+    pub search_lock_budget_ms: Option<u64>,
 }
 
 fn default_persist_graph_dump() -> bool {
@@ -67,6 +67,7 @@ impl Default for HnswConfig {
             max_elements: 100_000, // 100K chunks per tenant
             dimension: 384,        // all-MiniLM-L6-v2 (TODO: 1024 for Qwen3 upgrade)
             persist_graph_dump: true,
+            search_lock_budget_ms: None,
         }
     }
 }
@@ -336,26 +337,32 @@ impl HnswIndex {
         // Lock in same order as insert: mapping first, then hnsw
         // This prevents deadlock when insert and search run concurrently.
         //
-        // Bounded waits: a bulk insert holds the hnsw write lock for the
-        // duration of its batch — minutes for a large `insert_batch`. An
-        // unbounded read() here parks the calling thread for that long; in
-        // the warm worker that thread runs the accept loop, so one blocked
-        // search froze every request (including ping) until the client's
-        // 30s timeout. Failing with IndexBusy after a short bounded park
-        // keeps the worker responsive and lets clients fall back to the
-        // cold read path.
-        let mapping = self
-            .mapping
-            .try_read_for(SEARCH_LOCK_BUDGET)
-            .ok_or_else(|| MemdError::IndexBusy {
-                reason: "a writer holds the dense index mapping lock".to_string(),
-            })?;
-        let hnsw =
-            self.hnsw
-                .try_read_for(SEARCH_LOCK_BUDGET)
-                .ok_or_else(|| MemdError::IndexBusy {
-                    reason: "an index repair or bulk insert holds the dense index lock".to_string(),
-                })?;
+        // Lock-wait policy: without a configured budget, wait unboundedly
+        // (single-shot CLI: an in-process repair or bulk insert finishes
+        // and the search proceeds — pre-existing behavior). With a budget
+        // (the warm worker), a contended search fails fast with IndexBusy
+        // instead of parking the event-loop thread — a write hold can last
+        // minutes for a large insert batch, and one parked search froze
+        // accept + ping for every client until the 30s client timeout.
+        let (mapping, hnsw) = match self.config.search_lock_budget_ms.map(Duration::from_millis) {
+            Some(budget) => {
+                let mapping =
+                    self.mapping
+                        .try_read_for(budget)
+                        .ok_or_else(|| MemdError::IndexBusy {
+                            reason: "a writer holds the dense index mapping lock".to_string(),
+                        })?;
+                let hnsw = self
+                    .hnsw
+                    .try_read_for(budget)
+                    .ok_or_else(|| MemdError::IndexBusy {
+                        reason: "an index repair or bulk insert holds the dense index lock"
+                            .to_string(),
+                    })?;
+                (mapping, hnsw)
+            }
+            None => (self.mapping.read(), self.hnsw.read()),
+        };
 
         let neighbors: Vec<Neighbour> = hnsw.search(query_embedding, k, self.config.ef_search);
 
@@ -916,6 +923,8 @@ mod tests {
         let config = HnswConfig {
             max_elements: 100,
             dimension: 4,
+            // Worker-style bounded locks; unset (the default) waits instead.
+            search_lock_budget_ms: Some(50),
             ..Default::default()
         };
         let index = HnswIndex::new(config);

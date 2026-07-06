@@ -19,7 +19,6 @@ pub mod wal;
 pub mod writer_lock;
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -207,16 +206,6 @@ pub trait Store: Send + Sync {
     ///
     /// Returns the chunk_ids of all stored chunks.
     async fn add_batch(&self, chunks: Vec<MemoryChunk>) -> Result<Vec<ChunkId>>;
-
-    /// Wait briefly for the tenant's queued index work to land, so a read
-    /// that follows an acknowledged write observes it (read-your-writes)
-    /// even when indexing runs on a deferred background lane. Returns
-    /// `true` when the tenant's index is quiescent, `false` when the budget
-    /// expired (or waiting is pointless, e.g. a repair holds the index).
-    /// Stores that index synchronously are always quiescent.
-    async fn wait_for_index_quiescence(&self, _tenant_id: &TenantId, _budget: Duration) -> bool {
-        true
-    }
 
     /// Store a canonical task artifact and its retrieval projections.
     async fn add_task_artifact(

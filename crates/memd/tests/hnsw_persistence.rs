@@ -23,6 +23,7 @@ fn test_hnsw_persistence_round_trip() {
         max_elements: 1000,
         dimension: 4,
         persist_graph_dump: true,
+        search_lock_budget_ms: None,
     };
 
     // Create index and insert embeddings
@@ -357,6 +358,7 @@ fn save_without_graph_dump_writes_only_embedding_cache() {
         max_elements: 100,
         dimension: 4,
         persist_graph_dump: false,
+        search_lock_budget_ms: None,
         ..Default::default()
     };
 
@@ -400,6 +402,7 @@ fn load_ignores_stale_dump_when_persist_graph_dump_disabled() {
         max_elements: 100,
         dimension: 4,
         persist_graph_dump: true,
+        search_lock_budget_ms: None,
         ..Default::default()
     };
     let live_id = ChunkId::new();
@@ -435,6 +438,7 @@ fn load_ignores_stale_dump_when_persist_graph_dump_disabled() {
         max_elements: 100,
         dimension: 4,
         persist_graph_dump: false,
+        search_lock_budget_ms: None,
         ..Default::default()
     };
     let reloaded = HnswIndex::with_persistence(disabled_config, &path).unwrap();
