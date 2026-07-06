@@ -104,3 +104,8 @@ test-install.sh
 # Large generated benchmark payloads (rebuild locally when needed)
 /docs/scientific-task-memory/benchmark-results/task_memory_benchmark_data/
 /docs/scientific-task-memory/benchmark-results/task_memory_benchmark.log
+
+# Benchmark harness artifacts (benchmarks/locomo/)
+/benchmark-data/
+/run-output/
+/fable-work/
