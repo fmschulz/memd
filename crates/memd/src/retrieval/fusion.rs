@@ -134,11 +134,15 @@ impl RrfFusion {
             })
             .collect();
 
-        // Sort by RRF score descending
+        // Sort by RRF score descending. Equal scores are common (a chunk
+        // seen by only one source at rank r scores exactly weight/(k+r)),
+        // and the accumulator is a HashMap, so without a fixed tie-break
+        // the order would vary run-to-run.
         results.sort_by(|a, b| {
             b.rrf_score
                 .partial_cmp(&a.rrf_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.chunk_id.cmp(&b.chunk_id))
         });
 
         results
@@ -291,6 +295,37 @@ mod tests {
         // Score should be sum of both contributions
         let expected = 1.0 / (60.0 + 1.0) + 1.0 / (60.0 + 2.0);
         assert!((results[0].rrf_score - expected).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_rrf_equal_score_tie_break_is_deterministic() {
+        let fusion = RrfFusion::default_config();
+
+        // Two chunks seen by exactly one source each at the same rank score
+        // identically (weight/(k+rank)); order must not depend on input
+        // order or HashMap iteration.
+        let a = FusionCandidate {
+            chunk_id: make_chunk_id(9),
+            source: FusionSource::Dense,
+            rank: 4,
+            source_score: 0.5,
+        };
+        let b = FusionCandidate {
+            chunk_id: make_chunk_id(3),
+            source: FusionSource::Sparse,
+            rank: 4,
+            source_score: 7.0,
+        };
+
+        let forward = fusion.fuse(vec![a.clone(), b.clone()]);
+        let reverse = fusion.fuse(vec![b, a]);
+
+        assert_eq!(forward[0].rrf_score, forward[1].rrf_score);
+        let forward_ids: Vec<_> = forward.iter().map(|r| r.chunk_id.clone()).collect();
+        let reverse_ids: Vec<_> = reverse.iter().map(|r| r.chunk_id.clone()).collect();
+        assert_eq!(forward_ids, reverse_ids);
+        // Ascending chunk_id among ties.
+        assert_eq!(forward_ids[0], make_chunk_id(3));
     }
 
     #[test]

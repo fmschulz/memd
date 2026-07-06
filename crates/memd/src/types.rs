@@ -177,7 +177,8 @@ impl From<&str> for ProjectId {
 /// Chunk identifier - UUIDv7 wrapper for time-sortable IDs
 ///
 /// Uses UUIDv7 which encodes timestamp for natural chronological ordering.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Ord gives ranking code a deterministic tie-break key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ChunkId(Uuid);
 

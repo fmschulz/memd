@@ -429,12 +429,14 @@ impl<W: WarmTierSearch> TieredSearcher<W> {
             }
         }
 
-        // Sort by score descending and take top k
+        // Sort by score descending and take top k. `seen` is a HashMap, so
+        // equal scores need a fixed tie-break or the order varies per run.
         let mut results: Vec<ScoredChunk> = seen.into_values().collect();
         results.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.chunk_id.cmp(&b.chunk_id))
         });
         results.truncate(k);
         results
