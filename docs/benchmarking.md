@@ -10,7 +10,7 @@ checks.
 ## Repo-local harness (2026-07 protocol)
 
 A self-contained, fetch-on-run LoCoMo harness now lives at
-[`benchmarks/locomo/`](../benchmarks/locomo/README.md). Its numbers use a
+[`benchmarks/locomo/`](https://github.com/fmschulz/memd/tree/main/benchmarks/locomo). Its numbers use a
 **different protocol** from the historical tables below (per-conversation
 search scope, a pinned local answer model, upstream token-F1 metrics) and are
 **not comparable** to them; within the new harness every comparison is
