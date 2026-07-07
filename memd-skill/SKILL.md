@@ -337,6 +337,10 @@ Warm-mode flags:
 - `--warm required` fails if the warm worker cannot be reached.
 - If a command reports `writer lock held`, a warm worker owns the store: keep
   the default `--warm auto`, or run `memd warm stop` before cold-only commands.
+- If a write through the worker fails with `memd:dense-index-busy` (v1.3.1+),
+  an index repair is holding the dense index; the store is healthy — retry
+  the same command after a short wait. Reads never need this: they fall back
+  to the cold path automatically.
 
 For scripts or benchmarks that need many structured operations in one loaded
 process:
@@ -360,6 +364,22 @@ Useful modes:
 - `--mode find_decisions` for previous decisions
 - `--mode find_evidence` for evidence highlights
 - `--mode find_highlights` for high-uplift lessons
+
+Temporal recall (v1.3+): when answering time-sensitive questions (what
+happened when, before/after ordering), request event dates at recall.
+Memories stored with `event_time_ms` come back prefixed `[YYYY-MM-DD]`;
+memories without one are unchanged. JSON surface only (`call` / `batch`):
+
+```bash
+memd call memory.search \
+  --json '{"query":"kickoff meeting","k":5,"render_event_time":true}'
+```
+
+Source dedup (v1.3+): `memd search --dedupe-by-source` collapses results
+that share a `source.uri` to the best-ranked one. Use it when the store
+holds multi-chunk documents (one document per add) so fragments of one
+document don't crowd out other sources. Leave it off for conversational
+or pre-chunked stores — measured to hurt precision there.
 
 ## Record Work
 
@@ -413,6 +433,21 @@ memd add \
   --tags kind:finish,task:"$TASK_ID" \
   --text "Implemented tenant-scoped cache keys. Validation: cargo test cache_scope passed. Remaining risk: no load test yet."
 ```
+
+Event-time memories (v1.3+): when the record describes something that
+happened at a specific time — a meeting, an incident, a deploy, a dated
+fact — store the event time (ms since epoch) so recall can render it.
+Never bake dates into the text itself (they pollute retrieval); pass
+`event_time_ms` instead. JSON surface only (`call` / `batch`):
+
+```bash
+memd call memory.add \
+  --json '{"type":"message","text":"Kickoff meeting with Dana: agreed to ship v2 by June.","event_time_ms":1749168000000,"tags":["kind:evidence"]}'
+```
+
+The same field works per-line in `memd batch` (`memory.add` /
+`memory.add_batch` arguments). Backdating is the point: the event time is
+independent of when the memory is written.
 
 ## Tenant and Project Scope
 
