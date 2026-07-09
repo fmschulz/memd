@@ -185,7 +185,7 @@ def build() -> plt.Figure:
         Box(1.1, cli_band_y + 0.15, 3.4, 0.95,
             "Coding agent", "Claude Code · Codex · others"),
         Box(5.3, cli_band_y + 0.15, 3.4, 0.95,
-            "AI scientist", "ARIS · AI-Scientist · custom"),
+            "AI scientist", "research workflows · custom"),
         Box(9.5, cli_band_y + 0.15, 3.4, 0.95,
             "Human / controller", "shell · scripts · CI"),
     ]
@@ -198,7 +198,7 @@ def build() -> plt.Figure:
         Box(
             1.1, surf_band_y + 0.20, 5.6, 1.45,
             "Entry commands",
-            "memd agent-context\nmemd search · memd add\nmemd warm · memd batch",
+            "memd agent-context\nmemd search · memd add\nmemd warm · memd batch · memd doctor",
             mono=True, accent=SURFACE, fill=SURFACE_SOFT,
         ),
         Box(
@@ -227,7 +227,7 @@ def build() -> plt.Figure:
         Box(8.45, ret_y, 2.45, ret_h, "Hot + cache", "recency LRU\nquery-hash cache",
             accent=RETRIEVE, fill=RETRIEVE_SOFT),
         Box(11.05, ret_y, 2.35, ret_h, "Rerank",
-            "feature (default)\nONNX CE · MemRank-4B\n(opt-in)",
+            "feature (default)\nopt-in: ONNX CE,\nMemReranker-4B",
             accent=RETRIEVE, fill=RETRIEVE_SOFT),
     ]
     for box in retrieval:
@@ -260,7 +260,7 @@ def build() -> plt.Figure:
             mono=True, accent=NEUTRAL, fill=DISK_SOFT),
         Box(3.55, disk_y, 2.30, disk_h, "sparse_index/", "tantivy",
             mono=True, accent=NEUTRAL, fill=DISK_SOFT),
-        Box(6.00, disk_y, 2.30, disk_h, "warm_index/", "HNSW + mapping.bin",
+        Box(6.00, disk_y, 2.30, disk_h, "warm_index/", "HNSW + mapping.bin\n(per tenant)",
             mono=True, accent=NEUTRAL, fill=DISK_SOFT),
         Box(8.45, disk_y, 2.45, disk_h, "segments/", "append-only payloads\n(per tenant)",
             mono=True, accent=NEUTRAL, fill=DISK_SOFT),
@@ -332,7 +332,7 @@ def build() -> plt.Figure:
     )
     ax.text(
         13.6, title_y,
-        "v0.50.0",
+        "v1.3.1",
         ha="right", va="top",
         color=NEUTRAL, fontsize=10, family="DejaVu Sans Mono",
     )
