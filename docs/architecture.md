@@ -24,6 +24,7 @@ flowchart TB
     direction LR
     agent_context["memd agent-context"]
     search_add["memd search / memd add"]
+    warm_batch["memd warm / memd batch / memd doctor"]
   end
 
   subgraph core["memd core"]
@@ -56,15 +57,17 @@ flowchart TB
     segment_files[("tenant segments")]
     wal_file[("tenant WAL")]
     sparse_index[("sparse index")]
-    warm_index[("warm index")]
+    warm_index[("tenant warm index")]
   end
 
   ca --> agent_context
   sci --> agent_context
   human --> search_add
   human --> cli_call
+  human --> warm_batch
   agent_context --> handlers
   search_add --> handlers
+  warm_batch --> handlers
   cli_call --> handlers
   cli_call --> metrics
   handlers --> hybrid
