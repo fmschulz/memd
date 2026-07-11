@@ -1036,7 +1036,10 @@ async fn shutdown_existing_warm_worker_best_effort(config: &WarmProcessConfig) {
 }
 
 fn warm_worker_needs_replacement(error: &MemdError) -> bool {
-    matches!(error, MemdError::IncompatibleWarmWorker { .. })
+    matches!(
+        error,
+        MemdError::IncompatibleWarmWorker { .. } | MemdError::WarmWorkerConfigMismatch { .. }
+    )
 }
 
 async fn replace_incompatible_warm_worker(config: &WarmProcessConfig) -> Result<Value> {
@@ -1232,7 +1235,32 @@ async fn warm_ping(config: &WarmProcessConfig) -> Result<Value> {
     }
     let result = response.result.unwrap_or(Value::Null);
     validate_warm_worker_identity(&result)?;
+    validate_warm_worker_config(&result, config)?;
     Ok(result)
+}
+
+/// Reject a resident worker whose embedding model or search variant differs
+/// from what this CLI requested, so `ensure_warm_worker` respawns it. Runs
+/// only after the version/protocol check, so a same-version worker is
+/// guaranteed to report these fields.
+fn validate_warm_worker_config(result: &Value, config: &WarmProcessConfig) -> Result<()> {
+    let worker_model = result
+        .get("embedding_model")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let worker_variant = result
+        .get("search_variant")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if worker_model != config.embedding_model || worker_variant != config.search_variant {
+        return Err(MemdError::WarmWorkerConfigMismatch {
+            worker_model: worker_model.to_string(),
+            worker_variant: worker_variant.to_string(),
+            cli_model: config.embedding_model.clone(),
+            cli_variant: config.search_variant.clone(),
+        });
+    }
+    Ok(())
 }
 
 /// Diagnostic ping for `memd doctor`: returns the worker's identity
@@ -1251,12 +1279,19 @@ pub(super) async fn warm_ping_identity(data_dir: &Path) -> Result<Value> {
     Ok(response.result.unwrap_or(Value::Null))
 }
 
-fn warm_worker_identity(socket: &Path, ryw_probe_stats: Option<RywProbeStats>) -> Value {
+fn warm_worker_identity(
+    socket: &Path,
+    ryw_probe_stats: Option<RywProbeStats>,
+    embedding_model: &str,
+    search_variant: &str,
+) -> Value {
     let mut identity = json!({
         "pid": std::process::id(),
         "socket": socket,
         "memd_version": env!("CARGO_PKG_VERSION"),
         "warm_wire_protocol": WARM_WIRE_PROTOCOL,
+        "embedding_model": embedding_model,
+        "search_variant": search_variant,
     });
     if let Some(stats) = ryw_probe_stats {
         identity["ryw_probe"] = json!({
@@ -1505,8 +1540,15 @@ pub(super) async fn run_warm_worker<S: Store>(
     store: &S,
     tenant_manager: Option<&TenantManager>,
     socket: &Path,
+    embedding_model: Option<&str>,
+    search_variant: Option<&str>,
 ) -> Result<()> {
     use futures_util::stream::{FuturesUnordered, StreamExt};
+
+    // Identity this worker advertises in its ping handshake. Falls back to the
+    // documented defaults if the parent did not stamp them (test paths only).
+    let embedding_model = embedding_model.unwrap_or("all-minilm").to_string();
+    let search_variant = search_variant.unwrap_or("hybrid-feature").to_string();
     use std::os::unix::fs::PermissionsExt;
     use tokio::net::UnixListener;
     use tokio::sync::Semaphore;
@@ -1575,6 +1617,8 @@ pub(super) async fn run_warm_worker<S: Store>(
                             socket,
                             &semaphore,
                             stream,
+                            &embedding_model,
+                            &search_variant,
                         )));
                     }
                     Err(error) => {
@@ -1622,12 +1666,15 @@ pub(super) async fn run_warm_worker<S: Store>(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 async fn handle_warm_connection<S: Store>(
     store: &S,
     tenant_manager: Option<&TenantManager>,
     socket: &Path,
     semaphore: &tokio::sync::Semaphore,
     mut stream: tokio::net::UnixStream,
+    embedding_model: &str,
+    search_variant: &str,
 ) -> bool {
     use tokio::io::AsyncReadExt;
 
@@ -1639,12 +1686,20 @@ async fn handle_warm_connection<S: Store>(
 
     let mut shutdown = false;
     let response = match serde_json::from_slice::<WarmWireRequest>(&bytes) {
-        Ok(WarmWireRequest::Ping) => {
-            WarmWireResponse::ok_result(warm_worker_identity(socket, store.ryw_probe_stats()))
-        }
+        Ok(WarmWireRequest::Ping) => WarmWireResponse::ok_result(warm_worker_identity(
+            socket,
+            store.ryw_probe_stats(),
+            embedding_model,
+            search_variant,
+        )),
         Ok(WarmWireRequest::Shutdown) => {
             shutdown = true;
-            WarmWireResponse::ok_result(warm_worker_identity(socket, store.ryw_probe_stats()))
+            WarmWireResponse::ok_result(warm_worker_identity(
+                socket,
+                store.ryw_probe_stats(),
+                embedding_model,
+                search_variant,
+            ))
         }
         Ok(WarmWireRequest::Command { command }) => {
             let permit = match semaphore.acquire().await {
@@ -1748,7 +1803,12 @@ mod tests {
             stream.read_to_end(&mut bytes).await.unwrap();
             match serde_json::from_slice::<WarmWireRequest>(&bytes).unwrap() {
                 WarmWireRequest::Ping => {
-                    let response = WarmWireResponse::ok_result(warm_worker_identity(&socket, None));
+                    let response = WarmWireResponse::ok_result(warm_worker_identity(
+                        &socket,
+                        None,
+                        "all-minilm",
+                        "hybrid-feature",
+                    ));
                     assert!(write_warm_response(&mut stream, response).await);
                 }
                 WarmWireRequest::Command { .. } => {
@@ -1776,7 +1836,12 @@ mod tests {
             stream.read_to_end(&mut bytes).await.unwrap();
             match serde_json::from_slice::<WarmWireRequest>(&bytes).unwrap() {
                 WarmWireRequest::Ping => {
-                    let response = WarmWireResponse::ok_result(warm_worker_identity(&socket, None));
+                    let response = WarmWireResponse::ok_result(warm_worker_identity(
+                        &socket,
+                        None,
+                        "all-minilm",
+                        "hybrid-feature",
+                    ));
                     assert!(write_warm_response(&mut stream, response).await);
                 }
                 WarmWireRequest::Command { .. } => {
@@ -2086,7 +2151,12 @@ mod tests {
 
     #[test]
     fn warm_worker_identity_validation_accepts_current_payload() {
-        let payload = warm_worker_identity(Path::new("/tmp/memd.sock"), None);
+        let payload = warm_worker_identity(
+            Path::new("/tmp/memd.sock"),
+            None,
+            "all-minilm",
+            "hybrid-feature",
+        );
 
         validate_warm_worker_identity(&payload).unwrap();
     }
@@ -2101,6 +2171,8 @@ mod tests {
                 repairs: 1,
                 repair_in_progress: false,
             }),
+            "all-minilm",
+            "hybrid-feature",
         );
 
         assert_eq!(
@@ -2139,6 +2211,31 @@ mod tests {
                 worker_protocol,
                 ..
             } if worker_version == "0.0.1" && worker_protocol == "1"
+        ));
+        assert!(warm_worker_needs_replacement(&err));
+    }
+
+    #[test]
+    fn warm_worker_config_mismatch_is_detected_and_needs_replacement() {
+        // test_warm_config requests model=all-minilm, variant=hybrid-feature.
+        let config = test_warm_config(PathBuf::from("/tmp/warm-cfg-test"));
+
+        // A worker serving the same model/variant validates cleanly.
+        let matching = warm_worker_identity(
+            Path::new("/tmp/memd.sock"),
+            None,
+            "all-minilm",
+            "hybrid-feature",
+        );
+        validate_warm_worker_config(&matching, &config).unwrap();
+
+        // A bge/dense-only worker answering an all-minilm request is a
+        // respawn-triggering mismatch.
+        let bge = warm_worker_identity(Path::new("/tmp/memd.sock"), None, "bge-base", "dense-only");
+        let err = validate_warm_worker_config(&bge, &config).unwrap_err();
+        assert!(matches!(
+            &err,
+            MemdError::WarmWorkerConfigMismatch { worker_model, .. } if worker_model == "bge-base"
         ));
         assert!(warm_worker_needs_replacement(&err));
     }

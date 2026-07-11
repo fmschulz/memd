@@ -621,8 +621,19 @@ pub async fn run_cli<S: Store>(
             ));
         }
 
-        CliCommand::WarmWorker { socket } => {
-            run_warm_worker(store, tenant_manager, &socket).await?;
+        CliCommand::WarmWorker {
+            socket,
+            embedding_model,
+            search_variant,
+        } => {
+            run_warm_worker(
+                store,
+                tenant_manager,
+                &socket,
+                embedding_model.as_deref(),
+                search_variant.as_deref(),
+            )
+            .await?;
         }
 
         CliCommand::Maintenance {

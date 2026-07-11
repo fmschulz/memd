@@ -47,6 +47,36 @@ pub enum MemdError {
         cli_protocol: String,
     },
 
+    /// Warm worker serves a different embedding model or search variant than
+    /// this CLI requested. Triggers the same shutdown+respawn as a version
+    /// skew so a resident MiniLM/hybrid worker never answers bge/dense-only
+    /// requests (and vice versa).
+    #[error(
+        "warm worker configuration mismatch: worker serves model {worker_model} / variant {worker_variant}; CLI requested model {cli_model} / variant {cli_variant}"
+    )]
+    WarmWorkerConfigMismatch {
+        worker_model: String,
+        worker_variant: String,
+        cli_model: String,
+        cli_variant: String,
+    },
+
+    /// The persisted dense index was built with a different embedding model
+    /// (vector dimension) than the one now active — i.e. `--embedding-model`
+    /// was changed on an existing store. Refused rather than silently wiping
+    /// the index (dense-only search has no sparse fallback).
+    #[error(
+        "dense index at {path} holds {store_dim}-d embeddings but the active embedding model produces {model_dim}-d vectors; this store was built with a different --embedding-model. Re-open with the original model, or set MEMD_BACKFILL_HNSW_ON_STARTUP=1 to discard the dense index and re-embed from segments."
+    )]
+    DenseIndexModelMismatch {
+        /// Path to the embedding cache that could not be reused.
+        path: std::path::PathBuf,
+        /// Vector dimension of the persisted index.
+        store_dim: usize,
+        /// Vector dimension the active embedding model produces.
+        model_dim: usize,
+    },
+
     /// Another process currently owns the persistent-store writer lock.
     #[error(
         "writer lock held by another process ({holder}) at {lock_path}; if a memd warm worker is running, route this write through it (--warm auto, the default) or stop it with `memd warm stop`; otherwise stop the other memd process or retry later (MEMD_WRITER_LOCK_TIMEOUT_MS)"
