@@ -52,6 +52,13 @@ pub struct HnswConfig {
     /// not an index property: never persisted.
     #[serde(skip)]
     pub search_lock_budget_ms: Option<u64>,
+    /// Operator opt-in (`MEMD_BACKFILL_HNSW_ON_STARTUP=1`) to re-embed from
+    /// segments. When set, a persisted cache whose dimension no longer matches
+    /// the active embedding model is discarded and rebuilt instead of erroring
+    /// — the intentional model-switch migration path. Runtime policy, never
+    /// persisted.
+    #[serde(skip)]
+    pub backfill_hnsw_on_startup: bool,
 }
 
 fn default_persist_graph_dump() -> bool {
@@ -68,6 +75,7 @@ impl Default for HnswConfig {
             dimension: 384,        // all-MiniLM-L6-v2 (TODO: 1024 for Qwen3 upgrade)
             persist_graph_dump: true,
             search_lock_budget_ms: None,
+            backfill_hnsw_on_startup: false,
         }
     }
 }
@@ -239,6 +247,12 @@ impl HnswIndex {
                     tracing::info!("Loaded persisted HNSW index from {:?}", path);
                     return Ok(index);
                 }
+                // A model/dimension mismatch is a hard error: the store was
+                // built with a different embedder. Falling through to an empty
+                // index here would let save_all() clobber the intact cache on
+                // shutdown (the round-1 data-loss). Propagate it; only genuine
+                // load failures degrade to an empty index.
+                Err(e @ MemdError::DenseIndexModelMismatch { .. }) => return Err(e),
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
@@ -660,14 +674,39 @@ impl HnswIndex {
         let embedding_cache = if cache_path.exists() {
             match EmbeddingCache::load_from(&cache_path) {
                 Ok(cache) => {
-                    // Validate consistency
-                    if let Err(e) = cache.validate_consistency(config.dimension, mapping.next_id) {
+                    if cache.dimension() != config.dimension {
+                        // Wrong model for this store: switching --embedding-model
+                        // changes the vector dimension. Deleting the cache here
+                        // would silently wipe the dense index (and dense-only
+                        // search has no sparse fallback), so refuse loudly —
+                        // unless the operator opted into re-embedding from
+                        // segments via MEMD_BACKFILL_HNSW_ON_STARTUP.
+                        if config.backfill_hnsw_on_startup && !read_only {
+                            tracing::warn!(
+                                store_dim = cache.dimension(),
+                                model_dim = config.dimension,
+                                "dense index dimension differs from the active model; \
+                                 backfill opt-in set — discarding cache and re-embedding from segments"
+                            );
+                            let _ = std::fs::remove_file(&cache_path);
+                            EmbeddingCache::new(config.dimension)
+                        } else {
+                            return Err(MemdError::DenseIndexModelMismatch {
+                                path: cache_path.clone(),
+                                store_dim: cache.dimension(),
+                                model_dim: config.dimension,
+                            });
+                        }
+                    } else if let Err(e) =
+                        cache.validate_consistency(config.dimension, mapping.next_id)
+                    {
+                        // Same-dimension corruption (count mismatch): genuine
+                        // corruption — delete and rebuild from segments.
                         tracing::warn!(
                             "Embedding cache validation failed: {}. Will need rebuild from segments.",
                             e
                         );
                         if !read_only {
-                            // Delete corrupted cache so the writer path can rebuild cleanly.
                             let _ = std::fs::remove_file(&cache_path);
                         }
                         EmbeddingCache::new(config.dimension)
@@ -1086,6 +1125,107 @@ mod tests {
             let mapping = index.mapping.read();
             assert!(mapping.chunk_to_id.contains_key(&chunk_id_str));
         }
+    }
+
+    #[test]
+    fn test_dimension_mismatch_errors_without_deleting_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index");
+
+        // Persist a 4-d index (simulating a store built with one model).
+        let config = HnswConfig {
+            max_elements: 100,
+            dimension: 4,
+            ..Default::default()
+        };
+        {
+            let index = HnswIndex::with_persistence(config.clone(), &path).unwrap();
+            let mut emb = vec![1.0, 0.0, 0.0, 0.0];
+            normalize(&mut emb);
+            index.insert(&ChunkId::new(), &emb).unwrap();
+            index.save().unwrap();
+        }
+        let cache_path = path.join("embeddings.bin");
+        assert!(cache_path.exists(), "cache should have been persisted");
+
+        // Re-open with a different dimension (wrong model): must hard-error and
+        // NOT delete the persisted cache.
+        let wrong = HnswConfig {
+            max_elements: 100,
+            dimension: 8,
+            ..Default::default()
+        };
+        // Note: HnswIndex is not Debug, so match rather than unwrap_err().
+        match HnswIndex::load(&path, wrong.clone()) {
+            Err(MemdError::DenseIndexModelMismatch {
+                store_dim,
+                model_dim,
+                ..
+            }) => {
+                assert_eq!(store_dim, 4);
+                assert_eq!(model_dim, 8);
+            }
+            Err(other) => panic!("expected DenseIndexModelMismatch, got {other:?}"),
+            Ok(_) => panic!("expected dimension mismatch to error, got Ok"),
+        }
+        assert!(
+            cache_path.exists(),
+            "dimension mismatch must not delete the persisted cache"
+        );
+
+        // With the backfill opt-in, the same mismatch discards and rebuilds
+        // instead of erroring (the intentional model-switch migration path).
+        let migrate = HnswConfig {
+            backfill_hnsw_on_startup: true,
+            ..wrong
+        };
+        let index = HnswIndex::load(&path, migrate).unwrap();
+        assert_eq!(index.config.dimension, 8);
+    }
+
+    #[test]
+    fn test_with_persistence_propagates_dimension_mismatch() {
+        // Production opens the dense index via with_persistence (not load()),
+        // whose error arm previously swallowed any failure into an empty index
+        // that save_all() would later clobber the real cache with. The
+        // model/dimension mismatch must propagate as a hard error here too.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index");
+        let config = HnswConfig {
+            max_elements: 100,
+            dimension: 4,
+            ..Default::default()
+        };
+        {
+            let index = HnswIndex::with_persistence(config.clone(), &path).unwrap();
+            let mut emb = vec![1.0, 0.0, 0.0, 0.0];
+            normalize(&mut emb);
+            index.insert(&ChunkId::new(), &emb).unwrap();
+            index.save().unwrap();
+        }
+        let cache_path = path.join("embeddings.bin");
+
+        let wrong = HnswConfig {
+            max_elements: 100,
+            dimension: 8,
+            ..Default::default()
+        };
+        match HnswIndex::with_persistence(wrong, &path) {
+            Err(MemdError::DenseIndexModelMismatch {
+                store_dim,
+                model_dim,
+                ..
+            }) => {
+                assert_eq!(store_dim, 4);
+                assert_eq!(model_dim, 8);
+            }
+            Err(other) => panic!("expected DenseIndexModelMismatch, got {other:?}"),
+            Ok(_) => panic!("with_persistence swallowed the mismatch into an empty index"),
+        }
+        assert!(
+            cache_path.exists(),
+            "dimension mismatch must not delete the persisted cache"
+        );
     }
 
     #[test]

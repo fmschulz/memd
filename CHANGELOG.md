@@ -6,6 +6,40 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-11
+
+### Added
+
+- **bge-base-en-v1.5 embedder** (`--embedding-model bge-base`): a 768-d Candle
+  BERT retriever (CLS pooling, query-only instruction prefix) selectable
+  alongside the default `all-minilm`. Assets are fetched on first use from a
+  pinned Hugging Face revision and verified by sha256, matching the existing
+  MiniLM download contract.
+- **Model-conditional default search variant**: when `bge-base` is selected and
+  `--search-variant` is not given, the retrieval default becomes `dense-only`
+  (hybrid fusion off). `all-minilm` and other models keep the `hybrid-feature`
+  default, and an explicit `--search-variant` always takes precedence.
+
+### Changed
+
+- **Warm workers report their embedding model and search variant in the ping
+  identity.** A resident worker serving a different model/variant than the
+  client requests is now shut down and respawned (the same path as a
+  version/protocol skew), instead of silently answering with the wrong
+  embedder.
+- **Switching `--embedding-model` on an existing store no longer wipes the
+  dense index.** A persisted index built at a different vector dimension
+  (e.g. bge-base 768-d vs all-minilm 384-d) is incompatible with the active
+  model; memd now fails with a clear error naming both dimensions instead of
+  deleting the embedding cache and leaving an empty index. Set
+  `MEMD_BACKFILL_HNSW_ON_STARTUP=1` to intentionally discard the dense index
+  and re-embed from segments under the new model. Same-dimension cache
+  corruption still deletes and rebuilds as before.
+- `CandleEmbedder::with_config` applies the model's required pooling strategy
+  (mean for MiniLM, CLS for bge-base), overriding any pooling carried on the
+  passed `EmbeddingConfig` — pooling is a property of the model's training
+  recipe, not a caller choice.
+
 ## [1.3.1] - 2026-07-06
 
 Fixes a 1.3.0 regression in warm-worker write acknowledgements.

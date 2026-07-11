@@ -1,5 +1,6 @@
 use memd::index::{HnswConfig, HnswIndex};
 use memd::types::ChunkId;
+use memd::MemdError;
 use tempfile::TempDir;
 
 fn normalize(v: &mut [f32]) {
@@ -24,6 +25,7 @@ fn test_hnsw_persistence_round_trip() {
         dimension: 4,
         persist_graph_dump: true,
         search_lock_budget_ms: None,
+        backfill_hnsw_on_startup: false,
     };
 
     // Create index and insert embeddings
@@ -200,18 +202,40 @@ fn test_hnsw_dimension_mismatch() {
     index.save().unwrap();
     drop(index);
 
-    // Try to load with different dimension
+    // Loading with a different dimension (wrong embedding model) must refuse
+    // loudly rather than silently wiping the persisted index.
     let wrong_config = HnswConfig {
         dimension: 8,
         ..Default::default()
     };
+    match HnswIndex::load(&index_path, wrong_config) {
+        Err(MemdError::DenseIndexModelMismatch {
+            store_dim,
+            model_dim,
+            ..
+        }) => {
+            assert_eq!(store_dim, 4);
+            assert_eq!(model_dim, 8);
+        }
+        Err(other) => panic!("expected DenseIndexModelMismatch, got {other:?}"),
+        Ok(_) => panic!("dimension mismatch must error, not silently reset the cache"),
+    }
+    assert!(
+        index_path.join("embeddings.bin").exists(),
+        "refused load must not delete the persisted cache"
+    );
 
-    let loaded = HnswIndex::load(&index_path, wrong_config).unwrap();
-
-    // Should load but with empty cache (dimension mismatch)
+    // Opting into the migration (MEMD_BACKFILL_HNSW_ON_STARTUP=1) re-embeds at
+    // the new dimension, starting from an empty cache.
+    let migrate = HnswConfig {
+        dimension: 8,
+        backfill_hnsw_on_startup: true,
+        ..Default::default()
+    };
+    let loaded = HnswIndex::load(&index_path, migrate).unwrap();
     assert!(
         loaded.cache_is_empty(),
-        "Cache should be empty due to dimension mismatch"
+        "re-embed migration starts from an empty cache"
     );
 }
 

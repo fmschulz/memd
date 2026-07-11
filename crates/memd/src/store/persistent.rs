@@ -48,7 +48,7 @@ use super::{
     rank_candidate_chunks, score_candidate_chunk, ExternalMutationOutcome, RywProbeStats, Store,
     StoreHealthSnapshot, StoreStats,
 };
-use crate::embeddings::EmbeddingModel;
+use crate::embeddings::{CandleModel, EmbeddingModel};
 use crate::error::{MemdError, Result};
 use crate::index::{Bm25Index, SparseIndex};
 use crate::metrics::{IndexStats, MetricsCollector, QueryMetrics, TieredQueryMetrics};
@@ -95,7 +95,13 @@ pub struct PersistentStoreConfig {
     /// Hybrid search configuration
     pub hybrid_config: Option<HybridConfig>,
     /// Embedding model to use for dense search
+    ///
+    /// Vestigial ONNX-era selector (retained for config compatibility); the
+    /// live dense embedder is the Candle backend selected via `candle_model`.
     pub embedding_model: EmbeddingModel,
+    /// Candle embedder model actually loaded for dense search. Set from the
+    /// `--embedding-model` CLI choice.
+    pub candle_model: CandleModel,
     /// Enable async/background indexing of newly added chunks
     pub enable_async_indexing: bool,
     /// Max pending chunks processed per async indexer tick
@@ -193,6 +199,7 @@ impl Default for PersistentStoreConfig {
             enable_tiered_search: true,
             hybrid_config: None,
             embedding_model: EmbeddingModel::default(),
+            candle_model: CandleModel::default(),
             enable_async_indexing,
             async_index_batch_size,
             async_index_poll_ms,
@@ -689,7 +696,13 @@ impl PersistentStore {
         let dense_searcher = if config.enable_dense_search {
             use super::dense::DenseSearchConfig;
 
-            let mut dense_config = DenseSearchConfig::default();
+            let mut dense_config = DenseSearchConfig {
+                model: config.candle_model,
+                ..DenseSearchConfig::default()
+            };
+            // Propagate the model-switch migration opt-in so a dimension
+            // mismatch re-embeds from segments instead of hard-erroring.
+            dense_config.hnsw.backfill_hnsw_on_startup = config.backfill_hnsw_on_startup;
             if config.bounded_search_locks {
                 dense_config.hnsw.search_lock_budget_ms = Some(WORKER_SEARCH_LOCK_BUDGET_MS);
             }
