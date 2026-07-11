@@ -47,6 +47,7 @@ impl Default for HotTierConfig {
                 dimension: 384,
                 persist_graph_dump: true,
                 search_lock_budget_ms: None,
+                backfill_hnsw_on_startup: false,
             },
         }
     }
@@ -355,6 +356,7 @@ mod tests {
                 dimension: 4,
                 persist_graph_dump: true,
                 search_lock_budget_ms: None,
+                backfill_hnsw_on_startup: false,
             },
         }
     }

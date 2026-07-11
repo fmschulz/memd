@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use parking_lot::RwLock;
 
 use crate::compaction::hnsw_rebuild::{HnswRebuilder, RebuildResult};
-use crate::embeddings::{CandleEmbedder, Embedder, EmbeddingConfig};
+use crate::embeddings::{CandleEmbedder, CandleModel, Embedder, EmbeddingConfig};
 use crate::error::{MemdError, Result};
 use crate::index::{HnswConfig, HnswIndex};
 use crate::metrics::IndexStats;
@@ -32,9 +32,8 @@ pub struct DenseSearchConfig {
     pub hnsw: HnswConfig,
     /// Whether to persist index
     pub persist: bool,
-    // Temporarily removed during Candle migration
-    // /// Embedding model to use
-    // pub model: EmbeddingModel,
+    /// Candle embedder model to load (selected via `--embedding-model`).
+    pub model: CandleModel,
 }
 
 impl Default for DenseSearchConfig {
@@ -42,7 +41,7 @@ impl Default for DenseSearchConfig {
         Self {
             hnsw: HnswConfig::default(),
             persist: true,
-            // model: EmbeddingModel::default(),
+            model: CandleModel::default(),
         }
     }
 }
@@ -74,7 +73,10 @@ impl DenseSearcher {
     pub fn new(config: DenseSearchConfig) -> Result<Self> {
         let mut embedding_config = EmbeddingConfig::default();
         embedding_config.batch_size = embedding_batch_size();
-        let embedder = Arc::new(CandleEmbedder::with_config(embedding_config)?);
+        let embedder = Arc::new(CandleEmbedder::with_config_and_model(
+            embedding_config,
+            config.model,
+        )?);
 
         // Update HNSW config dimension to match model
         let mut updated_config = config.clone();
@@ -168,7 +170,17 @@ impl DenseSearcher {
                 op: "dense_index_chunk".to_string(),
             });
         }
-        let embedding = self.embedder.embed_query(text).await?;
+        // Documents are embedded verbatim via embed_texts; embed_query would
+        // apply a retrieval query prefix (BGE), corrupting stored vectors.
+        let embedding = self
+            .embedder
+            .embed_texts(&[text])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                MemdError::EmbeddingError("embed_texts returned no embedding".to_string())
+            })?;
         let index = self.get_or_create_index(tenant_id)?;
         index.insert(chunk_id, &embedding)?;
 

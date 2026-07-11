@@ -616,6 +616,14 @@ pub enum CliCommand {
         /// Unix socket path to listen on.
         #[arg(long)]
         socket: PathBuf,
+        /// Embedding-model identity this worker serves, injected by the parent
+        /// before dispatch (not parsed from argv). Reported in the ping
+        /// identity so a client requesting a different model respawns it.
+        #[arg(skip)]
+        embedding_model: Option<String>,
+        /// Search-variant identity this worker serves (injected, see above).
+        #[arg(skip)]
+        search_variant: Option<String>,
     },
 
     /// Get a chunk by ID

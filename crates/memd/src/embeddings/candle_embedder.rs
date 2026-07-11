@@ -13,12 +13,10 @@ use parking_lot::Mutex;
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 use tokio::sync::Semaphore;
 
-use crate::embeddings::download::get_candle_bert_paths;
+use crate::embeddings::download::{get_candle_model_paths, CandleModel};
 use crate::embeddings::traits::{Embedder, EmbeddingConfig, EmbeddingResult, PoolingStrategy};
 use crate::error::{MemdError, Result};
 
-const DEFAULT_MODEL: &str = "sentence-transformers/all-MiniLM-L6-v2";
-const DEFAULT_DIMENSION: usize = 384;
 const DEFAULT_MAX_LENGTH: usize = 512;
 const MODEL_POOL_SIZE: usize = 4; // 4 models for parallel inference
                                   // MAX_CONCURRENT derived from MODEL_POOL_SIZE to avoid duplication
@@ -98,19 +96,32 @@ pub struct CandleEmbedder {
     dimension: usize,
     /// Embedding configuration
     config: EmbeddingConfig,
+    /// Retrieval query prefix (model-specific; applied to queries only)
+    query_prefix: Option<&'static str>,
 }
 
 impl CandleEmbedder {
-    /// Create a new CandleEmbedder with default model (all-MiniLM-L6-v2)
+    /// Create a new CandleEmbedder with the default model (all-MiniLM-L6-v2).
     pub fn new() -> Result<Self> {
         Self::with_config(EmbeddingConfig::default())
     }
 
-    /// Create with custom configuration
+    /// Create with custom configuration and the default model
+    /// (all-MiniLM-L6-v2). Use `with_config_and_model` to select a model.
     pub fn with_config(config: EmbeddingConfig) -> Result<Self> {
+        Self::with_config_and_model(config, CandleModel::default())
+    }
+
+    /// Create with custom configuration and an explicit Candle model.
+    ///
+    /// Pooling and the query prefix are properties of the model's training
+    /// recipe, so they override whatever the caller's config carried.
+    pub fn with_config_and_model(mut config: EmbeddingConfig, model: CandleModel) -> Result<Self> {
+        config.pooling = model.pooling_strategy();
+
         tracing::info!(
-            model = DEFAULT_MODEL,
-            dimension = DEFAULT_DIMENSION,
+            model = model.hf_id(),
+            pooling = ?config.pooling,
             "initializing Candle embedder"
         );
 
@@ -176,7 +187,7 @@ impl CandleEmbedder {
         // (`~/.cache/huggingface/hub` or `$HF_HOME/hub`). Hosts with a
         // populated hf-hub cache but no network will re-download on first
         // upgrade — see CHANGELOG.
-        let (config_path, tokenizer_path, weights_path) = get_candle_bert_paths()?;
+        let (config_path, tokenizer_path, weights_path) = get_candle_model_paths(model)?;
 
         // Load and validate model config
         let config_str = std::fs::read_to_string(&config_path)
@@ -258,6 +269,7 @@ impl CandleEmbedder {
             device,
             dimension,
             config,
+            query_prefix: model.query_prefix(),
         })
     }
 
@@ -388,7 +400,15 @@ impl CandleEmbedder {
 #[async_trait]
 impl Embedder for CandleEmbedder {
     async fn embed_query(&self, query: &str) -> Result<EmbeddingResult> {
-        self.embed_single(query).await
+        // Retrieval-tuned models (BGE) expect an instruction prefix on the
+        // query side only; documents are embedded verbatim by embed_texts.
+        match self.query_prefix {
+            Some(prefix) => {
+                let prefixed = format!("{prefix}{query}");
+                self.embed_single(&prefixed).await
+            }
+            None => self.embed_single(query).await,
+        }
     }
 
     async fn embed_texts(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {

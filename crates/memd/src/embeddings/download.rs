@@ -210,6 +210,70 @@ const MIN_CANDLE_BERT_CONFIG_SIZE: u64 = 100; // config.json is ~600 bytes
 const MIN_CANDLE_BERT_TOKENIZER_SIZE: u64 = 100_000; // tokenizer.json is ~470KB
 const MIN_CANDLE_BERT_WEIGHTS_SIZE: u64 = 80_000_000; // safetensors is ~90MB
 
+// Candle BERT (safetensors) files for BAAI/bge-base-en-v1.5 — a stronger
+// 768-d BERT retriever selectable via `--embedding-model bge-base`. Same
+// pinned-immutable-revision + sha256 contract as the MiniLM constants.
+const CANDLE_BGE_CONFIG_URL: &str =
+    "https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/a5beb1e3e68b9ab74eb54cfd186867f64f240e1a/config.json";
+const CANDLE_BGE_CONFIG_SHA256: &str =
+    "bc00af31a4a31b74040d73370aa83b62da34c90b75eb77bfa7db039d90abd591";
+const CANDLE_BGE_CONFIG_FILENAME: &str = "bge-base-en-v1.5-config.json";
+const CANDLE_BGE_TOKENIZER_URL: &str =
+    "https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/a5beb1e3e68b9ab74eb54cfd186867f64f240e1a/tokenizer.json";
+const CANDLE_BGE_TOKENIZER_SHA256: &str =
+    "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66";
+const CANDLE_BGE_TOKENIZER_FILENAME: &str = "bge-base-en-v1.5-tokenizer.json";
+const CANDLE_BGE_WEIGHTS_URL: &str =
+    "https://huggingface.co/BAAI/bge-base-en-v1.5/resolve/a5beb1e3e68b9ab74eb54cfd186867f64f240e1a/model.safetensors";
+const CANDLE_BGE_WEIGHTS_SHA256: &str =
+    "c7c1988aae201f80cf91a5dbbd5866409503b89dcaba877ca6dba7dd0a5167d7";
+const CANDLE_BGE_WEIGHTS_FILENAME: &str = "bge-base-en-v1.5.safetensors";
+const MIN_CANDLE_BGE_CONFIG_SIZE: u64 = 100; // config.json is ~800 bytes
+const MIN_CANDLE_BGE_TOKENIZER_SIZE: u64 = 100_000; // tokenizer.json is ~700KB
+const MIN_CANDLE_BGE_WEIGHTS_SIZE: u64 = 400_000_000; // safetensors is ~438MB
+
+/// Which BERT-family model the Candle embedder loads.
+///
+/// Selected through the normal config surface (`--embedding-model bge-base`,
+/// which threads down to the store as `PersistentStoreConfig::candle_model`).
+/// Pooling and the retrieval query prefix are properties of the model, not
+/// user-configurable — mirroring how `EmbeddingModel` ties pooling to
+/// architecture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CandleModel {
+    /// sentence-transformers/all-MiniLM-L6-v2: 384-d, mean pooling
+    #[default]
+    MiniLm,
+    /// BAAI/bge-base-en-v1.5: 768-d, CLS pooling, query prefix at recall
+    BgeBase,
+}
+
+impl CandleModel {
+    /// Pooling strategy required by this model's training recipe.
+    pub fn pooling_strategy(&self) -> PoolingStrategy {
+        match self {
+            Self::MiniLm => PoolingStrategy::Mean,
+            Self::BgeBase => PoolingStrategy::Cls,
+        }
+    }
+
+    /// Retrieval query prefix, applied to queries only (never documents).
+    pub fn query_prefix(&self) -> Option<&'static str> {
+        match self {
+            Self::MiniLm => None,
+            Self::BgeBase => Some("Represent this sentence for searching relevant passages: "),
+        }
+    }
+
+    /// Human-readable model id for logs.
+    pub fn hf_id(&self) -> &'static str {
+        match self {
+            Self::MiniLm => "sentence-transformers/all-MiniLM-L6-v2",
+            Self::BgeBase => "BAAI/bge-base-en-v1.5",
+        }
+    }
+}
+
 /// Get the cache directory for memd models
 pub fn get_cache_dir() -> Result<PathBuf> {
     let cache_dir = dirs::cache_dir()
@@ -765,46 +829,78 @@ impl Drop for LockGuard {
 /// the `sentence-transformers/all-MiniLM-L6-v2` repo used by the Candle BERT
 /// embedder. Returns the local paths in (config, tokenizer, weights) order.
 pub fn get_candle_bert_paths() -> Result<(PathBuf, PathBuf, PathBuf)> {
+    get_candle_model_paths(CandleModel::MiniLm)
+}
+
+/// Get paths to the Candle model files for the selected BERT-family model.
+///
+/// Same download/verify contract as `get_candle_bert_paths`, parameterized
+/// over the model chosen via `--embedding-model`.
+pub fn get_candle_model_paths(model: CandleModel) -> Result<(PathBuf, PathBuf, PathBuf)> {
+    struct Spec {
+        config: (&'static str, &'static str, &'static str, u64),
+        tokenizer: (&'static str, &'static str, &'static str, u64),
+        weights: (&'static str, &'static str, &'static str, u64),
+    }
+    let spec = match model {
+        CandleModel::MiniLm => Spec {
+            config: (
+                CANDLE_BERT_CONFIG_URL,
+                CANDLE_BERT_CONFIG_FILENAME,
+                CANDLE_BERT_CONFIG_SHA256,
+                MIN_CANDLE_BERT_CONFIG_SIZE,
+            ),
+            tokenizer: (
+                CANDLE_BERT_TOKENIZER_URL,
+                CANDLE_BERT_TOKENIZER_FILENAME,
+                CANDLE_BERT_TOKENIZER_SHA256,
+                MIN_CANDLE_BERT_TOKENIZER_SIZE,
+            ),
+            weights: (
+                CANDLE_BERT_WEIGHTS_URL,
+                CANDLE_BERT_WEIGHTS_FILENAME,
+                CANDLE_BERT_WEIGHTS_SHA256,
+                MIN_CANDLE_BERT_WEIGHTS_SIZE,
+            ),
+        },
+        CandleModel::BgeBase => Spec {
+            config: (
+                CANDLE_BGE_CONFIG_URL,
+                CANDLE_BGE_CONFIG_FILENAME,
+                CANDLE_BGE_CONFIG_SHA256,
+                MIN_CANDLE_BGE_CONFIG_SIZE,
+            ),
+            tokenizer: (
+                CANDLE_BGE_TOKENIZER_URL,
+                CANDLE_BGE_TOKENIZER_FILENAME,
+                CANDLE_BGE_TOKENIZER_SHA256,
+                MIN_CANDLE_BGE_TOKENIZER_SIZE,
+            ),
+            weights: (
+                CANDLE_BGE_WEIGHTS_URL,
+                CANDLE_BGE_WEIGHTS_FILENAME,
+                CANDLE_BGE_WEIGHTS_SHA256,
+                MIN_CANDLE_BGE_WEIGHTS_SIZE,
+            ),
+        },
+    };
+
     let cache_dir = get_cache_dir()?;
     std::fs::create_dir_all(&cache_dir)?;
 
-    let config_path = cache_dir.join(CANDLE_BERT_CONFIG_FILENAME);
-    if !config_path.exists() {
-        download_file(
-            CANDLE_BERT_CONFIG_URL,
-            &config_path,
-            "BERT config",
-            Some(CANDLE_BERT_CONFIG_SHA256),
-        )?;
-    }
-    verify_file_size(&config_path, MIN_CANDLE_BERT_CONFIG_SIZE, "BERT config")?;
+    let fetch =
+        |(url, filename, sha, min_size): (&str, &str, &str, u64), kind: &str| -> Result<PathBuf> {
+            let path = cache_dir.join(filename);
+            if !path.exists() {
+                download_file(url, &path, kind, Some(sha))?;
+            }
+            verify_file_size(&path, min_size, kind)?;
+            Ok(path)
+        };
 
-    let tokenizer_path = cache_dir.join(CANDLE_BERT_TOKENIZER_FILENAME);
-    if !tokenizer_path.exists() {
-        download_file(
-            CANDLE_BERT_TOKENIZER_URL,
-            &tokenizer_path,
-            "BERT tokenizer",
-            Some(CANDLE_BERT_TOKENIZER_SHA256),
-        )?;
-    }
-    verify_file_size(
-        &tokenizer_path,
-        MIN_CANDLE_BERT_TOKENIZER_SIZE,
-        "BERT tokenizer",
-    )?;
-
-    let weights_path = cache_dir.join(CANDLE_BERT_WEIGHTS_FILENAME);
-    if !weights_path.exists() {
-        download_file(
-            CANDLE_BERT_WEIGHTS_URL,
-            &weights_path,
-            "BERT weights",
-            Some(CANDLE_BERT_WEIGHTS_SHA256),
-        )?;
-    }
-    verify_file_size(&weights_path, MIN_CANDLE_BERT_WEIGHTS_SIZE, "BERT weights")?;
-
+    let config_path = fetch(spec.config, "BERT config")?;
+    let tokenizer_path = fetch(spec.tokenizer, "BERT tokenizer")?;
+    let weights_path = fetch(spec.weights, "BERT weights")?;
     Ok((config_path, tokenizer_path, weights_path))
 }
 
@@ -944,6 +1040,9 @@ mod tests {
             CANDLE_BERT_CONFIG_URL,
             CANDLE_BERT_TOKENIZER_URL,
             CANDLE_BERT_WEIGHTS_URL,
+            CANDLE_BGE_CONFIG_URL,
+            CANDLE_BGE_TOKENIZER_URL,
+            CANDLE_BGE_WEIGHTS_URL,
             EmbeddingModel::AllMiniLmL6V2.model_url(),
             EmbeddingModel::AllMiniLmL6V2.tokenizer_url(),
             EmbeddingModel::Qwen3Embedding0_6B.model_url(),
@@ -966,10 +1065,32 @@ mod tests {
             CANDLE_BERT_CONFIG_SHA256,
             CANDLE_BERT_TOKENIZER_SHA256,
             CANDLE_BERT_WEIGHTS_SHA256,
+            CANDLE_BGE_CONFIG_SHA256,
+            CANDLE_BGE_TOKENIZER_SHA256,
+            CANDLE_BGE_WEIGHTS_SHA256,
         ];
         for hash in hashes {
             assert_sha256_constant(hash);
         }
+    }
+
+    #[test]
+    fn test_candle_model_selection_and_properties() {
+        // Default is MiniLM with mean pooling and no query prefix; BGE uses
+        // CLS pooling with the retrieval instruction prefix on queries only.
+        assert_eq!(CandleModel::default(), CandleModel::MiniLm);
+        assert_eq!(
+            CandleModel::MiniLm.pooling_strategy(),
+            PoolingStrategy::Mean
+        );
+        assert!(CandleModel::MiniLm.query_prefix().is_none());
+        assert_eq!(
+            CandleModel::BgeBase.pooling_strategy(),
+            PoolingStrategy::Cls
+        );
+        let prefix = CandleModel::BgeBase.query_prefix().unwrap();
+        assert!(prefix.starts_with("Represent this sentence"));
+        assert!(CandleModel::BgeBase.hf_id().contains("bge-base-en-v1.5"));
     }
 
     #[test]

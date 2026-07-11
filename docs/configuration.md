@@ -64,8 +64,11 @@ Unknown keys are silently ignored because the config structs do not deny
 unknown fields.
 
 Retrieval variant is not a config key. Use the global CLI flag
-`--search-variant` with `hybrid-feature` (default), `hybrid-cross-encoder`,
-`dense-only`, or `bm25-only`.
+`--search-variant` with `hybrid-feature`, `hybrid-cross-encoder`,
+`dense-only`, or `bm25-only`. When it is not given, the default is
+model-conditional: `dense-only` for `--embedding-model bge-base`, and
+`hybrid-feature` for `all-minilm` and other models. An explicit
+`--search-variant` always takes precedence.
 
 ## Project alias compatibility
 
