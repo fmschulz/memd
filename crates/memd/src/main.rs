@@ -7,7 +7,7 @@ use tracing::info;
 use memd::cli::{
     run_cli, run_warm_admin, try_run_warm_client, CliCommand, StoreAccess, WarmProcessConfig,
 };
-use memd::embeddings::EmbeddingModel;
+use memd::embeddings::{CandleModel, EmbeddingModel};
 use memd::store::HybridConfig;
 use memd::{
     configure_operation_routing, init_logging, load_config, MemoryStore, PersistentStore,
@@ -15,12 +15,15 @@ use memd::{
 };
 
 /// Embedding model choice
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ModelChoice {
     /// all-MiniLM-L6-v2: 384-dim, fast, good quality (default)
     AllMinilm,
     /// Qwen3-Embedding-0.6B: 1024-dim, slower, best quality (not yet supported in Candle)
     Qwen3,
+    /// bge-base-en-v1.5: 768-dim Candle BERT, stronger retrieval (CLS pooling,
+    /// dense-only by default)
+    BgeBase,
 }
 
 impl From<ModelChoice> for EmbeddingModel {
@@ -28,6 +31,20 @@ impl From<ModelChoice> for EmbeddingModel {
         match choice {
             ModelChoice::AllMinilm => EmbeddingModel::AllMiniLmL6V2,
             ModelChoice::Qwen3 => EmbeddingModel::Qwen3Embedding0_6B,
+            // EmbeddingModel is the vestigial ONNX-era selector and has no bge
+            // variant; the live Candle model is chosen via CandleModel below.
+            ModelChoice::BgeBase => EmbeddingModel::AllMiniLmL6V2,
+        }
+    }
+}
+
+impl From<ModelChoice> for CandleModel {
+    fn from(choice: ModelChoice) -> Self {
+        match choice {
+            // Qwen3 is not supported by the Candle BERT backend; it has always
+            // run MiniLM there, so preserve that behavior.
+            ModelChoice::AllMinilm | ModelChoice::Qwen3 => CandleModel::MiniLm,
+            ModelChoice::BgeBase => CandleModel::BgeBase,
         }
     }
 }
@@ -37,8 +54,25 @@ impl ModelChoice {
         match self {
             ModelChoice::AllMinilm => "all-minilm",
             ModelChoice::Qwen3 => "qwen3",
+            ModelChoice::BgeBase => "bge-base",
         }
     }
+}
+
+/// Resolve the default retrieval strategy for a model when `--search-variant`
+/// is not given explicitly. bge-base defaults to dense-only (hybrid fusion
+/// off); every other model keeps the hybrid-feature default.
+fn default_search_variant(model: ModelChoice) -> SearchVariant {
+    match model {
+        ModelChoice::BgeBase => SearchVariant::DenseOnly,
+        _ => SearchVariant::HybridFeature,
+    }
+}
+
+/// Resolve the effective retrieval strategy: an explicit `--search-variant`
+/// wins; otherwise fall back to the model-derived default.
+fn resolve_search_variant(explicit: Option<SearchVariant>, model: ModelChoice) -> SearchVariant {
+    explicit.unwrap_or_else(|| default_search_variant(model))
 }
 
 /// Retrieval strategy for persistent mode.
@@ -92,8 +126,11 @@ struct Args {
     embedding_model: ModelChoice,
 
     /// Retrieval strategy variant for persistent mode
-    #[arg(long, value_enum, default_value = "hybrid-feature")]
-    search_variant: SearchVariant,
+    ///
+    /// Defaults to dense-only for bge-base and hybrid-feature for other
+    /// models when not given explicitly.
+    #[arg(long, value_enum)]
+    search_variant: Option<SearchVariant>,
 
     /// CLI subcommand
     #[command(subcommand)]
@@ -155,11 +192,30 @@ async fn main() {
         std::process::exit(1);
     }
 
+    // Resolve the retrieval strategy once, here, so an unset --search-variant
+    // takes the model-derived default (dense-only for bge-base) and warm
+    // workers are spawned with the same concrete variant.
+    let search_variant = resolve_search_variant(args.search_variant, args.embedding_model);
+
+    // Stamp the worker's model/variant identity onto the (hidden) WarmWorker
+    // command so it reports them in the ping handshake; a client requesting a
+    // different model/variant then respawns it instead of being answered by
+    // the wrong embedder.
+    if let CliCommand::WarmWorker {
+        embedding_model,
+        search_variant: worker_variant,
+        ..
+    } = &mut cmd
+    {
+        *embedding_model = Some(args.embedding_model.cli_value().to_string());
+        *worker_variant = Some(search_variant.cli_value().to_string());
+    }
+
     let warm_config = WarmProcessConfig {
         data_dir: data_dir.clone(),
         config_path: args.config.clone(),
         embedding_model: args.embedding_model.cli_value().to_string(),
-        search_variant: args.search_variant.cli_value().to_string(),
+        search_variant: search_variant.cli_value().to_string(),
     };
 
     if let CliCommand::Warm { command } = &cmd {
@@ -223,9 +279,10 @@ async fn main() {
             data_dir: data_dir.clone(),
             read_only: cmd.store_access() == StoreAccess::ReadOnly,
             embedding_model: args.embedding_model.into(),
+            candle_model: args.embedding_model.into(),
             ..Default::default()
         };
-        apply_search_variant(args.search_variant, &mut store_config);
+        apply_search_variant(search_variant, &mut store_config);
         if matches!(&cmd, CliCommand::WarmWorker { .. }) {
             // A warm worker that cannot promptly become THE writer must exit
             // and let the client's ping find the winner / fall back. Long
@@ -282,5 +339,70 @@ fn apply_search_variant(search_variant: SearchVariant, config: &mut PersistentSt
             hybrid.reranker.mode = RerankerMode::Feature;
             config.hybrid_config = Some(hybrid);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_choice_maps_to_candle_model() {
+        // The Candle backend is the live embedder; bge-base selects it.
+        assert_eq!(
+            CandleModel::from(ModelChoice::AllMinilm),
+            CandleModel::MiniLm
+        );
+        assert_eq!(
+            CandleModel::from(ModelChoice::BgeBase),
+            CandleModel::BgeBase
+        );
+        // Qwen3 has no Candle backend and has always run MiniLM there.
+        assert_eq!(CandleModel::from(ModelChoice::Qwen3), CandleModel::MiniLm);
+    }
+
+    #[test]
+    fn bge_choice_has_cli_value_and_vestigial_onnx_mapping() {
+        assert_eq!(ModelChoice::BgeBase.cli_value(), "bge-base");
+        // EmbeddingModel is the vestigial ONNX selector; bge maps onto the
+        // MiniLM id there because the live model flows via CandleModel.
+        assert_eq!(
+            EmbeddingModel::from(ModelChoice::BgeBase),
+            EmbeddingModel::AllMiniLmL6V2
+        );
+    }
+
+    #[test]
+    fn default_search_variant_is_dense_only_for_bge_only() {
+        assert!(matches!(
+            default_search_variant(ModelChoice::BgeBase),
+            SearchVariant::DenseOnly
+        ));
+        assert!(matches!(
+            default_search_variant(ModelChoice::AllMinilm),
+            SearchVariant::HybridFeature
+        ));
+        assert!(matches!(
+            default_search_variant(ModelChoice::Qwen3),
+            SearchVariant::HybridFeature
+        ));
+    }
+
+    #[test]
+    fn explicit_search_variant_overrides_bge_default() {
+        // An explicit flag wins even against bge's dense-only default.
+        assert!(matches!(
+            resolve_search_variant(Some(SearchVariant::HybridFeature), ModelChoice::BgeBase),
+            SearchVariant::HybridFeature
+        ));
+        // An unset flag falls back to the model-derived default.
+        assert!(matches!(
+            resolve_search_variant(None, ModelChoice::BgeBase),
+            SearchVariant::DenseOnly
+        ));
+        assert!(matches!(
+            resolve_search_variant(None, ModelChoice::AllMinilm),
+            SearchVariant::HybridFeature
+        ));
     }
 }

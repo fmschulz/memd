@@ -11,7 +11,7 @@ pub mod traits;
 // pub mod python_embedder;
 
 pub use candle_embedder::CandleEmbedder;
-pub use download::EmbeddingModel;
+pub use download::{CandleModel, EmbeddingModel};
 pub use mock::MockEmbedder;
 // pub use onnx::OnnxEmbedder;
 // pub use python_embedder::PythonEmbedder;
