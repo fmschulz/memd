@@ -1,7 +1,6 @@
 //! Best-effort usage-event ledger primitives.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use super::outcome::stable_query_hash;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageOp {
@@ -73,13 +72,8 @@ pub fn usage_retention_ms() -> i64 {
     days.saturating_mul(86_400_000).min(i64::MAX as u64) as i64
 }
 
-/// Hash a search query for privacy-preserving distinctness analytics.
-/// Search queries are never stored verbatim, only this hash.
-/// This hash is NOT stable across Rust releases; distinctness comparisons are
-/// only meaningful among events written by the same memd build, never as a
-/// persistent cross-build identifier.
+/// Hash a search query for privacy-preserving, cross-build analytics.
+/// Search queries are never stored verbatim, only a stable SHA-256 digest.
 pub fn query_hash_hex(query: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    query.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    stable_query_hash(query)
 }

@@ -133,6 +133,9 @@ async fn dispatch_operation<S: memd::store::Store>(
         "memory.get" => handle_memory_get(store, parse_params(name, args)?).await,
         "memory.delete" => handle_memory_delete(store, parse_params(name, args)?).await,
         "memory.feedback" => handle_memory_feedback(store, parse_params(name, args)?).await,
+        "memory.record_outcome" => {
+            handle_memory_record_outcome(store, parse_params(name, args)?).await
+        }
         "memory.stats" => handle_memory_stats(store, None, parse_params(name, args)?).await,
         "memory.health" => handle_memory_health(store, &metrics, parse_params(name, args)?).await,
         "memory.metrics" => {

@@ -239,10 +239,14 @@ impl CandleEmbedder {
             // The mmap is valid for the lifetime of the loaded weights file.
             // Multiple models can safely share the same mmaped region.
             let vb = unsafe {
-                VarBuilder::from_mmaped_safetensors(&[weights_path.clone()], DTYPE, &device)
-                    .map_err(|e| {
-                        MemdError::EmbeddingError(format!("Failed to load model {}: {}", i, e))
-                    })?
+                VarBuilder::from_mmaped_safetensors(
+                    std::slice::from_ref(&weights_path),
+                    DTYPE,
+                    &device,
+                )
+                .map_err(|e| {
+                    MemdError::EmbeddingError(format!("Failed to load model {}: {}", i, e))
+                })?
             };
 
             let model = BertModel::load(vb, &bert_config).map_err(|e| {
@@ -331,11 +335,11 @@ impl CandleEmbedder {
                 .map(|e| e.get_attention_mask().to_vec())
                 .collect();
 
-            let token_ids_tensor = Tensor::new(token_ids, &*device).map_err(|e| {
+            let token_ids_tensor = Tensor::new(token_ids, &device).map_err(|e| {
                 MemdError::EmbeddingError(format!("Failed to create token tensor: {}", e))
             })?;
 
-            let attention_mask_tensor = Tensor::new(attention_mask, &*device).map_err(|e| {
+            let attention_mask_tensor = Tensor::new(attention_mask, &device).map_err(|e| {
                 MemdError::EmbeddingError(format!("Failed to create mask tensor: {}", e))
             })?;
 

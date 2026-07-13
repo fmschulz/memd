@@ -37,8 +37,8 @@ use std::str::FromStr;
 use serde_json::Value;
 use tracing::debug;
 
+use crate::dedup::FUZZY_RECENT_POOL_SIZE;
 use crate::error::{MemdError, Result};
-use crate::mcp::dedup::FUZZY_RECENT_POOL_SIZE;
 use crate::store::metadata::MetadataStore;
 use crate::store::persistent::PersistentStore;
 use crate::store::supersession::{canonicalize_for_type, is_near_duplicate};
@@ -226,7 +226,7 @@ pub async fn import_omf_with_events(
         }
 
         let trusted_item = trusted && ext_version_supported(&item.extensions);
-        let initial = if trusted_item {
+        let mut initial = if trusted_item {
             extract_lifecycle_strict(&item.extensions)?
         } else {
             LifecycleDelta::default()
@@ -239,22 +239,28 @@ pub async fn import_omf_with_events(
         // auto-priority stamp. Run the gate here so import and add agree.
         let ingestion_mode =
             extract_ingestion_mode(&item.extensions).unwrap_or(IngestionMode::Document);
-        let mut tags = item.tags.clone();
-        let admission = crate::write_admission::classify_write(
-            chunk_type,
-            &item.content,
-            &tags,
-            ingestion_mode,
-        );
-        if admission.decision == crate::write_admission::AdmissionDecision::Reject {
+        let prepared =
+            crate::write_service::prepare_write(crate::write_service::PrepareWriteRequest {
+                chunk_type,
+                text: &item.content,
+                tags: &item.tags,
+                ingestion_mode,
+                expires_at_ms: initial.expires_at_ms.flatten(),
+                review_after_ms: initial.review_after_ms.flatten(),
+            });
+        if prepared.is_rejected() {
             result.skipped += 1;
             continue;
         }
-        if admission.warning.is_some() {
-            crate::write_admission::downgrade_high_priority_tags(&mut tags);
+        let prepared_lifecycle = prepared.lifecycle_delta();
+        if initial.tier.is_none() {
+            initial.tier = prepared_lifecycle.tier;
         }
-        if admission.decision == crate::write_admission::AdmissionDecision::Durable {
-            crate::auto_priority::stamp_auto_priority(chunk_type, &item.content, &mut tags);
+        if initial.expires_at_ms.is_none() {
+            initial.expires_at_ms = prepared_lifecycle.expires_at_ms;
+        }
+        if initial.review_after_ms.is_none() {
+            initial.review_after_ms = prepared_lifecycle.review_after_ms;
         }
 
         let mut chunk = MemoryChunk::new(tenant_id.clone(), item.content.clone(), chunk_type)
@@ -262,9 +268,7 @@ pub async fn import_omf_with_events(
         if let Some(ref p) = project_id {
             chunk = chunk.with_project(ProjectId::new(Some(p.clone())));
         }
-        if !tags.is_empty() {
-            chunk = chunk.with_tags(tags);
-        }
+        chunk = prepared.apply_to_chunk(chunk);
 
         let text = chunk.text.clone();
         let chunk_id = store.add_chunk_with_lifecycle(chunk, initial).await?;
@@ -459,8 +463,25 @@ pub async fn preview_omf_import(
         // preview to predict import success/failure, not paper over a
         // parse error that would block the subsequent real import.
         let trusted = is_trusted(doc) && ext_version_supported(&item.extensions);
-        if trusted {
-            let _ = extract_lifecycle_strict(&item.extensions)?;
+        let initial = if trusted {
+            extract_lifecycle_strict(&item.extensions)?
+        } else {
+            LifecycleDelta::default()
+        };
+        let ingestion_mode =
+            extract_ingestion_mode(&item.extensions).unwrap_or(IngestionMode::Document);
+        let prepared =
+            crate::write_service::prepare_write(crate::write_service::PrepareWriteRequest {
+                chunk_type,
+                text: &item.content,
+                tags: &item.tags,
+                ingestion_mode,
+                expires_at_ms: initial.expires_at_ms.flatten(),
+                review_after_ms: initial.review_after_ms.flatten(),
+            });
+        if prepared.is_rejected() {
+            result.filtered += 1;
+            continue;
         }
 
         result.to_import += 1;
@@ -628,6 +649,12 @@ fn extract_lifecycle_strict(ext: &Value) -> Result<LifecycleDelta> {
     };
 
     let status = parse_optional_string_field(lc, "status", ChunkStatus::from_str)?;
+    if status == Some(ChunkStatus::Candidate) {
+        return Err(MemdError::ValidationError(
+            "extensions.memd.lifecycle.status=candidate requires a local consolidation journal"
+                .to_string(),
+        ));
+    }
     let tier = parse_optional_string_field(lc, "tier", MemoryTier::from_str)?;
     let review_after_ms = parse_optional_i64_field(lc, "review_after_ms")?.map(Some);
     let lifecycle_updated_at_ms = parse_optional_i64_field(lc, "lifecycle_updated_at_ms")?;
@@ -731,6 +758,14 @@ mod tests {
         let bad_status = json!({"memd": {"lifecycle": {"status": 42}}});
         assert!(matches!(
             extract_lifecycle_strict(&bad_status),
+            Err(MemdError::ValidationError(_))
+        ));
+
+        // Candidate is a valid local status but cannot be imported without
+        // its run journal and lineage transaction.
+        let unjournaled_candidate = json!({"memd": {"lifecycle": {"status": "candidate"}}});
+        assert!(matches!(
+            extract_lifecycle_strict(&unjournaled_candidate),
             Err(MemdError::ValidationError(_))
         ));
 

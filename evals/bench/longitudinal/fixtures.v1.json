@@ -1,0 +1,58 @@
+{
+  "schema_version": "memd.longitudinal.fixtures.v1",
+  "fixture_id": "stale-correction-clusters-v1",
+  "fact_template": {
+    "correct": "For {subsystem}, cache keys must use tenant scope.",
+    "correction": "Correction for {subsystem}: tenant scope replaces the obsolete process scope rule.",
+    "stale": "For {subsystem}, cache keys must use process scope.",
+    "distractor": "For {subsystem}, trace sampling uses a bounded diagnostic buffer.",
+    "task": "For {subsystem}, which cache-key scope must the implementation use?"
+  },
+  "task_variants": [
+    "For {subsystem}, which cache-key scope must the implementation use?",
+    "Recall the cache-key namespace scope required by {subsystem}.",
+    "What scope prevents cache collisions in {subsystem}?",
+    "State the corrected cache-key isolation rule for {subsystem}.",
+    "Which scope is valid for {subsystem} cache keys now?"
+  ],
+  "write_order": [
+    "correct",
+    "correction",
+    "distractor",
+    "stale"
+  ],
+  "clusters": [
+    {"id": "cluster-01", "subsystem": "atlas"},
+    {"id": "cluster-02", "subsystem": "boreal"},
+    {"id": "cluster-03", "subsystem": "cirrus"},
+    {"id": "cluster-04", "subsystem": "delta"},
+    {"id": "cluster-05", "subsystem": "ember"},
+    {"id": "cluster-06", "subsystem": "fjord"},
+    {"id": "cluster-07", "subsystem": "granite"},
+    {"id": "cluster-08", "subsystem": "harbor"},
+    {"id": "cluster-09", "subsystem": "ion"},
+    {"id": "cluster-10", "subsystem": "juniper"},
+    {"id": "cluster-11", "subsystem": "kepler"},
+    {"id": "cluster-12", "subsystem": "lagoon"},
+    {"id": "cluster-13", "subsystem": "mesa"},
+    {"id": "cluster-14", "subsystem": "nimbus"},
+    {"id": "cluster-15", "subsystem": "onyx"},
+    {"id": "cluster-16", "subsystem": "prairie"},
+    {"id": "cluster-17", "subsystem": "quartz"},
+    {"id": "cluster-18", "subsystem": "raven"},
+    {"id": "cluster-19", "subsystem": "summit"},
+    {"id": "cluster-20", "subsystem": "tundra"},
+    {"id": "cluster-21", "subsystem": "upland"},
+    {"id": "cluster-22", "subsystem": "vale"},
+    {"id": "cluster-23", "subsystem": "willow"},
+    {"id": "cluster-24", "subsystem": "xenon"},
+    {"id": "cluster-25", "subsystem": "yarrow"},
+    {"id": "cluster-26", "subsystem": "zephyr"},
+    {"id": "cluster-27", "subsystem": "aurora"},
+    {"id": "cluster-28", "subsystem": "bramble"},
+    {"id": "cluster-29", "subsystem": "cobalt"},
+    {"id": "cluster-30", "subsystem": "drift"},
+    {"id": "cluster-31", "subsystem": "estuary"},
+    {"id": "cluster-32", "subsystem": "flint"}
+  ]
+}

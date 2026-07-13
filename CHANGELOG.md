@@ -6,6 +6,69 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Fixed
+
+- `memory.md` now deduplicates project and machine-wide candidates as one
+  bounded union, including exact chunk IDs, consolidation lineage, and topic
+  matches. Active-project results are assigned to the project section instead
+  of appearing twice or leaking into the machine-wide section.
+- Startup answerability no longer treats a missing or unreadable
+  `tasks/todo.md` as proof that no tasks are open. The generated project state
+  records the task source as missing, parsed-empty, parsed-open, or failed.
+
+- CLI, structured-operation, batch, OMF-import, supersession, episode, and
+  consolidation writes now share one preparation service for tag
+  normalization, admission, retention, priority, and initial trust. Batch and
+  single writes no longer diverge on inferred priority or retention defaults.
+- Consolidation now admits chunks retrieved after the last-run watermark,
+  even when those chunks were created earlier. Every candidate is checked
+  against its current lifecycle and project scope before use.
+- Tenant-wide consolidation no longer hides project-scoped source memories.
+  It records `derives_from:<csv>` lineage and leaves those sources active;
+  project-scoped consolidation retains its existing `supersedes:<csv>` and
+  soft-tombstone behavior.
+- WAL replay preserves newer SQLite lifecycle metadata when repairing an
+  existing payload location, so restart cannot revert `Final`, `Superseded`,
+  `Expired`, or `Error` rows to the status stored in their original Add record.
+
+### Added
+
+- Search and agent context now return privacy-safe retrieval episode IDs.
+  `memd outcome` and `memory.record_outcome` accept explicit used/harmful
+  attribution and verifier evidence. `outcome-v1` computes bounded,
+  project-scoped, time-decayed shadow ranks while production serving remains
+  unchanged.
+- `memd eval-outcome-ranking` writes JSON and Markdown reports comparing
+  served and source-deduplicated shadow top-k lists against explicit relevant
+  and harmful chunk judgments.
+
+- Consolidation runs use durable run, entry, and normalized lineage tables.
+  Outputs are written as hidden `Candidate` chunks. The default
+  `memd consolidate` stops after validation; `memd consolidate-review --list`
+  discovers staged runs, and `--accept` records durable promotion intent
+  before atomically promoting candidates with their same-project sources.
+  `memd consolidate --promote` explicitly requests that path in one command.
+  Exact source-set retries reuse the existing run.
+- LLM consolidation output must include a concrete agent action, exact source
+  evidence, and bounded confidence. The journal records the consolidator
+  command, model, and version and references a permission-restricted,
+  size-capped raw-response audit artifact with integrity hashes.
+- Session start performs bounded consolidation recovery before refreshing
+  agent context. Recovery isolates per-run errors, protects fresh in-flight
+  work with a 30-second grace period, promotes only runs with recorded intent,
+  and refreshes promoted dense-index rows. Background consolidation stages
+  proposals for later review instead of changing source visibility.
+
+### Changed
+
+- Upgrading an existing store is conservative. Previously validated runs gain
+  `promotion_requested = 0` and appear in the review list, but cannot be
+  promoted because they lack the new audit artifact; an acceptance attempt
+  fails closed and rejects their candidates. Older planned or
+  candidate-written runs without that artifact are rejected during recovery.
+  Sources remain active in both cases. `--legacy-immediate` preserves the old
+  one-command behavior for one release and prints a deprecation warning.
+
 ## [1.4.0] - 2026-07-11
 
 ### Added
@@ -625,8 +688,8 @@ requiring a cross-encoder.
   startup path. The harness now has a current CLI contract suite, a `CliClient`
   for `memd call`, and a temporary MCP-shaped compatibility wrapper for older
   behavior suites.
-- Archived the retired protocol-only MCP conformance suite in
-  `evals/legacy_mcp_conformance.md`.
+- Recorded the retired protocol-only MCP conformance suite in
+  `evals/bench/BENCHMARK_INVENTORY.md`.
 - Refreshed repo-wide rustfmt output in a dedicated style commit so future
   formatter checks are meaningful.
 

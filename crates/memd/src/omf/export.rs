@@ -68,7 +68,10 @@ pub async fn export_omf(
     let now_ms = now_utc_ms();
     let mut memories = Vec::with_capacity(rows.len());
     for meta in rows {
-        if matches!(meta.status, ChunkStatus::Deleted | ChunkStatus::Error) {
+        if matches!(
+            meta.status,
+            ChunkStatus::Candidate | ChunkStatus::Deleted | ChunkStatus::Error
+        ) {
             continue;
         }
         if !opts.include_superseded && meta.status == ChunkStatus::Superseded {

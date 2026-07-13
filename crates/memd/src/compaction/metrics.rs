@@ -48,10 +48,10 @@ impl CompactionMetrics {
         tenant_id: &TenantId,
     ) -> Result<Self> {
         // Get active and deleted counts from metadata
-        let (active, deleted) = metadata.count_by_status(tenant_id)?;
+        let (active, deleted, candidates) = metadata.count_by_status(tenant_id)?;
 
         // Calculate tombstone ratio (handle division by zero)
-        let total = active + deleted;
+        let total = active + deleted + candidates;
         let tombstone_ratio = if total > 0 {
             deleted as f32 / total as f32
         } else {

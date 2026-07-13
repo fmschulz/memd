@@ -71,8 +71,10 @@ pub struct DenseSearcher {
 impl DenseSearcher {
     /// Create a new dense searcher with Candle embedder
     pub fn new(config: DenseSearchConfig) -> Result<Self> {
-        let mut embedding_config = EmbeddingConfig::default();
-        embedding_config.batch_size = embedding_batch_size();
+        let embedding_config = EmbeddingConfig {
+            batch_size: embedding_batch_size(),
+            ..EmbeddingConfig::default()
+        };
         let embedder = Arc::new(CandleEmbedder::with_config_and_model(
             embedding_config,
             config.model,
@@ -216,7 +218,7 @@ impl DenseSearcher {
         let index = self.get_or_create_index(tenant_id)?;
         let items: Vec<(ChunkId, Vec<f32>)> = chunks
             .iter()
-            .zip(embeddings.into_iter())
+            .zip(embeddings)
             .map(|((chunk_id, _), emb)| (chunk_id.clone(), emb))
             .collect();
 

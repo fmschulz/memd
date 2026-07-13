@@ -11,7 +11,7 @@ use memd::embeddings::{CandleModel, EmbeddingModel};
 use memd::store::HybridConfig;
 use memd::{
     configure_operation_routing, init_logging, load_config, MemoryStore, PersistentStore,
-    PersistentStoreConfig, RerankerMode, TenantManager,
+    PersistentStoreConfig, RerankerConfig, RerankerMode, TenantManager,
 };
 
 /// Embedding model choice
@@ -312,15 +312,25 @@ fn apply_search_variant(search_variant: SearchVariant, config: &mut PersistentSt
         SearchVariant::HybridFeature => {
             config.enable_dense_search = true;
             config.enable_hybrid_search = true;
-            let mut hybrid = HybridConfig::default();
-            hybrid.reranker.mode = RerankerMode::Feature;
+            let hybrid = HybridConfig {
+                reranker: RerankerConfig {
+                    mode: RerankerMode::Feature,
+                    ..RerankerConfig::default()
+                },
+                ..HybridConfig::default()
+            };
             config.hybrid_config = Some(hybrid);
         }
         SearchVariant::HybridCrossEncoder => {
             config.enable_dense_search = true;
             config.enable_hybrid_search = true;
-            let mut hybrid = HybridConfig::default();
-            hybrid.reranker.mode = RerankerMode::CrossEncoder;
+            let hybrid = HybridConfig {
+                reranker: RerankerConfig {
+                    mode: RerankerMode::CrossEncoder,
+                    ..RerankerConfig::default()
+                },
+                ..HybridConfig::default()
+            };
             config.hybrid_config = Some(hybrid);
         }
         SearchVariant::DenseOnly => {
@@ -332,11 +342,16 @@ fn apply_search_variant(search_variant: SearchVariant, config: &mut PersistentSt
             config.enable_dense_search = true;
             config.enable_hybrid_search = true;
             config.enable_tiered_search = false;
-            let mut hybrid = HybridConfig::default();
-            hybrid.dense_k = 0;
-            hybrid.sparse_k = 200;
-            hybrid.enable_sparse = true;
-            hybrid.reranker.mode = RerankerMode::Feature;
+            let hybrid = HybridConfig {
+                dense_k: 0,
+                sparse_k: 200,
+                enable_sparse: true,
+                reranker: RerankerConfig {
+                    mode: RerankerMode::Feature,
+                    ..RerankerConfig::default()
+                },
+                ..HybridConfig::default()
+            };
             config.hybrid_config = Some(hybrid);
         }
     }

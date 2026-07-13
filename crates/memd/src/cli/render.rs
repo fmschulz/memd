@@ -112,9 +112,9 @@ fn render_memory_markdown(payload: &Value, title: &str) -> Result<String> {
         }
         if let Some(text) = result.get("text").and_then(Value::as_str) {
             if !text.is_empty() {
-                out.push_str("\n");
+                out.push('\n');
                 out.push_str(text.trim());
-                out.push_str("\n");
+                out.push('\n');
             }
         }
         out.push('\n');

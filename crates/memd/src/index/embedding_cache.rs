@@ -327,11 +327,11 @@ impl EmbeddingCache {
 
         // Read valid flags
         let mut valid_ids = vec![false; next_id];
-        for i in 0..next_id {
+        for (i, valid) in valid_ids.iter_mut().enumerate() {
             let flag = reader.read_u8().map_err(|e| {
                 MemdError::StorageError(format!("Failed to read valid flag {}: {}", i, e))
             })?;
-            valid_ids[i] = flag != 0;
+            *valid = flag != 0;
         }
 
         // Verify count matches actual valid flags

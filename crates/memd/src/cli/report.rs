@@ -91,6 +91,7 @@ struct RejectedGrowth {
 struct StoreTotals {
     tenant_count: usize,
     active_chunks: usize,
+    candidate_chunks: usize,
     deleted_chunks: usize,
 }
 
@@ -132,8 +133,8 @@ struct RetrievalUsefulnessSection {
 #[derive(Debug, Serialize)]
 struct ServedChunkStat {
     chunk_id: String,
-    hit_count: u32,
-    selected_count: u32,
+    exposure_count: u32,
+    rendered_count: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -244,6 +245,7 @@ async fn collect_report<S: Store>(
     for tenant in tenants {
         let stats = store.stats(&tenant).await?;
         store_totals.active_chunks += stats.active_chunks;
+        store_totals.candidate_chunks += stats.candidate_chunks;
         store_totals.deleted_chunks += stats.deleted_chunks;
         let chunks = collect_scanned_chunks(
             store,
@@ -259,15 +261,35 @@ async fn collect_report<S: Store>(
         });
     }
 
-    // Per-chunk serve counts come from the central hit log under the
-    // store data_dir, scoped to the same window, tenant, and project as the
-    // usage-event metrics above (the central log mixes tenants/projects).
-    let serve_stats = serve_counts_since(
-        ps.data_dir(),
+    // Structured episodes are canonical. Fall back to the rotated legacy
+    // JSONL exposure ledger only for pre-migration data.
+    let structured_exposures = ps.metadata().retrieval_exposure_stats_since(
         since_ms,
         options.tenant_id.as_deref(),
         options.project_id.as_deref(),
-    );
+    )?;
+    let serve_stats = if structured_exposures.is_empty() {
+        serve_counts_since(
+            ps.data_dir(),
+            since_ms,
+            options.tenant_id.as_deref(),
+            options.project_id.as_deref(),
+        )
+    } else {
+        structured_exposures
+            .into_iter()
+            .map(|(chunk_id, count, last_ts_ms)| {
+                (
+                    chunk_id,
+                    HitStats {
+                        exposure_count: count,
+                        rendered_count: count,
+                        last_ts_ms,
+                    },
+                )
+            })
+            .collect()
+    };
 
     let growth = build_growth(&usage_events, lifecycle_counts, store_totals);
     let learning_digest = build_learning_digest(&scanned_tenants, since_ms, options.top);
@@ -528,14 +550,17 @@ fn build_retrieval_usefulness(
     }
 
     let distinct_served_chunks = serve_stats.len();
-    let total_serves: usize = serve_stats.values().map(|s| s.hit_count as usize).sum();
-    // Rank by serve count, then selected count, then chunk_id for a
+    let total_serves: usize = serve_stats
+        .values()
+        .map(|stats| stats.exposure_count as usize)
+        .sum();
+    // Rank by exposure count, then rendered count, then chunk_id for a
     // stable order; take the top N for display.
     let mut ranked: Vec<(&String, &HitStats)> = serve_stats.iter().collect();
     ranked.sort_by(|a, b| {
-        b.1.hit_count
-            .cmp(&a.1.hit_count)
-            .then(b.1.selected_count.cmp(&a.1.selected_count))
+        b.1.exposure_count
+            .cmp(&a.1.exposure_count)
+            .then(b.1.rendered_count.cmp(&a.1.rendered_count))
             .then(a.0.cmp(b.0))
     });
     let top_served_chunks = ranked
@@ -543,13 +568,13 @@ fn build_retrieval_usefulness(
         .take(top)
         .map(|(chunk_id, stats)| ServedChunkStat {
             chunk_id: (*chunk_id).clone(),
-            hit_count: stats.hit_count,
-            selected_count: stats.selected_count,
+            exposure_count: stats.exposure_count,
+            rendered_count: stats.rendered_count,
         })
         .collect();
 
     let per_chunk_serve_counts = if distinct_served_chunks == 0 {
-        "none recorded in window (central hit log empty; scattered pre-centralization logs are not counted)"
+        "none recorded in window (structured episode and legacy exposure ledgers are empty)"
             .to_string()
     } else {
         format!("distinct_chunks={distinct_served_chunks}; total_serves={total_serves}")
@@ -792,9 +817,10 @@ fn render_markdown(report: &Report) -> String {
     );
     let _ = writeln!(
         out,
-        "- store_totals: tenants=`{}`; active_chunks=`{}`; deleted_chunks=`{}`",
+        "- store_totals: tenants=`{}`; active_chunks=`{}`; candidate_chunks=`{}`; deleted_chunks=`{}`",
         report.growth.store_totals.tenant_count,
         report.growth.store_totals.active_chunks,
+        report.growth.store_totals.candidate_chunks,
         report.growth.store_totals.deleted_chunks
     );
 
@@ -848,8 +874,8 @@ fn render_markdown(report: &Report) -> String {
     for served in &report.retrieval_usefulness.top_served_chunks {
         let _ = writeln!(
             out,
-            "  - `{}`: served={}, selected={}",
-            served.chunk_id, served.hit_count, served.selected_count
+            "  - `{}`: exposures={}, rendered={}",
+            served.chunk_id, served.exposure_count, served.rendered_count
         );
     }
 
@@ -1023,6 +1049,7 @@ mod tests {
             StoreTotals {
                 tenant_count: 0,
                 active_chunks: 0,
+                candidate_chunks: 0,
                 deleted_chunks: 0,
             },
         );

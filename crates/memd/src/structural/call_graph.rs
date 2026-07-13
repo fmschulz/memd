@@ -382,10 +382,11 @@ impl CallGraphExtractor {
         }
 
         // Check parent for method invocation in Java
-        if language == SupportedLanguage::Java && node.kind() == "method_invocation" {
-            if node.child_by_field_name("object").is_some() {
-                return CallType::Method;
-            }
+        if language == SupportedLanguage::Java
+            && node.kind() == "method_invocation"
+            && node.child_by_field_name("object").is_some()
+        {
+            return CallType::Method;
         }
 
         CallType::Direct

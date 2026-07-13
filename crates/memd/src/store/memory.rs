@@ -3,16 +3,19 @@
 //! Provides a working baseline store backed by a simple HashMap.
 //! This is used for development and testing before persistent storage.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::RwLock;
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
+use super::outcome::{validate_outcome_event, validate_retrieval_episode};
 use super::{
-    apply_feedback_scores, split_for_add, FeedbackConfig, FeedbackEntry, Store, StoreStats,
+    apply_feedback_scores, split_for_add, FeedbackConfig, FeedbackEntry, OutcomeEvent,
+    OutcomePrior, RetrievalEpisode, RetrievalEpisodeId, RetrievalEpisodeItem, Store, StoreStats,
 };
+use crate::compaction::CompactionResult;
 use crate::error::Result;
 use crate::task_memory::{
     ArtifactKind, TaskArtifact, TaskArtifactWriteResult, TaskProjection, TaskRecord,
@@ -35,6 +38,10 @@ pub struct MemoryStore {
     projection_to_artifact: RwLock<HashMap<String, HashMap<String, String>>>,
     /// Per-tenant relevance feedback log.
     feedback: RwLock<HashMap<String, Vec<FeedbackEntry>>>,
+    /// Privacy-safe retrieval episodes keyed by episode ID.
+    retrieval_episodes: RwLock<HashMap<String, (RetrievalEpisode, Vec<RetrievalEpisodeItem>)>>,
+    /// Immutable outcomes keyed by episode ID.
+    outcome_events: RwLock<HashMap<String, Vec<OutcomeEvent>>>,
 }
 
 impl MemoryStore {
@@ -46,6 +53,8 @@ impl MemoryStore {
             task_projection_links: RwLock::new(HashMap::new()),
             projection_to_artifact: RwLock::new(HashMap::new()),
             feedback: RwLock::new(HashMap::new()),
+            retrieval_episodes: RwLock::new(HashMap::new()),
+            outcome_events: RwLock::new(HashMap::new()),
         }
     }
 
@@ -411,16 +420,199 @@ impl Store for MemoryStore {
         limit: usize,
     ) -> Result<Vec<FeedbackEntry>> {
         let tenant = tenant_id.to_string();
-        let normalized = super::normalize_query(query);
+        let query_hash = super::stable_query_hash(&super::normalize_query(query));
         let store = self.feedback.read().unwrap();
         let entries = store.get(&tenant).cloned().unwrap_or_default();
         let mut filtered: Vec<FeedbackEntry> = entries
             .into_iter()
-            .filter(|entry| super::normalize_query(&entry.query) == normalized)
+            .filter(|entry| entry.query_hash == query_hash)
             .collect();
-        filtered.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
+        filtered.sort_by_key(|entry| std::cmp::Reverse(entry.timestamp_ms));
         filtered.truncate(limit);
         Ok(filtered)
+    }
+
+    async fn record_retrieval_episode(
+        &self,
+        episode: RetrievalEpisode,
+        items: Vec<RetrievalEpisodeItem>,
+    ) -> Result<()> {
+        validate_retrieval_episode(&episode, &items)?;
+        let chunks = self.chunks.read().unwrap();
+        for item in &items {
+            let tenant_chunks = chunks.get(item.origin_tenant_id.as_str()).ok_or_else(|| {
+                crate::error::MemdError::ValidationError(
+                    "retrieval episode item origin tenant has no chunks".to_string(),
+                )
+            })?;
+            let chunk = tenant_chunks
+                .get(&item.chunk_id.to_string())
+                .ok_or_else(|| {
+                    crate::error::MemdError::ValidationError(format!(
+                        "retrieval episode chunk {} does not belong to its origin tenant",
+                        item.chunk_id
+                    ))
+                })?;
+            if chunk.project_id.as_option() != item.origin_project_id.as_deref() {
+                return Err(crate::error::MemdError::ValidationError(format!(
+                    "retrieval episode chunk {} origin project does not match",
+                    item.chunk_id
+                )));
+            }
+        }
+        drop(chunks);
+
+        let key = episode.episode_id.to_string();
+        let mut episodes = self.retrieval_episodes.write().unwrap();
+        if episodes.contains_key(&key) {
+            return Err(crate::error::MemdError::ValidationError(format!(
+                "retrieval episode {} already exists",
+                episode.episode_id
+            )));
+        }
+        episodes.insert(key, (episode, items));
+        Ok(())
+    }
+
+    async fn get_retrieval_episode(
+        &self,
+        tenant_id: &TenantId,
+        episode_id: &RetrievalEpisodeId,
+    ) -> Result<Option<(RetrievalEpisode, Vec<RetrievalEpisodeItem>)>> {
+        Ok(self
+            .retrieval_episodes
+            .read()
+            .unwrap()
+            .get(&episode_id.to_string())
+            .filter(|(episode, _)| &episode.tenant_id == tenant_id)
+            .cloned())
+    }
+
+    async fn finalize_retrieval_episode(
+        &self,
+        tenant_id: &TenantId,
+        episode_id: &RetrievalEpisodeId,
+        rendered_chunk_ids: &[ChunkId],
+    ) -> Result<()> {
+        let mut episodes = self.retrieval_episodes.write().unwrap();
+        let (episode, items) = episodes
+            .get_mut(&episode_id.to_string())
+            .filter(|(episode, _)| &episode.tenant_id == tenant_id)
+            .ok_or_else(|| {
+                crate::error::MemdError::ValidationError(format!(
+                    "unknown retrieval episode {episode_id} for tenant"
+                ))
+            })?;
+        super::apply_rendered_order(episode, items, rendered_chunk_ids)
+    }
+
+    async fn record_outcome(&self, tenant_id: &TenantId, event: OutcomeEvent) -> Result<()> {
+        let (episode, items) = self
+            .get_retrieval_episode(tenant_id, &event.episode_id)
+            .await?
+            .ok_or_else(|| {
+                crate::error::MemdError::ValidationError(format!(
+                    "unknown retrieval episode {} for tenant",
+                    event.episode_id
+                ))
+            })?;
+        validate_outcome_event(tenant_id, &episode, &items, &event)?;
+        let mut outcomes = self.outcome_events.write().unwrap();
+        let events = outcomes.entry(event.episode_id.to_string()).or_default();
+        if events
+            .iter()
+            .any(|existing| existing.event_id == event.event_id)
+        {
+            return Err(crate::error::MemdError::ValidationError(format!(
+                "outcome event {} already exists",
+                event.event_id
+            )));
+        }
+        events.push(event);
+        Ok(())
+    }
+
+    async fn list_outcomes_for_episode(
+        &self,
+        tenant_id: &TenantId,
+        episode_id: &RetrievalEpisodeId,
+    ) -> Result<Vec<OutcomeEvent>> {
+        if self
+            .get_retrieval_episode(tenant_id, episode_id)
+            .await?
+            .is_none()
+        {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .outcome_events
+            .read()
+            .unwrap()
+            .get(&episode_id.to_string())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn outcome_priors(
+        &self,
+        scope_tenant_id: &TenantId,
+        scope_project_id: Option<&str>,
+        chunk_ids: &[ChunkId],
+        now_ms: i64,
+    ) -> Result<Vec<OutcomePrior>> {
+        let requested = chunk_ids.iter().cloned().collect::<HashSet<_>>();
+        if requested.is_empty() {
+            return Ok(Vec::new());
+        }
+        let episodes = self.retrieval_episodes.read().unwrap();
+        let outcomes = self.outcome_events.read().unwrap();
+        let mut priors = HashMap::<ChunkId, OutcomePrior>::new();
+        let mut seen_episode_chunks = HashSet::<(String, ChunkId)>::new();
+
+        for (episode_key, (episode, items)) in episodes.iter() {
+            if &episode.tenant_id != scope_tenant_id
+                || episode.project_id.as_deref() != scope_project_id
+            {
+                continue;
+            }
+            let eligible_items = items
+                .iter()
+                .filter(|item| requested.contains(&item.chunk_id))
+                .map(|item| item.chunk_id.clone())
+                .collect::<HashSet<_>>();
+            if eligible_items.is_empty() {
+                continue;
+            }
+            let mut events = outcomes.get(episode_key).cloned().unwrap_or_default();
+            events.sort_by_key(|event| std::cmp::Reverse(event.timestamp_ms));
+            for event in events.into_iter().filter(|event| event.ranking_eligible) {
+                let (positive, attributed) = if event.outcome.credits_used() {
+                    (true, &event.used_chunk_ids)
+                } else if event.outcome.credits_harmful() {
+                    (false, &event.harmful_chunk_ids)
+                } else {
+                    continue;
+                };
+                for chunk_id in attributed {
+                    if !eligible_items.contains(chunk_id)
+                        || !seen_episode_chunks.insert((episode_key.clone(), chunk_id.clone()))
+                    {
+                        continue;
+                    }
+                    priors
+                        .entry(chunk_id.clone())
+                        .or_insert_with(|| OutcomePrior::new(chunk_id.clone()))
+                        .add(
+                            positive,
+                            super::decayed_outcome_weight(event.timestamp_ms, now_ms),
+                            event.timestamp_ms,
+                        );
+                }
+            }
+        }
+        let mut priors = priors.into_values().collect::<Vec<_>>();
+        priors.sort_by_key(|prior| prior.chunk_id.to_string());
+        Ok(priors)
     }
 
     async fn get(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<Option<MemoryChunk>> {
@@ -439,7 +631,12 @@ impl Store for MemoryStore {
         let chunk = store
             .get(&tenant_str)
             .and_then(|tenant_chunks| tenant_chunks.get(&chunk_id_str))
-            .filter(|c| c.status != ChunkStatus::Deleted)
+            .filter(|c| {
+                !matches!(
+                    c.status,
+                    ChunkStatus::Candidate | ChunkStatus::Deleted | ChunkStatus::Error
+                )
+            })
             .cloned();
 
         Ok(chunk)
@@ -467,8 +664,12 @@ impl Store for MemoryStore {
             .map(|tenant_chunks| {
                 tenant_chunks
                     .values()
-                    // Filter out deleted chunks
-                    .filter(|chunk| chunk.status != ChunkStatus::Deleted)
+                    .filter(|chunk| {
+                        !matches!(
+                            chunk.status,
+                            ChunkStatus::Candidate | ChunkStatus::Deleted | ChunkStatus::Error
+                        )
+                    })
                     // Basic text contains filter if query is non-empty
                     .filter(|chunk| {
                         query.is_empty()
@@ -565,6 +766,8 @@ impl Store for MemoryStore {
                 let mut chunk_types_deleted: HashMap<String, usize> = HashMap::new();
                 let mut chunk_types_all: HashMap<String, usize> = HashMap::new();
                 let mut deleted_count = 0;
+                let mut active_count = 0;
+                let mut candidate_count = 0;
 
                 for chunk in tenant_chunks.values() {
                     let key = chunk.chunk_type.to_string();
@@ -572,15 +775,18 @@ impl Store for MemoryStore {
                     if chunk.status == ChunkStatus::Deleted {
                         deleted_count += 1;
                         *chunk_types_deleted.entry(key).or_insert(0) += 1;
-                    } else {
+                    } else if chunk.status == ChunkStatus::Candidate {
+                        candidate_count += 1;
+                    } else if chunk.status != ChunkStatus::Error {
+                        active_count += 1;
                         *chunk_types_active.entry(key).or_insert(0) += 1;
                     }
                 }
-                let active_count = tenant_chunks.len().saturating_sub(deleted_count);
 
                 StoreStats {
                     total_chunks: tenant_chunks.len(),
                     active_chunks: active_count,
+                    candidate_chunks: candidate_count,
                     deleted_chunks: deleted_count,
                     chunk_types: chunk_types_active.clone(),
                     chunk_types_active,
@@ -610,7 +816,12 @@ impl Store for MemoryStore {
             .map(|tenant_chunks| {
                 tenant_chunks
                     .values()
-                    .filter(|chunk| chunk.status != ChunkStatus::Deleted)
+                    .filter(|chunk| {
+                        !matches!(
+                            chunk.status,
+                            ChunkStatus::Candidate | ChunkStatus::Deleted | ChunkStatus::Error
+                        )
+                    })
                     .cloned()
                     .collect()
             })
@@ -622,6 +833,10 @@ impl Store for MemoryStore {
         }
 
         Ok(chunks.into_iter().skip(offset).take(limit).collect())
+    }
+
+    fn run_compaction_if_needed(&self, _tenant_id: &TenantId) -> Result<Option<CompactionResult>> {
+        Ok(None)
     }
 }
 

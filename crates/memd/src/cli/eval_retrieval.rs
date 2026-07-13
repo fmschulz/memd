@@ -491,7 +491,7 @@ mod tests {
 
     #[test]
     fn variant_metrics_uses_fixed_k_denominator() {
-        let rows = vec![
+        let rows = [
             EvalRow {
                 chunk_id: "a".to_string(),
                 tags: Vec::new(),

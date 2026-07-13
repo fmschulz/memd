@@ -149,9 +149,11 @@ script adds a Claude Code `SessionStart` hook; Codex users can copy
 memd session-start --project-dir "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || true
 ```
 
-This refreshes `memory.md` synchronously and — when ≥10 dirty chunks have
-accumulated since the last consolidation — spawns a detached `memd
-consolidate` in the background.
+This recovers stale journaled consolidation runs, refreshes `memory.md`
+synchronously, and — when ≥10 dirty chunks have accumulated since the last
+consolidation — stages a detached `memd consolidate` in the background.
+Recovery skips runs updated within the last 30 seconds and promotes only a
+run whose durable promotion intent was recorded before the interruption.
 
 If `.memd/project_scope.json` is missing, `session-start` auto-creates a
 minimal scope file using `$MEMD_DEFAULT_TENANT` (then `$USER`, then
@@ -188,19 +190,46 @@ runs under one 60 s timeout that explicitly kills and reaps the child on
 expiry. The region is sent to the model as a JSON array so untrusted chunk
 text cannot forge prompt framing.
 
-Source chunks are soft-tombstoned (lifecycle status `Superseded`) — nothing
-is ever deleted; the raw records remain accessible via `memd search
---include-superseded`. Consolidated chunks carry
-`kind:consolidated, priority:N, supersedes:<csv>, consolidator:<name>`
-plus the dominant inherited `ctx:*` tags.
+Each response is journaled under a `run_id` before Candidate payloads are
+written. Every proposed lesson must include a concrete agent action, exact
+source evidence, and confidence in `[0, 1]`. The journal records the backend
+command, model, and CLI version; a permission-restricted, size-capped local
+artifact preserves the raw response and integrity hashes for audit.
+
+Candidate text is unavailable to search, `memory.get`, agent context,
+`memory.md`, exports, and reports. The default command stops after validation:
+
+```bash
+memd consolidate-review --list
+memd consolidate-review <run_id> --accept
+```
+
+Use `--reject` to close a staged run without changing its sources. Acceptance
+records durable promotion intent, then one SQLite transaction promotes the
+candidates to `Final` and, for project-scoped runs, changes every source to
+`Superseded`. A failure before commit leaves sources active and recovery can
+finish only an accepted run. Exact source-set reruns reuse the same active or
+committed run. Workflows that require explicit automatic promotion can run
+`memd consolidate --project-dir . --promote`. The deprecated
+`--legacy-immediate` flag has the same behavior for one migration release.
+
+Project-scoped source chunks are soft-tombstoned (lifecycle status
+`Superseded`) — nothing is deleted; the raw records remain accessible via
+`memd search --include-superseded`. Their consolidated chunks carry
+`kind:consolidated, priority:N, supersedes:<csv>, consolidator:<name>` plus
+the dominant inherited `ctx:*` tags. Tenant-wide runs instead use
+`derives_from:<csv>` and keep project-scoped sources active.
 
 Skipped without `--force` when fewer than 10 chunks have accumulated since
 the previous run; `.memd/data/consolidate.state.json` tracks the watermark.
+Background proposals from session start are discoverable with
+`memd consolidate-review --list`.
 
 For cross-project transfer, run a tenant-wide consolidation (explicit
 `--tenant-id`, no `--project-id`): the consolidated lessons are written
 without a `project_id` and surface in every project's `memory.md`
-through the `Machine-Wide Fact Library`.
+through the `Machine-Wide Fact Library`. Project sources stay searchable in
+their original scope.
 
 ### Counterfactual retrieval eval
 
@@ -468,8 +497,8 @@ This writes `.memd/memory_guardrails.md`, `.memd/tenant_scope.json`, and
 `.memd/project_scope.json`, and can upsert CLI guardrail blocks into local
 `AGENTS.md` and `CLAUDE.md`.
 
-For the "just works in any repo" UX, you do NOT need to run `memd init` —
-the `SessionStart` hook will auto-create a memd-managed
+Automatic session startup does not require `memd init`. The `SessionStart`
+hook creates a memd-managed
 `.memd/project_scope.json` (do not hand-write this file; partial JSON fails to
 parse) on first use. See [Automatic session-start](#automatic-session-start).
 Run `memd init` only when you want the full guardrail suite for a repo.

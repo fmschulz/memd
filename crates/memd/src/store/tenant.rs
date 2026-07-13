@@ -158,23 +158,20 @@ impl TenantManager {
         }
 
         if path.is_file() {
-            return path
-                .metadata()
-                .map(|m| m.len())
-                .map_err(|e| MemdError::IoError(e));
+            return path.metadata().map(|m| m.len()).map_err(MemdError::IoError);
         }
 
-        let entries = fs::read_dir(path).map_err(|e| MemdError::IoError(e))?;
+        let entries = fs::read_dir(path).map_err(MemdError::IoError)?;
 
         for entry in entries {
-            let entry = entry.map_err(|e| MemdError::IoError(e))?;
+            let entry = entry.map_err(MemdError::IoError)?;
             let path = entry.path();
 
             if path.is_file() {
                 total += entry
                     .metadata()
                     .map(|m| m.len())
-                    .map_err(|e| MemdError::IoError(e))?;
+                    .map_err(MemdError::IoError)?;
             } else if path.is_dir() {
                 total += Self::dir_size(&path)?;
             }
@@ -190,7 +187,7 @@ impl TenantManager {
         }
 
         let count = fs::read_dir(segments_dir)
-            .map_err(|e| MemdError::IoError(e))?
+            .map_err(MemdError::IoError)?
             .filter_map(|e| e.ok())
             .filter(|e| e.path().is_dir())
             .count();

@@ -83,7 +83,6 @@ TESTING.md
 /evals/bench/memd-xproject-pilot/
 /evals/bench/memd-cost-v3/
 /evals/bench/memd-stress-v4/
-/evals/bench/BENCHMARK_INVENTORY.md
 /evals/bench/bright-pro-memd/results/*
 !/evals/bench/bright-pro-memd/results/
 !/evals/bench/bright-pro-memd/results/biology_q5_d141_comparison.json
@@ -105,7 +104,7 @@ test-install.sh
 /docs/scientific-task-memory/benchmark-results/task_memory_benchmark_data/
 /docs/scientific-task-memory/benchmark-results/task_memory_benchmark.log
 
-# Benchmark harness artifacts (benchmarks/locomo/)
+# Local benchmark artifacts
 /benchmark-data/
 /run-output/
 /fable-work/

@@ -356,7 +356,7 @@ fn verify_tokenizer_exists(path: &PathBuf) -> Result<()> {
 }
 
 /// Download the embedding model
-pub fn download_model(cache_dir: &PathBuf) -> Result<()> {
+pub fn download_model(cache_dir: &Path) -> Result<()> {
     let model_path = cache_dir.join(MODEL_FILENAME);
     download_file(
         MODEL_URL,
@@ -367,7 +367,7 @@ pub fn download_model(cache_dir: &PathBuf) -> Result<()> {
 }
 
 /// Download the tokenizer (legacy, uses default model)
-fn download_tokenizer(cache_dir: &PathBuf) -> Result<()> {
+fn download_tokenizer(cache_dir: &Path) -> Result<()> {
     let tokenizer_path = cache_dir.join(TOKENIZER_FILENAME);
     download_file(
         TOKENIZER_URL,

@@ -25,6 +25,82 @@ fn hit_ids(resp: &serde_json::Value) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn candidate_is_hidden_even_with_every_public_include_flag() {
+    use memd::omf::export::{export_omf, ExportOptions};
+    use memd::store::metadata::MetadataStore;
+    use memd::types::LifecycleDelta;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store = persistent_store(tmp.path()).await;
+    let t = tenant("t");
+    let visible = store
+        .add(MemoryChunk::new(
+            t.clone(),
+            "candidate visibility payload",
+            ChunkType::Doc,
+        ))
+        .await
+        .unwrap();
+    let candidate = store
+        .add_chunk_with_lifecycle(
+            MemoryChunk::new(
+                t.clone(),
+                "candidate visibility payload staged",
+                ChunkType::Doc,
+            )
+            .with_status(ChunkStatus::Candidate),
+            LifecycleDelta::default(),
+        )
+        .await
+        .unwrap();
+
+    let config = memd::config::Config {
+        data_dir: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let server = std::sync::Arc::new(TestServer::new(config, store.clone()));
+    let response = call_tool(
+        &server,
+        "memory.search",
+        json!({
+            "tenant_id": "t",
+            "query": "candidate visibility payload",
+            "k": 20,
+            "include_superseded": true,
+            "include_expired": true,
+            "include_history": true
+        }),
+    )
+    .await;
+    let hits = hit_ids(&response);
+    assert!(
+        hits.contains(&visible.to_string()),
+        "visible control missing: {hits:?}"
+    );
+    assert!(
+        !hits.contains(&candidate.to_string()),
+        "candidate leaked through permissive search: {hits:?}"
+    );
+
+    let listed = store.list_chunks(&t, 20, 0).await.unwrap();
+    assert!(listed.iter().all(|chunk| chunk.chunk_id != candidate));
+
+    let export = export_omf(&store, &t, ExportOptions::default())
+        .await
+        .unwrap();
+    assert!(export
+        .memories
+        .iter()
+        .all(|memory| memory.content != "candidate visibility payload staged"));
+
+    let health = store.metadata().health_snapshot(&t, None, 10).unwrap();
+    assert_eq!(health.counts.active_chunks, 1);
+    assert_eq!(health.counts.candidate_chunks, 1);
+    let hidden = store.metadata().list_lifecycle_hidden(&t).unwrap();
+    assert!(hidden.contains(&candidate));
+}
+
+#[tokio::test]
 async fn search_hides_superseded_by_default_and_refills_to_k() {
     // Add 12 chunks that all match the query "payload", then supersede the
     // first 3 we added. With `k=10` and default visibility (hide

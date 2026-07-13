@@ -122,6 +122,7 @@ pub fn resolve_command_scope(cmd: &mut CliCommand) -> Result<()> {
         }
         CliCommand::Get { tenant_id, .. }
         | CliCommand::Delete { tenant_id, .. }
+        | CliCommand::Outcome { tenant_id, .. }
         | CliCommand::Stats { tenant_id }
         | CliCommand::Export { tenant_id, .. }
         | CliCommand::ImportOmf { tenant_id, .. } => {

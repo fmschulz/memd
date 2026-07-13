@@ -9,18 +9,13 @@ use crate::types::{ChunkId, ChunkType};
 use std::collections::HashSet;
 
 /// Reranker strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RerankerMode {
     /// Metadata-only feature reranking.
+    #[default]
     Feature,
     /// Query-document interaction reranking.
     CrossEncoder,
-}
-
-impl Default for RerankerMode {
-    fn default() -> Self {
-        Self::Feature
-    }
 }
 
 /// Configuration for reranking.

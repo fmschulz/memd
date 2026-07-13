@@ -1,0 +1,119 @@
+{
+  "schema_version": "memd.longitudinal.protocol.v1",
+  "protocol_id": "longitudinal-outcome-v1",
+  "random_seed": 20260712,
+  "bootstrap": {
+    "unit": "task_cluster",
+    "iterations": 10000,
+    "confidence_level": 0.95
+  },
+  "retrieval": {
+    "k": 3,
+    "candidate_multiplier": 4,
+    "ranking_policy_version": "outcome-v1",
+    "production_serve_enabled": false
+  },
+  "timeline": {
+    "pre_feedback_rounds": 1,
+    "post_feedback_rounds": 4,
+    "consolidation_after_round": 1
+  },
+  "exposure_compatibility": {
+    "adjustment_per_prior_render": 0.05,
+    "max_prior_renders": 4,
+    "max_adjustment": 0.2,
+    "product_policy": false
+  },
+  "treatments": [
+    {
+      "id": "no_memory",
+      "admission": "none",
+      "consolidation": "none",
+      "ranking": "none"
+    },
+    {
+      "id": "raw_memory",
+      "admission": "bypass",
+      "consolidation": "none",
+      "ranking": "base"
+    },
+    {
+      "id": "admission_only",
+      "admission": "shared_write_service",
+      "consolidation": "none",
+      "ranking": "base"
+    },
+    {
+      "id": "staged_consolidation",
+      "admission": "shared_write_service",
+      "consolidation": "stage_validate_explicit_promote",
+      "ranking": "base"
+    },
+    {
+      "id": "exposure_compat",
+      "admission": "shared_write_service",
+      "consolidation": "none",
+      "ranking": "offline_rendered_count_compatibility"
+    },
+    {
+      "id": "outcome_only",
+      "admission": "shared_write_service",
+      "consolidation": "none",
+      "ranking": "shadow_replay"
+    },
+    {
+      "id": "full_loop",
+      "admission": "shared_write_service",
+      "consolidation": "stage_validate_explicit_promote",
+      "ranking": "shadow_replay"
+    }
+  ],
+  "attribution": {
+    "success_outcome": "passed",
+    "failure_outcome": "failed",
+    "verifier": "automated_test",
+    "credit": "selected_correct_chunk_only",
+    "harm": "selected_stale_chunk_only",
+    "unrendered_attribution_allowed": false
+  },
+  "metrics": [
+    "task_success",
+    "verifier_pass_rate",
+    "stale_error_recurrence",
+    "harmful_memory_rate",
+    "recall_at_3",
+    "mrr",
+    "served_shadow_change_rate",
+    "rendered_byte_count",
+    "token_proxy_ceil_bytes_div_4",
+    "latency_ms",
+    "store_growth_bytes",
+    "consolidation_source_coverage",
+    "staged_count",
+    "promotion_count",
+    "rejection_count",
+    "rollback_count",
+    "recoverable_count",
+    "scope_violation_count"
+  ],
+  "promotion_gates": {
+    "full_loop_minus_raw_success_ci_lower_gt": 0.0,
+    "full_loop_stale_recurrence_lte_raw": true,
+    "full_loop_minus_raw_harmful_rate_ci_upper_lte": 0.02,
+    "full_loop_recall_at_3_gte_raw": true,
+    "full_loop_mrr_gte_raw": true,
+    "scope_violation_count_eq": 0,
+    "crash_recovery_violation_count_eq": 0,
+    "performance_caps": null
+  },
+  "artifacts": {
+    "immutable_run_directory": true,
+    "files": [
+      "manifest.<run_id>.json",
+      "rows.<run_id>.jsonl",
+      "summary.<run_id>.json",
+      "counterfactual.<run_id>.json",
+      "inventory.<run_id>.sha256"
+    ]
+  }
+}

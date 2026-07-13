@@ -603,7 +603,7 @@ fn project_counts_from_default_metadata(
     let mut stmt = conn.prepare(
         "SELECT project_id, COUNT(*) AS active_chunks
          FROM chunks
-         WHERE tenant_id = ?1 AND status != 'deleted'
+         WHERE tenant_id = ?1 AND status NOT IN ('candidate', 'deleted')
          GROUP BY project_id
          ORDER BY active_chunks DESC
          LIMIT ?2",

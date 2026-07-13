@@ -9,7 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use super::{run_cli_capture, Consolidator, DEFAULT_TIMEOUT};
+use super::{cli_version, run_cli_capture, Consolidator, ConsolidatorIdentity, DEFAULT_TIMEOUT};
 use crate::error::{MemdError, Result};
 
 /// Default Haiku model id used for consolidation.
@@ -56,6 +56,18 @@ impl Consolidator for ClaudeHaikuConsolidator {
 
     fn name(&self) -> &'static str {
         "claude-haiku"
+    }
+
+    async fn identity(&self) -> Result<ConsolidatorIdentity> {
+        Ok(ConsolidatorIdentity {
+            adapter: self.name().to_string(),
+            command: Some(format!(
+                "claude -p --model {} --output-format json",
+                self.model
+            )),
+            model: Some(self.model.clone()),
+            version: Some(cli_version("claude", self.timeout).await?),
+        })
     }
 }
 

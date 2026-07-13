@@ -6,8 +6,10 @@ use tempfile::TempDir;
 #[tokio::test]
 async fn test_persistent_store_chunks_long_document() {
     let temp_dir = TempDir::new().unwrap();
-    let mut config = PersistentStoreConfig::default();
-    config.data_dir = temp_dir.path().to_path_buf();
+    let config = PersistentStoreConfig {
+        data_dir: temp_dir.path().to_path_buf(),
+        ..PersistentStoreConfig::default()
+    };
 
     let store = PersistentStore::open(config).unwrap();
 

@@ -7,11 +7,9 @@ For a map of completed runs and where their result artifacts live, see
 agent benchmark, see
 [`../memd-multiturn-token-savings/README.md`](../memd-multiturn-token-savings/README.md).
 
-## Keep
+## Entrypoints
 
 - `run_offline_retrieval_benchmark.sh`
-- `run_variant_matrix_benchmark.sh`
-- `run_longmemeval_benchmark.sh`
 - `run_task_memory_benchmark.sh`
 
 These scripts run directly with local `cargo` and Python. Docker is not required.
@@ -32,26 +30,6 @@ If you skip that step, the offline benchmark script will still run on the tracke
   --system-variant hybrid-feature \
   --bootstrap-iterations 1000 \
   --seed 42
-```
-
-## Variant matrix benchmark
-
-```bash
-./evals/bench/scripts/run_variant_matrix_benchmark.sh \
-  --model all-minilm \
-  --with-longmemeval-s \
-  --max-queries 200 \
-  --max-sessions-per-query 40 \
-  --seed 42
-```
-
-## LongMemEval benchmark
-
-```bash
-./evals/bench/scripts/run_longmemeval_benchmark.sh \
-  --split s \
-  --model all-minilm \
-  --system-variant hybrid-feature
 ```
 
 ## Task-memory benchmark

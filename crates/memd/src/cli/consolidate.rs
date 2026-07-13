@@ -3,9 +3,9 @@
 //! Builds a working region from chunks written (and retrieved) since
 //! the last run, asks the configured [`Consolidator`] to rewrite them
 //! into a smaller deduplicated set of `kind:consolidated` lessons,
-//! persists those lessons, and soft-tombstones the superseded
-//! sources. Nothing is ever deleted — superseded chunks stay on disk
-//! and are merely hidden from retrieval.
+//! and persists those lessons. Project-scoped runs soft-tombstone
+//! superseded sources; tenant-wide runs retain project sources and
+//! record non-destructive `derives_from` lineage. Nothing is deleted.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -14,15 +14,17 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::paths::absolutize_project_dir;
+use crate::consolidate::journal::LineageRelation;
 use crate::consolidate::prompt::{
-    build_consolidation_prompt, parse_consolidation_response, ConsolidatedEntry, RegionChunk,
+    build_consolidation_prompt, parse_consolidation_response, RegionChunk,
 };
 use crate::consolidate::select::select_consolidator;
+use crate::consolidate::service::execute_consolidation_with_identity;
 use crate::consolidate::Consolidator;
 use crate::error::{MemdError, Result};
 use crate::store::Store;
-use crate::types::lifecycle::LifecycleDelta;
-use crate::types::{ChunkId, ChunkStatus, ChunkType, MemoryChunk, ProjectId, TenantId};
+use crate::types::lifecycle::VisibilityPolicy;
+use crate::types::{ChunkId, ChunkStatus, MemoryChunk, TenantId};
 
 /// Minimum region size below which consolidation is skipped unless
 /// `--force` is passed. Also the dirty-chunk threshold at which
@@ -42,6 +44,8 @@ pub(super) struct ConsolidateOptions {
     pub(super) dry_run: bool,
     pub(super) background: bool,
     pub(super) force: bool,
+    pub(super) promote: bool,
+    pub(super) legacy_immediate: bool,
 }
 
 /// Entry point: resolves the consolidator backend from the
@@ -50,11 +54,99 @@ pub(super) async fn run_consolidate<S: Store>(
     store: &S,
     options: ConsolidateOptions,
 ) -> Result<Value> {
+    if options.legacy_immediate {
+        eprintln!(
+            "warning: --legacy-immediate is deprecated and will be removed in the next release; use --promote"
+        );
+    }
     if options.background {
         return spawn_background(&options);
     }
     let consolidator = select_consolidator()?;
     consolidate_core(store, options, consolidator.as_ref()).await
+}
+
+pub(super) async fn run_consolidate_review<S: Store>(
+    store: &S,
+    run_id: Option<&str>,
+    list: bool,
+    limit: usize,
+    accept: bool,
+    reject: bool,
+) -> Result<Value> {
+    let persistent = store.as_persistent().ok_or_else(|| {
+        MemdError::ValidationError("consolidate-review requires a persistent store".to_string())
+    })?;
+    if list {
+        if run_id.is_some() || accept || reject {
+            return Err(MemdError::ValidationError(
+                "consolidate-review --list does not accept a run id or decision".to_string(),
+            ));
+        }
+        let mut staged = Vec::new();
+        for run in persistent
+            .metadata()
+            .list_staged_consolidation_runs(limit.clamp(1, 1_000))?
+        {
+            let candidate_count = persistent
+                .metadata()
+                .get_consolidation_entries(&run.run_id)?
+                .len();
+            let source_count = persistent
+                .metadata()
+                .get_memory_lineage(&run.run_id)?
+                .into_iter()
+                .map(|edge| edge.source_chunk_id)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            staged.push(json!({
+                "run_id": run.run_id.to_string(),
+                "tenant_id": run.tenant_id.to_string(),
+                "project_id": run.project_id,
+                "state": run.state.as_str(),
+                "candidate_count": candidate_count,
+                "source_count": source_count,
+                "consolidator": {
+                    "adapter": run.consolidator,
+                    "command": run.consolidator_command,
+                    "model": run.consolidator_model,
+                    "version": run.consolidator_version,
+                },
+                "created_at_ms": run.created_at_ms,
+                "updated_at_ms": run.updated_at_ms,
+            }));
+        }
+        let count = staged.len();
+        return Ok(json!({
+            "staged_runs": staged,
+            "count": count,
+        }));
+    }
+    if accept == reject {
+        return Err(MemdError::ValidationError(
+            "consolidate-review requires exactly one of --accept or --reject".to_string(),
+        ));
+    }
+    let run_id = run_id.ok_or_else(|| {
+        MemdError::ValidationError(
+            "consolidate-review requires a run id unless --list is used".to_string(),
+        )
+    })?;
+    let run_id = crate::consolidate::journal::ConsolidationRunId::parse(run_id)?;
+    let decision = if accept {
+        crate::consolidate::service::ConsolidationReviewDecision::Accept
+    } else {
+        crate::consolidate::service::ConsolidationReviewDecision::Reject
+    };
+    let execution =
+        crate::consolidate::service::review_consolidation_run(persistent, &run_id, decision)
+            .await?;
+    Ok(json!({
+        "run_id": execution.run_id.to_string(),
+        "state": execution.state.as_str(),
+        "candidate_chunk_ids": execution.candidate_chunk_ids.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "source_count": execution.source_count,
+    }))
 }
 
 /// Core consolidation flow, parameterised over the [`Consolidator`] so
@@ -72,6 +164,15 @@ async fn consolidate_core<S: Store>(
     )?;
     let tenant = TenantId::new(&tenant_id)?;
     let max_region = options.max_region.clamp(MIN_REGION, SCAN_LIMIT);
+
+    // Reconcile stale journaled work before selecting a new region or paying
+    // for another model call. The recovery service has an in-flight grace
+    // period, so this does not claim a run that is still writing candidates.
+    if !options.dry_run {
+        if let Some(persistent) = store.as_persistent() {
+            crate::consolidate::service::recover_consolidation_runs(persistent, 100).await?;
+        }
+    }
 
     let state_path = consolidate_state_path(&project_dir);
     let since_ms = read_last_consolidation_ms(&state_path);
@@ -103,47 +204,80 @@ async fn consolidate_core<S: Store>(
         }));
     }
 
+    let identity = consolidator.identity().await?;
     let raw = consolidator.consolidate(&prompt).await?;
     let entries = parse_consolidation_response(&raw, &region)?;
 
-    let now = now_ms();
     let inherited_ctx = most_common_ctx_tags(&region, 3);
-    let mut written = Vec::new();
-    let mut tombstoned = 0usize;
-
-    for entry in &entries {
-        let new_id = persist_consolidated(
-            store,
-            &tenant,
-            project_id.as_deref(),
-            entry,
-            consolidator.name(),
-            &inherited_ctx,
-        )
-        .await?;
-        tombstoned += tombstone_sources(store, &tenant, entry, &new_id, now).await?;
-        written.push(new_id.to_string());
+    let persistent = store.as_persistent().ok_or_else(|| {
+        MemdError::ValidationError("consolidate requires a persistent store".to_string())
+    })?;
+    let promotion_requested = options.promote || options.legacy_immediate;
+    let execution = execute_consolidation_with_identity(
+        persistent,
+        &tenant,
+        project_id.as_deref(),
+        &entries,
+        if project_id.is_some() {
+            LineageRelation::Supersedes
+        } else {
+            LineageRelation::DerivesFrom
+        },
+        &identity,
+        &inherited_ctx,
+        &prompt,
+        &raw,
+        promotion_requested,
+    )
+    .await?;
+    if !matches!(
+        execution.state,
+        crate::consolidate::journal::ConsolidationState::Validated
+            | crate::consolidate::journal::ConsolidationState::Committed
+    ) {
+        return Err(MemdError::StorageError(format!(
+            "consolidation run {} stopped before validation in state {}",
+            execution.run_id, execution.state
+        )));
     }
+    let written = execution
+        .candidate_chunk_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let committed = execution.state == crate::consolidate::journal::ConsolidationState::Committed;
+    let tombstoned = if committed && project_id.is_some() {
+        execution.source_count
+    } else {
+        0
+    };
+    let now = now_ms();
 
     write_last_consolidation_ms(&state_path, now)?;
 
     // Tenant-wide runs persist lessons with no project_id; flag that
     // project-scoped searches will not surface them.
-    let tenant_wide_write = project_id.is_none() && !written.is_empty();
+    let tenant_wide_write = committed && project_id.is_none() && !written.is_empty();
     let mut summary = json!({
         "tenant_id": tenant_id,
         "project_id": project_id,
         "region_size": region.len(),
-        "consolidated": written.len(),
+        "consolidated": if committed { written.len() } else { 0 },
+        "staged": if committed { 0 } else { written.len() },
         "tombstoned": tombstoned,
-        "consolidator": consolidator.name(),
-        "new_chunk_ids": written,
+        "state": execution.state.as_str(),
+        "promotion_requested": promotion_requested,
+        "consolidator": identity,
+        "candidate_chunk_ids": written,
+        "new_chunk_ids": if committed { execution.candidate_chunk_ids.iter().map(ToString::to_string).collect::<Vec<_>>() } else { Vec::new() },
+        "run_id": execution.run_id.to_string(),
+        "reused_existing_run": execution.reused_existing_run,
     });
     if tenant_wide_write {
         summary["warning"] = json!(
             "consolidated lessons written without project_id; project-scoped searches \
-             will not see them (they surface via tenant-wide search and memory-md \
-             Machine-Wide Fact Library)"
+             will not see them directly (they surface via tenant-wide search and \
+             memory-md Machine-Wide Fact Library); project-scoped sources were retained"
         );
     }
     Ok(summary)
@@ -265,12 +399,27 @@ async fn collect_region<S: Store>(
 ) -> Result<Vec<RegionChunk>> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut region: Vec<RegionChunk> = Vec::new();
+    let visibility = VisibilityPolicy::default();
+    let visibility_now_ms = now_ms();
 
     let recent = store
         .list_chunks_for_project(tenant, project_id, SCAN_LIMIT, 0)
         .await?;
     for chunk in recent {
-        consider_chunk(chunk, since_ms, project_id, &mut seen, &mut region);
+        let Some(resolved) = store.get_with_lifecycle(tenant, &chunk.chunk_id).await? else {
+            continue;
+        };
+        if !visibility.is_visible_at(resolved.status, &resolved.lifecycle, visibility_now_ms) {
+            continue;
+        }
+        consider_chunk(
+            resolved.chunk,
+            RegionReason::NewWrite,
+            since_ms,
+            project_id,
+            &mut seen,
+            &mut region,
+        );
     }
 
     for chunk_id in search_log_chunk_ids(project_dir, since_ms) {
@@ -280,18 +429,39 @@ async fn collect_region<S: Store>(
         let Ok(parsed) = ChunkId::parse(&chunk_id) else {
             continue;
         };
-        // `store.get` is tenant-scoped only — `consider_chunk`
-        // re-checks `project_id` so a project consolidation never
-        // ingests (and later tombstones) another project's chunk.
-        if let Ok(Some(chunk)) = store.get(tenant, &parsed).await {
-            consider_chunk(chunk, since_ms, project_id, &mut seen, &mut region);
+        // Lifecycle can change after a search log is written. Resolve its
+        // overlay now so an intervening correction cannot revive a stale
+        // source and fork its supersession lineage. The lookup remains
+        // tenant-scoped, and `consider_chunk` re-checks `project_id`.
+        if let Ok(Some(resolved)) = store.get_with_lifecycle(tenant, &parsed).await {
+            if !visibility.is_visible_at(resolved.status, &resolved.lifecycle, visibility_now_ms) {
+                continue;
+            }
+            consider_chunk(
+                resolved.chunk,
+                RegionReason::RecentHit,
+                since_ms,
+                project_id,
+                &mut seen,
+                &mut region,
+            );
         }
     }
 
-    // Newest first, then cap.
-    region.sort_by(|a, b| b.timestamp_created.cmp(&a.timestamp_created));
+    // Newest first, then id ascending for deterministic ties.
+    region.sort_by(|a, b| {
+        b.timestamp_created
+            .cmp(&a.timestamp_created)
+            .then_with(|| a.chunk_id.cmp(&b.chunk_id))
+    });
     region.truncate(max_region);
     Ok(region)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegionReason {
+    NewWrite,
+    RecentHit,
 }
 
 /// Apply region-membership filters to one chunk and push it if it
@@ -300,6 +470,7 @@ async fn collect_region<S: Store>(
 /// where chunk ids are resolved tenant-wide.
 fn consider_chunk(
     chunk: MemoryChunk,
+    reason: RegionReason,
     since_ms: i64,
     project_id: Option<&str>,
     seen: &mut std::collections::HashSet<String>,
@@ -310,12 +481,16 @@ fn consider_chunk(
             return;
         }
     }
-    if chunk.timestamp_created <= since_ms {
+    if reason == RegionReason::NewWrite && chunk.timestamp_created <= since_ms {
         return;
     }
     if matches!(
         chunk.status,
-        ChunkStatus::Superseded | ChunkStatus::Deleted | ChunkStatus::Expired
+        ChunkStatus::Candidate
+            | ChunkStatus::Superseded
+            | ChunkStatus::Deleted
+            | ChunkStatus::Expired
+            | ChunkStatus::Error
     ) {
         return;
     }
@@ -355,14 +530,15 @@ fn search_log_chunk_ids(project_dir: &Path, since_ms: i64) -> Vec<String> {
         if !name.ends_with(".json") || name.ends_with("_log.jsonl") {
             continue;
         }
-        if let Some(stamp) = name
+        let Some(stamp) = name
             .rsplit_once('_')
             .and_then(|(_, tail)| tail.strip_suffix(".json"))
             .and_then(|s| s.parse::<i64>().ok())
-        {
-            if stamp <= since_ms {
-                continue;
-            }
+        else {
+            continue;
+        };
+        if stamp <= since_ms {
+            continue;
         }
         let Ok(text) = std::fs::read_to_string(entry.path()) else {
             continue;
@@ -405,68 +581,6 @@ fn most_common_ctx_tags(region: &[RegionChunk], limit: usize) -> Vec<String> {
         .collect()
 }
 
-/// Persist one consolidated lesson and return its new chunk id.
-async fn persist_consolidated<S: Store>(
-    store: &S,
-    tenant: &TenantId,
-    project_id: Option<&str>,
-    entry: &ConsolidatedEntry,
-    consolidator_name: &str,
-    inherited_ctx: &[String],
-) -> Result<ChunkId> {
-    let mut tags = vec![
-        "kind:consolidated".to_string(),
-        format!("priority:{}", entry.priority),
-        format!("supersedes:{}", entry.supersedes.join(",")),
-        format!("consolidator:{consolidator_name}"),
-    ];
-    tags.extend(inherited_ctx.iter().cloned());
-
-    let mut chunk = MemoryChunk::new(tenant.clone(), &entry.text, ChunkType::Summary);
-    if let Some(project_id) = project_id {
-        chunk = chunk.with_project(ProjectId::from(project_id));
-    }
-    chunk = chunk.with_tags(tags);
-    store.add(chunk).await
-}
-
-/// Soft-tombstone every source chunk an `entry` supersedes: set
-/// `status = Superseded` and `superseded_by = <new_id>` on the
-/// lifecycle overlay. The payload is never deleted. Returns the count
-/// of sources successfully tombstoned.
-async fn tombstone_sources<S: Store>(
-    store: &S,
-    tenant: &TenantId,
-    entry: &ConsolidatedEntry,
-    new_id: &ChunkId,
-    now_ms: i64,
-) -> Result<usize> {
-    let persistent = store.as_persistent().ok_or_else(|| {
-        MemdError::ValidationError(
-            "consolidate requires a persistent store to tombstone superseded chunks".to_string(),
-        )
-    })?;
-    let mut count = 0usize;
-    for source_id in &entry.supersedes {
-        let Ok(parsed) = ChunkId::parse(source_id) else {
-            continue;
-        };
-        let delta = LifecycleDelta {
-            status: Some(ChunkStatus::Superseded),
-            superseded_by: Some(new_id.clone()),
-            lifecycle_updated_at_ms: Some(now_ms),
-            ..Default::default()
-        };
-        if persistent
-            .update_lifecycle_if_exists(tenant, &parsed, &delta)
-            .await?
-        {
-            count += 1;
-        }
-    }
-    Ok(count)
-}
-
 /// Re-exec `memd consolidate` as a detached background child and
 /// return immediately. The child runs the same scope without
 /// `--background`.
@@ -488,6 +602,12 @@ fn spawn_background(options: &ConsolidateOptions) -> Result<Value> {
         .arg(options.max_region.to_string());
     if options.force {
         command.arg("--force");
+    }
+    if options.promote {
+        command.arg("--promote");
+    }
+    if options.legacy_immediate {
+        command.arg("--legacy-immediate");
     }
     command
         .stdin(std::process::Stdio::null())
@@ -515,12 +635,16 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use crate::consolidate::MockEnvConsolidator;
+    use crate::mcp::handlers::{handle_memory_search, SearchParams};
+    use crate::store::metadata::MetadataStore;
     use crate::store::persistent::{PersistentStore, PersistentStoreConfig};
     use crate::store::Store;
+    use crate::types::lifecycle::LifecycleDelta;
+    use crate::types::{ChunkStatus, ChunkType, ProjectId};
     use tempfile::tempdir;
 
     /// Serialises tests that set the process-global `MOCK_RESPONSE_ENV`.
-    static MOCK_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static MOCK_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn persistent_store(dir: &Path) -> PersistentStore {
         let cfg = PersistentStoreConfig {
@@ -562,6 +686,218 @@ mod tests {
         assert_eq!(read_last_consolidation_ms(&path), 0);
         write_last_consolidation_ms(&path, 4242).unwrap();
         assert_eq!(read_last_consolidation_ms(&path), 4242);
+    }
+
+    #[tokio::test]
+    async fn recent_search_hit_includes_chunk_created_before_watermark() {
+        let dir = tempdir().unwrap();
+        let store = persistent_store(&dir.path().join("store"));
+        let tenant = TenantId::new("t").unwrap();
+        let mut old_chunk = MemoryChunk::new(
+            tenant.clone(),
+            "old lesson retrieved after the last consolidation",
+            ChunkType::Summary,
+        )
+        .with_project(ProjectId::from("p"));
+        old_chunk.timestamp_created = 100;
+        let old_id = store.add(old_chunk).await.unwrap();
+
+        let log_dir = dir.path().join(".memd/search-logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        std::fs::write(
+            log_dir.join("memd_search_2000.json"),
+            serde_json::to_string(&json!({
+                "results": [{"chunk_id": old_id.to_string()}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let region = collect_region(&store, &tenant, Some("p"), 1000, dir.path(), 50)
+            .await
+            .unwrap();
+
+        assert_eq!(region.len(), 1, "a recent hit must revive an old chunk");
+        assert_eq!(region[0].chunk_id, old_id.to_string());
+    }
+
+    #[tokio::test]
+    async fn recent_search_hit_excludes_chunk_superseded_after_search() {
+        let dir = tempdir().unwrap();
+        let store = persistent_store(&dir.path().join("store"));
+        let tenant = TenantId::new("t").unwrap();
+        let mut old_chunk = MemoryChunk::new(
+            tenant.clone(),
+            "stale lesson retrieved before a later correction",
+            ChunkType::Summary,
+        )
+        .with_project(ProjectId::from("p"));
+        old_chunk.timestamp_created = 100;
+        let old_id = store.add(old_chunk).await.unwrap();
+
+        let log_dir = dir.path().join(".memd/search-logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        std::fs::write(
+            log_dir.join("memd_search_2000.json"),
+            serde_json::to_string(&json!({
+                "results": [{"chunk_id": old_id.to_string()}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        store
+            .update_lifecycle_if_exists(
+                &tenant,
+                &old_id,
+                &LifecycleDelta {
+                    status: Some(ChunkStatus::Superseded),
+                    superseded_by: Some(ChunkId::new()),
+                    lifecycle_updated_at_ms: Some(2500),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let region = collect_region(&store, &tenant, Some("p"), 1000, dir.path(), 50)
+            .await
+            .unwrap();
+
+        assert!(
+            region.is_empty(),
+            "a recent hit superseded after search must not re-enter consolidation"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_write_excludes_chunk_superseded_before_consolidation() {
+        let dir = tempdir().unwrap();
+        let store = persistent_store(&dir.path().join("store"));
+        let tenant = TenantId::new("t").unwrap();
+        let mut stale_chunk = MemoryChunk::new(
+            tenant.clone(),
+            "new lesson corrected before consolidation",
+            ChunkType::Summary,
+        )
+        .with_project(ProjectId::from("p"));
+        stale_chunk.timestamp_created = 2000;
+        let stale_id = store.add(stale_chunk).await.unwrap();
+        store
+            .update_lifecycle_if_exists(
+                &tenant,
+                &stale_id,
+                &LifecycleDelta {
+                    status: Some(ChunkStatus::Superseded),
+                    superseded_by: Some(ChunkId::new()),
+                    lifecycle_updated_at_ms: Some(2500),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let region = collect_region(&store, &tenant, Some("p"), 1000, dir.path(), 50)
+            .await
+            .unwrap();
+
+        assert!(
+            region.is_empty(),
+            "a new write superseded before consolidation must not enter the region"
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_search_hits_reject_foreign_project_chunks() {
+        let dir = tempdir().unwrap();
+        let store = persistent_store(&dir.path().join("store"));
+        let tenant = TenantId::new("t").unwrap();
+        let own_id = store
+            .add(
+                MemoryChunk::new(tenant.clone(), "own project lesson", ChunkType::Summary)
+                    .with_project(ProjectId::from("p")),
+            )
+            .await
+            .unwrap();
+        let foreign_id = store
+            .add(
+                MemoryChunk::new(tenant.clone(), "foreign project lesson", ChunkType::Summary)
+                    .with_project(ProjectId::from("q")),
+            )
+            .await
+            .unwrap();
+
+        let log_dir = dir.path().join(".memd/search-logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        std::fs::write(
+            log_dir.join("memd_search_2000.json"),
+            serde_json::to_string(&json!({
+                "results": [
+                    {"chunk_id": own_id.to_string()},
+                    {"chunk_id": foreign_id.to_string()}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let region = collect_region(&store, &tenant, Some("p"), 0, dir.path(), 50)
+            .await
+            .unwrap();
+
+        let ids = region
+            .iter()
+            .map(|chunk| chunk.chunk_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert!(ids.contains(own_id.to_string().as_str()));
+        assert!(!ids.contains(foreign_id.to_string().as_str()));
+    }
+
+    #[tokio::test]
+    async fn region_scan_boundary_is_deterministic_for_equal_timestamps() {
+        let dir = tempdir().unwrap();
+        let store = persistent_store(&dir.path().join("store"));
+        let tenant = TenantId::new("t").unwrap();
+        let mut expected = Vec::new();
+        for i in 0..=SCAN_LIMIT {
+            let mut chunk = MemoryChunk::new(
+                tenant.clone(),
+                format!("equal timestamp lesson {i}"),
+                ChunkType::Summary,
+            )
+            .with_project(ProjectId::from("p"));
+            chunk.timestamp_created = 2000;
+            expected.push(store.add(chunk).await.unwrap().to_string());
+        }
+        expected.sort();
+        expected.truncate(SCAN_LIMIT);
+
+        let region = collect_region(&store, &tenant, Some("p"), 1000, dir.path(), SCAN_LIMIT)
+            .await
+            .unwrap();
+        let actual = region
+            .iter()
+            .map(|chunk| chunk.chunk_id.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn unstamped_search_log_is_ignored() {
+        let dir = tempdir().unwrap();
+        let log_dir = dir.path().join(".memd/search-logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        std::fs::write(
+            log_dir.join("manual.json"),
+            serde_json::to_string(&json!({
+                "results": [{"chunk_id": ChunkId::new().to_string()}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(search_log_chunk_ids(dir.path(), 1000).is_empty());
     }
 
     #[test]
@@ -609,6 +945,8 @@ mod tests {
             dry_run: false,
             background: false,
             force: false,
+            promote: false,
+            legacy_immediate: false,
         };
         let consolidator = MockEnvConsolidator;
         let result = consolidate_core(&store, opts, &consolidator).await.unwrap();
@@ -636,11 +974,11 @@ mod tests {
                 .unwrap();
             ids.push(id.to_string());
         }
+        let ids_json = serde_json::to_string(&ids).unwrap();
         let response = format!(
-            r#"[{{"text":"Cache keys must be tenant-scoped.","supersedes":{},"priority":8}}]"#,
-            serde_json::to_string(&ids).unwrap()
+            r#"[{{"text":"Cache keys must be tenant-scoped.","agent_action":"Reuse tenant-scoped keys when repairing this cache failure.","evidence":{ids_json},"confidence":0.9,"supersedes":{ids_json},"priority":8}}]"#,
         );
-        let _guard = MOCK_ENV_LOCK.lock().unwrap();
+        let _guard = MOCK_ENV_LOCK.lock().await;
         std::env::set_var(crate::consolidate::MOCK_RESPONSE_ENV, &response);
 
         let opts = ConsolidateOptions {
@@ -651,6 +989,8 @@ mod tests {
             dry_run: false,
             background: false,
             force: false,
+            promote: true,
+            legacy_immediate: false,
         };
         let consolidator = MockEnvConsolidator;
         let result = consolidate_core(&store, opts, &consolidator).await.unwrap();
@@ -677,6 +1017,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn consolidate_stages_by_default_without_hiding_sources() {
+        let dir = tempdir().unwrap();
+        let store = persistent_store(&dir.path().join("store"));
+        let tenant = TenantId::new("t").unwrap();
+        let mut ids = Vec::new();
+        for i in 0..12 {
+            ids.push(
+                store
+                    .add(
+                        MemoryChunk::new(
+                            tenant.clone(),
+                            format!("staged lesson {i}: preserve the source until review"),
+                            ChunkType::Summary,
+                        )
+                        .with_project(ProjectId::from("p")),
+                    )
+                    .await
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+        let ids_json = serde_json::to_string(&ids).unwrap();
+        let response = format!(
+            r#"[{{"text":"Sources remain visible until explicit review.","agent_action":"Verify the staged candidate before accepting its replacement.","evidence":{ids_json},"confidence":0.9,"supersedes":{ids_json},"priority":7}}]"#,
+        );
+        let _guard = MOCK_ENV_LOCK.lock().await;
+        std::env::set_var(crate::consolidate::MOCK_RESPONSE_ENV, &response);
+        let result = consolidate_core(
+            &store,
+            ConsolidateOptions {
+                tenant_id: Some("t".to_string()),
+                project_id: Some("p".to_string()),
+                project_dir: dir.path().to_path_buf(),
+                max_region: 50,
+                dry_run: false,
+                background: false,
+                force: false,
+                promote: false,
+                legacy_immediate: false,
+            },
+            &MockEnvConsolidator,
+        )
+        .await
+        .unwrap();
+        std::env::remove_var(crate::consolidate::MOCK_RESPONSE_ENV);
+
+        assert_eq!(result["state"], "validated");
+        assert_eq!(result["staged"], 1);
+        assert_eq!(result["consolidated"], 0);
+        assert_eq!(result["tombstoned"], 0);
+        for source_id in ids {
+            let source = store
+                .metadata()
+                .get(&tenant, &ChunkId::parse(&source_id).unwrap())
+                .unwrap()
+                .unwrap();
+            assert_eq!(source.status, ChunkStatus::Final);
+        }
+        let candidate_id = ChunkId::parse(
+            result["candidate_chunk_ids"][0]
+                .as_str()
+                .expect("candidate id"),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .metadata()
+                .get(&tenant, &candidate_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            ChunkStatus::Candidate
+        );
+        let pending = run_consolidate_review(&store, None, true, 100, false, false)
+            .await
+            .unwrap();
+        assert_eq!(pending["count"], 1);
+        assert_eq!(pending["staged_runs"][0]["run_id"], result["run_id"]);
+    }
+
+    #[tokio::test]
     async fn dry_run_emits_prompt_without_calling_llm() {
         let dir = tempdir().unwrap();
         let store = persistent_store(&dir.path().join("store"));
@@ -698,6 +1119,8 @@ mod tests {
             dry_run: true,
             background: false,
             force: false,
+            promote: false,
+            legacy_immediate: false,
         };
         // A mock with no response env set must NOT be invoked.
         let consolidator = MockEnvConsolidator;
@@ -731,11 +1154,11 @@ mod tests {
                 .unwrap();
             ids.push(id.to_string());
         }
+        let ids_json = serde_json::to_string(&ids).unwrap();
         let response = format!(
-            r#"[{{"text":"One tenant-wide lesson.","supersedes":{},"priority":8}}]"#,
-            serde_json::to_string(&ids).unwrap()
+            r#"[{{"text":"One tenant-wide lesson.","agent_action":"Reuse this tenant-wide lesson only after checking its sources.","evidence":{ids_json},"confidence":0.9,"supersedes":{ids_json},"priority":8}}]"#,
         );
-        let _guard = MOCK_ENV_LOCK.lock().unwrap();
+        let _guard = MOCK_ENV_LOCK.lock().await;
         std::env::set_var(crate::consolidate::MOCK_RESPONSE_ENV, &response);
         let opts = ConsolidateOptions {
             tenant_id: Some("t".to_string()),
@@ -745,8 +1168,10 @@ mod tests {
             dry_run: false,
             background: false,
             force: false,
+            promote: true,
+            legacy_immediate: false,
         };
-        let result = consolidate_core(&store, opts, &MockEnvConsolidator)
+        let result = consolidate_core(&store, opts.clone(), &MockEnvConsolidator)
             .await
             .unwrap();
         std::env::remove_var(crate::consolidate::MOCK_RESPONSE_ENV);
@@ -760,5 +1185,66 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("project-scoped searches"));
+        assert_eq!(result["tombstoned"], 0);
+        let new_id = ChunkId::parse(result["new_chunk_ids"][0].as_str().unwrap()).unwrap();
+        let tenant_wide = store.get(&tenant, &new_id).await.unwrap().unwrap();
+        assert!(tenant_wide
+            .tags
+            .iter()
+            .any(|tag| tag.starts_with("derives_from:")));
+        assert!(!tenant_wide
+            .tags
+            .iter()
+            .any(|tag| tag.starts_with("supersedes:")));
+
+        // A tenant-wide synthesis is additional machine-wide knowledge, not
+        // a project-visible replacement. Its project-scoped sources must stay
+        // active until a replacement exists in the same project scope.
+        for id in &ids {
+            let resolved = store
+                .get_with_lifecycle(&tenant, &ChunkId::parse(id).unwrap())
+                .await
+                .unwrap()
+                .expect("tenant-wide source remains stored");
+            assert_eq!(
+                resolved.status,
+                ChunkStatus::Final,
+                "tenant-wide consolidation must retain project source {id}"
+            );
+            assert!(resolved.lifecycle.superseded_by.is_none());
+        }
+
+        let response = handle_memory_search(
+            &store,
+            SearchParams {
+                tenant_id: "t".to_string(),
+                project_id: Some("p".to_string()),
+                query: "lesson".to_string(),
+                k: 50,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let text = response["content"][0]["text"].as_str().unwrap();
+        let payload: Value = serde_json::from_str(text).unwrap();
+        let hits = payload["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row["chunk_id"].as_str())
+            .collect::<std::collections::HashSet<_>>();
+        for id in &ids {
+            assert!(
+                hits.contains(id.as_str()),
+                "project search must retain tenant-wide source {id}"
+            );
+        }
+
+        let repeated = consolidate_core(&store, opts, &MockEnvConsolidator)
+            .await
+            .unwrap();
+        assert_eq!(repeated["skipped"], "below_threshold");
+        assert_eq!(repeated["region_size"], 0);
     }
 }

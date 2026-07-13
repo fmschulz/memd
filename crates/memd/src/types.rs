@@ -221,7 +221,7 @@ impl fmt::Display for ChunkId {
 /// Type of memory chunk
 ///
 /// Categorizes chunks for filtering and routing during retrieval.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChunkType {
     /// Source code snippets, functions, files
@@ -241,6 +241,7 @@ pub enum ChunkType {
     /// Summaries of other chunks or episodes
     Summary,
     /// Uncategorized content
+    #[default]
     Other,
 }
 
@@ -278,12 +279,6 @@ impl fmt::Display for ChunkType {
     }
 }
 
-impl Default for ChunkType {
-    fn default() -> Self {
-        ChunkType::Other
-    }
-}
-
 impl std::str::FromStr for ChunkType {
     type Err = crate::error::MemdError;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
@@ -309,12 +304,15 @@ impl std::str::FromStr for ChunkType {
 /// Status of a memory chunk
 ///
 /// Tracks the lifecycle state of a chunk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChunkStatus {
     /// Work in progress, may be incomplete
     Draft,
+    /// Synthesized consolidation output awaiting validation and promotion.
+    Candidate,
     /// Finalized content
+    #[default]
     Final,
     /// Contains error information
     Error,
@@ -330,6 +328,7 @@ impl fmt::Display for ChunkStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
             ChunkStatus::Draft => "draft",
+            ChunkStatus::Candidate => "candidate",
             ChunkStatus::Final => "final",
             ChunkStatus::Error => "error",
             ChunkStatus::Deleted => "deleted",
@@ -340,17 +339,12 @@ impl fmt::Display for ChunkStatus {
     }
 }
 
-impl Default for ChunkStatus {
-    fn default() -> Self {
-        ChunkStatus::Final
-    }
-}
-
 impl std::str::FromStr for ChunkStatus {
     type Err = crate::error::MemdError;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         Ok(match s {
             "draft" => Self::Draft,
+            "candidate" => Self::Candidate,
             "final" => Self::Final,
             "error" => Self::Error,
             "deleted" => Self::Deleted,
@@ -753,8 +747,8 @@ pub mod lifecycle {
     /// Visibility policy for lifecycle-aware retrieval.
     ///
     /// Defaults hide non-active content: superseded, expired, and history-tier
-    /// chunks are excluded unless explicitly opted in. `Deleted` and `Error`
-    /// chunks are always hidden regardless of policy.
+    /// chunks are excluded unless explicitly opted in. `Candidate`, `Deleted`,
+    /// and `Error` chunks are always hidden regardless of policy.
     #[derive(Debug, Clone, Default, Serialize, Deserialize)]
     pub struct VisibilityPolicy {
         #[serde(default)]
@@ -769,7 +763,7 @@ pub mod lifecycle {
         /// Check whether a chunk with the given status/tier should be visible.
         pub fn is_visible(&self, status: ChunkStatus, tier: MemoryTier) -> bool {
             match status {
-                ChunkStatus::Deleted | ChunkStatus::Error => false,
+                ChunkStatus::Candidate | ChunkStatus::Deleted | ChunkStatus::Error => false,
                 ChunkStatus::Superseded if !self.include_superseded => false,
                 ChunkStatus::Expired if !self.include_expired => false,
                 _ => !matches!(tier, MemoryTier::History if !self.include_history),
@@ -934,6 +928,7 @@ pub mod lifecycle {
             let default = VisibilityPolicy::default();
 
             // Always hidden regardless of flags
+            assert!(!default.is_visible(ChunkStatus::Candidate, MemoryTier::LongTerm));
             assert!(!default.is_visible(ChunkStatus::Deleted, MemoryTier::LongTerm));
             assert!(!default.is_visible(ChunkStatus::Error, MemoryTier::LongTerm));
 
@@ -1145,10 +1140,15 @@ mod tests {
 
     #[test]
     fn chunk_status_lifecycle_variants_serialize() {
+        assert_eq!(ChunkStatus::Candidate.to_string(), "candidate");
         assert_eq!(ChunkStatus::Superseded.to_string(), "superseded");
         assert_eq!(ChunkStatus::Expired.to_string(), "expired");
 
-        // serialize both new variants
+        // serialize lifecycle variants
+        assert_eq!(
+            serde_json::to_string(&ChunkStatus::Candidate).unwrap(),
+            "\"candidate\""
+        );
         assert_eq!(
             serde_json::to_string(&ChunkStatus::Superseded).unwrap(),
             "\"superseded\""
@@ -1158,7 +1158,9 @@ mod tests {
             "\"expired\""
         );
 
-        // deserialize both new variants
+        // deserialize lifecycle variants
+        let c: ChunkStatus = serde_json::from_str("\"candidate\"").unwrap();
+        assert_eq!(c, ChunkStatus::Candidate);
         let s: ChunkStatus = serde_json::from_str("\"superseded\"").unwrap();
         assert_eq!(s, ChunkStatus::Superseded);
         let e: ChunkStatus = serde_json::from_str("\"expired\"").unwrap();
@@ -1168,6 +1170,10 @@ mod tests {
     #[test]
     fn chunk_status_from_str_fails_closed() {
         use std::str::FromStr;
+        assert_eq!(
+            ChunkStatus::from_str("candidate").unwrap(),
+            ChunkStatus::Candidate
+        );
         assert_eq!(
             ChunkStatus::from_str("superseded").unwrap(),
             ChunkStatus::Superseded

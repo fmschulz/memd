@@ -89,6 +89,9 @@ async fn consolidate_replaces_raw_chunks_and_excludes_superseded() {
                 "text": format!(
                     "Consolidated lesson {g}: the durable fix uses tenant scoped keys."
                 ),
+                "agent_action": "Reuse tenant-scoped keys when repairing this cache failure.",
+                "evidence": group,
+                "confidence": 0.9,
                 "supersedes": group,
                 "kind": "consolidated",
                 "priority": 8,
@@ -111,6 +114,8 @@ async fn consolidate_replaces_raw_chunks_and_excludes_superseded() {
             dry_run: false,
             background: false,
             force: false,
+            promote: true,
+            legacy_immediate: false,
             warm: memd::cli::WarmMode::Off,
         },
     )

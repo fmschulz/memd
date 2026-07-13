@@ -46,7 +46,7 @@ fn default_log_format() -> String {
 ///
 /// The TOML table name remains `[server]` for existing config files, but the
 /// executable no longer exposes a network or stdio server mode.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerConfig {
     /// Opt-in to the legacy cross-tenant `project_id` fallback.
     ///
@@ -94,15 +94,6 @@ impl Default for Config {
             log_level: default_log_level(),
             log_format: default_log_format(),
             server: ServerConfig::default(),
-        }
-    }
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            allow_cross_tenant_project_fallback: false,
-            project_aliases: Vec::new(),
         }
     }
 }
@@ -173,10 +164,10 @@ impl Config {
 fn expand_tilde(path: &Path) -> Result<PathBuf> {
     let path_str = path.to_string_lossy();
 
-    if path_str.starts_with("~/") {
+    if let Some(relative) = path_str.strip_prefix("~/") {
         let home = std::env::var("HOME")
             .map_err(|_| MemdError::ConfigError("HOME environment variable not set".to_string()))?;
-        Ok(PathBuf::from(home).join(&path_str[2..]))
+        Ok(PathBuf::from(home).join(relative))
     } else if path_str == "~" {
         let home = std::env::var("HOME")
             .map_err(|_| MemdError::ConfigError("HOME environment variable not set".to_string()))?;

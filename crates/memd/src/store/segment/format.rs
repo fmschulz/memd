@@ -87,7 +87,7 @@ impl PayloadIndexRecord {
     ///
     /// Assumes bytes start after any magic header.
     pub fn parse_all(bytes: &[u8]) -> io::Result<Vec<Self>> {
-        if bytes.len() % Self::SIZE != 0 {
+        if !bytes.len().is_multiple_of(Self::SIZE) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid index size: not a multiple of record size",

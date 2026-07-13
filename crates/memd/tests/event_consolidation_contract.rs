@@ -9,6 +9,8 @@
 mod common;
 use common::*;
 
+use memd::store::metadata::MetadataStore;
+use memd::types::{ChunkId, ChunkStatus};
 use serde_json::{json, Value};
 
 fn result_has_tags(result: &Value, required: &[&str]) -> bool {
@@ -20,6 +22,167 @@ fn result_has_tags(result: &Value, required: &[&str]) -> bool {
             .iter()
             .any(|observed_tag| observed_tag.as_str() == Some(*required_tag))
     })
+}
+
+#[tokio::test]
+async fn episode_consolidation_uses_atomic_supersession_for_one_project_scope() {
+    let (server, _tmp) = test_server().await;
+    let mut source_ids = Vec::new();
+    for text in ["episode alpha", "episode beta"] {
+        let response = call_tool(
+            &server,
+            "memory.add",
+            json!({
+                "tenant_id": "episode_atomic",
+                "project_id": "p",
+                "episode_id": "e1",
+                "text": text,
+                "type": "doc"
+            }),
+        )
+        .await;
+        source_ids.push(
+            parse_result_text(&response)["chunk_id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+
+    let response = call_tool(
+        &server,
+        "memory.consolidate_episode",
+        json!({
+            "tenant_id": "episode_atomic",
+            "episode_id": "e1",
+            "retain_source_chunks": false
+        }),
+    )
+    .await;
+    let body = parse_result_text(&response);
+    assert_eq!(body["source_chunk_count"], 2);
+    assert!(!body["run_id"].as_str().unwrap().is_empty());
+
+    let tenant_id = tenant("episode_atomic");
+    let summary_id = ChunkId::parse(body["summary_chunk_id"].as_str().unwrap()).unwrap();
+    let summary = server
+        .store()
+        .metadata()
+        .get(&tenant_id, &summary_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(summary.status, ChunkStatus::Final);
+    assert_eq!(summary.project_id.as_deref(), Some("p"));
+    for source_id in source_ids {
+        let source = server
+            .store()
+            .metadata()
+            .get(&tenant_id, &ChunkId::parse(&source_id).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(source.status, ChunkStatus::Superseded);
+        assert_eq!(source.lifecycle.superseded_by.as_ref(), Some(&summary_id));
+    }
+}
+
+#[tokio::test]
+async fn episode_consolidation_refuses_cross_project_source_removal() {
+    let (server, _tmp) = test_server().await;
+    let mut source_ids = Vec::new();
+    for (project_id, text) in [("p", "episode p"), ("q", "episode q")] {
+        let response = call_tool(
+            &server,
+            "memory.add",
+            json!({
+                "tenant_id": "episode_mixed",
+                "project_id": project_id,
+                "episode_id": "e1",
+                "text": text,
+                "type": "doc"
+            }),
+        )
+        .await;
+        source_ids.push(
+            parse_result_text(&response)["chunk_id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+
+    let response = call_tool(
+        &server,
+        "memory.consolidate_episode",
+        json!({
+            "tenant_id": "episode_mixed",
+            "episode_id": "e1",
+            "retain_source_chunks": false
+        }),
+    )
+    .await;
+    assert!(
+        response.get("error").is_some(),
+        "unexpected success: {response}"
+    );
+
+    let tenant_id = tenant("episode_mixed");
+    for source_id in source_ids {
+        assert_eq!(
+            server
+                .store()
+                .metadata()
+                .get(&tenant_id, &ChunkId::parse(&source_id).unwrap())
+                .unwrap()
+                .unwrap()
+                .status,
+            ChunkStatus::Final
+        );
+    }
+}
+
+#[tokio::test]
+async fn episode_consolidation_can_supersede_unscoped_sources_without_crossing_scope() {
+    let (server, _tmp) = test_server().await;
+    let add = call_tool(
+        &server,
+        "memory.add",
+        json!({
+            "tenant_id": "episode_unscoped",
+            "episode_id": "e1",
+            "text": "unscoped episode fact",
+            "type": "doc"
+        }),
+    )
+    .await;
+    let source_id = ChunkId::parse(parse_result_text(&add)["chunk_id"].as_str().unwrap()).unwrap();
+    let response = call_tool(
+        &server,
+        "memory.consolidate_episode",
+        json!({
+            "tenant_id": "episode_unscoped",
+            "episode_id": "e1",
+            "retain_source_chunks": false
+        }),
+    )
+    .await;
+    let body = parse_result_text(&response);
+    let summary_id = ChunkId::parse(body["summary_chunk_id"].as_str().unwrap()).unwrap();
+    let tenant_id = tenant("episode_unscoped");
+    let source = server
+        .store()
+        .metadata()
+        .get(&tenant_id, &source_id)
+        .unwrap()
+        .unwrap();
+    let summary = server
+        .store()
+        .metadata()
+        .get(&tenant_id, &summary_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(source.status, ChunkStatus::Superseded);
+    assert_eq!(summary.status, ChunkStatus::Final);
+    assert!(summary.project_id.is_none());
 }
 
 #[tokio::test]

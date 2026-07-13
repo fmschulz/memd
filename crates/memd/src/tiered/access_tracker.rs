@@ -281,14 +281,8 @@ impl AccessTracker {
 
         // Project component: 1.0 if accessed from current project, 0.0 otherwise
         let project_component = match current_project {
-            Some(project) => {
-                if stats.project_hits.contains_key(project) {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
-            None => 0.0,
+            Some(project) if stats.project_hits.contains_key(project) => 1.0,
+            _ => 0.0,
         };
 
         // Weighted combination

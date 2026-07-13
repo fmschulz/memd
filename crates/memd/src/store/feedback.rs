@@ -27,7 +27,8 @@ impl RelevanceLabel {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedbackEntry {
     pub tenant_id: TenantId,
-    pub query: String,
+    pub project_id: Option<String>,
+    pub query_hash: String,
     pub chunk_id: ChunkId,
     pub relevance: RelevanceLabel,
     pub timestamp_ms: i64,
@@ -41,9 +42,22 @@ impl FeedbackEntry {
         relevance: RelevanceLabel,
         timestamp_ms: i64,
     ) -> Self {
+        Self::new_scoped(tenant_id, None, query, chunk_id, relevance, timestamp_ms)
+    }
+
+    pub fn new_scoped(
+        tenant_id: TenantId,
+        project_id: Option<String>,
+        query: impl Into<String>,
+        chunk_id: ChunkId,
+        relevance: RelevanceLabel,
+        timestamp_ms: i64,
+    ) -> Self {
+        let query = normalize_query(&query.into());
         Self {
             tenant_id,
-            query: normalize_query(&query.into()),
+            project_id,
+            query_hash: crate::store::stable_query_hash(&query),
             chunk_id,
             relevance,
             timestamp_ms,
@@ -113,7 +127,7 @@ pub fn apply_feedback_scores(
 
     let mut by_chunk: HashMap<String, Aggregate> = HashMap::new();
     for entry in feedback_entries {
-        if normalize_query(&entry.query) != normalized_query {
+        if entry.query_hash != crate::store::stable_query_hash(&normalized_query) {
             continue;
         }
 

@@ -12,6 +12,12 @@ pub use sqlite::SqliteMetadataStore;
 use crate::error::Result;
 use std::collections::HashMap;
 
+pub type ChunkTypeCounts = (
+    HashMap<String, usize>,
+    HashMap<String, usize>,
+    HashMap<String, usize>,
+);
+
 use crate::store::StoreHealthSnapshot;
 use crate::types::{ChunkId, ChunkStatus, ChunkType, LifecycleDelta, LifecycleMetadata, TenantId};
 
@@ -102,18 +108,14 @@ pub trait MetadataStore: Send + Sync {
     fn get_by_segment(&self, tenant_id: &TenantId, segment_id: u64) -> Result<Vec<ChunkMetadata>>;
 
     /// Count chunks by status for a tenant
-    fn count_by_status(&self, tenant_id: &TenantId) -> Result<(usize, usize)>;
+    fn count_by_status(&self, tenant_id: &TenantId) -> Result<(usize, usize, usize)>;
 
     /// Count chunk types via aggregate SQL, returning active/deleted/all maps.
     fn count_chunk_types_by_status(
         &self,
         tenant_id: &TenantId,
         project_id: Option<&str>,
-    ) -> Result<(
-        HashMap<String, usize>,
-        HashMap<String, usize>,
-        HashMap<String, usize>,
-    )>;
+    ) -> Result<ChunkTypeCounts>;
 
     /// Compute read-only health aggregates for a tenant/project scope.
     fn health_snapshot(
@@ -363,7 +365,7 @@ pub trait MetadataStore: Send + Sync {
 
     /// List chunks for OMF export (F2).
     ///
-    /// Excludes `deleted` and `error` rows unconditionally; includes
+    /// Excludes `candidate`, `deleted`, and `error` rows unconditionally; includes
     /// `superseded` and `expired` so callers can decide whether to emit
     /// them. Excludes `history`-tier rows unless `include_history` is
     /// set. Ordered by creation time ascending for stable export.

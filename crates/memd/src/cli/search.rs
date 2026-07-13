@@ -8,7 +8,11 @@ use crate::error::{MemdError, Result};
 use crate::hit_stats::{query_mode_label, record_hits, record_hits_to_data_dir, HitRecord};
 use crate::mcp::handlers::{handle_memory_search, SearchParams};
 use crate::store::usage::{UsageEvent, UsageOp};
-use crate::store::Store;
+use crate::store::{
+    stable_query_hash, RankingPolicyMode, RetrievalEpisode, RetrievalEpisodeId,
+    RetrievalEpisodeItem, Store, OUTCOME_POLICY_VERSION,
+};
+use crate::types::{ChunkId, TenantId};
 
 use super::args::{CliQueryMode, ExportFormat, SearchReranker, SearchRerankerOptions};
 use super::unwrap_content_payload;
@@ -122,6 +126,7 @@ async fn cli_search_payload_inner<S: Store>(
         no_text,
         include_artifact,
         include_superseded,
+        RankingPolicyMode::Shadow,
         suppress_usage_event,
     )
     .await?;
@@ -171,7 +176,7 @@ fn log_search_hits<S: Store>(
             let score = result.get("score").and_then(Value::as_f64).unwrap_or(0.0);
             // Compact-shaped payloads drop chunks past the token
             // budget; what remains in `results` *was* rendered.
-            let selected = true;
+            let rendered = true;
             Some(HitRecord {
                 ts_ms: now,
                 chunk_id: chunk_id.to_string(),
@@ -180,7 +185,7 @@ fn log_search_hits<S: Store>(
                 query_mode: query_mode.clone(),
                 rank,
                 score,
-                selected,
+                rendered,
             })
         })
         .collect();
@@ -352,6 +357,41 @@ pub(super) fn apply_search_reranker(
     }
 }
 
+/// Persist the final order actually rendered by a CLI caller after optional
+/// reranking. The handler already recorded the expanded candidate pool; this
+/// only updates its served projection.
+pub(super) async fn finalize_search_episode<S: Store>(
+    store: &S,
+    tenant_id: &str,
+    payload: &Value,
+) -> Result<()> {
+    let Some(episode_id) = payload.get("retrieval_episode_id").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let tenant_id = TenantId::new(tenant_id)?;
+    let episode_id = crate::store::RetrievalEpisodeId::parse(episode_id)?;
+    let rendered_chunk_ids = payload
+        .get("results")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|result| {
+            result
+                .get("chunk_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    MemdError::ProtocolError(
+                        "search result is missing chunk_id during episode finalization".to_string(),
+                    )
+                })
+                .and_then(ChunkId::parse)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    store
+        .finalize_retrieval_episode(&tenant_id, &episode_id, &rendered_chunk_ids)
+        .await
+}
+
 fn fallback_or_error(
     payload: Value,
     reason: &str,
@@ -514,10 +554,14 @@ fn trim_for_error(text: &str) -> String {
     }
 }
 
+// Protocol boundary: arguments deliberately mirror the stable CLI command.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn cli_agent_context_payload<S: Store>(
     store: &S,
     tenant_id: &str,
     project_id: Option<&str>,
+    task_id: Option<&str>,
+    thread_id: Option<&str>,
     queries: &[String],
     k: usize,
     token_budget: usize,
@@ -525,6 +569,16 @@ pub(super) async fn cli_agent_context_payload<S: Store>(
     no_text: bool,
     include_artifact: bool,
 ) -> Result<Value> {
+    if !(1..=100).contains(&k) {
+        return Err(MemdError::ValidationError(
+            "agent-context k must be between 1 and 100".to_string(),
+        ));
+    }
+    if queries.is_empty() || queries.len() > 20 {
+        return Err(MemdError::ValidationError(
+            "agent-context requires between 1 and 20 queries".to_string(),
+        ));
+    }
     let mut seen = std::collections::HashSet::new();
     let mut merged_results = Vec::new();
     let mut query_summaries = Vec::new();
@@ -544,6 +598,7 @@ pub(super) async fn cli_agent_context_payload<S: Store>(
             no_text,
             include_artifact,
             false,
+            RankingPolicyMode::Off,
             true,
         )
         .await?;
@@ -569,6 +624,9 @@ pub(super) async fn cli_agent_context_payload<S: Store>(
             };
             if seen.insert(chunk_id.to_string()) {
                 merged_results.push(result.clone());
+                if merged_results.len() >= 200 {
+                    break;
+                }
             }
         }
         query_summaries.push(json!({
@@ -593,6 +651,19 @@ pub(super) async fn cli_agent_context_payload<S: Store>(
         detail: Some(json!({"queries": queries.len(), "k": k}).to_string()),
     });
 
+    let episode_id = record_agent_context_episode(
+        store,
+        tenant_id,
+        project_id,
+        task_id,
+        thread_id,
+        queries,
+        k,
+        mode,
+        &merged_results,
+    )
+    .await?;
+
     Ok(json!({
         "tool": "memd.agent_context",
         "interface": "cli_prefetch",
@@ -603,9 +674,94 @@ pub(super) async fn cli_agent_context_payload<S: Store>(
         "k_per_query": k,
         "token_budget_per_query": token_budget,
         "result_count": merged_results.len(),
+        "retrieval_episode_id": episode_id,
+        "ranking_policy": {
+            "version": OUTCOME_POLICY_VERSION,
+            "mode": RankingPolicyMode::Off,
+            "candidate_count": merged_results.len(),
+            "shadow_order_changed": false,
+        },
         "scope_status": scope_status,
         "results": merged_results,
     }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_agent_context_episode<S: Store>(
+    store: &S,
+    tenant_id: &str,
+    project_id: Option<&str>,
+    task_id: Option<&str>,
+    thread_id: Option<&str>,
+    queries: &[String],
+    k: usize,
+    mode: CliQueryMode,
+    results: &[Value],
+) -> Result<String> {
+    let tenant_id = TenantId::new(tenant_id)?;
+    let episode_id = RetrievalEpisodeId::new();
+    let created_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0);
+    let mut items = Vec::with_capacity(results.len());
+    for (rank, result) in results.iter().enumerate() {
+        let chunk_id = ChunkId::parse(result.get("chunk_id").and_then(Value::as_str).ok_or_else(
+            || MemdError::ProtocolError("agent-context result is missing chunk_id".to_string()),
+        )?)?;
+        let origin_tenant_id = TenantId::new(
+            result
+                .get("tenant_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    MemdError::ProtocolError(
+                        "agent-context result is missing tenant_id".to_string(),
+                    )
+                })?,
+        )?;
+        let score = result.get("score").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        let source_dedup_group = result
+            .pointer("/source/uri")
+            .and_then(Value::as_str)
+            .filter(|uri| !uri.is_empty())
+            .map(stable_query_hash);
+        items.push(RetrievalEpisodeItem {
+            episode_id: episode_id.clone(),
+            chunk_id,
+            origin_tenant_id,
+            origin_project_id: result
+                .get("project_id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            original_rank: rank,
+            original_score: score,
+            lane_scores_json: json!({ "base": score }).to_string(),
+            outcome_adjustment: 0.0,
+            served_rank: Some(rank),
+            shadow_rank: None,
+            rendered: true,
+            source_dedup_group,
+        });
+    }
+    let query_bundle = serde_json::to_string(queries)?;
+    let episode = RetrievalEpisode {
+        episode_id: episode_id.clone(),
+        tenant_id,
+        project_id: project_id.map(str::to_string),
+        query_hash: stable_query_hash(&query_bundle),
+        query_mode: query_mode_label(&format!("{mode:?}")),
+        requested_k: k.saturating_mul(queries.len()).min(200),
+        fetched_k: items.len(),
+        rendered_k: items.len(),
+        policy_version: OUTCOME_POLICY_VERSION.to_string(),
+        policy_mode: RankingPolicyMode::Off,
+        task_id: task_id.map(str::to_string),
+        thread_id: thread_id.map(str::to_string),
+        created_at_ms,
+        expires_at_ms: created_at_ms.saturating_add(90 * 24 * 60 * 60 * 1_000),
+    };
+    store.record_retrieval_episode(episode, items).await?;
+    Ok(episode_id.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -622,6 +778,7 @@ pub(super) async fn direct_memory_search_payload<S: Store>(
     no_text: bool,
     include_artifact: bool,
     include_superseded: bool,
+    ranking_policy: RankingPolicyMode,
     suppress_usage_event: bool,
 ) -> Result<Value> {
     let params = SearchParams {
@@ -636,7 +793,9 @@ pub(super) async fn direct_memory_search_payload<S: Store>(
         include_text: no_text.then_some(false),
         include_artifact: include_artifact.then_some(true),
         include_superseded: include_superseded.then_some(true),
+        ranking_policy: Some(ranking_policy),
         suppress_usage_event,
+        suppress_retrieval_episode: suppress_usage_event,
         ..Default::default()
     };
     let mcp_value = handle_memory_search(store, params)

@@ -15,15 +15,12 @@ use memd::store::persistent::{PersistentStore, PersistentStoreConfig};
 use memd::store::Store;
 use memd::{configure_operation_routing, ChunkType, MemoryChunk, MemoryStore, ProjectId, TenantId};
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
 use tempfile::tempdir;
 
-static ROUTING_MUTEX: Mutex<()> = Mutex::new(());
+static ROUTING_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn routing_guard<'a>() -> MutexGuard<'a, ()> {
-    ROUTING_MUTEX
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+async fn routing_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    ROUTING_MUTEX.lock().await
 }
 
 /// Text echoing the `project_failures` query so the mock store
@@ -183,7 +180,7 @@ async fn generated_digest_hidden_and_user_priority_still_ranks() {
 
 #[tokio::test]
 async fn project_alias_allows_memory_md_to_use_hyphenated_bester_scope() {
-    let _guard = routing_guard();
+    let _guard = routing_guard().await;
     configure_operation_routing(false, Vec::new());
 
     let store = MemoryStore::new();
@@ -281,7 +278,62 @@ async fn ephemeral_progress_is_hidden_from_default_memory_md() {
     );
 }
 
+#[tokio::test]
+async fn project_and_machine_candidates_are_deduplicated_after_union_assignment() {
+    let store = MemoryStore::new();
+    let tenant = TenantId::new("phase2_union_memory_md").unwrap();
+    let active_project = "active-project";
+    let active_text = "Project architecture key decisions tradeoffs: all projects must keep cache keys tenant scoped. Agent action: verify tenant scope before reuse.";
+    store
+        .add(
+            MemoryChunk::new(tenant.clone(), active_text, ChunkType::Decision)
+                .with_project(ProjectId::from(active_project))
+                .with_tags(vec![
+                    "kind:decision".to_string(),
+                    "topic:tenant-cache-scope".to_string(),
+                    "priority:9".to_string(),
+                ]),
+        )
+        .await
+        .unwrap();
+    store
+        .add(
+            MemoryChunk::new(
+                tenant.clone(),
+                "Machine-wide cache guidance for all projects. Agent action: reuse the scoped-cache rule only after verification.",
+                ChunkType::Summary,
+            )
+            .with_project(ProjectId::from("other-project"))
+            .with_tags(vec![
+                "kind:decision".to_string(),
+                "topic:tenant-cache-scope".to_string(),
+                "priority:8".to_string(),
+            ]),
+        )
+        .await
+        .unwrap();
+
+    let content =
+        run_memory_md_with_global(&store, "phase2_union_memory_md", active_project, 10).await;
+
+    assert_eq!(content.matches(active_text).count(), 1, "{content}");
+    assert!(content.contains("## Project Fact Library"), "{content}");
+    assert!(
+        !content.contains("Machine-wide cache guidance for all projects"),
+        "cross-section topic duplicate should yield to the active project item:\n{content}"
+    );
+}
+
 async fn run_memory_md<S: Store>(store: &S, tenant: &str, project: &str) -> String {
+    run_memory_md_with_global(store, tenant, project, 0).await
+}
+
+async fn run_memory_md_with_global<S: Store>(
+    store: &S,
+    tenant: &str,
+    project: &str,
+    global_limit: usize,
+) -> String {
     let dir = tempdir().unwrap();
     run_cli(
         store,
@@ -292,7 +344,7 @@ async fn run_memory_md<S: Store>(store: &S, tenant: &str, project: &str) -> Stri
             project_dir: dir.path().to_path_buf(),
             output: PathBuf::from("memory.md"),
             project_limit: 10,
-            global_limit: 0,
+            global_limit,
             candidate_k: 40,
             explain_output: None,
         },

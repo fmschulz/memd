@@ -175,6 +175,7 @@ struct ProjectCleanupPlan {
 struct StoreStatsReport {
     total_chunks: usize,
     active_chunks: usize,
+    candidate_chunks: usize,
     deleted_chunks: usize,
 }
 
@@ -1174,6 +1175,9 @@ fn approval_id(action: &str, tenant_id: &str, project_id: Option<&str>) -> Strin
     }
 }
 
+// This pure renderer mirrors the independently configurable cleanup and
+// verification knobs; bundling them would duplicate CleanupPlanOptions.
+#[allow(clippy::too_many_arguments)]
 fn post_cleanup_verification_commands(
     tenant_id: Option<&str>,
     project_id: Option<&str>,
@@ -1413,13 +1417,13 @@ fn unreadable_purge_apply_command_with_archive(
             shell_quote(tenant_id),
             shell_quote(project_id),
             limit,
-            shell_quote_path(&archive)
+            shell_quote_path(archive)
         ),
         None => format!(
             "memd purge --tenant-id {} --include-unreadable-active --limit {} --archive {} --apply --vacuum-metadata",
             shell_quote(tenant_id),
             limit,
-            shell_quote_path(&archive)
+            shell_quote_path(archive)
         ),
     }
 }
@@ -1907,6 +1911,7 @@ impl StoreStatsReport {
         Self {
             total_chunks: stats.total_chunks,
             active_chunks: stats.active_chunks,
+            candidate_chunks: stats.candidate_chunks,
             deleted_chunks: stats.deleted_chunks,
         }
     }
@@ -2093,6 +2098,7 @@ mod tests {
             stats: StoreStatsReport {
                 total_chunks: 20,
                 active_chunks: 20,
+                candidate_chunks: 0,
                 deleted_chunks: 0,
             },
             metadata_active_chunks: 20,
@@ -2151,6 +2157,7 @@ mod tests {
             stats: StoreStatsReport {
                 total_chunks: 20,
                 active_chunks: 20,
+                candidate_chunks: 0,
                 deleted_chunks: 0,
             },
             metadata_active_chunks: 20,
@@ -2581,6 +2588,7 @@ mod tests {
             stats: StoreStatsReport {
                 total_chunks: 10,
                 active_chunks: 10,
+                candidate_chunks: 0,
                 deleted_chunks: 0,
             },
             metadata_active_chunks: 10,

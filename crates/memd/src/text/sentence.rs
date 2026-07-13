@@ -100,7 +100,7 @@ impl SentenceSplitter {
                 }
 
                 // Trim trailing empty lines from code block
-                while code_lines.last().map_or(false, |l| l.trim().is_empty()) {
+                while code_lines.last().is_some_and(|l| l.trim().is_empty()) {
                     code_lines.pop();
                 }
 
@@ -329,7 +329,7 @@ pub fn process(data: &str) -> Result<String, Error> {
         let sentences = splitter.split(text);
 
         // Unicode segmentation handles abbreviations
-        assert!(sentences.len() >= 1);
+        assert!(!sentences.is_empty());
     }
 
     #[test]
