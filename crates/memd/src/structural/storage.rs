@@ -175,7 +175,7 @@ impl SymbolKind {
     }
 
     /// Parse from string.
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "function" => Some(SymbolKind::Function),
             "class" => Some(SymbolKind::Class),
@@ -254,7 +254,7 @@ impl CallType {
     }
 
     /// Parse from string.
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "direct" => Some(CallType::Direct),
             "method" => Some(CallType::Method),
@@ -700,7 +700,7 @@ impl StructuralStore {
              ORDER BY line_start",
         )?;
 
-        let rows = stmt.query_map(params![symbol_id], |row| Self::row_to_symbol(row))?;
+        let rows = stmt.query_map(params![symbol_id], Self::row_to_symbol)?;
 
         let mut results = Vec::new();
         for row in rows {
@@ -734,7 +734,7 @@ impl StructuralStore {
         })?;
 
         // Parse kind - default to Function if unknown
-        let kind = SymbolKind::from_str(&kind_str).unwrap_or(SymbolKind::Function);
+        let kind = SymbolKind::parse(&kind_str).unwrap_or(SymbolKind::Function);
 
         Ok(SymbolRecord {
             symbol_id: Some(symbol_id),
@@ -929,7 +929,7 @@ impl StructuralStore {
             call_file: row.get(5)?,
             call_line: row.get(6)?,
             call_col: row.get(7)?,
-            call_type: CallType::from_str(&call_type_str).unwrap_or(CallType::Direct),
+            call_type: CallType::parse(&call_type_str).unwrap_or(CallType::Direct),
         })
     }
 

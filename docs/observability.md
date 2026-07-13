@@ -78,7 +78,15 @@ in the report window; tagging or filtering eval-origin events is future work.
 startup briefing collected from the project directory. It includes scope,
 freshness, git branch and clean/dirty state, active task or handoff signals,
 source-backed next actions, and warnings for scope drift or unreadable memory
-payloads.
+payloads. The task source is classified as missing, parsed with no open tasks,
+parsed with open tasks, or failed to parse. Only the two parsed states can pass
+the startup answerability check.
+
+The project and machine-wide searches feed one bounded candidate union before
+section assignment and display truncation. Exact chunk IDs, consolidation
+lineage, and high-confidence topic duplicates are collapsed across that union.
+If the active project's item competes with a machine-wide match, the project
+item is retained.
 
 Below that, `## Memory health` summarizes lines derived from `memd report`.
 This is best-effort and is silently skipped if report generation fails. If

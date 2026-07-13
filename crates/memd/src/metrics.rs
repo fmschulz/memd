@@ -131,7 +131,7 @@ pub struct TieredQueryMetrics {
 
 /// Per-(tool, reason) rejection counter.
 ///
-/// Phase 4.4: every time a tool call surfaces an `McpError` (invalid
+/// Phase 4.4: every time a tool call surfaces an `OperationError` (invalid
 /// params, method not found, internal error, etc.) we bump the
 /// matching counter. Operators can then see at a glance which tool
 /// is producing which kind of rejection — historically these errors
@@ -142,7 +142,7 @@ pub struct RejectionStats {
     pub total: u64,
     /// Per-tool rejection counts, keyed by tool name (e.g. `"memory.search"`).
     pub by_tool: HashMap<String, u64>,
-    /// Per-reason rejection counts, keyed by McpError variant name
+    /// Per-reason rejection counts, keyed by operation-error variant name
     /// (e.g. `"invalid_params"`, `"method_not_found"`).
     pub by_reason: HashMap<String, u64>,
 }

@@ -672,6 +672,7 @@ fn rate(numerator: usize, denominator: usize) -> f64 {
 fn status_name(status: ChunkStatus) -> &'static str {
     match status {
         ChunkStatus::Draft => "draft",
+        ChunkStatus::Candidate => "candidate",
         ChunkStatus::Error => "error",
         ChunkStatus::Final => "final",
         ChunkStatus::Superseded => "superseded",
@@ -680,6 +681,8 @@ fn status_name(status: ChunkStatus) -> &'static str {
     }
 }
 
+// The report schema intentionally names each measured scalar at this boundary.
+#[allow(clippy::too_many_arguments)]
 fn write_report(
     project_dir: &Path,
     attempts: &[AttemptReport],

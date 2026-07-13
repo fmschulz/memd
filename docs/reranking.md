@@ -95,5 +95,5 @@ is required.
 | Highest precision, GPU-friendly | MemReranker-4B (`--reranker auto`) |
 | Default agent use | Neither — hybrid feature reranker already does well |
 
-The [Bright-Pro adapter](benchmarking.md#bright-pro-scoped-adapter-biology-q5d141)
+The scoped Bright-Pro adapter under `evals/bench/bright-pro-memd/`
 table shows the recall/nDCG lift each path delivers on a biology workload.

@@ -1,12 +1,12 @@
-//! Retrieval hit counting (Phase 3).
+//! Retrieval exposure counting.
 //!
 //! Every CLI search appends one JSONL line per returned chunk to
-//! `.memd/data/hit_counts.jsonl`. [`aggregate_hits`] folds that log
+//! `.memd/data/retrieval_exposures.jsonl`. [`aggregate_hits`] folds that log
 //! into per-chunk [`HitStats`] within a recency window, cached to
-//! `.memd/data/hit_counts.summary.json` with a TTL so the read path
+//! `.memd/data/retrieval_exposures.summary.json` with a TTL so the read path
 //! stays cheap. `cli/memory_md.rs` feeds the aggregate into
-//! `priority_score` so frequently-retrieved chunks rank higher and
-//! never-retrieved stale chunks are demoted.
+//! `priority_score` only for staleness diagnostics. Exposure is not success
+//! and must never create a positive utility loop.
 //!
 //! The log is append-only and lock-free: each line is well under the
 //! 4 KiB Linux atomic-append boundary, so concurrent writers cannot
@@ -21,10 +21,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 /// JSONL hit log, relative to the project root (cwd).
-pub const HIT_LOG_REL_PATH: &str = ".memd/data/hit_counts.jsonl";
+pub const HIT_LOG_REL_PATH: &str = ".memd/data/retrieval_exposures.jsonl";
 
 /// Cached aggregate, relative to the project root (cwd).
-pub const HIT_SUMMARY_REL_PATH: &str = ".memd/data/hit_counts.summary.json";
+pub const HIT_SUMMARY_REL_PATH: &str = ".memd/data/retrieval_exposures.summary.json";
+
+const LEGACY_HIT_LOG_NAME: &str = "hit_counts.jsonl";
+const LEGACY_HIT_SUMMARY_NAME: &str = "hit_counts.summary.json";
+const EXPOSURE_LOG_NAME: &str = "retrieval_exposures.jsonl";
+const EXPOSURE_SUMMARY_NAME: &str = "retrieval_exposures.summary.json";
+const MAX_EXPOSURE_LOG_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Default aggregate cache TTL: one hour.
 pub const DEFAULT_SUMMARY_TTL_MS: i64 = 3_600_000;
@@ -40,16 +46,19 @@ pub struct HitRecord {
     pub query_mode: String,
     pub rank: usize,
     pub score: f64,
-    pub selected: bool,
+    #[serde(alias = "selected")]
+    pub rendered: bool,
 }
 
 /// Folded per-chunk retrieval statistics within an aggregation window.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HitStats {
     /// Times the chunk appeared in a result set.
-    pub hit_count: u32,
+    #[serde(alias = "hit_count")]
+    pub exposure_count: u32,
     /// Times the chunk was in the rendered (selected) result set.
-    pub selected_count: u32,
+    #[serde(alias = "selected_count")]
+    pub rendered_count: u32,
     /// Most recent retrieval timestamp (Unix ms).
     pub last_ts_ms: i64,
 }
@@ -67,7 +76,7 @@ fn now_ms() -> i64 {
 /// concurrent writers can never interleave.
 const MAX_RECORD_BYTES: usize = 4096;
 
-/// Append one line per record to `.memd/data/hit_counts.jsonl` under
+/// Append one line per record to `.memd/data/retrieval_exposures.jsonl` under
 /// `cwd`. Best-effort: skips silently when there is no `.memd`
 /// directory (not a memd project root) or on any IO error.
 pub fn record_hits(records: &[HitRecord]) {
@@ -91,6 +100,7 @@ pub fn record_hits_in(project_dir: &Path, records: &[HitRecord]) {
     if records.is_empty() || !project_dir.join(".memd").is_dir() {
         return;
     }
+    migrate_legacy_exposure_files(&project_dir.join(".memd/data"));
     write_hit_lines(&project_dir.join(HIT_LOG_REL_PATH), records);
 }
 
@@ -98,7 +108,7 @@ pub fn record_hits_in(project_dir: &Path, records: &[HitRecord]) {
 /// independent of the process cwd. The live search and agent_context
 /// paths use this so every project's hits land in one central ledger
 /// that both `memd report` and `memd memory-md` read — previously each
-/// process wrote `hit_counts.jsonl` relative to its cwd, scattering the
+/// process wrote the legacy hit log relative to its cwd, scattering the
 /// log across project dirs where `report` never saw it.
 ///
 /// `data_dir` already points at `.../.memd/data`, so the log file lives
@@ -107,7 +117,8 @@ pub fn record_hits_to_data_dir(data_dir: &Path, records: &[HitRecord]) {
     if records.is_empty() {
         return;
     }
-    write_hit_lines(&data_dir.join("hit_counts.jsonl"), records);
+    migrate_legacy_exposure_files(data_dir);
+    write_hit_lines(&data_dir.join(EXPOSURE_LOG_NAME), records);
 }
 
 /// Append one JSONL line per record to `path`. Each line is written in
@@ -120,6 +131,13 @@ fn write_hit_lines(path: &Path, records: &[HitRecord]) {
     };
     if std::fs::create_dir_all(parent).is_err() {
         return;
+    }
+    if std::fs::metadata(path)
+        .map(|metadata| metadata.len() >= MAX_EXPOSURE_LOG_BYTES)
+        .unwrap_or(false)
+    {
+        let rotated = parent.join(format!("retrieval_exposures.{}.jsonl", now_ms()));
+        let _ = std::fs::rename(path, rotated);
     }
     let Ok(mut file) = std::fs::OpenOptions::new()
         .append(true)
@@ -152,7 +170,7 @@ struct SummaryCache {
 /// Aggregate the hit log into per-chunk [`HitStats`] for retrievals
 /// within `window_days`. Reads `cwd`'s `.memd/data/`.
 ///
-/// A fresh `hit_counts.summary.json` (same window, age under
+/// A fresh exposure summary (same window, age under
 /// `DEFAULT_SUMMARY_TTL_MS`) is reused; otherwise the JSONL log is
 /// re-scanned and the cache rewritten.
 pub fn aggregate_hits(window_days: u32) -> HashMap<String, HitStats> {
@@ -169,6 +187,7 @@ pub fn aggregate_hits_in(
     window_days: u32,
     ttl_ms: i64,
 ) -> HashMap<String, HitStats> {
+    migrate_legacy_exposure_files(&project_dir.join(".memd/data"));
     aggregate_from(
         &project_dir.join(HIT_LOG_REL_PATH),
         &project_dir.join(HIT_SUMMARY_REL_PATH),
@@ -188,9 +207,10 @@ pub fn aggregate_hits_at_data_dir(
     window_days: u32,
     ttl_ms: i64,
 ) -> HashMap<String, HitStats> {
+    migrate_legacy_exposure_files(data_dir);
     aggregate_from(
-        &data_dir.join("hit_counts.jsonl"),
-        &data_dir.join("hit_counts.summary.json"),
+        &data_dir.join(EXPOSURE_LOG_NAME),
+        &data_dir.join(EXPOSURE_SUMMARY_NAME),
         window_days,
         ttl_ms,
     )
@@ -206,12 +226,26 @@ pub fn serve_counts_since(
     tenant_id: Option<&str>,
     project_id: Option<&str>,
 ) -> HashMap<String, HitStats> {
+    migrate_legacy_exposure_files(data_dir);
     scan_hit_log_since(
-        &data_dir.join("hit_counts.jsonl"),
+        &data_dir.join(EXPOSURE_LOG_NAME),
         since_ms,
         tenant_id,
         project_id,
     )
+}
+
+fn migrate_legacy_exposure_files(data_dir: &Path) {
+    let legacy_log = data_dir.join(LEGACY_HIT_LOG_NAME);
+    let exposure_log = data_dir.join(EXPOSURE_LOG_NAME);
+    if legacy_log.exists() && !exposure_log.exists() {
+        let _ = std::fs::rename(legacy_log, exposure_log);
+    }
+    let legacy_summary = data_dir.join(LEGACY_HIT_SUMMARY_NAME);
+    let exposure_summary = data_dir.join(EXPOSURE_SUMMARY_NAME);
+    if legacy_summary.exists() && !exposure_summary.exists() {
+        let _ = std::fs::rename(legacy_summary, exposure_summary);
+    }
 }
 
 fn aggregate_from(
@@ -263,39 +297,51 @@ fn scan_hit_log_since(
     project_id: Option<&str>,
 ) -> HashMap<String, HitStats> {
     let mut stats: HashMap<String, HitStats> = HashMap::new();
-    let Ok(text) = std::fs::read_to_string(log_path) else {
-        return stats;
-    };
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
+    let mut paths = vec![log_path.to_path_buf()];
+    if log_path.file_name().and_then(|name| name.to_str()) == Some(EXPOSURE_LOG_NAME) {
+        if let Some(parent) = log_path.parent() {
+            if let Ok(entries) = std::fs::read_dir(parent) {
+                paths.extend(entries.flatten().filter_map(|entry| {
+                    let name = entry.file_name();
+                    let name = name.to_str()?;
+                    (name.starts_with("retrieval_exposures.") && name.ends_with(".jsonl"))
+                        .then(|| entry.path())
+                }));
+            }
         }
-        let Ok(record) = serde_json::from_str::<HitRecord>(line) else {
+    }
+    paths.sort();
+    paths.dedup();
+    for path in paths {
+        let Ok(text) = std::fs::read_to_string(path) else {
             continue;
         };
-        if record.ts_ms < cutoff {
-            continue;
-        }
-        // The central log mixes tenants and projects; scope to match the
-        // caller (e.g. `memd report --tenant-id`) so serve counts never leak
-        // chunks from another tenant/project.
-        if let Some(want) = tenant_id {
-            if record.tenant_id != want {
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
                 continue;
             }
-        }
-        if let Some(want) = project_id {
-            if record.project_id.as_deref() != Some(want) {
+            let Ok(record) = serde_json::from_str::<HitRecord>(line) else {
+                continue;
+            };
+            if record.ts_ms < cutoff {
                 continue;
             }
+            // The central log mixes tenants and projects; scope to match the
+            // caller so exposure counts never leak across scopes.
+            if tenant_id.is_some_and(|want| record.tenant_id != want) {
+                continue;
+            }
+            if project_id.is_some_and(|want| record.project_id.as_deref() != Some(want)) {
+                continue;
+            }
+            let entry = stats.entry(record.chunk_id).or_default();
+            entry.exposure_count = entry.exposure_count.saturating_add(1);
+            if record.rendered {
+                entry.rendered_count = entry.rendered_count.saturating_add(1);
+            }
+            entry.last_ts_ms = entry.last_ts_ms.max(record.ts_ms);
         }
-        let entry = stats.entry(record.chunk_id).or_default();
-        entry.hit_count = entry.hit_count.saturating_add(1);
-        if record.selected {
-            entry.selected_count = entry.selected_count.saturating_add(1);
-        }
-        entry.last_ts_ms = entry.last_ts_ms.max(record.ts_ms);
     }
     stats
 }
@@ -327,7 +373,7 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    fn record(chunk_id: &str, ts_ms: i64, selected: bool) -> HitRecord {
+    fn record(chunk_id: &str, ts_ms: i64, rendered: bool) -> HitRecord {
         HitRecord {
             ts_ms,
             chunk_id: chunk_id.to_string(),
@@ -336,7 +382,7 @@ mod tests {
             query_mode: "find-failures".to_string(),
             rank: 0,
             score: 0.5,
-            selected,
+            rendered,
         }
     }
 
@@ -377,9 +423,9 @@ mod tests {
             ],
         );
         let stats = aggregate_hits_in(dir.path(), 7, DEFAULT_SUMMARY_TTL_MS);
-        assert_eq!(stats["c1"].hit_count, 2);
-        assert_eq!(stats["c1"].selected_count, 1);
-        assert_eq!(stats["c2"].hit_count, 1);
+        assert_eq!(stats["c1"].exposure_count, 2);
+        assert_eq!(stats["c1"].rendered_count, 1);
+        assert_eq!(stats["c2"].exposure_count, 1);
         assert!(!stats.contains_key("c3"), "old record excluded by window");
     }
 
@@ -391,18 +437,18 @@ mod tests {
         record_hits_in(dir.path(), &[record("c1", now, true)]);
         // Prime the cache.
         let first = aggregate_hits_in(dir.path(), 7, DEFAULT_SUMMARY_TTL_MS);
-        assert_eq!(first["c1"].hit_count, 1);
+        assert_eq!(first["c1"].exposure_count, 1);
 
         // New hits land in the log but the cache is still fresh, so a
         // re-aggregate within the TTL returns the stale (cached) value.
         record_hits_in(dir.path(), &[record("c1", now, true)]);
         let cached = aggregate_hits_in(dir.path(), 7, DEFAULT_SUMMARY_TTL_MS);
-        assert_eq!(cached["c1"].hit_count, 1, "fresh cache reused");
+        assert_eq!(cached["c1"].exposure_count, 1, "fresh cache reused");
 
         // With a zero TTL the cache is always stale, so the log is
         // re-scanned and the new hit is visible.
         let rescanned = aggregate_hits_in(dir.path(), 7, 0);
-        assert_eq!(rescanned["c1"].hit_count, 2, "expired cache rescanned");
+        assert_eq!(rescanned["c1"].exposure_count, 2, "expired cache rescanned");
     }
 
     #[test]
@@ -432,7 +478,7 @@ mod tests {
         assert!(aggregate_hits_in(dir.path(), 7, DEFAULT_SUMMARY_TTL_MS).is_empty());
     }
 
-    fn record_in(chunk_id: &str, ts_ms: i64, selected: bool, project: &str) -> HitRecord {
+    fn record_in(chunk_id: &str, ts_ms: i64, rendered: bool, project: &str) -> HitRecord {
         HitRecord {
             ts_ms,
             chunk_id: chunk_id.to_string(),
@@ -441,13 +487,13 @@ mod tests {
             query_mode: "find-failures".to_string(),
             rank: 0,
             score: 0.5,
-            selected,
+            rendered,
         }
     }
 
     #[test]
     fn record_to_data_dir_writes_log_directly_under_data_dir() {
-        // Central-log writes target `<data_dir>/hit_counts.jsonl`, with no
+        // Central-log writes target `<data_dir>/retrieval_exposures.jsonl`, with no
         // `.memd/data` suffix and no project-root `.memd` guard (the store
         // data_dir is always present).
         let dir = tempdir().unwrap();
@@ -455,7 +501,7 @@ mod tests {
         std::fs::create_dir_all(&data_dir).unwrap();
         let now = now_ms();
         record_hits_to_data_dir(&data_dir, &[record("c1", now, true)]);
-        let log = data_dir.join("hit_counts.jsonl");
+        let log = data_dir.join(EXPOSURE_LOG_NAME);
         assert!(log.is_file(), "log must live directly under data_dir");
         assert_eq!(
             std::fs::read_to_string(&log).unwrap().lines().count(),
@@ -488,9 +534,9 @@ mod tests {
 
         // No tenant/project filter, recent cutoff: all in-window chunks.
         let all = serve_counts_since(&data_dir, now - 86_400_000, None, None);
-        assert_eq!(all["a"].hit_count, 2);
-        assert_eq!(all["a"].selected_count, 1);
-        assert_eq!(all["b"].hit_count, 1);
+        assert_eq!(all["a"].exposure_count, 2);
+        assert_eq!(all["a"].rendered_count, 1);
+        assert_eq!(all["b"].exposure_count, 1);
         assert!(
             all.contains_key("z"),
             "other-tenant chunk present when unfiltered"
@@ -523,7 +569,7 @@ mod tests {
         );
         // ttl=0 forces a fresh scan of the central log.
         let stats = aggregate_hits_at_data_dir(&data_dir, 7, 0);
-        assert_eq!(stats["c1"].hit_count, 2);
-        assert_eq!(stats["c1"].selected_count, 1);
+        assert_eq!(stats["c1"].exposure_count, 2);
+        assert_eq!(stats["c1"].rendered_count, 1);
     }
 }

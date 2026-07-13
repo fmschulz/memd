@@ -702,7 +702,7 @@ impl TraceQueryService {
             .collect();
 
         // Sort by count descending
-        summaries.sort_by(|a, b| b.count.cmp(&a.count));
+        summaries.sort_by_key(|summary| std::cmp::Reverse(summary.count));
 
         Ok(summaries)
     }
@@ -751,7 +751,7 @@ pub fn format_timestamp(ms: i64) -> String {
     use std::time::{Duration, UNIX_EPOCH};
 
     // Handle negative or very large timestamps
-    if ms < 0 || ms > i64::MAX / 2 {
+    if !(0..=i64::MAX / 2).contains(&ms) {
         return format!("{}ms", ms);
     }
 
@@ -850,9 +850,8 @@ fn parse_rfc3339(s: &str) -> Option<i64> {
 
     // Convert to Unix timestamp
     let days = ymd_to_days(year, month, day)?;
-    let secs =
-        (days as i64) * 86400 + (hour as i64) * 3600 + (minute as i64) * 60 + (second as i64)
-            - (tz_offset_mins as i64) * 60;
+    let secs = days * 86400 + (hour as i64) * 3600 + (minute as i64) * 60 + (second as i64)
+        - (tz_offset_mins as i64) * 60;
     let ms = secs * 1000 + (millis as i64);
 
     Some(ms)
@@ -865,9 +864,9 @@ fn parse_millis_and_tz(s: &str) -> Option<(u32, i32)> {
         return Some((0, 0));
     }
 
-    let (millis, rest) = if s.starts_with('.') {
+    let (millis, rest) = if let Some(fractional) = s.strip_prefix('.') {
         // Parse milliseconds
-        let end = s[1..]
+        let end = fractional
             .find(|c: char| !c.is_ascii_digit())
             .map(|i| i + 1)
             .unwrap_or(s.len());
@@ -909,7 +908,7 @@ fn parse_millis_and_tz(s: &str) -> Option<(u32, i32)> {
 
 /// Convert year, month, day to days since Unix epoch.
 fn ymd_to_days(year: i32, month: u32, day: u32) -> Option<i64> {
-    if month < 1 || month > 12 || day < 1 || day > 31 {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
 

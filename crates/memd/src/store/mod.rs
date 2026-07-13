@@ -8,6 +8,7 @@ pub mod feedback;
 pub mod hybrid;
 pub mod memory;
 pub mod metadata;
+pub mod outcome;
 pub mod persistent;
 pub mod segment;
 pub mod shared_add;
@@ -35,14 +36,22 @@ use crate::types::{ChunkId, MemoryChunk, TenantId};
 pub use feedback::{
     apply_feedback_scores, normalize_query, FeedbackConfig, FeedbackEntry, RelevanceLabel,
 };
+pub use outcome::{
+    apply_rendered_order, decayed_outcome_weight, stable_query_hash, OutcomeEvent, OutcomeEventId,
+    OutcomeKind, OutcomePrior, OutcomeVerifier, RankingPolicyMode, RetrievalEpisode,
+    RetrievalEpisodeId, RetrievalEpisodeItem, MAX_OUTCOME_ADJUSTMENT, OUTCOME_HALF_LIFE_MS,
+    OUTCOME_POLICY_VERSION,
+};
 
 /// Statistics for a tenant's store
 #[derive(Debug, Clone, Default)]
 pub struct StoreStats {
     /// Total number of chunks (including deleted)
     pub total_chunks: usize,
-    /// Number of non-deleted chunks.
+    /// Number of non-deleted, non-candidate storage rows.
     pub active_chunks: usize,
+    /// Staged consolidation outputs, hidden from public retrieval.
+    pub candidate_chunks: usize,
     /// Number of soft-deleted chunks
     pub deleted_chunks: usize,
     /// Backward-compatible count of active chunks by type.
@@ -58,6 +67,10 @@ pub struct StoreStats {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HealthCounts {
     pub active_chunks: usize,
+    /// Staged consolidation outputs. Counted for diagnostics but never as
+    /// active/visible memory.
+    #[serde(default)]
+    pub candidate_chunks: usize,
     pub deleted_chunks: usize,
     pub expired_chunks: usize,
     pub superseded_chunks: usize,
@@ -192,6 +205,10 @@ pub(crate) fn rank_candidate_chunks(
     scored
 }
 
+fn unsupported_store_capability(capability: &str) -> MemdError {
+    MemdError::StorageError(format!("store capability unsupported: {capability}"))
+}
+
 /// Store trait for memory operations
 ///
 /// Defines the interface for all storage backends (in-memory, persistent, etc.)
@@ -213,9 +230,7 @@ pub trait Store: Send + Sync {
         _artifact: TaskArtifact,
         _projections: Vec<TaskProjection>,
     ) -> Result<TaskArtifactWriteResult> {
-        Err(MemdError::StorageError(
-            "task artifacts not supported by this store".into(),
-        ))
+        Err(unsupported_store_capability("task artifacts"))
     }
 
     /// Fetch one canonical task artifact by ID.
@@ -224,7 +239,7 @@ pub trait Store: Send + Sync {
         _tenant_id: &TenantId,
         _artifact_id: &str,
     ) -> Result<Option<TaskArtifact>> {
-        Ok(None)
+        Err(unsupported_store_capability("task artifact lookup"))
     }
 
     /// List canonical task artifacts for one logical task.
@@ -233,7 +248,7 @@ pub trait Store: Send + Sync {
         _tenant_id: &TenantId,
         _task_id: &str,
     ) -> Result<Vec<TaskArtifact>> {
-        Ok(Vec::new())
+        Err(unsupported_store_capability("task artifact listing"))
     }
 
     /// List canonical task artifacts for a logical thread.
@@ -242,7 +257,7 @@ pub trait Store: Send + Sync {
         _tenant_id: &TenantId,
         _thread_id: &str,
     ) -> Result<Vec<TaskArtifact>> {
-        Ok(Vec::new())
+        Err(unsupported_store_capability("thread artifact listing"))
     }
 
     /// List logical task records for a tenant, optionally scoped to one project.
@@ -252,12 +267,12 @@ pub trait Store: Send + Sync {
         _project_id: Option<&str>,
         _limit: usize,
     ) -> Result<Vec<TaskRecord>> {
-        Ok(Vec::new())
+        Err(unsupported_store_capability("task listing"))
     }
 
     /// List tenants known to this store.
     async fn list_tenants(&self) -> Result<Vec<TenantId>> {
-        Ok(Vec::new())
+        Err(unsupported_store_capability("tenant listing"))
     }
 
     /// Resolve candidate projection chunk IDs using exact task filters.
@@ -267,7 +282,7 @@ pub trait Store: Send + Sync {
         _filters: &TaskSearchFilters,
         _limit: usize,
     ) -> Result<Vec<ChunkId>> {
-        Ok(Vec::new())
+        Err(unsupported_store_capability("task projection search"))
     }
 
     /// Rerank a prefiltered set of candidate chunk IDs for one query.
@@ -293,12 +308,14 @@ pub trait Store: Send + Sync {
         _tenant_id: &TenantId,
         _chunk_ids: &[ChunkId],
     ) -> Result<HashMap<String, TaskArtifact>> {
-        Ok(HashMap::new())
+        Err(unsupported_store_capability(
+            "artifact projection resolution",
+        ))
     }
 
     /// Record relevance feedback for retrieval quality adaptation.
     async fn add_feedback(&self, _feedback: FeedbackEntry) -> Result<()> {
-        Ok(())
+        Err(unsupported_store_capability("retrieval feedback"))
     }
 
     /// List feedback events for a query (implementation may cap internally).
@@ -308,7 +325,62 @@ pub trait Store: Send + Sync {
         _query: &str,
         _limit: usize,
     ) -> Result<Vec<FeedbackEntry>> {
-        Ok(Vec::new())
+        Err(unsupported_store_capability("retrieval feedback listing"))
+    }
+
+    /// Persist one privacy-safe retrieval episode and its candidate set.
+    async fn record_retrieval_episode(
+        &self,
+        _episode: RetrievalEpisode,
+        _items: Vec<RetrievalEpisodeItem>,
+    ) -> Result<()> {
+        Err(unsupported_store_capability("retrieval episodes"))
+    }
+
+    /// Load one retrieval episode by tenant and ID.
+    async fn get_retrieval_episode(
+        &self,
+        _tenant_id: &TenantId,
+        _episode_id: &RetrievalEpisodeId,
+    ) -> Result<Option<(RetrievalEpisode, Vec<RetrievalEpisodeItem>)>> {
+        Err(unsupported_store_capability("retrieval episode lookup"))
+    }
+
+    /// Update the observable rendered order after caller-side post-processing.
+    async fn finalize_retrieval_episode(
+        &self,
+        _tenant_id: &TenantId,
+        _episode_id: &RetrievalEpisodeId,
+        _rendered_chunk_ids: &[ChunkId],
+    ) -> Result<()> {
+        Err(unsupported_store_capability(
+            "retrieval episode finalization",
+        ))
+    }
+
+    /// Persist an explicit task outcome after validating episode attribution.
+    async fn record_outcome(&self, _tenant_id: &TenantId, _event: OutcomeEvent) -> Result<()> {
+        Err(unsupported_store_capability("outcome recording"))
+    }
+
+    /// List immutable outcomes attached to one retrieval episode.
+    async fn list_outcomes_for_episode(
+        &self,
+        _tenant_id: &TenantId,
+        _episode_id: &RetrievalEpisodeId,
+    ) -> Result<Vec<OutcomeEvent>> {
+        Err(unsupported_store_capability("outcome listing"))
+    }
+
+    /// Aggregate ranking-eligible outcomes into requester-scoped decayed priors.
+    async fn outcome_priors(
+        &self,
+        _scope_tenant_id: &TenantId,
+        _scope_project_id: Option<&str>,
+        _chunk_ids: &[ChunkId],
+        _now_ms: i64,
+    ) -> Result<Vec<OutcomePrior>> {
+        Err(unsupported_store_capability("outcome priors"))
     }
 
     /// Get chunk by ID (respects tenant isolation)
@@ -518,7 +590,7 @@ pub trait Store: Send + Sync {
     /// Default implementation returns Ok(None).
     /// PersistentStore overrides with real implementation.
     fn run_compaction_if_needed(&self, _tenant_id: &TenantId) -> Result<Option<CompactionResult>> {
-        Ok(None)
+        Err(unsupported_store_capability("threshold compaction"))
     }
 
     /// Get compaction metrics for a tenant

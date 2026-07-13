@@ -9,7 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use super::{run_cli_capture, Consolidator, DEFAULT_TIMEOUT};
+use super::{cli_version, run_cli_capture, Consolidator, ConsolidatorIdentity, DEFAULT_TIMEOUT};
 use crate::error::{MemdError, Result};
 
 /// Default Codex model id used for consolidation.
@@ -58,6 +58,18 @@ impl Consolidator for CodexSparkConsolidator {
 
     fn name(&self) -> &'static str {
         "codex-spark"
+    }
+
+    async fn identity(&self) -> Result<ConsolidatorIdentity> {
+        Ok(ConsolidatorIdentity {
+            adapter: self.name().to_string(),
+            command: Some(format!(
+                "codex exec --model {} --json --skip-git-repo-check --sandbox read-only -",
+                self.model
+            )),
+            model: Some(self.model.clone()),
+            version: Some(cli_version("codex", self.timeout).await?),
+        })
     }
 }
 

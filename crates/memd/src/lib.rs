@@ -6,16 +6,19 @@ pub mod cli;
 pub mod compaction;
 pub mod config;
 pub mod consolidate;
+pub mod dedup;
 pub mod embeddings;
 pub mod error;
 pub mod hit_stats;
 pub mod index;
 pub mod logging;
 pub mod maintenance;
+pub mod markdown_export;
 pub mod mcp;
 pub mod metrics;
 pub mod omf;
 pub mod ops;
+pub mod post_write_hooks;
 pub mod retrieval;
 pub mod store;
 pub mod structural;
@@ -24,6 +27,7 @@ pub mod text;
 pub mod tiered;
 pub mod types;
 pub mod write_admission;
+pub mod write_service;
 
 pub use chunking::{chunk_text, Chunk, ChunkingConfig};
 pub use compaction::{

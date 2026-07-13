@@ -343,7 +343,7 @@ mod tests {
 
     #[test]
     fn test_overlap_between_chunks() {
-        let sentences = vec![
+        let sentences = [
             "Sentence one. ",
             "Sentence two. ",
             "Sentence three. ",
@@ -436,7 +436,7 @@ mod tests {
         let chunks = chunk_text(text, &config);
 
         // Document is ~1400 chars, should create 1-2 chunks
-        assert!(chunks.len() >= 1);
+        assert!(!chunks.is_empty());
         assert!(chunks.len() <= 3);
 
         // Verify complete coverage

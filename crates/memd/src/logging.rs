@@ -33,7 +33,7 @@ pub fn init_logging(format: &str, level: &str) {
                 )
                 .init();
         }
-        "pretty" | _ => {
+        _ => {
             tracing_subscriber::registry()
                 .with(filter)
                 .with(

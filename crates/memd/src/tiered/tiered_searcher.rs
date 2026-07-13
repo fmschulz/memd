@@ -822,14 +822,14 @@ mod tests {
         TenantId::new("test_tenant").unwrap()
     }
 
-    fn make_searcher_with_warm(
-        warm: Arc<MockWarmTier>,
-    ) -> (
+    type TestSearcher = (
         TieredSearcher<MockWarmTier>,
         Arc<SemanticCache>,
         Arc<RwLock<HotTier>>,
         Arc<RwLock<AccessTracker>>,
-    ) {
+    );
+
+    fn make_searcher_with_warm(warm: Arc<MockWarmTier>) -> TestSearcher {
         let cache = Arc::new(SemanticCache::new(SemanticCacheConfig::default()));
         let hot_tier_config = HotTierConfig {
             hnsw_config: crate::index::HnswConfig {

@@ -1282,6 +1282,6 @@ mod tests {
         }
 
         // Verify index has data
-        assert!(index.len() > 0);
+        assert!(!index.is_empty());
     }
 }

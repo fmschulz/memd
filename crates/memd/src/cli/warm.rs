@@ -23,9 +23,9 @@ use super::purge::{run_purge, PurgeOptions};
 use super::report::{cli_report_rendered, ReportOptions};
 use super::{
     apply_search_reranker, cli_add_rendered, cli_agent_context_payload, cli_call_tool,
-    cli_delete_rendered, cli_import_omf_rendered, cli_search_payload, parse_call_arguments,
-    render_agent_context, render_search_payload, unwrap_content_payload, write_cli_log,
-    write_rendered, CliAddRenderOptions,
+    cli_delete_rendered, cli_import_omf_rendered, cli_search_payload, finalize_search_episode,
+    parse_call_arguments, render_agent_context, render_search_payload, unwrap_content_payload,
+    write_cli_log, write_rendered, CliAddRenderOptions,
 };
 
 const WARM_WIRE_PROTOCOL: &str = "3";
@@ -52,6 +52,10 @@ enum WarmWireCommand {
     AgentContext {
         tenant_id: String,
         project_id: Option<String>,
+        #[serde(default)]
+        task_id: Option<String>,
+        #[serde(default)]
+        thread_id: Option<String>,
         query: Vec<String>,
         k: usize,
         token_budget: usize,
@@ -110,6 +114,8 @@ enum WarmWireCommand {
         dry_run: bool,
         background: bool,
         force: bool,
+        promote: bool,
+        legacy_immediate: bool,
     },
     Batch {
         jsonl_content: String,
@@ -278,6 +284,7 @@ fn warm_routable(cmd: &CliCommand) -> bool {
         } | CliCommand::AgentContext { .. }
             | CliCommand::Report { .. }
             | CliCommand::Call { .. }
+            | CliCommand::Outcome { .. }
             | CliCommand::Add { .. }
             | CliCommand::Delete { .. }
             | CliCommand::ImportOmf { .. }
@@ -375,6 +382,8 @@ fn warm_wire_command_from_cli(
         CliCommand::AgentContext {
             tenant_id,
             project_id,
+            task_id,
+            thread_id,
             query,
             k,
             token_budget,
@@ -389,6 +398,8 @@ fn warm_wire_command_from_cli(
             WarmWireCommand::AgentContext {
                 tenant_id: super::scope::require_tenant(tenant_id.clone())?,
                 project_id: project_id.clone(),
+                task_id: task_id.clone(),
+                thread_id: thread_id.clone(),
                 query: query.clone(),
                 k: *k,
                 token_budget: *token_budget,
@@ -415,6 +426,35 @@ fn warm_wire_command_from_cli(
             },
             WarmLocalOutputs {
                 output: output.clone(),
+                log_dir: None,
+            },
+        ),
+        CliCommand::Outcome {
+            episode_id,
+            tenant_id,
+            outcome,
+            verifier,
+            used,
+            harmful,
+            evidence,
+            event_time_ms,
+            warm: _,
+        } => (
+            WarmWireCommand::Call {
+                tool: "memory.record_outcome".to_string(),
+                arguments: json!({
+                    "tenant_id": super::scope::require_tenant(tenant_id.clone())?,
+                    "episode_id": episode_id,
+                    "outcome": outcome,
+                    "verifier_type": verifier,
+                    "used_chunk_ids": used,
+                    "harmful_chunk_ids": harmful,
+                    "evidence_reference": evidence,
+                    "event_time_ms": event_time_ms,
+                }),
+            },
+            WarmLocalOutputs {
+                output: None,
                 log_dir: None,
             },
         ),
@@ -540,6 +580,8 @@ fn warm_wire_command_from_cli(
             dry_run,
             background,
             force,
+            promote,
+            legacy_immediate,
             warm: _,
         } => (
             WarmWireCommand::Consolidate {
@@ -550,6 +592,8 @@ fn warm_wire_command_from_cli(
                 dry_run: *dry_run,
                 background: *background,
                 force: *force,
+                promote: *promote,
+                legacy_immediate: *legacy_immediate,
             },
             WarmLocalOutputs {
                 output: None,
@@ -613,11 +657,14 @@ async fn execute_warm_wire_command<S: Store>(
             )
             .await?;
             payload = apply_search_reranker(payload, &query, &reranker)?;
+            finalize_search_episode(store, &tenant_id, &payload).await?;
             Ok((render_search_payload(&payload, format)?, None))
         }
         WarmWireCommand::AgentContext {
             tenant_id,
             project_id,
+            task_id,
+            thread_id,
             query,
             k,
             token_budget,
@@ -630,6 +677,8 @@ async fn execute_warm_wire_command<S: Store>(
                 store,
                 &tenant_id,
                 project_id.as_deref(),
+                task_id.as_deref(),
+                thread_id.as_deref(),
                 &query,
                 k,
                 token_budget,
@@ -757,6 +806,8 @@ async fn execute_warm_wire_command<S: Store>(
             dry_run,
             background,
             force,
+            promote,
+            legacy_immediate,
         } => {
             let result = run_consolidate(
                 store,
@@ -768,6 +819,8 @@ async fn execute_warm_wire_command<S: Store>(
                     dry_run,
                     background,
                     force,
+                    promote,
+                    legacy_immediate,
                 },
             )
             .await?;
@@ -1759,10 +1812,9 @@ async fn write_warm_response(
 mod tests {
     use super::*;
     use crate::cli::SearchReranker;
-    use std::sync::Mutex;
     use tempfile::tempdir;
 
-    static WARM_TIMEOUT_ENV_LOCK: Mutex<()> = Mutex::new(());
+    static WARM_TIMEOUT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn test_warm_config(data_dir: PathBuf) -> WarmProcessConfig {
         WarmProcessConfig {
@@ -2059,6 +2111,8 @@ mod tests {
             CliCommand::AgentContext {
                 tenant_id: Some("t".to_string()),
                 project_id: None,
+                task_id: None,
+                thread_id: None,
                 query: vec!["q".to_string()],
                 k: 1,
                 token_budget: 100,
@@ -2121,6 +2175,8 @@ mod tests {
                 dry_run: true,
                 background: false,
                 force: false,
+                promote: false,
+                legacy_immediate: false,
                 warm: WarmMode::Auto,
             },
             CliCommand::Call {
@@ -2278,6 +2334,8 @@ mod tests {
             WarmWireCommand::AgentContext {
                 tenant_id: "t".to_string(),
                 project_id: Some("p".to_string()),
+                task_id: Some("task".to_string()),
+                thread_id: Some("thread".to_string()),
                 query: vec!["q".to_string()],
                 k: 2,
                 token_budget: 700,
@@ -2336,6 +2394,8 @@ mod tests {
                 dry_run: true,
                 background: false,
                 force: true,
+                promote: false,
+                legacy_immediate: false,
             },
             WarmWireCommand::Batch {
                 jsonl_content: "{\"tool\":\"memory.stats\"}\n".to_string(),
@@ -2492,7 +2552,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn auto_read_only_command_timeout_falls_back_to_cold_path() {
-        let _guard = WARM_TIMEOUT_ENV_LOCK.lock().unwrap();
+        let _guard = WARM_TIMEOUT_ENV_LOCK.lock().await;
         std::env::set_var("MEMD_WARM_CLIENT_TIMEOUT_MS", "50");
         let dir = tempdir().unwrap();
         let config = test_warm_config(dir.path().join("data"));
@@ -2511,7 +2571,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn auto_write_command_timeout_does_not_retry_cold_path() {
-        let _guard = WARM_TIMEOUT_ENV_LOCK.lock().unwrap();
+        let _guard = WARM_TIMEOUT_ENV_LOCK.lock().await;
         std::env::set_var("MEMD_WARM_CLIENT_TIMEOUT_MS", "50");
         let dir = tempdir().unwrap();
         let config = test_warm_config(dir.path().join("data"));
@@ -2537,6 +2597,8 @@ mod tests {
         let agent_context = CliCommand::AgentContext {
             tenant_id: Some("t".to_string()),
             project_id: None,
+            task_id: None,
+            thread_id: None,
             query: vec!["q".to_string()],
             k: 1,
             token_budget: 100,

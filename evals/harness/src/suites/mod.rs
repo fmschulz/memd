@@ -18,6 +18,7 @@ pub mod cli_contract;
 pub mod codesearchnet;
 pub mod compaction;
 pub mod hybrid;
+pub mod longitudinal;
 pub mod nfcorpus;
 pub mod persistence;
 pub mod retrieval;

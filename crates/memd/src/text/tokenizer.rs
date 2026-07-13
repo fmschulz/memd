@@ -142,9 +142,9 @@ fn split_camel_case(word: &str) -> Vec<String> {
 
         let prev_upper = chars
             .get(i.saturating_sub(1))
-            .map_or(false, |c| c.is_uppercase());
+            .is_some_and(|c| c.is_uppercase());
         let curr_upper = c.is_uppercase();
-        let next_lower = chars.get(i + 1).map_or(false, |c| c.is_lowercase());
+        let next_lower = chars.get(i + 1).is_some_and(|c| c.is_lowercase());
 
         // Split cases:
         // 1. lowercase -> uppercase: "getUser" at 'U'

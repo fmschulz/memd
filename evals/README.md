@@ -3,17 +3,23 @@
 Benchmark suites and harnesses for `memd`. Each family lives in its own
 directory and is independently runnable.
 
-## Public-facing
+## Active gates
 
 | Suite | Purpose | One-command |
 |---|---|---|
-| [`benchmarks/locomo/`](benchmarks/locomo/) | **Headline.** Cross-system retrieval on upstream LoCoMo. memd vs Mem0 vs SuperLocalMemory. | `./evals/benchmarks/locomo/run.sh` |
 | `bench/scripts/run_task_memory_benchmark.sh` | Internal task-memory corpus (cli_warm + cli_batch lanes). | shell script |
 | `bench/scripts/run_offline_retrieval_benchmark.sh` | BEIR fiqa + scidocs retrieval gate (used by `.github/workflows/retrieval-gate.yml`). | shell script |
+| [`bench/longitudinal/`](bench/longitudinal/) | Frozen repeated-task ablation for admission, staged consolidation, exposure compatibility, and verified outcome ranking. | `./evals/bench/longitudinal/run.sh` |
+
+Current public LoCoMo, CodeIR, MemoryData, and LongMemEval protocols live in
+the sibling `memd-bench` repository. The old in-repository LoCoMo harness is
+preserved under `legacy/locomo-2026-05/`. The incomplete BEIR figure snapshot
+is preserved under [`legacy/beir-2026-06/`](legacy/beir-2026-06/). Neither
+archive is current evidence.
 
 ## Internal / experimental
 
-The rest of `bench/` holds in-flight and historical experiments —
+The rest of `bench/` holds in-flight experiments —
 agent-cost stress tests, cross-project usefulness pilots, paper-artifact
 coordination evals, etc. Their READMEs explain what's still load-bearing
 and what was superseded; see
@@ -41,10 +47,9 @@ memory-quality contract:
 
 ## Conventions
 
-- Per-suite results live under `<suite>/results/`. Result data
-  directories (qdrant, sqlite, etc.) and the raw LoCoMo dataset are
-  gitignored; curated baselines and the per-system markdown summaries
-  are checked in.
+- Per-suite results live under `<suite>/results/`. Generated stores and large
+  datasets are gitignored. A public result is claim-bearing only after the
+  corresponding `memd-bench` artifact bundle validates.
 - Each suite has a `README.md` explaining what it measures, what it
   doesn't, and known limitations.
 - Adapters are pluggable: drop a new file in

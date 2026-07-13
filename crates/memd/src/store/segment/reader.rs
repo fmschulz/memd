@@ -57,7 +57,7 @@ impl SegmentReader {
         // Load tombstones
         let tombstone_path = dir.join("tombstone.bin");
         let tombstones = TombstoneSet::load_or_create(tombstone_path)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
 
         Ok(Self {
             id,
@@ -179,7 +179,7 @@ impl SegmentReader {
         tombstones.mark_deleted(ordinal);
         tombstones
             .persist()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+            .map_err(|e| io::Error::other(e.to_string()))
     }
 
     /// Get segment directory path

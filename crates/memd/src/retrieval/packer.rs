@@ -189,9 +189,7 @@ impl ContextPacker {
 
                 if mmr > best_mmr {
                     // Track if MMR changes the selection order
-                    if idx != 0 && selected.is_empty() {
-                        would_change_top = true;
-                    } else if !selected.is_empty() && best_mmr != f32::NEG_INFINITY {
+                    if idx != 0 {
                         would_change_top = true;
                     }
                     best_mmr = mmr;
@@ -292,8 +290,7 @@ impl ContextPacker {
 
         for chunk in chunks {
             let chunk_chars = chunk.text.len();
-            let chunk_tokens =
-                (chunk_chars + self.config.chars_per_token - 1) / self.config.chars_per_token;
+            let chunk_tokens = chunk_chars.div_ceil(self.config.chars_per_token);
 
             if total_chars + chunk_chars > max_chars {
                 // Would exceed budget - stop here
@@ -311,8 +308,7 @@ impl ContextPacker {
             });
         }
 
-        let total_tokens =
-            (total_chars + self.config.chars_per_token - 1) / self.config.chars_per_token;
+        let total_tokens = total_chars.div_ceil(self.config.chars_per_token);
 
         PackedContext {
             chunks: result,

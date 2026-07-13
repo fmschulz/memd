@@ -25,7 +25,7 @@ pub enum MemdError {
     /// or fall back to a degraded path rather than block behind the writer.
     /// The display text starts with [`MemdError::INDEX_BUSY_MARKER`] so the
     /// condition stays classifiable after crossing stringifying error
-    /// boundaries (ops `McpError` -> CLI -> warm wire).
+    /// boundaries (operation error -> CLI -> warm wire).
     #[error("{}: {reason}; retry shortly", MemdError::INDEX_BUSY_MARKER)]
     IndexBusy {
         /// What held the index lock.

@@ -30,17 +30,9 @@ impl Default for ThrottleConfig {
 ///
 /// Provides delay methods and batched processing helpers to prevent
 /// compaction from monopolizing I/O.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Throttle {
     config: ThrottleConfig,
-}
-
-impl Default for Throttle {
-    fn default() -> Self {
-        Self {
-            config: ThrottleConfig::default(),
-        }
-    }
 }
 
 impl Throttle {

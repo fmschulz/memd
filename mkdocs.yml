@@ -83,6 +83,7 @@ nav:
       - Configuration: configuration.md
       - Observability: observability.md
       - Operational contract: operational-contract.md
+      - Local cache hygiene: local-cache-hygiene.md
       - OMF (memory interchange): omf.md
   - Task memory:
       - Schema: scientific-task-memory/schema/README.md

@@ -236,23 +236,12 @@ pub struct ReclaimedBytes {
     pub estimated_hidden_payload_bytes: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhysicalCompactionResult {
     pub store_compaction_ran: bool,
     pub sparse_pruned_chunks: usize,
     pub metadata_vacuum_ran: bool,
     pub rewrite_segments_supported: bool,
-}
-
-impl Default for PhysicalCompactionResult {
-    fn default() -> Self {
-        Self {
-            store_compaction_ran: false,
-            sparse_pruned_chunks: 0,
-            metadata_vacuum_ran: false,
-            rewrite_segments_supported: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -569,13 +558,11 @@ pub fn estimated_hidden_payload_bytes(actions: &[DreamAction]) -> usize {
         .sum()
 }
 
-pub fn status_for_report(blocked: bool, dry_run: bool, applied_count: usize) -> String {
+pub fn status_for_report(blocked: bool, dry_run: bool) -> String {
     if blocked {
         "blocked".to_string()
     } else if dry_run {
         "dry_run".to_string()
-    } else if applied_count > 0 {
-        "completed".to_string()
     } else {
         "completed".to_string()
     }

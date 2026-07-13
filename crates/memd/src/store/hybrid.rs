@@ -814,7 +814,7 @@ impl HybridSearcher {
     /// Called when a chunk is deleted to ensure cache consistency.
     pub fn invalidate_chunk_in_cache(&self, chunk_id: &ChunkId) {
         if let Some(ref cache) = self.semantic_cache {
-            cache.invalidate_chunks(&[chunk_id.clone()]);
+            cache.invalidate_chunks(std::slice::from_ref(chunk_id));
         }
     }
 

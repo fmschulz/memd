@@ -30,9 +30,11 @@ For write-quality expectations and cleanup safety, see the
 | `memd cleanup-plan` | Generate a non-destructive cleanup approval report with archive/purge command previews and post-cleanup pass criteria. |
 | `memd purge` | Dry-run or archive-first cleanup of hidden rows; `--apply` verifies the archive before mutation, and `--include-unreadable-active` previews active metadata rows whose segment payload cannot be loaded. |
 | `memd purge-archive` | Read-only verification for `memd purge --archive` files: validates format/counts/payload flags, emits SHA-256, and can enforce expected tenant/project. |
-| `memd consolidate` | Call the configured LLM (Claude Haiku or Codex Spark, selected by `MEMD_CONSOLIDATOR`) to rewrite recent chunks into deduplicated `kind:consolidated` lessons. Sources are soft-tombstoned via `ChunkStatus::Superseded` (never deleted). With an explicit `--tenant-id` and no `--project-id` the run is tenant-wide; the resulting lessons surface via tenant-wide search and the memory-md `Machine-Wide Fact Library`. |
-| `memd session-start` | Auto-create a minimal `.memd/project_scope.json` when missing, refresh `memory.md` synchronously, then spawn a background consolidation when enough chunks have accumulated. Wired into Claude Code via the bundled skill installer; a Codex hook template lives at `memd-skill/examples/codex_session_start_hook.json`. |
+| `memd consolidate` | Call the configured LLM (Claude Haiku or Codex Spark, selected by `MEMD_CONSOLIDATOR`) and stage validated output under a journaled run ID. Candidate summaries remain hidden until review. `--promote` requests promotion in the same run; `--legacy-immediate` is a deprecated alias for one compatibility release. Exact source-set reruns reuse the existing run. |
+| `memd consolidate-review` | List staged runs, accept one for atomic promotion, or reject it while leaving every source active. |
+| `memd session-start` | Auto-create a minimal `.memd/project_scope.json` when missing, recover consolidation runs idle for at least 30 seconds, refresh `memory.md` synchronously, then stage a background consolidation when enough chunks have accumulated. Recovery promotes only runs with durable promotion intent. A writer-lock failure is reported in `consolidation_recovery` without suppressing context refresh. Wired into Claude Code via the bundled skill installer; a Codex hook template lives at `memd-skill/examples/codex_session_start_hook.json`. |
 | `memd eval-counterfactual` | Replay a JSONL benchmark file; write an overlap@k / rank-shift report under `evals/bench/reports/`. Monitors whether `kind:consolidated` lessons are load-bearing in retrieval. |
+| `memd eval-outcome-ranking` | Compare the served order with the source-deduplicated `outcome-v1` shadow order against JSONL relevant/harmful judgments. Writes JSON and Markdown counterfactual reports without activating the policy. |
 | `memd maintenance` | Disk hygiene: sweep orphan HNSW snapshots, report what changed. |
 
 - `memory-md --explain-output <path>` writes a JSON candidate audit with query
@@ -40,18 +42,74 @@ For write-quality expectations and cleanup safety, see the
   state, and agent-usefulness metrics.
 - `memory-md` renders `Latest Project State` before fact libraries. That
   section includes scope, freshness, git status, latest task/handoff signals,
-  source-backed next actions, and warnings for scope drift or unreadable
-  memory payloads.
+  source-backed next actions, the parsed state of `tasks/todo.md`, and warnings
+  for scope drift or unreadable memory payloads. Missing or unreadable task
+  files are reported as unknown; they are not treated as proof that no work is
+  open.
+- Project and machine-wide candidates are assigned and deduplicated as one
+  bounded pool before display limits are applied. Exact IDs, consolidation
+  lineage, and high-confidence topic matches appear in one section only, with
+  the active project's section taking precedence.
 - `eval-memory-md --agent-usefulness` fails when startup context lacks current
   state, git state for a git repo, source-backed next actions when open tasks
-  exist, scope-health warnings, or when displayed startup items include
-  continuation fragments or generated boilerplate actions. `--gold-file` can
-  run the same checks over local multi-project fixtures.
+  exist, a readable task source, scope-health warnings, or when displayed
+  startup items include continuation fragments or generated boilerplate
+  actions. `--gold-file` can run the same checks over local multi-project
+  fixtures.
 - `eval-retrieval` gates with `--min-precision-at-k`,
   `--min-hit-rate-at-k`, `--min-known-recall-at-k`, and `--min-mrr`.
+- `eval-outcome-ranking --queries <jsonl> --report-json <path>` records normal
+  privacy-safe episodes but does not serve the shadow order. Each query row
+  contains `id`, `query`, `relevant_chunk_ids`, and `harmful_chunk_ids`.
+  Existing report paths are never overwritten. Its served baseline is the
+  current production order, including any exact-query relevance feedback in
+  the store; the shadow order adds outcome-attributed priors.
+- `search` episodes retain the expanded candidate pool and counterfactual
+  shadow ranks. Multi-query `agent-context` episodes retain only the final
+  merged result set and use ranking mode `off`; they support later outcome
+  attribution but are not valid counterfactual ranking records.
+- `task_id`, `thread_id`, and outcome evidence references are plaintext
+  linkage fields. Keep them opaque and non-sensitive. Retrieval episode tables
+  store query hashes rather than raw queries, but an explicit
+  `agent-context --log-dir` audit log includes the raw query summaries.
 - `eval-write-quality` gates with `--min-rejection-or-downgrade-rate`,
   `--min-duplicate-reuse-rate`, `--max-total-chunks`, `--max-disk-bytes`, and
   `--require-retention-compaction`.
+
+### Consolidation review
+
+The default command creates a hidden, validated proposal and returns its
+`run_id`, candidate IDs, consolidator command, model, and version:
+
+```bash
+memd consolidate --project-dir .
+memd consolidate-review --list
+memd consolidate-review <run_id> --accept
+```
+
+Use `--reject` instead of `--accept` to close the run without changing its
+sources. Acceptance records durable promotion intent before the atomic
+transaction. A restart can therefore finish an accepted run, but cannot
+promote a proposal that was only staged. Project-scoped acceptance promotes
+the candidates and marks same-project sources `Superseded`; tenant-wide
+acceptance records `derives_from` lineage and leaves project sources active.
+
+For an explicitly automated workflow, use:
+
+```bash
+memd consolidate --project-dir . --promote
+```
+
+The deprecated `--legacy-immediate` flag has the same promotion semantics and
+prints a warning. It exists only for migration from the former default.
+
+Each proposed entry must name a concrete agent action, cite exactly the source
+IDs it supersedes or derives from, and provide a confidence in `[0, 1]`.
+Malformed, conflicting, or prompt-like output is rejected before candidate
+creation. The journal records the consolidator identity and points to a
+permission-restricted, size-capped raw-response audit artifact inside the
+store data directory. Candidate contents and audit artifacts are never part
+of retrieval or export surfaces.
 
 ## Structured operations (`memd call`)
 

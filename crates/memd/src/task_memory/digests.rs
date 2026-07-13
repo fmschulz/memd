@@ -690,6 +690,8 @@ pub fn build_task_resume_digest_artifact(view: &TaskResumeView) -> TaskArtifact 
     artifact
 }
 
+// Public constructor kept source-compatible for downstream artifact builders.
+#[allow(clippy::too_many_arguments)]
 pub fn build_library_digest_artifact(
     tenant_id: TenantId,
     project_id: Option<ProjectId>,

@@ -269,6 +269,14 @@ pub enum CliCommand {
         #[arg(long)]
         project_id: Option<String>,
 
+        /// Optional non-sensitive task identifier attached as plaintext.
+        #[arg(long)]
+        task_id: Option<String>,
+
+        /// Optional non-sensitive thread identifier attached as plaintext.
+        #[arg(long)]
+        thread_id: Option<String>,
+
         /// Search query. May be repeated; results are merged and deduplicated.
         #[arg(long, required = true, action = ArgAction::Append)]
         query: Vec<String>,
@@ -471,8 +479,8 @@ pub enum CliCommand {
     ///
     /// Builds a working region from chunks written/retrieved since the
     /// last run, asks the configured LLM consolidator to rewrite them,
-    /// persists `kind:consolidated` lessons, and soft-tombstones the
-    /// superseded sources. Backend is chosen by `MEMD_CONSOLIDATOR`.
+    /// and stages hidden `kind:consolidated` candidates for review.
+    /// Backend is chosen by `MEMD_CONSOLIDATOR`.
     Consolidate {
         /// Tenant identifier. Defaults to `.memd/project_scope.json`
         /// or `.memd/config.json` when present.
@@ -504,7 +512,79 @@ pub enum CliCommand {
         #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
         force: bool,
 
+        /// Promote candidates after deterministic validation. Without this,
+        /// consolidation stops at a hidden validated candidate.
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        promote: bool,
+
+        /// Preserve the former immediate-promotion behavior for one release.
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue, conflicts_with = "promote")]
+        legacy_immediate: bool,
+
         /// Route this write through the local warm worker (auto starts one if needed; off runs locally and requires the writer lock; required fails when no worker is reachable)
+        #[arg(long, value_enum, default_value = "auto")]
+        warm: WarmMode,
+    },
+
+    /// Accept or reject a validated staged consolidation run.
+    ConsolidateReview {
+        /// Consolidation run UUID returned by `memd consolidate`.
+        run_id: Option<String>,
+
+        /// List validated runs awaiting review.
+        #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["accept", "reject"])]
+        list: bool,
+
+        /// Maximum staged runs returned by --list.
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+
+        /// Promote the validated candidates and apply their lineage policy.
+        #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["reject", "list"])]
+        accept: bool,
+
+        /// Reject the run and keep every candidate hidden.
+        #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["accept", "list"])]
+        reject: bool,
+    },
+
+    /// Record a verified task outcome against one retrieval episode.
+    ///
+    /// Only chunks that were rendered in the named episode may be attributed.
+    /// Agent self-reports are retained for audit but never train ranking.
+    Outcome {
+        /// Retrieval episode UUID returned by search or agent-context.
+        episode_id: String,
+
+        /// Tenant identifier. Defaults to the current project scope.
+        #[arg(long)]
+        tenant_id: Option<String>,
+
+        /// Outcome: passed, accepted, corrected, failed, or abandoned.
+        #[arg(long)]
+        outcome: String,
+
+        /// Verifier: user, automated_test, external_tool, task_system, or agent_self_report.
+        #[arg(long)]
+        verifier: String,
+
+        /// Rendered chunks that materially helped (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        used: Vec<String>,
+
+        /// Rendered chunks that caused harm or required correction (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        harmful: Vec<String>,
+
+        /// Non-sensitive reference to a durable test, task, or tool result.
+        #[arg(long)]
+        evidence: Option<String>,
+
+        /// Event time as Unix epoch milliseconds; defaults to now.
+        #[arg(long)]
+        event_time_ms: Option<i64>,
+
+        /// Route this write through the local warm worker.
         #[arg(long, value_enum, default_value = "auto")]
         warm: WarmMode,
     },
@@ -537,6 +617,37 @@ pub enum CliCommand {
         /// Top-k for retrieval comparison.
         #[arg(long, default_value_t = 5)]
         k: usize,
+    },
+
+    /// Compare served retrieval order with the outcome-v1 shadow policy.
+    ///
+    /// Query rows declare relevant and harmful chunk IDs. The command records
+    /// normal privacy-safe retrieval episodes, reconstructs a source-deduped
+    /// shadow top-k, and writes JSON plus Markdown counterfactual artifacts.
+    EvalOutcomeRanking {
+        /// Tenant identifier.
+        #[arg(long)]
+        tenant_id: String,
+
+        /// Optional project identifier.
+        #[arg(long)]
+        project_id: Option<String>,
+
+        /// Project directory used to resolve relative paths.
+        #[arg(long, default_value = ".")]
+        project_dir: PathBuf,
+
+        /// JSONL query rows with id, query, relevant_chunk_ids, and harmful_chunk_ids.
+        #[arg(long)]
+        queries: PathBuf,
+
+        /// Top-k for served-versus-shadow comparison.
+        #[arg(long, default_value_t = 5)]
+        k: usize,
+
+        /// JSON report path. The command also writes a sibling Markdown file.
+        #[arg(long)]
+        report_json: PathBuf,
     },
 
     /// Session-start hook entry point.
@@ -1066,7 +1177,10 @@ impl CliCommand {
             // Opens and mutates an isolated scratch PersistentStore.
             CliCommand::EvalWriteQuality { .. } => StoreAccess::Writer,
             CliCommand::Consolidate { .. } => StoreAccess::Writer,
+            CliCommand::ConsolidateReview { .. } => StoreAccess::Writer,
+            CliCommand::Outcome { .. } => StoreAccess::Writer,
             CliCommand::EvalCounterfactual { .. } => StoreAccess::Writer,
+            CliCommand::EvalOutcomeRanking { .. } => StoreAccess::Writer,
             CliCommand::SessionStart { .. } => StoreAccess::ReadOnly,
             CliCommand::Call { .. } => StoreAccess::Writer,
             CliCommand::Batch { .. } => StoreAccess::Writer,
@@ -1104,6 +1218,7 @@ impl CliCommand {
             CliCommand::Search { warm, .. }
             | CliCommand::AgentContext { warm, .. }
             | CliCommand::Consolidate { warm, .. }
+            | CliCommand::Outcome { warm, .. }
             | CliCommand::Call { warm, .. }
             | CliCommand::Batch { warm, .. }
             | CliCommand::Add { warm, .. }

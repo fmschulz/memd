@@ -32,12 +32,6 @@ pub struct MergeResult {
 pub struct SegmentMerger {
     /// Minimum segment count before merge is needed (default 4)
     min_segments_for_merge: usize,
-    /// Maximum docs before merge is forced (default 100_000)
-    #[allow(dead_code)]
-    max_docs_before_merge: usize,
-    /// Deleted docs ratio threshold (default 0.2 = 20%)
-    #[allow(dead_code)]
-    del_docs_ratio: f32,
 }
 
 impl SegmentMerger {
@@ -45,17 +39,13 @@ impl SegmentMerger {
     pub fn new() -> Self {
         Self {
             min_segments_for_merge: 4,
-            max_docs_before_merge: 100_000,
-            del_docs_ratio: 0.2,
         }
     }
 
-    /// Create a new SegmentMerger with custom configuration
-    pub fn with_config(min_segments: usize, max_docs: usize, del_ratio: f32) -> Self {
+    /// Create a new SegmentMerger with a custom segment-count threshold.
+    pub fn with_min_segments(min_segments: usize) -> Self {
         Self {
             min_segments_for_merge: min_segments,
-            max_docs_before_merge: max_docs,
-            del_docs_ratio: del_ratio,
         }
     }
 
@@ -189,8 +179,8 @@ mod tests {
     }
 
     #[test]
-    fn test_custom_config() {
-        let merger = SegmentMerger::with_config(10, 50_000, 0.1);
+    fn test_custom_threshold() {
+        let merger = SegmentMerger::with_min_segments(10);
 
         assert_eq!(merger.min_segments_threshold(), 10);
         assert!(!merger.needs_merge(5));

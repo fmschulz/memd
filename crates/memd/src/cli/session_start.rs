@@ -1,18 +1,17 @@
 //! `memd session-start` — invoked from the Claude Code / Codex
 //! SessionStart hook (Phase 2).
 //!
-//! Two jobs, both fast: refresh `memory.md` synchronously so the
-//! agent has fresh context, then — if enough chunks have accumulated
-//! since the last consolidation — kick off a detached background
-//! `memd consolidate`. The command returns immediately; it never
-//! blocks the session on an LLM call.
+//! Reconciles stale consolidation runs, refreshes `memory.md`
+//! synchronously, then starts detached background consolidation when
+//! enough chunks have accumulated. It does not block on an LLM call.
 //!
 //! When the project has no `.memd/project_scope.json`, the command
 //! auto-creates one using sensible defaults (USER as tenant, repo
-//! basename as project) so memd "just works" in every repo without a
-//! per-repo `memd init`. Opt out by setting `MEMD_AUTO_SCOPE=0` or
+//! basename as project) so automatic startup does not require a per-repo
+//! `memd init`. Opt out by setting `MEMD_AUTO_SCOPE=0` or
 //! dropping a `.memd-skip` file in the repo root.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -80,7 +79,7 @@ impl AutoScopeInputs {
             "default".to_string()
         };
         let enabled = std::env::var("MEMD_AUTO_SCOPE")
-            .map(|v| v != "0" && v.to_ascii_lowercase() != "false")
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
             .unwrap_or(true);
         Self {
             default_tenant,
@@ -141,6 +140,57 @@ pub(super) async fn run_session_start_inner<S: Store>(
         }
     };
 
+    // Reconcile staged candidates before generating agent-facing context.
+    // Recovery is intentionally a session-start stage rather than a store-open
+    // side effect. Session-start itself opens a short-lived writer when its
+    // main store handle is read-only, preserving the writer-lock invariant.
+    let consolidation_recovery = if let Some(persistent) = store.as_persistent() {
+        let recovery_result = if persistent.is_read_only() {
+            match persistent.open_consolidation_recovery_writer() {
+                Ok(writer) => {
+                    crate::consolidate::service::recover_consolidation_runs(&writer, 100).await
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            crate::consolidate::service::recover_consolidation_runs(persistent, 100).await
+        };
+        match recovery_result {
+            Ok(recovery) => {
+                let mut index_refresh_errors = Vec::new();
+                if persistent.is_read_only() {
+                    let mut by_tenant = BTreeMap::<String, (TenantId, Vec<_>)>::new();
+                    for (promoted_tenant, chunk_id) in &recovery.promoted_chunks {
+                        by_tenant
+                            .entry(promoted_tenant.to_string())
+                            .or_insert_with(|| (promoted_tenant.clone(), Vec::new()))
+                            .1
+                            .push(chunk_id.clone());
+                    }
+                    for (_, (promoted_tenant, chunk_ids)) in by_tenant {
+                        if let Err(error) = persistent
+                            .refresh_promoted_chunks_in_memory(&promoted_tenant, &chunk_ids)
+                            .await
+                        {
+                            index_refresh_errors.push(error.to_string());
+                        }
+                    }
+                }
+                json!({
+                    "inspected": recovery.inspected,
+                    "committed": recovery.committed,
+                    "rolled_back": recovery.rolled_back,
+                    "rejected": recovery.rejected,
+                    "failed_recoverable": recovery.failed_recoverable,
+                    "index_refresh_errors": index_refresh_errors,
+                })
+            }
+            Err(error) => json!({ "error": error.to_string() }),
+        }
+    } else {
+        json!({ "skipped": "non_persistent_store" })
+    };
+
     // 1. Refresh memory.md synchronously.
     let memory_md = refresh_memory_md(
         store,
@@ -189,6 +239,8 @@ pub(super) async fn run_session_start_inner<S: Store>(
                         dry_run: false,
                         background: true,
                         force: false,
+                        promote: false,
+                        legacy_immediate: false,
                     },
                 )
                 .await;
@@ -207,6 +259,7 @@ pub(super) async fn run_session_start_inner<S: Store>(
         "consolidation_skipped": skip_reason,
         "auto_scoped": auto_scoped,
         "auto_scope_recovered_malformed": recovered_from_malformed,
+        "consolidation_recovery": consolidation_recovery,
     }))
 }
 
@@ -465,7 +518,7 @@ mod tests {
     #[test]
     fn from_env_falls_back_to_user_then_default() {
         // Pure smoke check on the env precedence chain — we don't
-        // mutate process env (parallel tests share it). Just call
+        // mutate process env (parallel tests share it). Call
         // and assert the result is non-empty and valid as a tenant.
         let inputs = AutoScopeInputs::from_env();
         assert!(!inputs.default_tenant.is_empty());

@@ -18,6 +18,8 @@ pub struct TraceCapture;
 
 impl TraceCapture {
     /// Capture a tool call and create a trace record.
+    // Public record-construction boundary; each argument maps to stored trace data.
+    #[allow(clippy::too_many_arguments)]
     pub fn capture_tool_call(
         tenant_id: TenantId,
         tool_name: &str,

@@ -29,4 +29,15 @@ fn mcp_compatibility_exports_resolve() {
     let _ = std::any::type_name::<mcp::SearchParams>();
     let _ = std::any::type_name::<mcp::ArtifactCreateParams>();
     let _ = std::any::type_name::<mcp::TaskStartParams>();
+    let _ = std::any::type_name::<mcp::dedup::ResolvedDedup>();
+    let _ = std::any::type_name::<mcp::markdown_export::RenderedFile>();
+    let _ = std::any::type_name::<mcp::post_write_hooks::PostWriteEvent>();
+}
+
+#[test]
+fn protocol_neutral_operation_paths_resolve() {
+    let _ = std::any::type_name::<memd::ops::OperationError>();
+    let _ = std::any::type_name::<memd::dedup::ResolvedDedup>();
+    let _ = std::any::type_name::<memd::markdown_export::RenderedFile>();
+    let _ = std::any::type_name::<memd::post_write_hooks::PostWriteEvent>();
 }

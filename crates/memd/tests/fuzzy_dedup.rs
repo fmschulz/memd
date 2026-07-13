@@ -466,7 +466,7 @@ async fn add_with_lifecycle_long_split_doc_uses_per_row_canonical() {
             "tenant_id": "t",
             "text": long_text,
             "type": "doc",
-            "expires_at_ms": now_ms + 3600_000,
+            "expires_at_ms": now_ms + 3_600_000,
         }),
     )
     .await;

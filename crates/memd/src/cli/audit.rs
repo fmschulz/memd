@@ -81,6 +81,7 @@ struct TenantAudit {
 struct StoreStatsReport {
     total_chunks: usize,
     active_chunks: usize,
+    candidate_chunks: usize,
     deleted_chunks: usize,
     chunk_types_active: BTreeMap<String, usize>,
     chunk_types_deleted: BTreeMap<String, usize>,
@@ -733,6 +734,7 @@ impl StoreStatsReport {
         Self {
             total_chunks: stats.total_chunks,
             active_chunks: stats.active_chunks,
+            candidate_chunks: stats.candidate_chunks,
             deleted_chunks: stats.deleted_chunks,
             chunk_types_active: to_btree(stats.chunk_types_active),
             chunk_types_deleted: to_btree(stats.chunk_types_deleted),

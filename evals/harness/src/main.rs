@@ -191,6 +191,22 @@ struct Args {
     /// (e.g. `ndcg_at_10`, `ndcg_at_100`). Default: `ndcg_at_10`.
     #[arg(long, default_value = "ndcg_at_10")]
     metric: String,
+
+    /// Frozen longitudinal protocol JSON.
+    #[arg(long, default_value = "evals/bench/longitudinal/protocol.v1.json")]
+    longitudinal_protocol: String,
+
+    /// Frozen longitudinal fixture JSON.
+    #[arg(long, default_value = "evals/bench/longitudinal/fixtures.v1.json")]
+    longitudinal_fixtures: String,
+
+    /// Root for immutable longitudinal run directories.
+    #[arg(long, default_value = "evals/bench/longitudinal/results")]
+    longitudinal_output_root: String,
+
+    /// Log or report proving the table-driven consolidation crash gate passed.
+    #[arg(long)]
+    crash_gate_evidence: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -369,9 +385,24 @@ fn main() -> ExitCode {
             };
             suites::benchmark_protocol::run_regression_gate(config)
         }
+        "longitudinal" => {
+            let Some(crash_gate_evidence) = args.crash_gate_evidence.as_deref() else {
+                eprintln!("--crash-gate-evidence is required for --suite longitudinal");
+                return ExitCode::FAILURE;
+            };
+            suites::longitudinal::run(
+                &memd_binary,
+                suites::longitudinal::LongitudinalConfig {
+                    protocol_path: std::path::PathBuf::from(&args.longitudinal_protocol),
+                    fixtures_path: std::path::PathBuf::from(&args.longitudinal_fixtures),
+                    output_root: std::path::PathBuf::from(&args.longitudinal_output_root),
+                    crash_gate_evidence: std::path::PathBuf::from(crash_gate_evidence),
+                },
+            )
+        }
         _ => {
             eprintln!(
-                "Unknown suite: {}. Available: all, sanity, cli-contract, persistence, retrieval, hybrid, true-semantic, scifact, nfcorpus, codesearchnet, tiered, structural, compaction, benchmark, benchmark-regression",
+                "Unknown suite: {}. Available: all, sanity, cli-contract, persistence, retrieval, hybrid, true-semantic, scifact, nfcorpus, codesearchnet, tiered, structural, compaction, benchmark, benchmark-regression, longitudinal",
                 args.suite
             );
             return ExitCode::FAILURE;

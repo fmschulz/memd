@@ -15,13 +15,16 @@
 
 pub mod claude_haiku;
 pub mod codex_spark;
+pub mod journal;
 pub mod prompt;
 pub mod select;
+pub mod service;
 
 use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
@@ -29,6 +32,26 @@ use crate::error::{MemdError, Result};
 
 /// Default wall-clock budget for a single consolidation LLM call.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Exact executable/model identity persisted with a consolidation run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ConsolidatorIdentity {
+    pub adapter: String,
+    pub command: Option<String>,
+    pub model: Option<String>,
+    pub version: Option<String>,
+}
+
+impl ConsolidatorIdentity {
+    pub fn internal(adapter: impl Into<String>) -> Self {
+        Self {
+            adapter: adapter.into(),
+            command: Some("internal".to_string()),
+            model: None,
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        }
+    }
+}
 
 /// A pluggable LLM backend that rewrites a consolidation prompt into a
 /// JSON response. Implementors must not panic on adversarial input —
@@ -42,6 +65,50 @@ pub trait Consolidator: Send + Sync {
     /// Stable adapter name, recorded on consolidated chunks as
     /// `consolidator:<name>`.
     fn name(&self) -> &'static str;
+
+    /// Resolve the concrete CLI/model/version used for this run. Adapters that
+    /// spawn an external program override this and query `--version` before
+    /// the model call.
+    async fn identity(&self) -> Result<ConsolidatorIdentity> {
+        Ok(ConsolidatorIdentity::internal(self.name()))
+    }
+}
+
+pub(crate) async fn cli_version(program: &str, timeout: Duration) -> Result<String> {
+    let mut command = Command::new(program);
+    command
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let child = command.spawn().map_err(|error| {
+        MemdError::ProtocolError(format!("failed to spawn `{program}`: {error}"))
+    })?;
+    let output = tokio::time::timeout(timeout, child.wait_with_output())
+        .await
+        .map_err(|_| {
+            MemdError::ProtocolError(format!(
+                "`{program} --version` timed out after {}s",
+                timeout.as_secs()
+            ))
+        })?
+        .map_err(|error| {
+            MemdError::ProtocolError(format!("`{program} --version` failed: {error}"))
+        })?;
+    if !output.status.success() {
+        return Err(MemdError::ProtocolError(format!(
+            "`{program} --version` exited with {}",
+            output.status
+        )));
+    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if version.is_empty() {
+        return Err(MemdError::ProtocolError(format!(
+            "`{program} --version` returned empty output"
+        )));
+    }
+    Ok(version.chars().take(256).collect())
 }
 
 /// Spawn `program` with `args`, write `stdin_data` to its stdin, and
@@ -161,5 +228,14 @@ impl Consolidator for MockEnvConsolidator {
 
     fn name(&self) -> &'static str {
         "mock"
+    }
+
+    async fn identity(&self) -> Result<ConsolidatorIdentity> {
+        Ok(ConsolidatorIdentity {
+            adapter: self.name().to_string(),
+            command: Some("MEMD_CONSOLIDATOR_MOCK_RESPONSE".to_string()),
+            model: Some("deterministic-env".to_string()),
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        })
     }
 }

@@ -117,17 +117,18 @@ pub fn classify_write(
 
     let durable_reason = durable_signal_reason(chunk_type, trimmed, tags);
 
-    if tags.iter().any(|tag| tag == "kind:progress") {
-        if is_low_signal_progress(trimmed) && durable_reason.is_none() {
-            if mode == IngestionMode::Conversation {
-                return AdmissionOutcome::ephemeral(
-                    "low-signal conversation progress is stored as short-lived hidden context",
-                );
-            }
-            return AdmissionOutcome::reject(
-                "low-signal progress chatter needs a concrete result, decision, failure, command, path, or explicit priority",
+    if tags.iter().any(|tag| tag == "kind:progress")
+        && is_low_signal_progress(trimmed)
+        && durable_reason.is_none()
+    {
+        if mode == IngestionMode::Conversation {
+            return AdmissionOutcome::ephemeral(
+                "low-signal conversation progress is stored as short-lived hidden context",
             );
         }
+        return AdmissionOutcome::reject(
+                "low-signal progress chatter needs a concrete result, decision, failure, command, path, or explicit priority",
+            );
     }
 
     if let Some(reason) = durable_reason {
@@ -229,7 +230,7 @@ fn concrete_agent_action_candidates<'a>(
         let body_start = marker_starts[i] + marker.len();
         let next_marker = marker_starts.get(i + 1).copied().unwrap_or(text.len());
         let line_end = text[body_start..next_marker]
-            .find(|ch| matches!(ch, '\n' | '\r'))
+            .find(['\n', '\r'])
             .map(|offset| body_start + offset)
             .unwrap_or(next_marker);
         text[body_start..line_end].trim()
@@ -238,6 +239,13 @@ fn concrete_agent_action_candidates<'a>(
 
 fn is_concrete_agent_action(action: &str) -> bool {
     action.chars().count() >= 24 && contains_action_verb(action)
+}
+
+/// Validate an action body supplied separately from the `Agent action:` label.
+/// Consolidation uses this so model-authored guidance and direct writes share
+/// the same concrete-action contract.
+pub fn is_concrete_agent_action_text(action: &str) -> bool {
+    is_concrete_agent_action(action.trim())
 }
 
 /// Imperative verbs that make an `Agent action:` sentence concrete.
@@ -259,6 +267,7 @@ pub(crate) const ACTION_VERBS: &[&str] = &[
     "point",
     "prefer",
     "record",
+    "review",
     "resolve",
     "reuse",
     "run",
