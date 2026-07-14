@@ -413,10 +413,11 @@ impl SqliteMetadataStore {
                AND e.tenant_id = ?1
                AND ((?2 IS NULL AND e.project_id IS NULL)
                     OR e.project_id = ?2)
+               AND o.timestamp_ms <= ?3
              ORDER BY o.timestamp_ms DESC, o.event_id DESC",
         )?;
         let rows = statement.query_map(
-            rusqlite::params![scope_tenant_id.as_str(), scope_project_id],
+            rusqlite::params![scope_tenant_id.as_str(), scope_project_id, now_ms],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,

@@ -54,12 +54,16 @@ fn make_store() -> MemoryStore {
 
 struct SearchMissStore {
     chunks: Mutex<Vec<MemoryChunk>>,
+    outcome_times: Mutex<Vec<i64>>,
+    usage_events: Mutex<Vec<crate::store::usage::UsageEvent>>,
 }
 
 impl SearchMissStore {
     fn new(chunks: Vec<MemoryChunk>) -> Self {
         Self {
             chunks: Mutex::new(chunks),
+            outcome_times: Mutex::new(Vec::new()),
+            usage_events: Mutex::new(Vec::new()),
         }
     }
 }
@@ -144,8 +148,9 @@ impl Store for SearchMissStore {
         _scope_tenant_id: &TenantId,
         _scope_project_id: Option<&str>,
         _chunk_ids: &[ChunkId],
-        _now_ms: i64,
+        now_ms: i64,
     ) -> crate::error::Result<Vec<crate::store::OutcomePrior>> {
+        self.outcome_times.lock().unwrap().push(now_ms);
         Ok(Vec::new())
     }
 
@@ -155,6 +160,10 @@ impl Store for SearchMissStore {
         _items: Vec<crate::store::RetrievalEpisodeItem>,
     ) -> crate::error::Result<()> {
         Ok(())
+    }
+
+    fn record_usage_event(&self, event: crate::store::usage::UsageEvent) {
+        self.usage_events.lock().unwrap().push(event);
     }
 
     async fn resolve_artifacts_for_chunks(
@@ -357,6 +366,105 @@ async fn search_rejects_k_above_max() {
     let result = handle_memory_search(&store, params).await;
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), McpError::InvalidParams(_)));
+}
+
+#[tokio::test]
+async fn search_rejects_negative_ranking_time() {
+    let store = make_store();
+    let params = SearchParams {
+        tenant_id: "test".to_string(),
+        query: "hello".to_string(),
+        ranking_time_ms: Some(-1),
+        ..Default::default()
+    };
+
+    let result = handle_memory_search(&store, params).await;
+    assert!(
+        matches!(result, Err(McpError::InvalidParams(message)) if message.contains("ranking_time_ms"))
+    );
+}
+
+#[tokio::test]
+async fn fixed_ranking_time_search_does_not_record_attribution() {
+    let store = make_store();
+    let tenant = TenantId::new("fixed_search_read_only").unwrap();
+    store
+        .add(MemoryChunk::new(
+            tenant.clone(),
+            "car workshop evidence",
+            ChunkType::Doc,
+        ))
+        .await
+        .unwrap();
+    let params = SearchParams {
+        tenant_id: tenant.to_string(),
+        query: "car workshop".to_string(),
+        ranking_time_ms: Some(1_700_000_000_000),
+        ..Default::default()
+    };
+
+    let response = handle_memory_search(&store, params).await.unwrap();
+    let result: SearchResult = parse_tool_payload(&response);
+
+    assert_eq!(result.results.len(), 1);
+    assert!(result.retrieval_episode_id.is_none());
+    assert!(result.ranking_policy.is_none());
+
+    let payload: Value = parse_tool_payload(&response);
+    assert_eq!(payload.get("retrieval_episode_id"), Some(&Value::Null));
+}
+
+#[test]
+fn fixed_ranking_time_suppresses_search_usage_event() {
+    let store = SearchMissStore::new(Vec::new());
+    let mut params = SearchParams {
+        tenant_id: "fixed_search_read_only".to_string(),
+        query: "car workshop".to_string(),
+        ranking_time_ms: Some(1_700_000_000_000),
+        ..Default::default()
+    };
+
+    record_search_usage_event(
+        &store,
+        &TenantId::new("fixed_search_read_only").unwrap(),
+        &params,
+        1,
+    );
+
+    assert!(store.usage_events.lock().unwrap().is_empty());
+
+    params.ranking_time_ms = None;
+    record_search_usage_event(
+        &store,
+        &TenantId::new("fixed_search_read_only").unwrap(),
+        &params,
+        1,
+    );
+    assert_eq!(store.usage_events.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn outcome_shadow_uses_fixed_ranking_time() {
+    let tenant = TenantId::new("fixed_outcome_time").unwrap();
+    let chunk = MemoryChunk::new(tenant.clone(), "evidence", ChunkType::Doc);
+    let store = SearchMissStore::new(vec![chunk.clone()]);
+    let ranking_time_ms = 1_700_000_000_000i64;
+
+    outcome_rank_candidate_pool(
+        &store,
+        &tenant,
+        None,
+        vec![(chunk, 1.0)],
+        RankingPolicyMode::Shadow,
+        Some(ranking_time_ms),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        store.outcome_times.lock().unwrap().as_slice(),
+        &[ranking_time_ms]
+    );
 }
 
 proptest! {

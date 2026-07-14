@@ -2193,6 +2193,7 @@ async fn scope_status_for_search<S: Store>(
     result_count: usize,
     parsed_filters: &ParsedSearchFilters,
     visibility_policy: &VisibilityPolicy,
+    ranking_time_ms: Option<i64>,
 ) -> ScopeStatus {
     let retrieval_mode = store.retrieval_mode().to_string();
     let mut warnings = Vec::new();
@@ -2217,7 +2218,15 @@ async fn scope_status_for_search<S: Store>(
     let mut widen_hint = None;
     if let Some(project) = project_id.filter(|p| !p.trim().is_empty()) {
         if result_count < k && !query.is_empty() {
-            if let Ok(scored) = store.search_with_scores(tenant_id, query, k.max(8)).await {
+            let widened = match ranking_time_ms {
+                Some(ranking_time_ms) => {
+                    store
+                        .search_with_scores_at(tenant_id, query, k.max(8), ranking_time_ms)
+                        .await
+                }
+                None => store.search_with_scores(tenant_id, query, k.max(8)).await,
+            };
+            if let Ok(scored) = widened {
                 // Count only rows the real widened search would surface: apply
                 // the caller's non-project filters (chunk_type, time, episode)
                 // and the visibility policy, exactly as rerunning without
@@ -2258,13 +2267,23 @@ async fn search_with_scores_for_project_scopes<S: Store>(
     scopes: &[ProjectSearchScope],
     query: &str,
     fetch_k: usize,
+    ranking_time_ms: Option<i64>,
 ) -> Result<Vec<(MemoryChunk, f32)>, McpError> {
     let mut lists = Vec::with_capacity(scopes.len());
     for scope in scopes {
-        let mut scored = store
-            .search_with_scores(&scope.tenant_id, query, fetch_k)
-            .await
-            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        let mut scored = match ranking_time_ms {
+            Some(ranking_time_ms) => {
+                store
+                    .search_with_scores_at(&scope.tenant_id, query, fetch_k, ranking_time_ms)
+                    .await
+            }
+            None => {
+                store
+                    .search_with_scores(&scope.tenant_id, query, fetch_k)
+                    .await
+            }
+        }
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
         if let Some(project_id) = scope.project_id.as_deref() {
             scored.retain(|(chunk, _)| chunk.project_id.as_option() == Some(project_id));
         }
@@ -2579,12 +2598,22 @@ async fn search_with_tier_info_for_project_scopes<S: Store>(
     scopes: &[ProjectSearchScope],
     query: &str,
     fetch_k: usize,
+    ranking_time_ms: Option<i64>,
 ) -> Result<(Vec<(MemoryChunk, f32)>, Option<TieredTiming>), McpError> {
     if scopes.len() == 1 {
-        let (mut scored, timing) = store
-            .search_with_tier_info(&scopes[0].tenant_id, query, fetch_k)
-            .await
-            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        let (mut scored, timing) = match ranking_time_ms {
+            Some(ranking_time_ms) => {
+                store
+                    .search_with_tier_info_at(&scopes[0].tenant_id, query, fetch_k, ranking_time_ms)
+                    .await
+            }
+            None => {
+                store
+                    .search_with_tier_info(&scopes[0].tenant_id, query, fetch_k)
+                    .await
+            }
+        }
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
         if let Some(project_id) = scopes[0].project_id.as_deref() {
             scored.retain(|(chunk, _)| chunk.project_id.as_option() == Some(project_id));
         }
@@ -2593,10 +2622,19 @@ async fn search_with_tier_info_for_project_scopes<S: Store>(
 
     let mut lists = Vec::with_capacity(scopes.len());
     for scope in scopes {
-        let (mut results, _) = store
-            .search_with_tier_info(&scope.tenant_id, query, fetch_k)
-            .await
-            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        let (mut results, _) = match ranking_time_ms {
+            Some(ranking_time_ms) => {
+                store
+                    .search_with_tier_info_at(&scope.tenant_id, query, fetch_k, ranking_time_ms)
+                    .await
+            }
+            None => {
+                store
+                    .search_with_tier_info(&scope.tenant_id, query, fetch_k)
+                    .await
+            }
+        }
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
         if let Some(project_id) = scope.project_id.as_deref() {
             results.retain(|(chunk, _)| chunk.project_id.as_option() == Some(project_id));
         }
@@ -3543,6 +3581,7 @@ async fn summary_preferred_results_for_project_scopes<S: Store>(
     query: &str,
     mode: QueryMode,
     limit: usize,
+    ranking_time_ms: Option<i64>,
 ) -> Result<Vec<(MemoryChunk, f32)>, McpError> {
     let has_project_scope = scopes.iter().any(|scope| scope.project_id.is_some());
     let modes = if mode != QueryMode::Generic {
@@ -3585,10 +3624,25 @@ async fn summary_preferred_results_for_project_scopes<S: Store>(
                 }
             }
         }
-        let mut ranked = store
-            .rerank_chunks_for_query(&scope.tenant_id, query, &all_ids, limit)
-            .await
-            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        let mut ranked = match ranking_time_ms {
+            Some(ranking_time_ms) => {
+                store
+                    .rerank_chunks_for_query_at(
+                        &scope.tenant_id,
+                        query,
+                        &all_ids,
+                        limit,
+                        ranking_time_ms,
+                    )
+                    .await
+            }
+            None => {
+                store
+                    .rerank_chunks_for_query(&scope.tenant_id, query, &all_ids, limit)
+                    .await
+            }
+        }
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
         ranked.retain(|(chunk, _)| !is_empty_generated_digest_chunk(chunk));
         lists.push(ranked);
     }
@@ -3770,7 +3824,7 @@ fn record_search_usage_event<S: Store>(
     params: &SearchParams,
     result_count: usize,
 ) {
-    if params.suppress_usage_event {
+    if params.suppress_usage_event || params.ranking_time_ms.is_some() {
         return;
     }
 
@@ -3886,6 +3940,7 @@ async fn outcome_rank_candidate_pool<S: Store>(
     scope_project_id: Option<&str>,
     candidates: Vec<(MemoryChunk, f32)>,
     policy_mode: RankingPolicyMode,
+    ranking_time_ms: Option<i64>,
 ) -> Result<OutcomeRankedPool, McpError> {
     if policy_mode == RankingPolicyMode::Serve {
         return Err(McpError::InvalidParams(
@@ -3907,7 +3962,7 @@ async fn outcome_rank_candidate_pool<S: Store>(
         .iter()
         .map(|(chunk, _)| chunk.chunk_id.clone())
         .collect::<Vec<_>>();
-    let now_ms = current_time_ms();
+    let now_ms = ranking_time_ms.unwrap_or_else(current_time_ms);
     for prior in store
         .outcome_priors(scope_tenant_id, scope_project_id, &chunk_ids, now_ms)
         .await

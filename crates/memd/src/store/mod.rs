@@ -302,6 +302,19 @@ pub trait Store: Send + Sync {
         Ok(rank_candidate_chunks(chunks, query, k))
     }
 
+    /// Rerank a fixed candidate set at a fixed wall-clock reference.
+    async fn rerank_chunks_for_query_at(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        chunk_ids: &[ChunkId],
+        k: usize,
+        _ranking_time_ms: i64,
+    ) -> Result<Vec<(MemoryChunk, f32)>> {
+        self.rerank_chunks_for_query(tenant_id, query, chunk_ids, k)
+            .await
+    }
+
     /// Resolve canonical artifacts for retrieval projection chunk IDs.
     async fn resolve_artifacts_for_chunks(
         &self,
@@ -452,6 +465,20 @@ pub trait Store: Send + Sync {
         Ok(chunks.into_iter().map(|c| (c, 1.0)).collect())
     }
 
+    /// Search with scores at a fixed wall-clock reference.
+    ///
+    /// Backends without time-sensitive ranking may use the default, which
+    /// delegates to `search_with_scores`.
+    async fn search_with_scores_at(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        k: usize,
+        _ranking_time_ms: i64,
+    ) -> Result<Vec<(MemoryChunk, f32)>> {
+        self.search_with_scores(tenant_id, query, k).await
+    }
+
     /// Coarse retrieval capability, reported in-band via `scope_status`
     /// so agents can tell ranked semantic retrieval from degraded
     /// substring matching. Default matches the `search_with_scores`
@@ -555,6 +582,20 @@ pub trait Store: Send + Sync {
         k: usize,
     ) -> Result<(Vec<(MemoryChunk, f32)>, Option<TieredTiming>)> {
         let results = self.search_with_scores(tenant_id, query, k).await?;
+        Ok((results, None))
+    }
+
+    /// Search with tier info at a fixed wall-clock reference.
+    async fn search_with_tier_info_at(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        k: usize,
+        ranking_time_ms: i64,
+    ) -> Result<(Vec<(MemoryChunk, f32)>, Option<TieredTiming>)> {
+        let results = self
+            .search_with_scores_at(tenant_id, query, k, ranking_time_ms)
+            .await?;
         Ok((results, None))
     }
 

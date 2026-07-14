@@ -76,6 +76,14 @@ pub struct SearchParams {
     /// observed time are returned unchanged.
     #[serde(default)]
     pub render_event_time: bool,
+    /// Optional fixed wall-clock reference for recency, feedback, and outcome decay.
+    /// This makes ranking reproducible over a frozen corpus without changing
+    /// stored timestamps. It is not a historical snapshot: lifecycle visibility
+    /// is evaluated at request time, and chunks written after this timestamp
+    /// remain eligible. Searches with this field do not record usage or retrieval
+    /// episodes. Normal interactive searches should omit it.
+    #[serde(default)]
+    pub ranking_time_ms: Option<i64>,
     /// Collapse ranked results that share a `source.uri`, keeping only the
     /// best-ranked chunk per source before the final trim to `k`. Large
     /// documents are stored as several chunks that all carry the parent
@@ -144,6 +152,7 @@ impl Default for SearchParams {
             oversample_factor: None,
             expand_event_siblings: false,
             render_event_time: false,
+            ranking_time_ms: None,
             dedupe_by_source: false,
             compact: false,
             token_budget: None,
@@ -1141,7 +1150,9 @@ pub struct FindErrorsParams {
 pub struct SearchResult {
     pub results: Vec<ChunkResult>,
     /// Opaque identifier callers use to attribute a later verified outcome.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    /// Always serialized: `null` means no episode was recorded. Fixed-clock
+    /// callers use that explicit null to acknowledge read-only replay.
+    #[serde(default)]
     pub retrieval_episode_id: Option<String>,
     /// Inspectable policy diagnostics for the recorded episode.
     #[serde(skip_serializing_if = "Option::is_none", default)]

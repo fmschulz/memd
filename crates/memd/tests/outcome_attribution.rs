@@ -577,6 +577,17 @@ async fn eligible_outcomes_produce_project_scoped_decayed_priors() {
         .await
         .unwrap();
 
+    assert!(store
+        .outcome_priors(
+            &tenant,
+            Some("project_a"),
+            std::slice::from_ref(&positive),
+            now - 1,
+        )
+        .await
+        .unwrap()
+        .is_empty());
+
     let priors = store
         .outcome_priors(
             &tenant,

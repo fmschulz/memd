@@ -127,7 +127,9 @@ pub fn apply_feedback_scores(
 
     let mut by_chunk: HashMap<String, Aggregate> = HashMap::new();
     for entry in feedback_entries {
-        if entry.query_hash != crate::store::stable_query_hash(&normalized_query) {
+        if entry.query_hash != crate::store::stable_query_hash(&normalized_query)
+            || entry.timestamp_ms > now_ms
+        {
             continue;
         }
 

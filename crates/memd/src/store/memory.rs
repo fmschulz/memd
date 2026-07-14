@@ -585,7 +585,10 @@ impl Store for MemoryStore {
             }
             let mut events = outcomes.get(episode_key).cloned().unwrap_or_default();
             events.sort_by_key(|event| std::cmp::Reverse(event.timestamp_ms));
-            for event in events.into_iter().filter(|event| event.ranking_eligible) {
+            for event in events
+                .into_iter()
+                .filter(|event| event.ranking_eligible && event.timestamp_ms <= now_ms)
+            {
                 let (positive, attributed) = if event.outcome.credits_used() {
                     (true, &event.used_chunk_ids)
                 } else if event.outcome.credits_harmful() {
@@ -706,6 +709,25 @@ impl Store for MemoryStore {
             query,
             &feedback,
             current_time_ms(),
+            &FeedbackConfig::default(),
+        ))
+    }
+
+    async fn search_with_scores_at(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        k: usize,
+        ranking_time_ms: i64,
+    ) -> Result<Vec<(MemoryChunk, f32)>> {
+        let chunks = self.search(tenant_id, query, k).await?;
+        let scored = chunks.into_iter().map(|chunk| (chunk, 1.0)).collect();
+        let feedback = self.list_feedback(tenant_id, query, 512).await?;
+        Ok(apply_feedback_scores(
+            scored,
+            query,
+            &feedback,
+            ranking_time_ms,
             &FeedbackConfig::default(),
         ))
     }
@@ -1271,6 +1293,58 @@ mod tests {
             .unwrap();
         assert_eq!(ranked.len(), 2);
         assert_eq!(ranked[0].0.chunk_id, alpha);
+    }
+
+    #[tokio::test]
+    async fn fixed_ranking_time_pins_feedback_decay() {
+        let store = MemoryStore::new();
+        let tenant = make_tenant();
+        let chunk_id = store
+            .add(make_chunk(&tenant, "parser notes", ChunkType::Doc))
+            .await
+            .unwrap();
+        let ranking_time_ms = 1_700_000_000_000i64;
+        store
+            .add_feedback(FeedbackEntry::new(
+                tenant.clone(),
+                "parser notes",
+                chunk_id.clone(),
+                crate::store::RelevanceLabel::Relevant,
+                ranking_time_ms,
+            ))
+            .await
+            .unwrap();
+        store
+            .add_feedback(FeedbackEntry::new(
+                tenant.clone(),
+                "parser notes",
+                chunk_id.clone(),
+                crate::store::RelevanceLabel::Irrelevant,
+                ranking_time_ms + 30 * 24 * 60 * 60 * 1_000,
+            ))
+            .await
+            .unwrap();
+
+        let first = store
+            .search_with_scores_at(&tenant, "parser notes", 10, ranking_time_ms)
+            .await
+            .unwrap();
+        let second = store
+            .search_with_scores_at(&tenant, "parser notes", 10, ranking_time_ms)
+            .await
+            .unwrap();
+        let later = store
+            .search_with_scores_at(
+                &tenant,
+                "parser notes",
+                10,
+                ranking_time_ms + 30 * 24 * 60 * 60 * 1_000,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(first[0].1.to_bits(), second[0].1.to_bits());
+        assert!(first[0].1 > later[0].1);
     }
 
     #[tokio::test]
