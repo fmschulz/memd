@@ -1257,6 +1257,87 @@ async fn rerank_chunks_for_query_uses_hybrid_reranker_for_candidate_set() {
 
     assert_eq!(ranked.len(), 2);
     assert_eq!(ranked[0].0.chunk_id, newer_id);
+
+    let candidate_ids = ranked
+        .iter()
+        .map(|(chunk, _)| chunk.chunk_id.clone())
+        .collect::<Vec<_>>();
+    let fixed =
+        Store::rerank_chunks_for_query_at(&store, &tenant, "alpha beta", &candidate_ids, 2, now_ms)
+            .await
+            .unwrap();
+    let replayed =
+        Store::rerank_chunks_for_query_at(&store, &tenant, "alpha beta", &candidate_ids, 2, now_ms)
+            .await
+            .unwrap();
+    let later = Store::rerank_chunks_for_query_at(
+        &store,
+        &tenant,
+        "alpha beta",
+        &candidate_ids,
+        2,
+        now_ms + 365 * 24 * 60 * 60 * 1000,
+    )
+    .await
+    .unwrap();
+
+    let identity = |rows: &[(MemoryChunk, f32)]| {
+        rows.iter()
+            .map(|(chunk, score)| (chunk.chunk_id.clone(), score.to_bits()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(identity(&fixed), identity(&replayed));
+    assert_ne!(identity(&fixed), identity(&later));
+}
+
+#[tokio::test]
+async fn fixed_ranking_time_matches_standard_and_tier_debug_paths() {
+    let (mut store, _dir) = make_test_store();
+    let tenant = make_tenant();
+    let ranking_time_ms = 1_700_000_000_000i64;
+    let embedder = Arc::new(MockEmbedder::new());
+    let dense = Arc::new(DenseSearcher::with_embedder(
+        embedder,
+        DenseSearchConfig {
+            persist: false,
+            ..Default::default()
+        },
+    ));
+    let hybrid = HybridSearcher::new(
+        Arc::clone(&dense),
+        None,
+        HybridConfig {
+            enable_sparse: false,
+            enable_tiered: false,
+            ..Default::default()
+        },
+    );
+    store.dense_searcher = Some(dense);
+    store.hybrid_searcher = Some(Arc::new(hybrid));
+
+    let mut older = make_chunk(&tenant, "car workshop classic restoration");
+    older.timestamp_created = ranking_time_ms - 30 * 24 * 60 * 60 * 1_000;
+    Store::add(&store, older).await.unwrap();
+    let mut newer = make_chunk(&tenant, "car workshop custom engineering");
+    newer.timestamp_created = ranking_time_ms - 24 * 60 * 60 * 1_000;
+    Store::add(&store, newer).await.unwrap();
+
+    let standard = store
+        .search_with_scores_at(&tenant, "car workshop", 1, ranking_time_ms)
+        .await
+        .unwrap();
+    let (debug, _) =
+        Store::search_with_tier_info_at(&store, &tenant, "car workshop", 1, ranking_time_ms)
+            .await
+            .unwrap();
+
+    let identity = |rows: &[(MemoryChunk, f32)]| {
+        rows.iter()
+            .map(|(chunk, score)| (chunk.chunk_id.clone(), score.to_bits()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(standard.len(), 1);
+    assert_eq!(identity(&standard), identity(&debug));
 }
 
 #[tokio::test]

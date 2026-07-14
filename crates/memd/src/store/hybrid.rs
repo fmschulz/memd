@@ -77,6 +77,8 @@ pub struct HybridSearchResult {
 pub struct SearchContext {
     pub current_project: Option<String>,
     pub preferred_types: Vec<ChunkType>,
+    /// Fixed wall-clock reference for reproducible recency scoring.
+    pub ranking_time_ms: Option<i64>,
 }
 
 /// Timing breakdown for hybrid search
@@ -716,7 +718,11 @@ impl HybridSearcher {
 
         let mut reranker_context = match context {
             Some(ctx) => {
-                let base = RerankerContext::now().with_preferred_types(ctx.preferred_types);
+                let base = ctx
+                    .ranking_time_ms
+                    .map(RerankerContext::at)
+                    .unwrap_or_else(RerankerContext::now)
+                    .with_preferred_types(ctx.preferred_types);
                 if let Some(project) = ctx.current_project {
                     base.with_project(project)
                 } else {
@@ -1044,12 +1050,16 @@ mod tests {
             .await
             .unwrap();
 
+        let context = Some(SearchContext {
+            ranking_time_ms: Some(1_700_000_000_000),
+            ..SearchContext::default()
+        });
         let cold = searcher
-            .search(&tenant, "XyzSpecialFunctionName", 10, None)
+            .search(&tenant, "XyzSpecialFunctionName", 10, context.clone())
             .await
             .unwrap();
         let warm = searcher
-            .search(&tenant, "XyzSpecialFunctionName", 10, None)
+            .search(&tenant, "XyzSpecialFunctionName", 10, context)
             .await
             .unwrap();
         let signature = |results: &[HybridSearchResult]| {
@@ -1058,6 +1068,7 @@ mod tests {
                 .map(|result| {
                     (
                         result.chunk_id.clone(),
+                        result.final_score.to_bits(),
                         result.dense_rank,
                         result.sparse_rank,
                     )
@@ -1143,6 +1154,7 @@ mod tests {
         let context = Some(SearchContext {
             current_project: Some("current_project".to_string()),
             preferred_types: vec![ChunkType::Code],
+            ranking_time_ms: None,
         });
 
         let reranked = searcher.rerank_with_metadata(results, chunks_meta, context);

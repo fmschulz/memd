@@ -18,7 +18,9 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use super::dense::DenseSearcher;
-use super::hybrid::{ChunkMetaForRerank, HybridConfig, HybridSearchResult, HybridSearcher};
+use super::hybrid::{
+    ChunkMetaForRerank, HybridConfig, HybridSearchResult, HybridSearcher, SearchContext,
+};
 use super::metadata::{ChunkMetadata, MetadataStore, SqliteMetadataStore};
 use crate::compaction::{CompactionConfig, CompactionMetrics, CompactionResult, CompactionRunner};
 use crate::metrics::TieredMetrics;
@@ -1453,30 +1455,73 @@ impl PersistentStore {
         Option<TieredTiming>,
         Option<Vec<TierDecision>>,
     )> {
+        self.search_with_tier_info_at(tenant_id, query, k, None)
+            .await
+    }
+
+    pub async fn search_with_tier_info_at(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        k: usize,
+        ranking_time_ms: Option<i64>,
+    ) -> Result<(
+        Vec<(MemoryChunk, f32)>,
+        Option<TieredTiming>,
+        Option<Vec<TierDecision>>,
+    )> {
         let total_start = Instant::now();
 
         // Use hybrid search if available
         if let Some(ref hybrid) = self.hybrid_searcher {
-            let (hybrid_results, timing) =
-                hybrid.search_with_timing(tenant_id, query, k, None).await?;
+            let fetch_k = k.saturating_mul(2).min(k.saturating_add(256));
+            let search_context = ranking_time_ms.map(|ranking_time_ms| SearchContext {
+                ranking_time_ms: Some(ranking_time_ms),
+                ..SearchContext::default()
+            });
+            let (hybrid_results, timing) = hybrid
+                .search_with_timing(tenant_id, query, fetch_k, search_context.clone())
+                .await?;
 
-            let mut results = Vec::with_capacity(hybrid_results.len());
+            let mut chunk_by_id = HashMap::with_capacity(hybrid_results.len());
+            let mut rerank_meta = Vec::with_capacity(hybrid_results.len());
+            let mut base_results = Vec::with_capacity(hybrid_results.len());
             for result in hybrid_results {
                 if let Some(chunk) = self
                     .get_chunk_for_retrieval(tenant_id, &result.chunk_id, "search_with_tier_info")
                     .await?
                 {
-                    results.push((chunk, result.final_score));
+                    rerank_meta.push(ChunkMetaForRerank {
+                        chunk_id: result.chunk_id.clone(),
+                        rrf_score: result.final_score,
+                        timestamp_created: chunk.timestamp_created,
+                        project_id: chunk.project_id.as_option().map(str::to_string),
+                        chunk_type: chunk.chunk_type,
+                        text: Some(chunk.text.clone()),
+                    });
+                    chunk_by_id.insert(result.chunk_id.clone(), chunk);
+                    base_results.push(result);
                 }
             }
+            let results = hybrid
+                .rerank_with_metadata_for_query(query, base_results, rerank_meta, search_context)
+                .into_iter()
+                .filter_map(|result| {
+                    chunk_by_id
+                        .get(&result.chunk_id)
+                        .cloned()
+                        .map(|chunk| (chunk, result.final_score))
+                })
+                .collect();
             let feedback = self.list_feedback(tenant_id, query, 512).await?;
-            let results = apply_feedback_scores(
+            let mut results = apply_feedback_scores(
                 results,
                 query,
                 &feedback,
-                current_time_ms(),
+                ranking_time_ms.unwrap_or_else(current_time_ms),
                 &FeedbackConfig::default(),
             );
+            results.truncate(k);
 
             // Extract tiered timing and decisions
             let tiered_timing = timing.tiered.clone();
@@ -1497,7 +1542,13 @@ impl PersistentStore {
         }
 
         // Fallback
-        let results = self.search_with_scores(tenant_id, query, k).await?;
+        let results = match ranking_time_ms {
+            Some(ranking_time_ms) => {
+                self.search_with_scores_at(tenant_id, query, k, ranking_time_ms)
+                    .await?
+            }
+            None => self.search_with_scores(tenant_id, query, k).await?,
+        };
         Ok((results, None, None))
     }
 
@@ -1578,6 +1629,83 @@ impl PersistentStore {
         tenants.insert(tenant_id.to_string(), Arc::clone(&tenant));
 
         Ok(tenant)
+    }
+
+    async fn rerank_chunks_for_query_with_time(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        chunk_ids: &[ChunkId],
+        k: usize,
+        ranking_time_ms: Option<i64>,
+    ) -> Result<Vec<(MemoryChunk, f32)>> {
+        if chunk_ids.is_empty() || k == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut chunks = Vec::with_capacity(chunk_ids.len());
+        for chunk_id in chunk_ids {
+            if let Some(chunk) = self
+                .get_chunk_for_retrieval(tenant_id, chunk_id, "rerank_chunks_for_query")
+                .await?
+            {
+                chunks.push(chunk);
+            }
+        }
+
+        let Some(hybrid) = self.hybrid_searcher.as_ref() else {
+            return Ok(rank_candidate_chunks(chunks, query, k));
+        };
+
+        let use_cross_encoder = hybrid.reranker_mode() == RerankerMode::CrossEncoder;
+        let mut base_results = Vec::with_capacity(chunks.len());
+        let mut rerank_meta = Vec::with_capacity(chunks.len());
+        let mut chunk_by_id = HashMap::with_capacity(chunks.len());
+
+        for chunk in chunks {
+            let base_score = score_candidate_chunk(query, &chunk);
+            if !query.trim().is_empty() && !use_cross_encoder && base_score <= 0.0 {
+                continue;
+            }
+
+            base_results.push(HybridSearchResult {
+                chunk_id: chunk.chunk_id.clone(),
+                final_score: base_score,
+                dense_rank: None,
+                sparse_rank: None,
+            });
+            rerank_meta.push(ChunkMetaForRerank {
+                chunk_id: chunk.chunk_id.clone(),
+                rrf_score: base_score,
+                timestamp_created: chunk.timestamp_created,
+                project_id: chunk.project_id.as_option().map(str::to_string),
+                chunk_type: chunk.chunk_type,
+                text: Some(chunk.text.clone()),
+            });
+            chunk_by_id.insert(chunk.chunk_id.clone(), chunk);
+        }
+
+        if base_results.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let context = ranking_time_ms.map(|ranking_time_ms| SearchContext {
+            ranking_time_ms: Some(ranking_time_ms),
+            ..SearchContext::default()
+        });
+        let reranked =
+            hybrid.rerank_with_metadata_for_query(query, base_results, rerank_meta, context);
+        let mut results = reranked
+            .into_iter()
+            .filter_map(|result| {
+                chunk_by_id
+                    .get(&result.chunk_id)
+                    .cloned()
+                    .map(|chunk| (chunk, result.final_score))
+            })
+            .collect::<Vec<_>>();
+        results.truncate(k);
+        Ok(results)
     }
 
     /// Graceful shutdown - finalizes all active segments
@@ -1737,69 +1865,26 @@ impl Store for PersistentStore {
         chunk_ids: &[ChunkId],
         k: usize,
     ) -> Result<Vec<(MemoryChunk, f32)>> {
-        if chunk_ids.is_empty() || k == 0 {
-            return Ok(Vec::new());
-        }
+        self.rerank_chunks_for_query_with_time(tenant_id, query, chunk_ids, k, None)
+            .await
+    }
 
-        let mut chunks = Vec::with_capacity(chunk_ids.len());
-        for chunk_id in chunk_ids {
-            if let Some(chunk) = self
-                .get_chunk_for_retrieval(tenant_id, chunk_id, "rerank_chunks_for_query")
-                .await?
-            {
-                chunks.push(chunk);
-            }
-        }
-
-        let Some(hybrid) = self.hybrid_searcher.as_ref() else {
-            return Ok(rank_candidate_chunks(chunks, query, k));
-        };
-
-        let use_cross_encoder = hybrid.reranker_mode() == RerankerMode::CrossEncoder;
-        let mut base_results = Vec::with_capacity(chunks.len());
-        let mut rerank_meta = Vec::with_capacity(chunks.len());
-        let mut chunk_by_id = HashMap::with_capacity(chunks.len());
-
-        for chunk in chunks {
-            let base_score = score_candidate_chunk(query, &chunk);
-            if !query.trim().is_empty() && !use_cross_encoder && base_score <= 0.0 {
-                continue;
-            }
-
-            base_results.push(HybridSearchResult {
-                chunk_id: chunk.chunk_id.clone(),
-                final_score: base_score,
-                dense_rank: None,
-                sparse_rank: None,
-            });
-            rerank_meta.push(ChunkMetaForRerank {
-                chunk_id: chunk.chunk_id.clone(),
-                rrf_score: base_score,
-                timestamp_created: chunk.timestamp_created,
-                project_id: chunk.project_id.as_option().map(str::to_string),
-                chunk_type: chunk.chunk_type,
-                text: Some(chunk.text.clone()),
-            });
-            chunk_by_id.insert(chunk.chunk_id.clone(), chunk);
-        }
-
-        if base_results.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let reranked =
-            hybrid.rerank_with_metadata_for_query(query, base_results, rerank_meta, None);
-        let mut results = reranked
-            .into_iter()
-            .filter_map(|result| {
-                chunk_by_id
-                    .get(&result.chunk_id)
-                    .cloned()
-                    .map(|chunk| (chunk, result.final_score))
-            })
-            .collect::<Vec<_>>();
-        results.truncate(k);
-        Ok(results)
+    async fn rerank_chunks_for_query_at(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        chunk_ids: &[ChunkId],
+        k: usize,
+        ranking_time_ms: i64,
+    ) -> Result<Vec<(MemoryChunk, f32)>> {
+        self.rerank_chunks_for_query_with_time(
+            tenant_id,
+            query,
+            chunk_ids,
+            k,
+            Some(ranking_time_ms),
+        )
+        .await
     }
 
     async fn resolve_artifacts_for_chunks(
@@ -1962,6 +2047,26 @@ impl Store for PersistentStore {
         ))
     }
 
+    async fn search_with_scores_at(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        k: usize,
+        ranking_time_ms: i64,
+    ) -> Result<Vec<(MemoryChunk, f32)>> {
+        let scored = self
+            .hybrid_search_at(tenant_id, query, k, Some(ranking_time_ms))
+            .await?;
+        let feedback = self.list_feedback(tenant_id, query, 512).await?;
+        Ok(apply_feedback_scores(
+            scored,
+            query,
+            &feedback,
+            ranking_time_ms,
+            &FeedbackConfig::default(),
+        ))
+    }
+
     fn retrieval_mode(&self) -> &'static str {
         // Mirrors search_with_scores_real's dispatch: hybrid (dense + sparse
         // fusion) when the hybrid searcher is present, dense-only when just the
@@ -2054,6 +2159,24 @@ impl Store for PersistentStore {
         // Delegate to the specific method that returns timing info
         let (results, timing, _) =
             PersistentStore::search_with_tier_info(self, tenant_id, query, k).await?;
+        Ok((results, timing))
+    }
+
+    async fn search_with_tier_info_at(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        k: usize,
+        ranking_time_ms: i64,
+    ) -> Result<(Vec<(MemoryChunk, f32)>, Option<TieredTiming>)> {
+        let (results, timing, _) = PersistentStore::search_with_tier_info_at(
+            self,
+            tenant_id,
+            query,
+            k,
+            Some(ranking_time_ms),
+        )
+        .await?;
         Ok((results, timing))
     }
 

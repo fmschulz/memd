@@ -8,6 +8,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Fixed-clock searches ignore future-dated feedback and outcome events. Tier
+  diagnostics now use the same metadata reranker as standard search, so debug
+  mode no longer reports a different order from the served path.
 - `memory.md` now deduplicates project and machine-wide candidates as one
   bounded union, including exact chunk IDs, consolidation lineage, and topic
   matches. Active-project results are assigned to the project section instead
@@ -33,6 +36,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Added
 
+- `memory.search` accepts `ranking_time_ms` to pin recency, feedback, and
+  outcome decay over a frozen corpus. Fixed-clock searches are read-only with
+  respect to the usage ledger and retrieval-attribution episodes. Lifecycle
+  visibility remains live, so this option is not an as-of snapshot.
+- Search responses always serialize `retrieval_episode_id`. Read-only
+  fixed-clock searches return JSON `null`, allowing callers to reject binaries
+  that silently ignore `ranking_time_ms`.
 - Search and agent context now return privacy-safe retrieval episode IDs.
   `memd outcome` and `memory.record_outcome` accept explicit used/harmful
   attribution and verifier evidence. `outcome-v1` computes bounded,

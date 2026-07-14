@@ -7,6 +7,16 @@ impl PersistentStore {
         query: &str,
         k: usize,
     ) -> Result<Vec<(MemoryChunk, f32)>> {
+        self.hybrid_search_at(tenant_id, query, k, None).await
+    }
+
+    pub(super) async fn hybrid_search_at(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        k: usize,
+        ranking_time_ms: Option<i64>,
+    ) -> Result<Vec<(MemoryChunk, f32)>> {
         debug!(
             tenant_id = %tenant_id,
             query = &query[..query.len().min(50)],
@@ -19,7 +29,9 @@ impl PersistentStore {
         // Use real hybrid search if available, otherwise fallback
         if self.hybrid_searcher.is_some() || self.dense_searcher.is_some() {
             debug!("taking search_with_scores_real path");
-            return self.search_with_scores_real(tenant_id, query, k).await;
+            return self
+                .search_with_scores_real(tenant_id, query, k, ranking_time_ms)
+                .await;
         }
         // Final fallback: simple text search
         warn!("WARNING: Taking text-only fallback path - no embeddings!");
@@ -69,6 +81,7 @@ impl PersistentStore {
         tenant_id: &TenantId,
         query: &str,
         k: usize,
+        ranking_time_ms: Option<i64>,
     ) -> Result<Vec<(MemoryChunk, f32)>> {
         debug!(
             tenant_id = %tenant_id,
@@ -89,8 +102,12 @@ impl PersistentStore {
         // Use hybrid search if available (combines dense + sparse)
         if let Some(ref hybrid) = self.hybrid_searcher {
             debug!("using HYBRID search path");
+            let search_context = ranking_time_ms.map(|ranking_time_ms| SearchContext {
+                ranking_time_ms: Some(ranking_time_ms),
+                ..SearchContext::default()
+            });
             let (hybrid_results, timing) = hybrid
-                .search_with_timing(tenant_id, query, fetch_k, None)
+                .search_with_timing(tenant_id, query, fetch_k, search_context.clone())
                 .await?;
 
             let fetch_start = Instant::now();
@@ -118,8 +135,12 @@ impl PersistentStore {
                 }
             }
 
-            let reranked =
-                hybrid.rerank_with_metadata_for_query(query, base_results, rerank_meta, None);
+            let reranked = hybrid.rerank_with_metadata_for_query(
+                query,
+                base_results,
+                rerank_meta,
+                search_context,
+            );
             let mut results: Vec<(MemoryChunk, f32)> = reranked
                 .into_iter()
                 .filter_map(|result| {

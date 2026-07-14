@@ -83,6 +83,10 @@ impl RerankerContext {
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
 
+        Self::at(now_ms)
+    }
+
+    pub fn at(now_ms: i64) -> Self {
         Self {
             current_project: None,
             preferred_types: Vec::new(),
@@ -696,6 +700,45 @@ mod tests {
         let results = reranker.rerank(chunks, &context);
         assert_eq!(results[0].chunk_id, make_chunk_id(1));
         assert!(results[0].recency_bonus > results[1].recency_bonus);
+    }
+
+    #[test]
+    fn fixed_ranking_time_reproduces_scores_and_order() {
+        let reranker = FeatureReranker::default_config();
+        let now_ms = 1_700_000_000_000i64;
+        let chunks = vec![
+            ChunkWithMeta {
+                chunk_id: make_chunk_id(1),
+                rrf_score: 0.4,
+                timestamp_created: now_ms - MS_PER_DAY,
+                project_id: None,
+                chunk_type: ChunkType::Message,
+                text: Some("car workshop".to_string()),
+            },
+            ChunkWithMeta {
+                chunk_id: make_chunk_id(2),
+                rrf_score: 0.4,
+                timestamp_created: now_ms - (2 * MS_PER_DAY),
+                project_id: None,
+                chunk_type: ChunkType::Message,
+                text: Some("car workshop".to_string()),
+            },
+        ];
+        let context = RerankerContext::at(now_ms).with_query("car workshop");
+
+        let first = reranker.rerank(chunks.clone(), &context);
+        let second = reranker.rerank(chunks, &context);
+
+        assert_eq!(
+            first
+                .iter()
+                .map(|row| (&row.chunk_id, row.final_score.to_bits()))
+                .collect::<Vec<_>>(),
+            second
+                .iter()
+                .map(|row| (&row.chunk_id, row.final_score.to_bits()))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

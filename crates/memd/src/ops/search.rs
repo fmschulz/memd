@@ -8,6 +8,11 @@ pub async fn handle_memory_search<S: Store>(
     ProjectId::validate_opt(params.project_id.as_deref())
         .map_err(|e| McpError::InvalidParams(e.to_string()))?;
     validate_search_k(params.k)?;
+    if params.ranking_time_ms.is_some_and(|value| value < 0) {
+        return Err(McpError::InvalidParams(
+            "ranking_time_ms must be non-negative".to_string(),
+        ));
+    }
     let parsed_filters = parse_search_filters(params.filters.as_ref())?;
     let debug_tiers = params.debug_tiers.unwrap_or(false);
     let mode = params.mode.unwrap_or_default();
@@ -50,6 +55,7 @@ pub async fn handle_memory_search<S: Store>(
             &project_scopes,
             &params.query,
             fetch_k,
+            params.ranking_time_ms,
         )
         .await?;
         let exact_candidates = exact_lexical_candidates_for_project_scopes(
@@ -65,6 +71,7 @@ pub async fn handle_memory_search<S: Store>(
             &params.query,
             mode,
             params.k.min(8),
+            params.ranking_time_ms,
         )
         .await?;
         let mut merged = merge_preferred_and_raw(
@@ -94,6 +101,7 @@ pub async fn handle_memory_search<S: Store>(
                     &project_scopes,
                     &repaired_query,
                     fetch_k,
+                    params.ranking_time_ms,
                 )
                 .await?;
                 let repaired_filtered =
@@ -132,6 +140,7 @@ pub async fn handle_memory_search<S: Store>(
             project_id_filter,
             episode_candidates,
             policy_mode,
+            params.ranking_time_ms,
         )
         .await?;
         let mut scored_chunks = if params.dedupe_by_source {
@@ -197,25 +206,26 @@ pub async fn handle_memory_search<S: Store>(
         annotate_chunk_origins(&mut results, &tenant_id, scope_expansion.as_ref());
 
         let (results, budget_info) = shape_memory_results(results, &params);
-        let (retrieval_episode_id, ranking_policy) = if params.suppress_retrieval_episode {
-            (None, None)
-        } else {
-            let (episode_id, policy) = record_search_retrieval_episode(
-                store,
-                &tenant_id,
-                project_id_filter,
-                &params.query,
-                mode,
-                params.k,
-                policy_mode,
-                params.task_id.clone(),
-                params.thread_id.clone(),
-                &episode_pool,
-                &results,
-            )
-            .await?;
-            (Some(episode_id), Some(policy))
-        };
+        let (retrieval_episode_id, ranking_policy) =
+            if params.suppress_retrieval_episode || params.ranking_time_ms.is_some() {
+                (None, None)
+            } else {
+                let (episode_id, policy) = record_search_retrieval_episode(
+                    store,
+                    &tenant_id,
+                    project_id_filter,
+                    &params.query,
+                    mode,
+                    params.k,
+                    policy_mode,
+                    params.task_id.clone(),
+                    params.thread_id.clone(),
+                    &episode_pool,
+                    &results,
+                )
+                .await?;
+                (Some(episode_id), Some(policy))
+            };
         record_search_usage_event(store, &tenant_id, &params, results.len());
         let scope_status = scope_status_for_search(
             store,
@@ -226,6 +236,7 @@ pub async fn handle_memory_search<S: Store>(
             retrieved_count,
             &parsed_filters,
             &visibility_policy,
+            params.ranking_time_ms,
         )
         .await;
         return format_mcp_response(&SearchResult {
@@ -241,9 +252,14 @@ pub async fn handle_memory_search<S: Store>(
     }
 
     // Standard path without tier info
-    let scored_chunks =
-        search_with_scores_for_project_scopes(store, &project_scopes, &params.query, fetch_k)
-            .await?;
+    let scored_chunks = search_with_scores_for_project_scopes(
+        store,
+        &project_scopes,
+        &params.query,
+        fetch_k,
+        params.ranking_time_ms,
+    )
+    .await?;
     let exact_candidates = exact_lexical_candidates_for_project_scopes(
         store,
         &project_scopes,
@@ -257,6 +273,7 @@ pub async fn handle_memory_search<S: Store>(
         &params.query,
         mode,
         params.k.min(8),
+        params.ranking_time_ms,
     )
     .await?;
     let mut merged = merge_preferred_and_raw(
@@ -284,6 +301,7 @@ pub async fn handle_memory_search<S: Store>(
                 &project_scopes,
                 &repaired_query,
                 fetch_k,
+                params.ranking_time_ms,
             )
             .await?;
             let repaired_filtered =
@@ -318,6 +336,7 @@ pub async fn handle_memory_search<S: Store>(
         project_id_filter,
         episode_candidates,
         policy_mode,
+        params.ranking_time_ms,
     )
     .await?;
     let mut scored_chunks = if params.dedupe_by_source {
@@ -350,25 +369,26 @@ pub async fn handle_memory_search<S: Store>(
     annotate_chunk_origins(&mut results, &tenant_id, scope_expansion.as_ref());
 
     let (results, budget_info) = shape_memory_results(results, &params);
-    let (retrieval_episode_id, ranking_policy) = if params.suppress_retrieval_episode {
-        (None, None)
-    } else {
-        let (episode_id, policy) = record_search_retrieval_episode(
-            store,
-            &tenant_id,
-            project_id_filter,
-            &params.query,
-            mode,
-            params.k,
-            policy_mode,
-            params.task_id.clone(),
-            params.thread_id.clone(),
-            &episode_pool,
-            &results,
-        )
-        .await?;
-        (Some(episode_id), Some(policy))
-    };
+    let (retrieval_episode_id, ranking_policy) =
+        if params.suppress_retrieval_episode || params.ranking_time_ms.is_some() {
+            (None, None)
+        } else {
+            let (episode_id, policy) = record_search_retrieval_episode(
+                store,
+                &tenant_id,
+                project_id_filter,
+                &params.query,
+                mode,
+                params.k,
+                policy_mode,
+                params.task_id.clone(),
+                params.thread_id.clone(),
+                &episode_pool,
+                &results,
+            )
+            .await?;
+            (Some(episode_id), Some(policy))
+        };
     record_search_usage_event(store, &tenant_id, &params, results.len());
     let scope_status = scope_status_for_search(
         store,
@@ -379,6 +399,7 @@ pub async fn handle_memory_search<S: Store>(
         retrieved_count,
         &parsed_filters,
         &visibility_policy,
+        params.ranking_time_ms,
     )
     .await;
     format_mcp_response(&SearchResult {
