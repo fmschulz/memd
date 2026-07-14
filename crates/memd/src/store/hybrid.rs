@@ -505,9 +505,12 @@ impl HybridSearcher {
         let tiered_timing = tiered_result.timing;
         timing.tiered = Some(tiered_timing.clone());
 
-        // Step 3: If cache miss and sparse enabled, merge with sparse results
+        // Step 3: Run the sparse leg whenever hybrid search is enabled. The
+        // semantic cache stores dense tier results, not the final fused list;
+        // skipping sparse work on a cache hit would silently turn repeated
+        // hybrid queries into dense-only queries and change their ranking.
         let sparse_start = Instant::now();
-        let sparse_results = if !tiered_result.cache_hit && self.config.enable_sparse {
+        let sparse_results = if self.config.enable_sparse {
             if let Some(ref sparse) = self.sparse {
                 sparse.search(tenant_id, query, self.config.sparse_k)?
             } else {
@@ -518,63 +521,62 @@ impl HybridSearcher {
         };
         timing.sparse_time = sparse_start.elapsed();
 
-        // Step 4: Build results
-        // For cache hits, return directly; for non-cache, fuse with sparse
-        let results: Vec<HybridSearchResult> =
-            if tiered_result.cache_hit || sparse_results.is_empty() {
-                // Direct conversion from tiered results. Truncate to `k`: the
-                // dense leg was over-fetched to dense_fetch for fusion, but with
-                // no sparse leg to fuse there is nothing to truncate later.
-                tiered_result
-                    .results
-                    .into_iter()
-                    .take(k)
-                    .map(|r| HybridSearchResult {
-                        chunk_id: r.chunk_id,
-                        final_score: r.score,
-                        dense_rank: None, // Tier doesn't track separate ranks
-                        sparse_rank: None,
-                    })
-                    .collect()
-            } else {
-                // Fuse tiered (dense) results with sparse
-                let fusion_start = Instant::now();
-                let mut candidates: Vec<FusionCandidate> = Vec::new();
+        // Step 4: Build results. Cache hits still need sparse fusion because
+        // only the dense leg is cached.
+        let results: Vec<HybridSearchResult> = if sparse_results.is_empty() {
+            // Direct conversion from tiered results. Truncate to `k`: the
+            // dense leg was over-fetched to dense_fetch for fusion, but with
+            // no sparse leg to fuse there is nothing to truncate later.
+            tiered_result
+                .results
+                .into_iter()
+                .take(k)
+                .map(|r| HybridSearchResult {
+                    chunk_id: r.chunk_id,
+                    final_score: r.score,
+                    dense_rank: None, // Tier doesn't track separate ranks
+                    sparse_rank: None,
+                })
+                .collect()
+        } else {
+            // Fuse tiered (dense) results with sparse
+            let fusion_start = Instant::now();
+            let mut candidates: Vec<FusionCandidate> = Vec::new();
 
-                // Tiered results as dense candidates
-                for (rank, result) in tiered_result.results.iter().enumerate() {
-                    candidates.push(FusionCandidate {
-                        chunk_id: result.chunk_id.clone(),
-                        source: FusionSource::Dense,
-                        rank: rank + 1,
-                        source_score: result.score,
-                    });
-                }
+            // Tiered results as dense candidates
+            for (rank, result) in tiered_result.results.iter().enumerate() {
+                candidates.push(FusionCandidate {
+                    chunk_id: result.chunk_id.clone(),
+                    source: FusionSource::Dense,
+                    rank: rank + 1,
+                    source_score: result.score,
+                });
+            }
 
-                // Sparse candidates
-                for (rank, result) in sparse_results.iter().enumerate() {
-                    candidates.push(FusionCandidate {
-                        chunk_id: result.chunk_id.clone(),
-                        source: FusionSource::Sparse,
-                        rank: rank + 1,
-                        source_score: result.score,
-                    });
-                }
+            // Sparse candidates
+            for (rank, result) in sparse_results.iter().enumerate() {
+                candidates.push(FusionCandidate {
+                    chunk_id: result.chunk_id.clone(),
+                    source: FusionSource::Sparse,
+                    rank: rank + 1,
+                    source_score: result.score,
+                });
+            }
 
-                let fused = self.fusion.fuse(candidates);
-                timing.fusion_time = fusion_start.elapsed();
+            let fused = self.fusion.fuse(candidates);
+            timing.fusion_time = fusion_start.elapsed();
 
-                fused
-                    .into_iter()
-                    .take(k)
-                    .map(|f| HybridSearchResult {
-                        chunk_id: f.chunk_id,
-                        final_score: f.rrf_score,
-                        dense_rank: f.dense_rank,
-                        sparse_rank: f.sparse_rank,
-                    })
-                    .collect()
-            };
+            fused
+                .into_iter()
+                .take(k)
+                .map(|f| HybridSearchResult {
+                    chunk_id: f.chunk_id,
+                    final_score: f.rrf_score,
+                    dense_rank: f.dense_rank,
+                    sparse_rank: f.sparse_rank,
+                })
+                .collect()
+        };
 
         timing.total_time = total_start.elapsed();
 
@@ -834,7 +836,7 @@ impl HybridSearcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::embeddings::MockEmbedder;
+    use crate::embeddings::{Embedder, MockEmbedder};
     use crate::store::DenseSearchConfig;
 
     fn make_test_hybrid_searcher(enable_sparse: bool) -> HybridSearcher {
@@ -854,6 +856,24 @@ mod tests {
         let config = HybridConfig {
             enable_sparse,
             enable_tiered: false, // Disable tiered for tests (MockEmbedder has different dimension)
+            ..Default::default()
+        };
+
+        HybridSearcher::new(dense, sparse, config)
+    }
+
+    fn make_test_tiered_hybrid_searcher() -> HybridSearcher {
+        let embedder = Arc::new(MockEmbedder::new());
+        let mut dense_config = DenseSearchConfig {
+            persist: false,
+            ..Default::default()
+        };
+        dense_config.hnsw.dimension = embedder.dimension();
+        let dense = Arc::new(DenseSearcher::with_embedder(embedder, dense_config));
+        let sparse = Some(Arc::new(Bm25Index::new().unwrap()));
+        let config = HybridConfig {
+            enable_sparse: true,
+            enable_tiered: true,
             ..Default::default()
         };
 
@@ -1002,6 +1022,53 @@ mod tests {
         // All timing components should be populated (even if zero)
         assert!(timing.total_time >= timing.dense_time);
         assert!(results.len() <= 10);
+    }
+
+    #[tokio::test]
+    async fn test_tiered_cache_hit_preserves_sparse_fusion() {
+        let searcher = make_test_tiered_hybrid_searcher();
+        let tenant = make_tenant();
+        let exact = ChunkId::new();
+        let other = ChunkId::new();
+        searcher
+            .index_batch(
+                &tenant,
+                &[
+                    (
+                        exact,
+                        "XyzSpecialFunctionName handles exact keyword lookups".to_string(),
+                    ),
+                    (other, "general retrieval implementation notes".to_string()),
+                ],
+            )
+            .await
+            .unwrap();
+
+        let cold = searcher
+            .search(&tenant, "XyzSpecialFunctionName", 10, None)
+            .await
+            .unwrap();
+        let warm = searcher
+            .search(&tenant, "XyzSpecialFunctionName", 10, None)
+            .await
+            .unwrap();
+        let signature = |results: &[HybridSearchResult]| {
+            results
+                .iter()
+                .map(|result| {
+                    (
+                        result.chunk_id.clone(),
+                        result.dense_rank,
+                        result.sparse_rank,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(signature(&cold), signature(&warm));
+        assert!(warm.iter().any(|result| result.sparse_rank.is_some()));
+        let stats = searcher.get_cache_stats().unwrap();
+        assert_eq!(stats.cache_hits, 1);
     }
 
     #[tokio::test]
