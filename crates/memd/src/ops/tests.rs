@@ -557,6 +557,10 @@ async fn add_and_search() {
     let text = add_result["content"][0]["text"].as_str().unwrap();
     let add_response: AddResult = serde_json::from_str(text).unwrap();
     assert!(!add_response.chunk_id.is_empty());
+    assert_eq!(
+        add_response.stored_chunk_ids.as_deref(),
+        Some([add_response.chunk_id.clone()].as_slice())
+    );
     assert_eq!(add_response.admission_decision.as_deref(), Some("durable"));
     assert_eq!(add_response.admission_reason.as_deref(), Some("accepted"));
 
@@ -587,6 +591,156 @@ async fn add_and_search() {
     let search_response: SearchResult = serde_json::from_str(text).unwrap();
     assert_eq!(search_response.results.len(), 1);
     assert_eq!(search_response.results[0].text, "hello world");
+}
+
+#[tokio::test]
+async fn add_returns_every_split_chunk_id_in_storage_order() {
+    let (store, _dir) = make_persistent_store();
+    let tenant = TenantId::new("split_ids").unwrap();
+    let expires_at_ms = current_time_ms() + 3_600_000;
+    let result = handle_memory_add(
+        &store,
+        None,
+        AddParams {
+            tenant_id: tenant.to_string(),
+            text: "This sentence is long enough to exercise deterministic document splitting. "
+                .repeat(80),
+            chunk_type: "doc".to_string(),
+            project_id: Some("identity-contract".to_string()),
+            episode_id: None,
+            source: None,
+            tags: vec![],
+            expires_at_ms: Some(expires_at_ms),
+            review_after_ms: None,
+            mode: None,
+            supersede_near_duplicates: None,
+            event_time_ms: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let response: AddResult = parse_tool_payload(&result);
+    let stored_ids = response.stored_chunk_ids.expect("complete stored ids");
+    assert!(
+        stored_ids.len() > 1,
+        "fixture should split into child chunks"
+    );
+    assert_eq!(response.chunk_id, stored_ids[0]);
+
+    let listed = store.list_chunks(&tenant, 1_000, 0).await.unwrap();
+    assert_eq!(listed.len(), stored_ids.len());
+    let listed_ids = listed
+        .iter()
+        .map(|chunk| chunk.chunk_id.to_string())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(listed_ids.len(), stored_ids.len());
+    assert!(stored_ids
+        .iter()
+        .all(|chunk_id| listed_ids.contains(chunk_id)));
+    for chunk_id in &stored_ids {
+        let resolved = store
+            .get_with_lifecycle(&tenant, &ChunkId::parse(chunk_id).unwrap())
+            .await
+            .unwrap()
+            .expect("returned id should resolve");
+        assert_eq!(resolved.lifecycle.expires_at_ms, Some(expires_at_ms));
+    }
+}
+
+#[tokio::test]
+async fn dedup_supersession_returns_and_updates_every_split_child() {
+    let (store, _dir) = make_persistent_store();
+    let tenant = TenantId::new("split_supersede").unwrap();
+    handle_memory_add(
+        &store,
+        None,
+        AddParams {
+            tenant_id: tenant.to_string(),
+            text: "Original release note for the identity contract.".to_string(),
+            chunk_type: "doc".to_string(),
+            project_id: Some("identity-contract".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let expires_at_ms = current_time_ms() + 3_600_000;
+    let result = handle_memory_add(
+        &store,
+        None,
+        AddParams {
+            tenant_id: tenant.to_string(),
+            text: "Replacement release note with enough detail for deterministic splitting. "
+                .repeat(80),
+            chunk_type: "doc".to_string(),
+            project_id: Some("identity-contract".to_string()),
+            expires_at_ms: Some(expires_at_ms),
+            supersede_near_duplicates: Some(DedupSpec::Config(DedupConfig {
+                mode: Some("fuzzy".to_string()),
+                threshold: Some(0.0),
+                scope: Some("project".to_string()),
+            })),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let response: Value = parse_tool_payload(&result);
+    let primary_id = response["chunk_id"].as_str().unwrap();
+    let stored_ids = response["stored_chunk_ids"].as_array().unwrap();
+    assert!(stored_ids.len() > 1, "replacement fixture should split");
+    assert_eq!(stored_ids[0].as_str(), Some(primary_id));
+    assert_eq!(response["superseded_ids"].as_array().unwrap().len(), 1);
+    for chunk_id in stored_ids {
+        let resolved = store
+            .get_with_lifecycle(
+                &tenant,
+                &ChunkId::parse(chunk_id.as_str().expect("stored chunk id")).unwrap(),
+            )
+            .await
+            .unwrap()
+            .expect("returned id should resolve");
+        assert_eq!(resolved.lifecycle.expires_at_ms, Some(expires_at_ms));
+    }
+}
+
+#[tokio::test]
+async fn explicit_supersede_returns_every_replacement_chunk_id() {
+    let (store, _dir) = make_persistent_store();
+    let tenant = TenantId::new("explicit_split_supersede").unwrap();
+    let old_id = store
+        .add(MemoryChunk::new(
+            tenant.clone(),
+            "Original release note.",
+            ChunkType::Doc,
+        ))
+        .await
+        .unwrap();
+    let (result, event) = handle_memory_supersede(
+        &store,
+        None,
+        SupersedeParams {
+            tenant_id: tenant.to_string(),
+            old_chunk_id: old_id.to_string(),
+            new_text: "A deterministic replacement sentence for split identity. ".repeat(80),
+            chunk_type: "doc".to_string(),
+            project_id: None,
+            source: None,
+            tags: vec![],
+        },
+    )
+    .await
+    .unwrap();
+
+    let response: Value = parse_tool_payload(&result);
+    let stored_ids = response["new_stored_chunk_ids"].as_array().unwrap();
+    assert!(stored_ids.len() > 1);
+    let event_chunk_id = event.chunk_id.to_string();
+    assert_eq!(stored_ids[0].as_str(), Some(event_chunk_id.as_str()));
+    assert_eq!(response["new_chunk_id"], stored_ids[0]);
 }
 
 #[tokio::test]
@@ -1409,7 +1563,7 @@ async fn search_returns_citation_with_provenance_and_offsets() {
         "lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(80)
     );
 
-    handle_memory_add(
+    let add_result = handle_memory_add(
         &store,
         None,
         AddParams {
@@ -1437,6 +1591,11 @@ async fn search_returns_citation_with_provenance_and_offsets() {
     )
     .await
     .unwrap();
+    let add_response: AddResult = parse_tool_payload(&add_result);
+    assert!(
+        add_response.stored_chunk_ids.unwrap().len() > 1,
+        "in-memory long-document writes should expose split child ids"
+    );
 
     let result = handle_memory_search(
         &store,

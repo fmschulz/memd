@@ -79,8 +79,13 @@ pub async fn handle_memory_supersede<S: Store>(
     }
     new_chunk = admission.apply_to_chunk(new_chunk);
     let lifecycle_delta = admission.lifecycle_delta();
-    let new_id = ps
-        .supersede_chunk_with_lifecycle(&tenant_id, &old_id, new_chunk, lifecycle_delta)
+    let (new_id, stored_chunk_ids) = ps
+        .supersede_chunk_with_lifecycle_and_stored_ids(
+            &tenant_id,
+            &old_id,
+            new_chunk,
+            lifecycle_delta,
+        )
         .await
         .map_err(|e| McpError::ToolError(e.to_string()))?;
 
@@ -96,6 +101,7 @@ pub async fn handle_memory_supersede<S: Store>(
     };
     let response = format_mcp_response(&json!({
         "new_chunk_id": new_id.to_string(),
+        "new_stored_chunk_ids": stored_chunk_ids.iter().map(ToString::to_string).collect::<Vec<_>>(),
         "old_chunk_id": old_id.to_string(),
         "admission_decision": admission.decision(),
         "admission_reason": admission.outcome.reason,

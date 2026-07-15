@@ -81,6 +81,30 @@ async fn cli_add_rejects_low_signal_progress_with_reason() {
 }
 
 #[tokio::test]
+async fn cli_add_returns_every_split_chunk_id() {
+    let store = MemoryStore::new();
+    let rendered = cli_add_rendered(
+        &store,
+        None,
+        CliAddRenderOptions {
+            tenant_id: "cli_split_ids".to_string(),
+            text: "A deterministic sentence for split identity verification. ".repeat(80),
+            chunk_type: ChunkType::Doc,
+            project_id: Some("identity-contract".to_string()),
+            tags: None,
+            source_uri: None,
+            source_path: None,
+        },
+    )
+    .await
+    .unwrap();
+    let response: Value = serde_json::from_str(&rendered).unwrap();
+    let stored_ids = response["stored_chunk_ids"].as_array().unwrap();
+    assert!(stored_ids.len() > 1);
+    assert_eq!(stored_ids[0], response["chunk_id"]);
+}
+
+#[tokio::test]
 async fn export_markdown_writes_human_readable_output() {
     let store = MemoryStore::new();
     let tenant = TenantId::new("export_tenant").unwrap();

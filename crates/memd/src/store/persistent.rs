@@ -1789,6 +1789,10 @@ impl Store for PersistentStore {
             .ok_or_else(|| MemdError::StorageError("no chunk id produced".into()))
     }
 
+    async fn add_with_stored_ids(&self, chunk: MemoryChunk) -> Result<(ChunkId, Vec<ChunkId>)> {
+        self.add_chunk_with_stored_ids(chunk).await
+    }
+
     async fn add_batch(&self, chunks: Vec<MemoryChunk>) -> Result<Vec<ChunkId>> {
         self.ensure_writable("add_batch")?;
         self.add_chunks_internal(chunks).await

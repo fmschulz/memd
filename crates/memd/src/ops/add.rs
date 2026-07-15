@@ -1,5 +1,26 @@
 use super::*;
 
+async fn add_chunk_with_complete_ids<S: Store>(
+    store: &S,
+    chunk: MemoryChunk,
+    lifecycle: LifecycleDelta,
+) -> Result<(ChunkId, Vec<ChunkId>), McpError> {
+    if lifecycle.is_empty() {
+        store
+            .add_with_stored_ids(chunk)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))
+    } else if let Some(ps) = store.as_persistent() {
+        ps.add_chunk_with_lifecycle_and_stored_ids(chunk, lifecycle)
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))
+    } else {
+        Err(McpError::ToolError(
+            "memory.add with temporal fields requires a persistent store".into(),
+        ))
+    }
+}
+
 /// Handle memory.add tool call
 pub async fn handle_memory_add<S: Store>(
     store: &S,
@@ -94,7 +115,6 @@ pub async fn handle_memory_add<S: Store>(
 
     // PreparedWrite has already applied normalized tags, priority, and mode.
     let lifecycle_delta = admission_lifecycle_delta(&admission);
-    let has_lifecycle = !lifecycle_delta.is_empty();
     let caller_requested_lifecycle =
         params.expires_at_ms.is_some() || params.review_after_ms.is_some();
     let resolved_dedup = match params.supersede_near_duplicates.as_ref() {
@@ -111,6 +131,7 @@ pub async fn handle_memory_add<S: Store>(
             info!(chunk_id = %existing_id, "reused existing exact content duplicate");
             return format_mcp_response(&AddResult {
                 chunk_id: existing_id.to_string(),
+                stored_chunk_ids: Some(vec![existing_id.to_string()]),
                 dedupe_decision: Some("reused_existing_exact_content".to_string()),
                 deduped_existing_id: Some(existing_id.to_string()),
                 admission_decision: Some(admission_decision_string(&admission)),
@@ -150,19 +171,10 @@ pub async fn handle_memory_add<S: Store>(
         // dedup branch.
         let tenant_id_for_extras = chunk.tenant_id.clone();
 
-        let new_chunk_id = if candidates.is_empty() {
+        let (new_chunk_id, stored_chunk_ids) = if candidates.is_empty() {
             // No prior matches — fall back to a normal add. Lifecycle
             // overlay still applies if requested.
-            if has_lifecycle {
-                ps.add_chunk_with_lifecycle(chunk, lifecycle_delta.clone())
-                    .await
-                    .map_err(|e| McpError::ToolError(e.to_string()))?
-            } else {
-                store
-                    .add(chunk)
-                    .await
-                    .map_err(|e| McpError::ToolError(e.to_string()))?
-            }
+            add_chunk_with_complete_ids(store, chunk, lifecycle_delta.clone()).await?
         } else {
             // Atomically replace the FIRST candidate with the new chunk
             // — `supersede_chunk` writes the payload + supersession
@@ -172,27 +184,14 @@ pub async fn handle_memory_add<S: Store>(
             // supersede_chunk will not fail-closed on stale candidates
             // (Codex round-1 D3 HIGH-2).
             let first_old = &candidates[0];
-            let new_id = ps
-                .supersede_chunk(&tenant_id_for_extras, first_old, chunk)
-                .await
-                .map_err(|e| McpError::ToolError(e.to_string()))?;
-
-            // Codex round-1 D3 HIGH-1: supersede_chunk does not carry a
-            // lifecycle delta through, so the requested temporal overlay
-            // (expires_at_ms / review_after_ms) is dropped on the
-            // matched-dedup path. Apply it explicitly to the new
-            // chunk_id so the dedup-vs-no-dedup behaviour is identical
-            // when temporal fields are present.
-            if has_lifecycle {
-                let mut delta = lifecycle_delta.clone();
-                if delta.lifecycle_updated_at_ms.is_none() {
-                    delta.lifecycle_updated_at_ms = Some(current_time_ms());
-                }
-                ps.update_lifecycle(&tenant_id_for_extras, &new_id, &delta)
-                    .await
-                    .map_err(|e| McpError::ToolError(e.to_string()))?;
-            }
-            new_id
+            ps.supersede_chunk_with_lifecycle_and_stored_ids(
+                &tenant_id_for_extras,
+                first_old,
+                chunk,
+                lifecycle_delta.clone(),
+            )
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?
         };
 
         // We only atomically superseded the FIRST candidate via
@@ -219,6 +218,7 @@ pub async fn handle_memory_add<S: Store>(
         );
         return format_mcp_response(&serde_json::json!({
             "chunk_id": new_chunk_id.to_string(),
+            "stored_chunk_ids": stored_chunk_ids.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "superseded_ids": superseded_ids,
             "admission_decision": admission_decision_string(&admission),
             "admission_reason": admission.outcome.reason.clone(),
@@ -229,30 +229,14 @@ pub async fn handle_memory_add<S: Store>(
         }));
     }
 
-    let chunk_id = if has_lifecycle {
-        // Temporal overlay requires the persistent-store write path that
-        // updates the lifecycle row in the same logical op. Non-persistent
-        // stores (used only by a small handful of tests) have no overlay
-        // table, so we refuse rather than silently dropping the fields.
-        let ps = store.as_persistent().ok_or_else(|| {
-            McpError::ToolError(
-                "memory.add with temporal fields requires a persistent store".into(),
-            )
-        })?;
-        ps.add_chunk_with_lifecycle(chunk, lifecycle_delta)
-            .await
-            .map_err(|e| McpError::ToolError(e.to_string()))?
-    } else {
-        store
-            .add(chunk)
-            .await
-            .map_err(|e| McpError::ToolError(e.to_string()))?
-    };
+    let (chunk_id, stored_chunk_ids) =
+        add_chunk_with_complete_ids(store, chunk, lifecycle_delta).await?;
 
     info!(chunk_id = %chunk_id, "chunk added");
 
     format_mcp_response(&AddResult {
         chunk_id: chunk_id.to_string(),
+        stored_chunk_ids: Some(stored_chunk_ids.iter().map(ToString::to_string).collect()),
         dedupe_decision: None,
         deduped_existing_id: None,
         admission_decision: Some(admission_decision_string(&admission)),
@@ -376,7 +360,7 @@ pub async fn handle_memory_add_batch<S: Store>(
         let mut superseded_ids: Vec<Vec<String>> = Vec::with_capacity(prepared.len());
         let mut admission_decisions = Vec::with_capacity(prepared.len());
         let mut admission_reasons = Vec::with_capacity(prepared.len());
-        for (chunk, delta, has_lifecycle, project_id, admission) in prepared {
+        for (chunk, delta, _has_lifecycle, project_id, admission) in prepared {
             let bytes = chunk.text.len();
             let candidates = crate::dedup::compute_dedup_candidates(
                 ps,
@@ -387,32 +371,20 @@ pub async fn handle_memory_add_batch<S: Store>(
                 &cfg,
             )?;
             let new_id = if candidates.is_empty() {
-                if has_lifecycle {
-                    ps.add_chunk_with_lifecycle(chunk, delta.clone())
-                        .await
-                        .map_err(|e| McpError::ToolError(e.to_string()))?
-                } else {
-                    store
-                        .add(chunk)
-                        .await
-                        .map_err(|e| McpError::ToolError(e.to_string()))?
-                }
+                add_chunk_with_complete_ids(store, chunk, delta.clone())
+                    .await?
+                    .0
             } else {
                 let first_old = &candidates[0];
-                let new_id = ps
-                    .supersede_chunk(&tenant_id, first_old, chunk)
-                    .await
-                    .map_err(|e| McpError::ToolError(e.to_string()))?;
-                if has_lifecycle {
-                    let mut d = delta.clone();
-                    if d.lifecycle_updated_at_ms.is_none() {
-                        d.lifecycle_updated_at_ms = Some(current_time_ms());
-                    }
-                    ps.update_lifecycle(&tenant_id, &new_id, &d)
-                        .await
-                        .map_err(|e| McpError::ToolError(e.to_string()))?;
-                }
-                new_id
+                ps.supersede_chunk_with_lifecycle_and_stored_ids(
+                    &tenant_id,
+                    first_old,
+                    chunk,
+                    delta.clone(),
+                )
+                .await
+                .map_err(|e| McpError::ToolError(e.to_string()))?
+                .0
             };
             // Mirror D3: only the first candidate is actually linked
             // by supersede_chunk; report only what we changed.

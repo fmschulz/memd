@@ -37,6 +37,9 @@ For write-quality expectations and cleanup safety, see the
 | `memd eval-outcome-ranking` | Compare the served order with the source-deduplicated `outcome-v1` shadow order against JSONL relevant/harmful judgments. Writes JSON and Markdown counterfactual reports without activating the policy. |
 | `memd maintenance` | Disk hygiene: sweep orphan HNSW snapshots, report what changed. |
 
+`memd add` returns the primary `chunk_id` and `stored_chunk_ids`, an ordered
+list of every physical chunk created by document splitting.
+
 - `memory-md --explain-output <path>` writes a JSON candidate audit with query
   source, score components, tags, display/filter decisions, structured project
   state, and agent-usefulness metrics.
@@ -121,9 +124,14 @@ dedicated first-class subcommand.
 
 ### `memory.*` — raw searchable content
 
-- `memory.add` — single chunk (code, doc, note; code chunks with a real
-  `source.path` are parsed into the structural index).
-- `memory.add_batch` — many chunks in one call.
+- `memory.add` — single chunk. The response contains the primary `chunk_id`
+  and `stored_chunk_ids`, an ordered list of every stored split child with the
+  primary ID first. Code chunks with a real `source.path` are parsed into the
+  structural index.
+- `memory.add_batch` — many chunks in one call. Its `chunk_ids` array contains
+  one primary ID per logical input, preserving input order. It does not expose
+  split-child IDs; use individual `memory.add` calls when physical write
+  identity is required for retrieval or outcome attribution.
 - `memory.search` — hybrid retrieval with optional `mode`, `project_id`,
   compact/token-budgeted output, and event sibling expansion.
 - `memory.get`, `memory.delete`, `memory.stats`, `memory.health`, `memory.metrics`.

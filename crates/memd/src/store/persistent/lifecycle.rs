@@ -76,6 +76,17 @@ impl PersistentStore {
         chunk: MemoryChunk,
         initial: LifecycleDelta,
     ) -> Result<ChunkId> {
+        Ok(self
+            .add_chunk_with_lifecycle_and_stored_ids(chunk, initial)
+            .await?
+            .0)
+    }
+
+    pub(crate) async fn add_chunk_with_lifecycle_and_stored_ids(
+        &self,
+        chunk: MemoryChunk,
+        initial: LifecycleDelta,
+    ) -> Result<(ChunkId, Vec<ChunkId>)> {
         self.ensure_writable("add_chunk_with_lifecycle")?;
         let tenant_id = chunk.tenant_id.clone();
 
@@ -88,7 +99,7 @@ impl PersistentStore {
         // per-row canonical_text whenever `split_for_add` produced
         // multiple rows — Codex round-1 D2 review HIGH finding. The
         // INSERT-side write is now the single source of truth.
-        let chunk_id = <Self as Store>::add(self, chunk).await?;
+        let (chunk_id, stored_ids) = self.add_chunk_with_stored_ids(chunk).await?;
 
         // Step 2: apply the initial lifecycle delta only if non-empty so
         // we skip a no-op UPDATE on the common "no overlay yet" call.
@@ -98,8 +109,10 @@ impl PersistentStore {
             if delta.lifecycle_updated_at_ms.is_none() {
                 delta.lifecycle_updated_at_ms = Some(now);
             }
-            self.metadata
-                .update_lifecycle(&tenant_id, &chunk_id, &delta)?;
+            for stored_id in &stored_ids {
+                self.metadata
+                    .update_lifecycle(&tenant_id, stored_id, &delta)?;
+            }
             // Bump again to invalidate any snapshot captured between
             // `add()` and this overlay UPDATE.
             if let Some(h) = self.hybrid() {
@@ -107,7 +120,7 @@ impl PersistentStore {
             }
         }
 
-        Ok(chunk_id)
+        Ok((chunk_id, stored_ids))
     }
 
     /// Persist one journaled consolidation candidate with its preallocated
@@ -316,6 +329,19 @@ impl PersistentStore {
         new_chunk: MemoryChunk,
         lifecycle: LifecycleDelta,
     ) -> Result<ChunkId> {
+        Ok(self
+            .supersede_chunk_with_lifecycle_and_stored_ids(tenant_id, old_id, new_chunk, lifecycle)
+            .await?
+            .0)
+    }
+
+    pub(crate) async fn supersede_chunk_with_lifecycle_and_stored_ids(
+        &self,
+        tenant_id: &TenantId,
+        old_id: &ChunkId,
+        new_chunk: MemoryChunk,
+        lifecycle: LifecycleDelta,
+    ) -> Result<(ChunkId, Vec<ChunkId>)> {
         self.ensure_writable("supersede_chunk")?;
         // Step 0: refuse tenant mismatch immediately. Without this guard
         // the new chunk would be written under `new_chunk.tenant_id`
@@ -380,7 +406,9 @@ impl PersistentStore {
         // concurrent supersede racing the head check) are caught in
         // step 4 and compensated in step 4a so the orphan new chunk
         // doesn't remain visible.
-        let new_id = self.add_chunk_with_lifecycle(new_chunk, lifecycle).await?;
+        let (new_id, stored_ids) = self
+            .add_chunk_with_lifecycle_and_stored_ids(new_chunk, lifecycle)
+            .await?;
 
         // Step 4: atomically link old ↔ new in a single SQLite transaction.
         // The UPDATE filters on `superseded_by IS NULL` so a concurrent
@@ -400,13 +428,18 @@ impl PersistentStore {
             // `Store::delete_chunk` hits WAL + metadata + segment
             // tombstone + hybrid delete + cache invalidation, so after
             // this call the orphan is gone from every surface.
-            let delete_res = self.delete_chunk(tenant_id, &new_id).await;
-            if let Err(del_err) = delete_res {
+            let mut delete_errors = Vec::new();
+            for stored_id in &stored_ids {
+                if let Err(error) = self.delete_chunk(tenant_id, stored_id).await {
+                    delete_errors.push(format!("{stored_id}: {error}"));
+                }
+            }
+            if !delete_errors.is_empty() {
                 warn!(
                     tenant_id = %tenant_id,
                     new_id = %new_id,
                     link_err = %link_err,
-                    del_err = %del_err,
+                    del_err = %delete_errors.join("; "),
                     "supersede_chunk: atomic_supersede failed AND compensating delete_chunk failed; \
                      new chunk is an orphan — investigate manually"
                 );
@@ -436,7 +469,7 @@ impl PersistentStore {
             h.bump_tenant_memory_version(tenant_id);
         }
 
-        Ok(new_id)
+        Ok((new_id, stored_ids))
     }
 
     /// Walk the `superseded_by` chain starting at `start`. Returns
