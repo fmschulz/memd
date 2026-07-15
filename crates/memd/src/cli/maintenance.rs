@@ -8,15 +8,7 @@
 //!    this command surfaces it for ops scripts and lets operators
 //!    inspect the bytes-freed report before doing other work.
 //!
-//! 2. (`--aggressive`) Compaction hooks. The current implementation
-//!    counts what would be touched; the actual compaction entry
-//!    points live in `crate::compaction` and `crate::maintenance` and
-//!    will be wired in once they expose stable per-tenant interfaces.
-//!
-//! 3. (`--aggressive`) Mapping repack. `HnswIndex::load` already
-//!    converts legacy `mapping.json` to bincode `mapping.bin` on the
-//!    next save, but this command can force the conversion eagerly so
-//!    operators don't have to wait for the next write.
+//! 2. (`--aggressive`) Force-merge the global sparse index into one segment.
 //!
 //! Concurrency: the CLI acquires the data-dir writer lock before
 //! entering this module. The orphan sweep targets files the loader never
@@ -24,7 +16,9 @@
 
 use std::path::Path;
 
+use crate::compaction::SegmentMerger;
 use crate::error::{MemdError, Result};
+use crate::index::Bm25Index;
 
 /// Per-run summary returned by `run`. The CLI surface renders this as
 /// key:value lines so it stays greppable.
@@ -45,9 +39,12 @@ pub struct MaintenanceReport {
     /// Reserved for `--aggressive`: legacy `mapping.json` rewritten as
     /// `mapping.bin`. Currently 0 — wired by future compaction hook.
     pub legacy_mapping_converted: u64,
-    /// Reserved for `--aggressive`: small segments merged. Currently 0
-    /// — wired by future compaction hook.
+    /// Sparse-index segments merged, or that would be merged in dry-run mode.
     pub segments_merged: u64,
+    /// Sparse-index segment count before aggressive maintenance.
+    pub sparse_segments_before: u64,
+    /// Sparse-index segment count after, or predicted after, maintenance.
+    pub sparse_segments_after: u64,
 }
 
 /// Entry point. Inspects `data_dir/tenants/<tenant>/warm_index/` for
@@ -93,15 +90,40 @@ pub fn run(
         }
         report.tenants_scanned += 1;
         sweep_warm_index(&entry.path().join("warm_index"), dry_run, &mut report)?;
+    }
 
-        if aggressive {
-            // Compaction + mapping repack hooks land here in a
-            // follow-up. The maintenance command surface is committed
-            // so ops scripts don't break when the wiring shows up.
-        }
+    if aggressive {
+        let (before, after) = merge_sparse_segments(data_dir, dry_run)?;
+        report.sparse_segments_before = before;
+        report.sparse_segments_after = after;
+        report.segments_merged = before.saturating_sub(after);
     }
 
     Ok(report)
+}
+
+fn merge_sparse_segments(data_dir: &Path, dry_run: bool) -> Result<(u64, u64)> {
+    let sparse_path = data_dir.join("sparse_index");
+    if !sparse_path.exists() {
+        return Ok((0, 0));
+    }
+
+    if dry_run {
+        let Some(index) = Bm25Index::with_path_read_only(sparse_path)? else {
+            return Ok((0, 0));
+        };
+        let before = index.segment_count()? as u64;
+        let after = if index.total_docs()? == 0 {
+            0
+        } else {
+            before.min(1)
+        };
+        return Ok((before, after));
+    }
+
+    let index = Bm25Index::with_path(Some(sparse_path))?;
+    let result = SegmentMerger::new().merge(&index)?;
+    Ok((result.segments_before as u64, result.segments_after as u64))
 }
 
 fn sweep_warm_index(warm: &Path, dry_run: bool, report: &mut MaintenanceReport) -> Result<()> {
@@ -182,7 +204,60 @@ pub fn render_report(report: &MaintenanceReport, dry_run: bool, aggressive: bool
             "legacy_mapping_converted: {}\n",
             report.legacy_mapping_converted
         ));
+        out.push_str(&format!(
+            "sparse_segments_before: {}\n",
+            report.sparse_segments_before
+        ));
+        out.push_str(&format!(
+            "sparse_segments_after: {}\n",
+            report.sparse_segments_after
+        ));
         out.push_str(&format!("segments_merged: {}\n", report.segments_merged));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::SparseIndex;
+    use crate::types::{ChunkId, TenantId};
+    use tempfile::tempdir;
+
+    #[test]
+    fn aggressive_maintenance_force_merges_sparse_segments() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("tenants/test")).unwrap();
+        let sparse_path = dir.path().join("sparse_index");
+        let tenant = TenantId::new("test").unwrap();
+        {
+            let index = Bm25Index::with_path(Some(sparse_path.clone())).unwrap();
+            for i in 0..12 {
+                index
+                    .insert(
+                        &tenant,
+                        &ChunkId::new(),
+                        &[format!("maintenance segment {i}")],
+                    )
+                    .unwrap();
+                index.commit().unwrap();
+            }
+        }
+
+        let preview = run(dir.path(), None, true, true).unwrap();
+        assert!(preview.segments_merged > 0);
+        assert_eq!(preview.sparse_segments_after, 1);
+        let applied = run(dir.path(), None, false, true).unwrap();
+        assert_eq!(applied.segments_merged, preview.segments_merged);
+        assert_eq!(
+            applied.sparse_segments_before,
+            preview.sparse_segments_before
+        );
+        assert_eq!(applied.sparse_segments_after, 1);
+
+        let index = Bm25Index::with_path_read_only(sparse_path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(index.segment_count().unwrap(), 1);
+    }
 }

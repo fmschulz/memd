@@ -30,19 +30,20 @@ instead of silently returning the wrong record.
 
 ## Disk hygiene
 
-Run `memd maintenance` to sweep orphan HNSW snapshots and report what
-changed. Useful flags:
+Run `memd maintenance` to sweep orphan HNSW snapshots and report the result.
+Use `--aggressive` to force-merge the global Tantivy sparse index into one
+searchable segment:
 
 ```bash
 memd maintenance --dry-run                  # report what would change
 memd maintenance --aggressive               # run the full pass
-memd maintenance --tenant-id <id>           # restrict to one tenant
+memd maintenance --tenant-id <id>           # restrict the HNSW sweep only
 ```
 
-The orphan sweep targets `graph-NNNN.hnsw.{graph,data}` files left by older
-builds before the hnsw_rs orphan-snapshot fix shipped. Output is greppable
-`key:value` so ops scripts can wire it up directly. Safe to run while no
-writer process is active.
+The orphan sweep targets `graph-NNNN.hnsw.{graph,data}` files. Aggressive
+output includes `sparse_segments_before`, `sparse_segments_after`, and
+`segments_merged`. Output uses `key:value` lines for shell parsing. The command
+takes the data-directory writer lock and does not run through the warm worker.
 
 ## Why bincode for the mapping?
 

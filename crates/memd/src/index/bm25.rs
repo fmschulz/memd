@@ -285,6 +285,39 @@ impl Bm25Index {
         let searcher = self.reader.searcher();
         Ok(searcher.segment_readers().len())
     }
+
+    /// Merge every searchable Tantivy segment and wait for the merged segment
+    /// to become durable. A plain commit does not force existing segments to
+    /// merge, so maintenance callers must use this operation explicitly.
+    pub fn merge_all_segments(&self) -> Result<()> {
+        self.commit_if_dirty()?;
+        let segment_ids = self
+            .index
+            .searchable_segment_ids()
+            .map_err(|e| MemdError::StorageError(format!("list segments: {e}")))?;
+        if segment_ids.len() <= 1 {
+            return Ok(());
+        }
+
+        let merge = {
+            let mut writer = self
+                .writer
+                .as_ref()
+                .ok_or_else(|| MemdError::ReadOnlyStore {
+                    op: "bm25_merge_all_segments".to_string(),
+                })?
+                .lock()
+                .map_err(|e| MemdError::StorageError(format!("lock writer: {e}")))?;
+            writer.merge(&segment_ids)
+        };
+        merge
+            .wait()
+            .map_err(|e| MemdError::StorageError(format!("merge segments: {e}")))?;
+        self.reader
+            .reload()
+            .map_err(|e| MemdError::StorageError(format!("reload merged index: {e}")))?;
+        Ok(())
+    }
 }
 
 impl Default for Bm25Index {

@@ -1131,20 +1131,17 @@ pub enum CliCommand {
         strict: bool,
     },
 
-    /// Disk hygiene: sweep orphan HNSW snapshots, repack legacy mapping
-    /// files, and (with --aggressive) trigger optional compaction
-    /// hooks. Safe to run while no writer process is active; concurrent
-    /// writers may race on warm_index files and should be quiesced
-    /// first. Output is machine-greppable (key: value lines) so it can
-    /// be wired into ops scripts.
+    /// Disk hygiene: sweep orphan HNSW snapshots and, with --aggressive,
+    /// force-merge the global sparse index. Takes the data-directory writer
+    /// lock. Output uses key:value lines for shell parsing.
     Maintenance {
         /// Data directory (defaults to the top-level --data-dir or
         /// ~/.memd/data).
         #[arg(long)]
         data_dir: Option<PathBuf>,
 
-        /// Restrict to a single tenant directory. Omit to scan all
-        /// tenants.
+        /// Restrict the HNSW orphan sweep to one tenant directory. The
+        /// aggressive sparse-index merge remains global.
         #[arg(long)]
         tenant_id: Option<String>,
 
@@ -1152,8 +1149,8 @@ pub enum CliCommand {
         #[arg(long)]
         dry_run: bool,
 
-        /// Run the full pass: orphan sweep + segment compaction hooks
-        /// + mapping repack. Implies more I/O than the default sweep.
+        /// Sweep orphans and force-merge the global sparse index. This can
+        /// temporarily require space for both the old and merged segments.
         #[arg(long)]
         aggressive: bool,
     },
