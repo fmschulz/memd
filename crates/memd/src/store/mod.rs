@@ -219,9 +219,16 @@ pub trait Store: Send + Sync {
     /// Returns the chunk_id of the stored chunk.
     async fn add(&self, chunk: MemoryChunk) -> Result<ChunkId>;
 
+    /// Add one logical chunk and return its primary id plus every physical id
+    /// created by splitting. Backends that do not split may use the default.
+    async fn add_with_stored_ids(&self, chunk: MemoryChunk) -> Result<(ChunkId, Vec<ChunkId>)> {
+        let chunk_id = self.add(chunk).await?;
+        Ok((chunk_id.clone(), vec![chunk_id]))
+    }
+
     /// Add multiple chunks in a batch
     ///
-    /// Returns the chunk_ids of all stored chunks.
+    /// Returns one primary chunk id for each logical input chunk.
     async fn add_batch(&self, chunks: Vec<MemoryChunk>) -> Result<Vec<ChunkId>>;
 
     /// Store a canonical task artifact and its retrieval projections.

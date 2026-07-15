@@ -304,6 +304,77 @@ async fn add_batch_persists_canonical_text_for_every_row() {
 }
 
 #[tokio::test]
+async fn add_batch_returns_one_primary_id_per_input_when_documents_split() {
+    let (server, _tmp) = test_server().await;
+    let response = call_tool(
+        &server,
+        "memory.add_batch",
+        serde_json::json!({
+            "tenant_id": "batch_split_arity",
+            "chunks": [
+                {
+                    "project_id": "p1",
+                    "text": "First batch document sentence for deterministic splitting. ".repeat(80),
+                    "type": "doc",
+                    "source": { "uri": "urn:test:batch-split:first" }
+                },
+                {
+                    "project_id": "p1",
+                    "text": "Second batch document sentence with distinct content. ".repeat(80),
+                    "type": "doc",
+                    "source": { "uri": "urn:test:batch-split:second" }
+                }
+            ],
+        }),
+    )
+    .await;
+    let body = parse_result_text(&response);
+    let primary_ids = body["chunk_ids"]
+        .as_array()
+        .expect("chunk_ids array")
+        .iter()
+        .map(|value| value.as_str().expect("primary id"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        primary_ids.len(),
+        2,
+        "batch response must keep one primary id per logical input"
+    );
+
+    let ps = server
+        .store()
+        .as_persistent()
+        .expect("test_server uses PersistentStore");
+    let live_rows = ps
+        .metadata()
+        .list_recent_for_project(&tenant("batch_split_arity"), Some("p1"), 128)
+        .expect("list physical rows")
+        .into_iter()
+        .filter(|row| row.status == memd::types::ChunkStatus::Final)
+        .collect::<Vec<_>>();
+    let expected_sources = ["urn:test:batch-split:first", "urn:test:batch-split:second"];
+    for (primary_id, expected_source) in primary_ids.iter().zip(expected_sources) {
+        let primary_row = live_rows
+            .iter()
+            .find(|row| row.chunk_id.to_string() == *primary_id)
+            .expect("every returned primary id must identify a stored physical row");
+        assert_eq!(
+            primary_row.source_uri.as_deref(),
+            Some(expected_source),
+            "primary ids must preserve logical input order"
+        );
+        assert!(
+            live_rows
+                .iter()
+                .filter(|row| row.source_uri.as_deref() == Some(expected_source))
+                .count()
+                > 1,
+            "each logical input should expand into physical split children"
+        );
+    }
+}
+
+#[tokio::test]
 async fn add_code_chunk_preserves_case_in_canonical_text() {
     // ChunkType::Code must NOT lowercase identifiers (D1 contract). The
     // INSERT-side D2 fix uses canonicalize_for_type, so code chunks land
@@ -1282,10 +1353,10 @@ async fn add_batch_with_dedup_preserves_lifecycle_overlay_on_match() {
         "memory.add_batch",
         serde_json::json!({
             "tenant_id": "t",
-            "supersede_near_duplicates": { "mode": "exact" },
+            "supersede_near_duplicates": { "mode": "fuzzy", "threshold": 0.0 },
             "chunks": [
                 {
-                    "text": "release freeze begins thursday.",
+                    "text": "Replacement release note with enough detail for deterministic splitting. ".repeat(80),
                     "type": "doc",
                     "project_id": "p1",
                     "expires_at_ms": want_expires,
@@ -1317,6 +1388,17 @@ async fn add_batch_with_dedup_preserves_lifecycle_overlay_on_match() {
         Some(want_expires),
         "batch dedup must preserve per-chunk expires_at_ms on the match path"
     );
+    let live_rows = ps
+        .metadata()
+        .list_recent_for_project(&tenant("t"), Some("p1"), 128)
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.status == memd::types::ChunkStatus::Final)
+        .collect::<Vec<_>>();
+    assert!(live_rows.len() > 1, "replacement fixture should split");
+    assert!(live_rows
+        .iter()
+        .all(|row| row.lifecycle.expires_at_ms == Some(want_expires)));
 }
 
 #[tokio::test]

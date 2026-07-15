@@ -1385,7 +1385,12 @@ pub struct VerificationHint {
 /// Result of an add operation
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AddResult {
+    /// Backward-compatible id for the first stored chunk.
     pub chunk_id: String,
+    /// Every physical chunk stored for this logical add, including split
+    /// children. The primary `chunk_id` is always first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stored_chunk_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dedupe_decision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1,5 +1,11 @@
 use super::*;
 
+#[derive(Debug, Default)]
+pub(super) struct AddChunksOutcome {
+    pub primary_ids: Vec<ChunkId>,
+    pub stored_ids: Vec<ChunkId>,
+}
+
 impl PersistentStore {
     pub(super) fn expand_chunks_for_add(
         &self,
@@ -122,14 +128,29 @@ impl PersistentStore {
         &self,
         chunks: Vec<MemoryChunk>,
         preserve_chunk_ids: bool,
-        mut hook: F,
+        hook: F,
     ) -> Result<Vec<ChunkId>>
+    where
+        F: FnMut(CandidatePersistenceStage) -> Result<()>,
+    {
+        Ok(self
+            .add_chunks_internal_with_details_and_hook(chunks, preserve_chunk_ids, hook)
+            .await?
+            .primary_ids)
+    }
+
+    pub(super) async fn add_chunks_internal_with_details_and_hook<F>(
+        &self,
+        chunks: Vec<MemoryChunk>,
+        preserve_chunk_ids: bool,
+        mut hook: F,
+    ) -> Result<AddChunksOutcome>
     where
         F: FnMut(CandidatePersistenceStage) -> Result<()>,
     {
         self.ensure_writable("add_chunks_internal")?;
         if chunks.is_empty() {
-            return Ok(Vec::new());
+            return Ok(AddChunksOutcome::default());
         }
 
         let (expanded_chunks, primary_positions) = if preserve_chunk_ids {
@@ -299,7 +320,25 @@ impl PersistentStore {
                 .ok_or_else(|| MemdError::StorageError("missing primary chunk id".into()))?;
             primary_ids.push(chunk_id.clone());
         }
-        Ok(primary_ids)
+        Ok(AddChunksOutcome {
+            primary_ids,
+            stored_ids: expanded_ids,
+        })
+    }
+
+    /// Add one logical chunk and return both its backward-compatible primary
+    /// id and every physical chunk id created by document splitting.
+    pub(crate) async fn add_chunk_with_stored_ids(
+        &self,
+        chunk: MemoryChunk,
+    ) -> Result<(ChunkId, Vec<ChunkId>)> {
+        let outcome = self
+            .add_chunks_internal_with_details_and_hook(vec![chunk], false, |_| Ok(()))
+            .await?;
+        let primary_id = outcome.primary_ids.into_iter().next().ok_or_else(|| {
+            MemdError::StorageError("no primary chunk id produced for add".into())
+        })?;
+        Ok((primary_id, outcome.stored_ids))
     }
 
     pub(super) async fn add_task_artifact_internal(

@@ -100,13 +100,18 @@ impl Default for MemoryStore {
 #[async_trait]
 impl Store for MemoryStore {
     async fn add(&self, chunk: MemoryChunk) -> Result<ChunkId> {
+        Ok(self.add_with_stored_ids(chunk).await?.0)
+    }
+
+    async fn add_with_stored_ids(&self, chunk: MemoryChunk) -> Result<(ChunkId, Vec<ChunkId>)> {
         let mut chunks = split_for_add(chunk);
         if chunks.len() == 1 {
-            return self
+            let chunk_id = self
                 .add_single_chunk(chunks.pop().ok_or_else(|| {
                     crate::error::MemdError::StorageError("no chunk to add".into())
                 })?)
-                .await;
+                .await?;
+            return Ok((chunk_id.clone(), vec![chunk_id]));
         }
 
         let mut chunk_ids = Vec::with_capacity(chunks.len());
@@ -114,10 +119,11 @@ impl Store for MemoryStore {
             chunk_ids.push(self.add_single_chunk(chunk).await?);
         }
 
-        chunk_ids
-            .into_iter()
-            .next()
-            .ok_or_else(|| crate::error::MemdError::StorageError("no chunk id produced".into()))
+        let primary_id = chunk_ids
+            .first()
+            .cloned()
+            .ok_or_else(|| crate::error::MemdError::StorageError("no chunk id produced".into()))?;
+        Ok((primary_id, chunk_ids))
     }
 
     async fn add_batch(&self, chunks: Vec<MemoryChunk>) -> Result<Vec<ChunkId>> {

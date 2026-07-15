@@ -86,8 +86,8 @@ pub(super) async fn cli_add_rendered<S: Store>(
     });
 
     let lifecycle_delta = prepared.lifecycle_delta();
-    let chunk_id = if lifecycle_delta.is_empty() {
-        store.add(chunk).await?
+    let (chunk_id, stored_chunk_ids) = if lifecycle_delta.is_empty() {
+        store.add_with_stored_ids(chunk).await?
     } else {
         let persistent = store.as_persistent().ok_or_else(|| {
             MemdError::StorageError(
@@ -95,13 +95,14 @@ pub(super) async fn cli_add_rendered<S: Store>(
             )
         })?;
         persistent
-            .add_chunk_with_lifecycle(chunk, lifecycle_delta)
+            .add_chunk_with_lifecycle_and_stored_ids(chunk, lifecycle_delta)
             .await?
     };
     info!(chunk_id = %chunk_id, "chunk added");
 
     let output = json!({
         "chunk_id": chunk_id.to_string(),
+        "stored_chunk_ids": stored_chunk_ids.iter().map(ToString::to_string).collect::<Vec<_>>(),
         "admission_decision": prepared.decision(),
         "admission_reason": prepared.outcome.reason,
         "admission_warning": prepared.outcome.warning,

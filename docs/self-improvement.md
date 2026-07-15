@@ -98,6 +98,14 @@ memd outcome "$EPISODE_ID" \
   --evidence "artifact:test-report"
 ```
 
+Long documents may be stored as several chunks. `memory.add` returns the
+primary ID in `chunk_id` and the complete ordered set in `stored_chunk_ids`.
+Agents that retain write identities should store `stored_chunk_ids`; retrieval
+and outcome attribution use the physical child IDs.
+`memory.add_batch` returns one primary ID per logical input and does not expose
+split-child IDs. Agents that need complete physical attribution for long
+documents should use individual `memory.add` calls.
+
 Only explicitly used chunks on a verified pass or acceptance receive positive
 credit. Only explicitly harmful chunks on a verified correction or failure
 receive negative credit. Rendered-but-unattributed chunks receive no credit,

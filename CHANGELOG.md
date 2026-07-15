@@ -8,6 +8,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- `memory.add` and `memd add` return every physical chunk ID created by
+  long-document splitting in `stored_chunk_ids`, with the backward-compatible
+  `chunk_id` first. `memory.supersede` returns the replacement set in
+  `new_stored_chunk_ids`. Initial lifecycle metadata is applied to every split
+  child, and failed supersession links compensate all children instead of
+  deleting only the primary chunk.
 - Fixed-clock searches ignore future-dated feedback and outcome events. Tier
   diagnostics now use the same metadata reranker as standard search, so debug
   mode no longer reports a different order from the served path.
