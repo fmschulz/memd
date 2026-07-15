@@ -8,6 +8,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- `memd call` and `memd batch` now inherit missing `tenant_id` and
+  `project_id` values from `.memd/project_scope.json`, including requests
+  routed through a warm worker. An explicit JSON `tenant_id` remains
+  tenant-wide unless the same request also supplies `project_id`. Malformed
+  or unreadable scope files fail closed, and batch scope failures preserve
+  per-line receipts under `--continue-on-error`.
+- `bm25-only` no longer loads the dense index or applies recency, project,
+  type, or query-text feature bonuses. It preserves BM25 order before any
+  stored-feedback adjustment.
+- Sparse segment compaction now waits for an explicit Tantivy merge instead of
+  issuing a no-op commit. The compaction runner and
+  `memd maintenance --aggressive` now perform the merge; the maintenance
+  report includes sparse segment counts before and after it.
 - `memory.add` and `memd add` return every physical chunk ID created by
   long-document splitting in `stored_chunk_ids`, with the backward-compatible
   `chunk_id` first. `memory.supersede` returns the replacement set in

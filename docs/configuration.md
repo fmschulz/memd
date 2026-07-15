@@ -68,7 +68,10 @@ Retrieval variant is not a config key. Use the global CLI flag
 `dense-only`, or `bm25-only`. When it is not given, the default is
 model-conditional: `dense-only` for `--embedding-model bge-base`, and
 `hybrid-feature` for `all-minilm` and other models. An explicit
-`--search-variant` always takes precedence.
+`--search-variant` always takes precedence. `bm25-only` opens the sparse index
+without loading a dense model and preserves lexical rank by disabling metadata
+and query-text feature reranking. Stored feedback can still adjust the served
+order after lexical retrieval.
 
 ## Project alias compatibility
 

@@ -122,25 +122,34 @@ impl PersistentStore {
                     .get_chunk_for_retrieval(tenant_id, &result.chunk_id, "hybrid_search")
                     .await?
                 {
-                    rerank_meta.push(ChunkMetaForRerank {
-                        chunk_id: result.chunk_id.clone(),
-                        rrf_score: result.final_score,
-                        timestamp_created: chunk.timestamp_created,
-                        project_id: chunk.project_id.as_option().map(str::to_string),
-                        chunk_type: chunk.chunk_type,
-                        text: Some(chunk.text.clone()),
-                    });
+                    if hybrid.rerank_enabled() {
+                        rerank_meta.push(ChunkMetaForRerank {
+                            chunk_id: result.chunk_id.clone(),
+                            rrf_score: result.final_score,
+                            timestamp_created: chunk.timestamp_created,
+                            project_id: chunk.project_id.as_option().map(str::to_string),
+                            chunk_type: chunk.chunk_type,
+                            text: Some(chunk.text.clone()),
+                        });
+                    }
                     chunk_by_id.insert(result.chunk_id.clone(), chunk);
                     base_results.push(result);
+                    if !hybrid.rerank_enabled() && base_results.len() >= k {
+                        break;
+                    }
                 }
             }
 
-            let reranked = hybrid.rerank_with_metadata_for_query(
-                query,
-                base_results,
-                rerank_meta,
-                search_context,
-            );
+            let reranked = if hybrid.rerank_enabled() {
+                hybrid.rerank_with_metadata_for_query(
+                    query,
+                    base_results,
+                    rerank_meta,
+                    search_context,
+                )
+            } else {
+                base_results
+            };
             let mut results: Vec<(MemoryChunk, f32)> = reranked
                 .into_iter()
                 .filter_map(|result| {

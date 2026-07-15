@@ -84,7 +84,7 @@ enum SearchVariant {
     HybridCrossEncoder,
     /// Dense-only retrieval path.
     DenseOnly,
-    /// BM25 baseline via hybrid search with dense_k=0.
+    /// Pure BM25 baseline with dense retrieval and feature bonuses disabled.
     Bm25Only,
 }
 
@@ -339,15 +339,21 @@ fn apply_search_variant(search_variant: SearchVariant, config: &mut PersistentSt
             config.hybrid_config = None;
         }
         SearchVariant::Bm25Only => {
-            config.enable_dense_search = true;
+            config.enable_dense_search = false;
             config.enable_hybrid_search = true;
             config.enable_tiered_search = false;
             let hybrid = HybridConfig {
                 dense_k: 0,
-                sparse_k: 200,
                 enable_sparse: true,
+                enable_rerank: false,
                 reranker: RerankerConfig {
                     mode: RerankerMode::Feature,
+                    rrf_weight: 1.0,
+                    recency_weight: 0.0,
+                    project_weight: 0.0,
+                    type_weight: 0.0,
+                    query_text_weight: 0.0,
+                    cross_encoder_weight: 0.0,
                     ..RerankerConfig::default()
                 },
                 ..HybridConfig::default()
@@ -419,5 +425,23 @@ mod tests {
             resolve_search_variant(None, ModelChoice::AllMinilm),
             SearchVariant::HybridFeature
         ));
+    }
+
+    #[test]
+    fn bm25_only_disables_non_lexical_ranking_features() {
+        let mut config = PersistentStoreConfig::default();
+        apply_search_variant(SearchVariant::Bm25Only, &mut config);
+
+        let hybrid = config.hybrid_config.expect("bm25 hybrid configuration");
+        assert_eq!(hybrid.dense_k, 0);
+        assert!(hybrid.enable_sparse);
+        assert!(!hybrid.enable_rerank);
+        assert!(!config.enable_dense_search);
+        assert_eq!(hybrid.reranker.rrf_weight, 1.0);
+        assert_eq!(hybrid.reranker.recency_weight, 0.0);
+        assert_eq!(hybrid.reranker.project_weight, 0.0);
+        assert_eq!(hybrid.reranker.type_weight, 0.0);
+        assert_eq!(hybrid.reranker.query_text_weight, 0.0);
+        assert_eq!(hybrid.reranker.cross_encoder_weight, 0.0);
     }
 }

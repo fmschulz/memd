@@ -474,6 +474,10 @@ pub async fn run_cli<S: Store>(
             warm: _,
         } => {
             let arguments = parse_call_arguments(json.as_deref(), input.as_deref())?;
+            let arguments = scope::apply_operation_scope(
+                arguments,
+                &mut scope::OperationScopeCache::default(),
+            )?;
             let value = cli_call_tool(store, tenant_manager, &tool, arguments)
                 .await
                 .map_err(|e| MemdError::ProtocolError(e.to_string()))?;

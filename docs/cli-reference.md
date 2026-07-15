@@ -35,7 +35,7 @@ For write-quality expectations and cleanup safety, see the
 | `memd session-start` | Auto-create a minimal `.memd/project_scope.json` when missing, recover consolidation runs idle for at least 30 seconds, refresh `memory.md` synchronously, then stage a background consolidation when enough chunks have accumulated. Recovery promotes only runs with durable promotion intent. A writer-lock failure is reported in `consolidation_recovery` without suppressing context refresh. Wired into Claude Code via the bundled skill installer; a Codex hook template lives at `memd-skill/examples/codex_session_start_hook.json`. |
 | `memd eval-counterfactual` | Replay a JSONL benchmark file; write an overlap@k / rank-shift report under `evals/bench/reports/`. Monitors whether `kind:consolidated` lessons are load-bearing in retrieval. |
 | `memd eval-outcome-ranking` | Compare the served order with the source-deduplicated `outcome-v1` shadow order against JSONL relevant/harmful judgments. Writes JSON and Markdown counterfactual reports without activating the policy. |
-| `memd maintenance` | Disk hygiene: sweep orphan HNSW snapshots, report what changed. |
+| `memd maintenance` | Disk hygiene: sweep orphan HNSW snapshots; `--aggressive` also force-merges the Tantivy sparse index and reports before/after segment counts. |
 
 `memd add` returns the primary `chunk_id` and `stored_chunk_ids`, an ordered
 list of every physical chunk created by document splitting.
@@ -121,6 +121,16 @@ through the executable without starting a separate integration process. This is
 the compatibility path for advanced scripts that need structured task,
 artifact, context, code, or debug operations before every operation gets a
 dedicated first-class subcommand.
+
+When the current directory is inside a repository with
+`.memd/project_scope.json`, `memd call` and `memd batch` add the scope's
+`tenant_id` and `project_id` to requests that omit `tenant_id`. A request with
+an explicit JSON `tenant_id` does not inherit the repository project; include
+`project_id` in that request when project filtering is intended. Scope is
+resolved before warm-worker routing. A malformed or unreadable scope file
+fails closed for requests without a tenant. In batch mode,
+`--continue-on-error` reports that failure on the affected line while
+explicitly scoped lines continue.
 
 ### `memory.*` — raw searchable content
 

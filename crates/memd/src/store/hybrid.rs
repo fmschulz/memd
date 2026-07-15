@@ -12,7 +12,7 @@ use parking_lot::RwLock;
 use tracing::debug;
 
 use super::dense::DenseSearcher;
-use crate::error::Result;
+use crate::error::{MemdError, Result};
 use crate::index::{Bm25Index, SearchResult, SparseIndex};
 use crate::metrics::TieredQueryMetrics;
 use crate::retrieval::packer::{ContextPacker, PackerConfig};
@@ -38,6 +38,8 @@ pub struct HybridConfig {
     pub rrf: RrfConfig,
     /// Reranker configuration
     pub reranker: RerankerConfig,
+    /// Apply metadata/query feature reranking after dense/sparse fusion.
+    pub enable_rerank: bool,
     /// Packer configuration
     pub packer: PackerConfig,
     /// Enable sparse search (can be disabled for dense-only fallback)
@@ -55,11 +57,20 @@ impl Default for HybridConfig {
             sparse_k: 100,
             rrf: RrfConfig::default(),
             reranker: RerankerConfig::default(),
+            enable_rerank: true,
             packer: PackerConfig::default(),
             enable_sparse: true,
             enable_tiered: true,
             tiered_config: None,
         }
+    }
+}
+
+fn sparse_candidate_count(config: &HybridConfig, requested_k: usize) -> usize {
+    if config.dense_k == 0 && !config.enable_rerank {
+        requested_k
+    } else {
+        config.sparse_k
     }
 }
 
@@ -178,7 +189,7 @@ impl WarmTierSearch for WarmTierAdapter {
 /// with RRF, and applies feature-based reranking. Supports tiered search
 /// with cache/hot/warm fallback when enabled.
 pub struct HybridSearcher {
-    dense: Arc<DenseSearcher>,
+    dense: Option<Arc<DenseSearcher>>,
     sparse: Option<Arc<Bm25Index>>,
     text_processor: TextProcessor,
     fusion: RrfFusion,
@@ -209,19 +220,38 @@ impl HybridSearcher {
         sparse: Option<Arc<Bm25Index>>,
         config: HybridConfig,
     ) -> Self {
+        Self::from_parts(Some(dense), sparse, config)
+    }
+
+    /// Create a sparse-only searcher without loading an embedding model or
+    /// dense index. The caller must disable dense and tiered retrieval.
+    pub fn new_sparse_only(sparse: Arc<Bm25Index>, mut config: HybridConfig) -> Self {
+        config.dense_k = 0;
+        config.enable_tiered = false;
+        Self::from_parts(None, Some(sparse), config)
+    }
+
+    fn from_parts(
+        dense: Option<Arc<DenseSearcher>>,
+        sparse: Option<Arc<Bm25Index>>,
+        config: HybridConfig,
+    ) -> Self {
         let fusion = RrfFusion::new(config.rrf.clone());
         let reranker = RerankerEngine::new(config.reranker.clone());
         let packer = ContextPacker::new(config.packer.clone());
 
         // Create shared semantic cache if tiered search is enabled
-        let semantic_cache = if config.enable_tiered {
+        let semantic_cache = if config.enable_tiered && dense.is_some() {
             Some(Arc::new(SemanticCache::new(SemanticCacheConfig::default())))
         } else {
             None
         };
 
         // Create hot tier config based on dense dimension
-        let dimension = dense.dimension();
+        let dimension = dense
+            .as_ref()
+            .map(|searcher| searcher.dimension())
+            .unwrap_or_else(|| crate::index::HnswConfig::default().dimension);
         let hot_tier_config = HotTierConfig {
             hnsw_config: crate::index::HnswConfig {
                 dimension,
@@ -256,6 +286,10 @@ impl HybridSearcher {
         self.reranker.mode()
     }
 
+    pub fn rerank_enabled(&self) -> bool {
+        self.config.enable_rerank
+    }
+
     /// Get or create tiered searcher for a tenant
     fn get_or_create_tiered_searcher(
         &self,
@@ -264,6 +298,7 @@ impl HybridSearcher {
         if !self.config.enable_tiered {
             return None;
         }
+        let dense = self.dense.as_ref()?;
 
         let tenant_str = tenant_id.to_string();
 
@@ -284,10 +319,7 @@ impl HybridSearcher {
         }
 
         // Create components for this tenant
-        let warm_tier = Arc::new(WarmTierAdapter::new(
-            Arc::clone(&self.dense),
-            tenant_id.clone(),
-        ));
+        let warm_tier = Arc::new(WarmTierAdapter::new(Arc::clone(dense), tenant_id.clone()));
 
         let access_tracker = Arc::new(RwLock::new(AccessTracker::new(
             self.access_tracker_config.clone(),
@@ -336,7 +368,10 @@ impl HybridSearcher {
         }
 
         if self.config.dense_k > 0 {
-            self.dense.index_batch(tenant_id, chunks).await?;
+            let dense = self.dense.as_ref().ok_or_else(|| {
+                MemdError::StorageError("dense search is not configured".to_string())
+            })?;
+            dense.index_batch(tenant_id, chunks).await?;
         }
 
         if self.config.enable_sparse {
@@ -489,7 +524,10 @@ impl HybridSearcher {
 
         // Step 1: Embed query
         let embed_start = Instant::now();
-        let query_embedding = self.dense.embed_query(query).await?;
+        let dense = self.dense.as_ref().ok_or_else(|| {
+            MemdError::StorageError("tiered search requires a dense searcher".to_string())
+        })?;
+        let query_embedding = dense.embed_query(query).await?;
         timing.dense_time = embed_start.elapsed(); // Embed time tracked as dense_time
 
         // Step 2: Tiered search (cache -> hot -> warm)
@@ -514,7 +552,7 @@ impl HybridSearcher {
         let sparse_start = Instant::now();
         let sparse_results = if self.config.enable_sparse {
             if let Some(ref sparse) = self.sparse {
-                sparse.search(tenant_id, query, self.config.sparse_k)?
+                sparse.search(tenant_id, query, sparse_candidate_count(&self.config, k))?
             } else {
                 Vec::new()
             }
@@ -608,8 +646,10 @@ impl HybridSearcher {
 
         let dense_start = Instant::now();
         let dense_results = if self.config.dense_k > 0 {
-            let (dense_results, _embed_time, _search_time) = self
-                .dense
+            let dense = self.dense.as_ref().ok_or_else(|| {
+                MemdError::StorageError("dense search is not configured".to_string())
+            })?;
+            let (dense_results, _embed_time, _search_time) = dense
                 .search_with_timing(tenant_id, query, self.config.dense_k)
                 .await?;
             dense_results
@@ -622,7 +662,7 @@ impl HybridSearcher {
         let sparse_start = Instant::now();
         let sparse_results = if self.config.enable_sparse {
             if let Some(ref sparse) = self.sparse {
-                sparse.search(tenant_id, query, self.config.sparse_k)?
+                sparse.search(tenant_id, query, sparse_candidate_count(&self.config, k))?
             } else {
                 Vec::new()
             }
@@ -888,6 +928,32 @@ mod tests {
 
     fn make_tenant() -> TenantId {
         TenantId::new("test_tenant").unwrap()
+    }
+
+    #[test]
+    fn sparse_only_search_fetches_only_the_requested_candidates() {
+        let sparse_only = HybridConfig {
+            dense_k: 0,
+            sparse_k: 200,
+            enable_rerank: false,
+            ..HybridConfig::default()
+        };
+        assert_eq!(sparse_candidate_count(&sparse_only, 80), 80);
+
+        let reranked_sparse = HybridConfig {
+            dense_k: 0,
+            sparse_k: 200,
+            enable_rerank: true,
+            ..HybridConfig::default()
+        };
+        assert_eq!(sparse_candidate_count(&reranked_sparse, 80), 200);
+
+        let hybrid = HybridConfig {
+            dense_k: 100,
+            sparse_k: 200,
+            ..HybridConfig::default()
+        };
+        assert_eq!(sparse_candidate_count(&hybrid, 80), 200);
     }
 
     #[tokio::test]

@@ -1347,7 +1347,10 @@ async fn session_start_runs_bounded_recovery_before_context_refresh() {
     )
     .unwrap();
     let tenant = TenantId::new("t").unwrap();
-    let store = open_store(&data_dir);
+    // The command below explicitly requests BM25-only retrieval, so seed the
+    // fixture through a store that creates and populates the sparse index.
+    // A missing sparse index is now a hard configuration error for that mode.
+    let store = open_sparse_store(&data_dir);
     let source_id = seed_source(&store, &tenant).await;
     let result = execute_consolidation_with_hook(
         &store,

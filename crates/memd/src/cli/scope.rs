@@ -1,7 +1,26 @@
 use std::path::{Path, PathBuf};
 
+use serde_json::{Map, Value};
+
 use super::args::{CliCommand, ProjectScopeConfig};
 use crate::error::{MemdError, Result};
+
+#[derive(Default)]
+pub(super) struct OperationScopeCache {
+    loaded: bool,
+    scope: Option<ProjectScopeConfig>,
+    error: Option<String>,
+}
+
+impl OperationScopeCache {
+    pub(super) fn disabled() -> Self {
+        Self {
+            loaded: true,
+            scope: None,
+            error: None,
+        }
+    }
+}
 
 pub(super) fn find_project_scope(start: &Path) -> Result<Option<ProjectScopeConfig>> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -9,27 +28,36 @@ pub(super) fn find_project_scope(start: &Path) -> Result<Option<ProjectScopeConf
 
     for _ in 0..64 {
         let scope_path = current.join(".memd").join("project_scope.json");
-        if let Ok(text) = std::fs::read_to_string(&scope_path) {
-            // A scope file that exists but does not parse must stop the
-            // walk: silently falling through to a parent scope would route
-            // flagless writes into the wrong tenant/project.
-            return serde_json::from_str::<ProjectScopeConfig>(&text)
-                .map(Some)
-                .map_err(|err| {
-                    MemdError::ValidationError(format!(
-                        "malformed {}: {err}; re-create it with: memd session-start --project-dir {} (or pass --tenant-id explicitly)",
-                        scope_path.display(),
-                        current.display()
-                    ))
-                });
-        }
-
-        if home.as_deref().is_some_and(|home| current == home) {
-            break;
-        }
-        if !current.pop() {
-            break;
-        }
+        let text = match std::fs::read_to_string(&scope_path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if home.as_deref().is_some_and(|home| current == home) {
+                    break;
+                }
+                if !current.pop() {
+                    break;
+                }
+                continue;
+            }
+            Err(error) => {
+                return Err(MemdError::ValidationError(format!(
+                "unable to read {}: {error}; fix its permissions or pass --tenant-id explicitly",
+                scope_path.display()
+            )))
+            }
+        };
+        // A scope file that exists but cannot be read or parsed must stop the
+        // walk: silently falling through to a parent scope would route
+        // flagless writes into the wrong tenant/project.
+        return serde_json::from_str::<ProjectScopeConfig>(&text)
+            .map(Some)
+            .map_err(|err| {
+                MemdError::ValidationError(format!(
+                    "malformed {}: {err}; re-create it with: memd session-start --project-dir {} (or pass --tenant-id explicitly)",
+                    scope_path.display(),
+                    current.display()
+                ))
+            });
     }
 
     Ok(None)
@@ -85,6 +113,69 @@ pub(super) fn require_tenant(tenant: Option<String>) -> Result<String> {
 
 fn current_dir() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+pub(super) fn apply_operation_scope(
+    arguments: Value,
+    cache: &mut OperationScopeCache,
+) -> Result<Value> {
+    apply_operation_scope_at(&current_dir(), arguments, cache)
+}
+
+pub(super) fn apply_operation_scope_at(
+    start: &Path,
+    arguments: Value,
+    cache: &mut OperationScopeCache,
+) -> Result<Value> {
+    if arguments
+        .as_object()
+        .and_then(|object| object.get("tenant_id"))
+        .is_some_and(|tenant_id| !tenant_id.is_null())
+    {
+        // An explicit tenant must not inherit the repository project, matching
+        // the typed CLI's cross-project footgun guard.
+        return Ok(arguments);
+    }
+
+    if !cache.loaded {
+        cache.loaded = true;
+        match find_project_scope(start) {
+            Ok(scope) => cache.scope = scope,
+            Err(error) => {
+                cache.error = Some(match &error {
+                    MemdError::ValidationError(message) => message.clone(),
+                    _ => error.to_string(),
+                });
+                return Err(error);
+            }
+        }
+    }
+    if let Some(error) = cache.error.as_ref() {
+        return Err(MemdError::ValidationError(error.clone()));
+    }
+    let Some(scope) = cache.scope.as_ref() else {
+        return Ok(arguments);
+    };
+
+    let mut object = match arguments {
+        Value::Object(object) => object,
+        Value::Null => Map::new(),
+        _ => {
+            return Err(MemdError::ValidationError(
+                "operation arguments must be a JSON object".to_string(),
+            ))
+        }
+    };
+    object.insert(
+        "tenant_id".to_string(),
+        Value::String(scope.tenant_id.clone()),
+    );
+    if !object.contains_key("project_id") {
+        if let Some(project_id) = scope.project_id.as_ref() {
+            object.insert("project_id".to_string(), Value::String(project_id.clone()));
+        }
+    }
+    Ok(Value::Object(object))
 }
 
 pub fn resolve_command_scope(cmd: &mut CliCommand) -> Result<()> {
@@ -277,5 +368,132 @@ mod tests {
                 dir.path().display()
             )
         );
+    }
+
+    #[test]
+    fn operation_arguments_inherit_scope_without_overriding_explicit_values() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".memd")).unwrap();
+        std::fs::write(
+            dir.path().join(".memd/project_scope.json"),
+            r#"{
+              "tenant_id": "scoped_tenant",
+              "project_id": "scoped_project",
+              "interface": "cli",
+              "cli_command": "memd",
+              "agent_context_output": ".memd/context.md",
+              "project_dir": "."
+            }"#,
+        )
+        .unwrap();
+
+        let mut cache = OperationScopeCache::default();
+        let scoped = apply_operation_scope_at(
+            dir.path(),
+            serde_json::json!({"text": "scope me"}),
+            &mut cache,
+        )
+        .unwrap();
+        assert_eq!(scoped["tenant_id"], "scoped_tenant");
+        assert_eq!(scoped["project_id"], "scoped_project");
+
+        let mut cache = OperationScopeCache::default();
+        let project_override = apply_operation_scope_at(
+            dir.path(),
+            serde_json::json!({"project_id": "override"}),
+            &mut cache,
+        )
+        .unwrap();
+        assert_eq!(project_override["tenant_id"], "scoped_tenant");
+        assert_eq!(project_override["project_id"], "override");
+
+        let mut cache = OperationScopeCache::default();
+        let explicit_tenant = apply_operation_scope_at(
+            dir.path(),
+            serde_json::json!({"tenant_id": "other_tenant"}),
+            &mut cache,
+        )
+        .unwrap();
+        assert_eq!(explicit_tenant["tenant_id"], "other_tenant");
+        assert!(explicit_tenant.get("project_id").is_none());
+
+        let mut cache = OperationScopeCache::default();
+        let null_tenant = apply_operation_scope_at(
+            dir.path(),
+            serde_json::json!({"tenant_id": null}),
+            &mut cache,
+        )
+        .unwrap();
+        assert_eq!(null_tenant["tenant_id"], "scoped_tenant");
+        assert_eq!(null_tenant["project_id"], "scoped_project");
+    }
+
+    #[test]
+    fn explicit_operation_tenant_bypasses_malformed_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".memd")).unwrap();
+        std::fs::write(dir.path().join(".memd/project_scope.json"), "{ not json").unwrap();
+
+        let mut cache = OperationScopeCache::default();
+        let explicit = apply_operation_scope_at(
+            dir.path(),
+            serde_json::json!({"tenant_id": "explicit_tenant"}),
+            &mut cache,
+        )
+        .unwrap();
+        assert_eq!(explicit["tenant_id"], "explicit_tenant");
+    }
+
+    #[test]
+    fn cached_operation_scope_error_keeps_one_validation_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".memd")).unwrap();
+        std::fs::write(dir.path().join(".memd/project_scope.json"), "{ not json").unwrap();
+
+        let mut cache = OperationScopeCache::default();
+        let first =
+            apply_operation_scope_at(dir.path(), serde_json::json!({"text": "first"}), &mut cache)
+                .unwrap_err()
+                .to_string();
+        let replay = apply_operation_scope_at(
+            dir.path(),
+            serde_json::json!({"text": "second"}),
+            &mut cache,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert_eq!(replay, first);
+        assert_eq!(replay.matches("validation error:").count(), 1, "{replay}");
+    }
+
+    #[test]
+    fn unreadable_scope_path_fails_closed_without_walking_up() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".memd/project_scope.json")).unwrap();
+
+        let child = dir.path().join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        let mut cache = OperationScopeCache::default();
+        let error = apply_operation_scope_at(
+            &child,
+            serde_json::json!({"text": "do not route"}),
+            &mut cache,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unable to read"), "{error}");
+        assert!(
+            error.to_string().contains(".memd/project_scope.json"),
+            "{error}"
+        );
+
+        let mut cache = OperationScopeCache::default();
+        let explicit = apply_operation_scope_at(
+            &child,
+            serde_json::json!({"tenant_id": "explicit_tenant"}),
+            &mut cache,
+        )
+        .unwrap();
+        assert_eq!(explicit["tenant_id"], "explicit_tenant");
     }
 }

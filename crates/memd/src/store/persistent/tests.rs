@@ -13,6 +13,95 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 #[tokio::test]
+async fn sparse_only_store_searches_without_a_dense_index() {
+    let dir = tempdir().unwrap();
+    let store = PersistentStore::open(PersistentStoreConfig {
+        data_dir: dir.path().to_path_buf(),
+        enable_dense_search: false,
+        enable_hybrid_search: true,
+        enable_tiered_search: false,
+        hybrid_config: Some(HybridConfig {
+            dense_k: 0,
+            enable_sparse: true,
+            enable_rerank: false,
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(store.dense_searcher.is_none());
+    assert!(store.hybrid_searcher.is_some());
+
+    let tenant = TenantId::new("sparse_only").unwrap();
+    let chunk_id = store
+        .add(MemoryChunk::new(
+            tenant.clone(),
+            "lexical zanzibar sentinel",
+            ChunkType::Doc,
+        ))
+        .await
+        .unwrap();
+    let results = store.search(&tenant, "zanzibar", 10).await.unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].chunk_id, chunk_id);
+}
+
+#[test]
+fn sparse_only_store_fails_when_the_sparse_index_cannot_open() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("sparse_index"), b"not a directory").unwrap();
+    let result = PersistentStore::open(PersistentStoreConfig {
+        data_dir: dir.path().to_path_buf(),
+        enable_dense_search: false,
+        enable_hybrid_search: true,
+        enable_tiered_search: false,
+        hybrid_config: Some(HybridConfig {
+            dense_k: 0,
+            enable_sparse: true,
+            enable_rerank: false,
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let error = match result {
+        Ok(_) => panic!("invalid sparse index path must fail closed"),
+        Err(error) => error,
+    };
+    assert!(error
+        .to_string()
+        .contains("sparse-only search requires a readable BM25 index"));
+}
+
+#[tokio::test]
+async fn sparse_only_read_only_missing_store_is_empty_without_creating_data_dir() {
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().join("missing");
+    let store = PersistentStore::open(PersistentStoreConfig {
+        data_dir: data_dir.clone(),
+        read_only: true,
+        enable_dense_search: false,
+        enable_hybrid_search: true,
+        enable_tiered_search: false,
+        hybrid_config: Some(HybridConfig {
+            dense_k: 0,
+            enable_sparse: true,
+            enable_rerank: false,
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let tenant = TenantId::new("missing_sparse_only").unwrap();
+    assert!(store
+        .search(&tenant, "anything", 10)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(!data_dir.exists());
+}
+
+#[tokio::test]
 async fn promoted_candidate_is_refreshed_into_a_cold_dense_index() {
     let dir = tempdir().unwrap();
     let mut store = PersistentStore::open(PersistentStoreConfig {

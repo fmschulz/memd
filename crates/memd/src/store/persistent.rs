@@ -811,19 +811,42 @@ impl PersistentStore {
             None
         };
 
-        // Initialize hybrid searcher if both dense and sparse available (or just dense)
-        let hybrid_searcher = if let (true, Some(dense_searcher)) =
-            (config.enable_hybrid_search, dense_searcher.as_ref())
+        let sparse_only_requested = config
+            .hybrid_config
+            .as_ref()
+            .is_some_and(|hybrid| hybrid.dense_k == 0);
+        if config.enable_hybrid_search
+            && sparse_only_requested
+            && sparse_index.is_none()
+            && !read_only_missing_data_dir
         {
+            return Err(MemdError::StorageError(
+                "sparse-only search requires a readable BM25 index".to_string(),
+            ));
+        }
+
+        // Initialize hybrid searcher. A sparse-only configuration must not
+        // load the embedding model or dense index merely to use BM25.
+        let hybrid_searcher = if config.enable_hybrid_search {
             let mut hybrid_config = config.hybrid_config.clone().unwrap_or_default();
             // Apply tiered search configuration
             hybrid_config.enable_tiered = config.enable_tiered_search;
-            let hybrid = HybridSearcher::new(
-                Arc::clone(dense_searcher),
-                sparse_index.clone(),
-                hybrid_config,
-            );
-            Some(Arc::new(hybrid))
+            if hybrid_config.dense_k == 0 {
+                sparse_index.as_ref().map(|sparse| {
+                    Arc::new(HybridSearcher::new_sparse_only(
+                        Arc::clone(sparse),
+                        hybrid_config,
+                    ))
+                })
+            } else {
+                dense_searcher.as_ref().map(|dense| {
+                    Arc::new(HybridSearcher::new(
+                        Arc::clone(dense),
+                        sparse_index.clone(),
+                        hybrid_config,
+                    ))
+                })
+            }
         } else {
             None
         };
@@ -1491,20 +1514,34 @@ impl PersistentStore {
                     .get_chunk_for_retrieval(tenant_id, &result.chunk_id, "search_with_tier_info")
                     .await?
                 {
-                    rerank_meta.push(ChunkMetaForRerank {
-                        chunk_id: result.chunk_id.clone(),
-                        rrf_score: result.final_score,
-                        timestamp_created: chunk.timestamp_created,
-                        project_id: chunk.project_id.as_option().map(str::to_string),
-                        chunk_type: chunk.chunk_type,
-                        text: Some(chunk.text.clone()),
-                    });
+                    if hybrid.rerank_enabled() {
+                        rerank_meta.push(ChunkMetaForRerank {
+                            chunk_id: result.chunk_id.clone(),
+                            rrf_score: result.final_score,
+                            timestamp_created: chunk.timestamp_created,
+                            project_id: chunk.project_id.as_option().map(str::to_string),
+                            chunk_type: chunk.chunk_type,
+                            text: Some(chunk.text.clone()),
+                        });
+                    }
                     chunk_by_id.insert(result.chunk_id.clone(), chunk);
                     base_results.push(result);
+                    if !hybrid.rerank_enabled() && base_results.len() >= k {
+                        break;
+                    }
                 }
             }
-            let results = hybrid
-                .rerank_with_metadata_for_query(query, base_results, rerank_meta, search_context)
+            let ranked = if hybrid.rerank_enabled() {
+                hybrid.rerank_with_metadata_for_query(
+                    query,
+                    base_results,
+                    rerank_meta,
+                    search_context,
+                )
+            } else {
+                base_results
+            };
+            let results = ranked
                 .into_iter()
                 .filter_map(|result| {
                     chunk_by_id

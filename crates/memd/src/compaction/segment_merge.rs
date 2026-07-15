@@ -26,8 +26,7 @@ pub struct MergeResult {
 
 /// Merges sparse index segments using Tantivy's built-in policy
 ///
-/// Tantivy's LogMergePolicy automatically merges segments during commit.
-/// This merger triggers commits to ensure pending merges are applied and
+/// Forces all currently searchable Tantivy segments into one segment and
 /// reports before/after statistics.
 pub struct SegmentMerger {
     /// Minimum segment count before merge is needed (default 4)
@@ -49,10 +48,7 @@ impl SegmentMerger {
         }
     }
 
-    /// Trigger segment merge by committing the index
-    ///
-    /// Tantivy's LogMergePolicy runs during commit, merging small segments
-    /// into larger ones. This method triggers a commit and reports statistics.
+    /// Force all searchable segments into one merged segment.
     pub fn merge(&self, index: &Bm25Index) -> Result<MergeResult> {
         let start = Instant::now();
 
@@ -60,9 +56,7 @@ impl SegmentMerger {
         let segments_before = index.segment_count()?;
         let docs_before = index.total_docs()?;
 
-        // Tantivy's IndexWriter handles merging automatically on commit
-        // Force a commit to trigger any pending merges
-        index.commit()?;
+        index.merge_all_segments()?;
 
         // Get after stats (need to reload to see changes)
         let segments_after = index.segment_count()?;
@@ -151,12 +145,18 @@ mod tests {
             index
                 .insert(&tenant, &chunk_id, &[format!("test content {}", i)])
                 .unwrap();
+            index.commit().unwrap();
         }
 
         let result = merger.merge(&index).unwrap();
 
         assert_eq!(result.docs_before, 5);
         assert_eq!(result.docs_after, 5);
+        assert!(result.segments_after <= 1);
+        assert_eq!(
+            result.segments_merged,
+            result.segments_before.saturating_sub(result.segments_after)
+        );
         let _duration = result.duration;
     }
 

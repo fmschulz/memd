@@ -7,6 +7,23 @@ fn memd_bin() -> &'static str {
     env!("CARGO_BIN_EXE_memd")
 }
 
+fn write_project_scope(project_dir: &std::path::Path) {
+    std::fs::create_dir_all(project_dir.join(".memd")).unwrap();
+    std::fs::write(
+        project_dir.join(".memd/project_scope.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "tenant_id": "scoped_tenant",
+            "project_id": "scoped_project",
+            "interface": "cli",
+            "cli_command": "memd",
+            "agent_context_output": ".memd/context.md",
+            "project_dir": project_dir,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
 #[test]
 fn supported_cli_help_surfaces_resolve() {
     let commands = [
@@ -139,4 +156,166 @@ not-json
         .as_str()
         .expect("error")
         .contains("invalid JSONL request"));
+}
+
+#[test]
+fn call_inherits_repository_scope_for_structured_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_dir = temp.path().join("project");
+    let data_dir = temp.path().join("data");
+    write_project_scope(&project_dir);
+
+    let added = Command::new(memd_bin())
+        .current_dir(&project_dir)
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .args([
+            "--search-variant",
+            "bm25-only",
+            "call",
+            "memory.add",
+            "--json",
+            r#"{"text":"scoped call memory","type":"doc"}"#,
+            "--warm",
+            "off",
+        ])
+        .output()
+        .expect("run scoped memd call");
+    assert!(
+        added.status.success(),
+        "call failed: {}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let added: Value = serde_json::from_slice(&added.stdout).unwrap();
+    let chunk_id = added["chunk_id"].as_str().expect("chunk id");
+
+    let fetched = Command::new(memd_bin())
+        .current_dir(&project_dir)
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .args(["--search-variant", "bm25-only", "get", "--chunk-id"])
+        .arg(chunk_id)
+        .output()
+        .expect("get scoped call write");
+    assert!(
+        fetched.status.success(),
+        "get failed: {}",
+        String::from_utf8_lossy(&fetched.stderr)
+    );
+    let fetched: Value = serde_json::from_slice(&fetched.stdout).unwrap();
+    assert_eq!(fetched["tenant_id"], "scoped_tenant");
+    assert_eq!(fetched["project_id"], "scoped_project");
+}
+
+#[test]
+fn batch_inherits_repository_scope_for_structured_operations() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_dir = temp.path().join("project");
+    write_project_scope(&project_dir);
+    let jsonl = r#"{"tool":"memory.add","arguments":{"text":"scoped batch memory","type":"doc"}}
+{"tool":"memory.search","arguments":{"query":"scoped batch","k":1}}
+"#;
+
+    let mut child = Command::new(memd_bin())
+        .current_dir(&project_dir)
+        .args(["--in-memory", "batch", "--jsonl", "-", "--warm", "off"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn scoped memd batch");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(jsonl.as_bytes())
+        .expect("write scoped jsonl");
+    let output = child.wait_with_output().expect("wait for scoped batch");
+    assert!(
+        output.status.success(),
+        "batch failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let rows = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["ok"], true);
+    assert_eq!(rows[1]["ok"], true);
+    assert_eq!(
+        rows[1]["result"]["results"][0]["tenant_id"],
+        "scoped_tenant"
+    );
+    assert_eq!(
+        rows[1]["result"]["results"][0]["project_id"],
+        "scoped_project"
+    );
+}
+
+#[test]
+fn batch_continue_on_error_keeps_receipts_after_scope_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_dir = temp.path().join("project");
+    std::fs::create_dir_all(project_dir.join(".memd")).unwrap();
+    std::fs::write(
+        project_dir.join(".memd/project_scope.json"),
+        "{ malformed scope",
+    )
+    .unwrap();
+    let jsonl = r#"{"tool":"memory.add","arguments":{"tenant_id":"explicit_tenant","text":"receipt survives scope error","type":"doc"}}
+{"tool":"memory.add","arguments":{"text":"must not be written","type":"doc"}}
+{"tool":"memory.search","arguments":{"tenant_id":"explicit_tenant","query":"receipt survives","k":1}}
+"#;
+
+    let mut child = Command::new(memd_bin())
+        .current_dir(&project_dir)
+        .args([
+            "--in-memory",
+            "batch",
+            "--jsonl",
+            "-",
+            "--continue-on-error",
+            "--warm",
+            "off",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn batch with malformed scope");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(jsonl.as_bytes())
+        .expect("write malformed-scope jsonl");
+    let output = child.wait_with_output().expect("wait for batch");
+    assert!(
+        output.status.success(),
+        "batch failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let rows = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0]["ok"], true);
+    assert_eq!(rows[1]["ok"], false);
+    let scope_error = rows[1]["error"].as_str().unwrap();
+    assert!(scope_error.contains("malformed"), "{scope_error}");
+    assert!(
+        scope_error.contains(".memd/project_scope.json"),
+        "{scope_error}"
+    );
+    assert_eq!(rows[2]["ok"], true);
+    assert_eq!(
+        rows[2]["result"]["results"][0]["text"],
+        "receipt survives scope error"
+    );
 }

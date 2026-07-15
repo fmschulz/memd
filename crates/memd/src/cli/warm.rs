@@ -17,7 +17,7 @@ use super::args::{
     CliCommand, CliQueryMode, ExportFormat, ReportFormat, SearchRerankerOptions, StoreAccess,
     WarmCommand, WarmMode, WarmProcessConfig,
 };
-use super::batch::{read_batch_input, run_batch_jsonl};
+use super::batch::{read_batch_input, run_pre_scoped_batch_jsonl, scope_batch_jsonl};
 use super::consolidate::{run_consolidate, ConsolidateOptions};
 use super::purge::{run_purge, PurgeOptions};
 use super::report::{cli_report_rendered, ReportOptions};
@@ -422,7 +422,10 @@ fn warm_wire_command_from_cli(
         } => (
             WarmWireCommand::Call {
                 tool: tool.clone(),
-                arguments: parse_call_arguments(json.as_deref(), input.as_deref())?,
+                arguments: super::scope::apply_operation_scope(
+                    parse_call_arguments(json.as_deref(), input.as_deref())?,
+                    &mut super::scope::OperationScopeCache::default(),
+                )?,
             },
             WarmLocalOutputs {
                 output: output.clone(),
@@ -608,7 +611,10 @@ fn warm_wire_command_from_cli(
             warm: _,
         } => (
             WarmWireCommand::Batch {
-                jsonl_content: read_batch_input(jsonl.as_deref())?,
+                jsonl_content: scope_batch_jsonl(
+                    &read_batch_input(jsonl.as_deref())?,
+                    *continue_on_error,
+                )?,
                 continue_on_error: *continue_on_error,
             },
             WarmLocalOutputs {
@@ -830,7 +836,8 @@ async fn execute_warm_wire_command<S: Store>(
             jsonl_content,
             continue_on_error,
         } => Ok((
-            run_batch_jsonl(store, tenant_manager, &jsonl_content, continue_on_error).await?,
+            run_pre_scoped_batch_jsonl(store, tenant_manager, &jsonl_content, continue_on_error)
+                .await?,
             None,
         )),
     }
