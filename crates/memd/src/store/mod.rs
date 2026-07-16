@@ -154,15 +154,41 @@ pub(crate) fn score_candidate_chunk(query: &str, chunk: &MemoryChunk) -> f32 {
     let haystack = format!("{} {}", chunk.text, chunk.tags.join(" ")).to_ascii_lowercase();
     let terms = query
         .split_whitespace()
-        .map(|term| term.to_ascii_lowercase())
+        .filter_map(|term| {
+            let normalized = term
+                .trim_matches(|character: char| {
+                    !character.is_alphanumeric() && character != '_' && character != '-'
+                })
+                .to_ascii_lowercase();
+            normalized
+                .chars()
+                .any(char::is_alphanumeric)
+                .then_some(normalized)
+        })
         .collect::<Vec<_>>();
     if terms.is_empty() {
-        return 1.0;
+        return 0.0;
     }
+    let natural_haystack_terms = haystack
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
 
     let mut score = 0.0f32;
     for term in terms {
-        if haystack.contains(&term) {
+        let matched = if term
+            .chars()
+            .any(|character| !character.is_ascii_alphanumeric())
+        {
+            haystack.contains(&term)
+        } else {
+            natural_haystack_terms.iter().any(|candidate| {
+                *candidate == term
+                    || (candidate.len().min(term.len()) >= 4
+                        && (candidate.starts_with(&term) || term.starts_with(*candidate)))
+            })
+        };
+        if matched {
             score += 1.0;
         }
     }
@@ -172,6 +198,21 @@ pub(crate) fn score_candidate_chunk(query: &str, chunk: &MemoryChunk) -> f32 {
     }
 
     score
+}
+
+pub(crate) fn compare_scored_chunks(
+    (left_chunk, left_score): &(MemoryChunk, f32),
+    (right_chunk, right_score): &(MemoryChunk, f32),
+) -> std::cmp::Ordering {
+    right_score
+        .partial_cmp(left_score)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| {
+            right_chunk
+                .timestamp_created
+                .cmp(&left_chunk.timestamp_created)
+        })
+        .then_with(|| left_chunk.chunk_id.cmp(&right_chunk.chunk_id))
 }
 
 pub(crate) fn rank_candidate_chunks(
@@ -187,17 +228,7 @@ pub(crate) fn rank_candidate_chunks(
         })
         .collect::<Vec<_>>();
 
-    scored.sort_by(|(left_chunk, left_score), (right_chunk, right_score)| {
-        right_score
-            .partial_cmp(left_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                right_chunk
-                    .timestamp_created
-                    .cmp(&left_chunk.timestamp_created)
-            })
-            .then_with(|| left_chunk.chunk_id.cmp(&right_chunk.chunk_id))
-    });
+    scored.sort_by(compare_scored_chunks);
     if !query.trim().is_empty() {
         scored.retain(|(_, score)| *score > 0.0);
     }
@@ -660,3 +691,105 @@ pub use persistent::{PersistentStore, PersistentStoreConfig, TieredStats};
 pub use shared_add::{split_for_add, ADD_CHUNK_THRESHOLD};
 pub use tenant::TenantManager;
 pub use tombstone::TombstoneSet;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ChunkType;
+
+    #[test]
+    fn candidate_ranking_matches_terms_across_boundary_punctuation() {
+        let tenant = TenantId::new("candidate_rank_test").unwrap();
+        let mut correct = MemoryChunk::new(
+            tenant.clone(),
+            "For atlas, cache keys must use tenant scope.",
+            ChunkType::Decision,
+        );
+        correct.timestamp_created = 1;
+        let correct_id = correct.chunk_id.clone();
+        let mut wrong = MemoryChunk::new(
+            tenant,
+            "For boreal, cache keys must use tenant scope.",
+            ChunkType::Decision,
+        );
+        wrong.timestamp_created = 2;
+
+        let ranked = rank_candidate_chunks(
+            vec![correct, wrong],
+            "Recall the cache-key namespace scope required by atlas.",
+            2,
+        );
+
+        assert_eq!(ranked[0].0.chunk_id, correct_id);
+    }
+
+    #[test]
+    fn candidate_ranking_does_not_match_alphanumeric_term_inside_another_word() {
+        let tenant = TenantId::new("candidate_rank_test").unwrap();
+        let mut correct = MemoryChunk::new(
+            tenant.clone(),
+            "For ion, cache keys must use tenant scope.",
+            ChunkType::Decision,
+        );
+        correct.timestamp_created = 1;
+        let correct_id = correct.chunk_id.clone();
+        let mut wrong = MemoryChunk::new(
+            tenant,
+            "For atlas, apply the corrected cache-key isolation scope rule.",
+            ChunkType::Decision,
+        );
+        wrong.timestamp_created = 2;
+
+        let ranked = rank_candidate_chunks(vec![correct, wrong], "scope for ion.", 2);
+
+        assert_eq!(ranked[0].0.chunk_id, correct_id);
+    }
+
+    #[test]
+    fn candidate_ranking_matches_natural_word_suffixes_at_token_boundaries() {
+        let tenant = TenantId::new("candidate_rank_test").unwrap();
+        let correct = MemoryChunk::new(
+            tenant.clone(),
+            "Parameters: sensitivity 7.5",
+            ChunkType::Trace,
+        );
+        let wrong = MemoryChunk::new(tenant, "Candidate search", ChunkType::Trace);
+
+        let ranked = rank_candidate_chunks(vec![wrong, correct], "parameter sweeps", 2);
+
+        assert_eq!(ranked.len(), 1);
+        assert!(ranked[0].0.text.starts_with("Parameters:"));
+    }
+
+    #[test]
+    fn candidate_ranking_preserves_dotted_identifier_terms() {
+        let tenant = TenantId::new("candidate_rank_test").unwrap();
+        let mut correct = MemoryChunk::new(
+            tenant.clone(),
+            "Release v1.3 fixed the recovery path.",
+            ChunkType::Decision,
+        );
+        correct.timestamp_created = 1;
+        let correct_id = correct.chunk_id.clone();
+        let mut wrong = MemoryChunk::new(
+            tenant,
+            "Release v1.2 fixed the recovery path.",
+            ChunkType::Decision,
+        );
+        wrong.timestamp_created = 2;
+
+        let ranked = rank_candidate_chunks(vec![correct, wrong], "v1.3", 2);
+
+        assert_eq!(ranked[0].0.chunk_id, correct_id);
+    }
+
+    #[test]
+    fn candidate_ranking_rejects_punctuation_only_queries() {
+        let tenant = TenantId::new("candidate_rank_test").unwrap();
+        let chunk = MemoryChunk::new(tenant, "durable fact", ChunkType::Decision);
+
+        for query in ["???", "---", "___"] {
+            assert!(rank_candidate_chunks(vec![chunk.clone()], query, 1).is_empty());
+        }
+    }
+}
