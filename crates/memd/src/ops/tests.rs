@@ -3126,11 +3126,13 @@ async fn memory_search_rescues_exact_code_token_when_indexes_miss() {
     ]);
     let store = SearchMissStore::new(vec![chunk]);
 
-    let rescued = exact_lexical_candidates_for_tenants(
+    let rescued = exact_lexical_candidates_for_project_scopes(
         &store,
-        &[tenant],
+        &[ProjectSearchScope {
+            tenant_id: tenant,
+            project_id: Some("virosync".to_string()),
+        }],
         "repeat_spike",
-        Some("virosync"),
         5,
     )
     .await
@@ -3138,6 +3140,74 @@ async fn memory_search_rescues_exact_code_token_when_indexes_miss() {
 
     assert_eq!(rescued.len(), 1);
     assert!(rescued[0].0.text.contains("repeat-spike benchmark"));
+}
+
+#[tokio::test]
+async fn exact_code_token_rescue_ranks_the_bounded_scan_before_truncating() {
+    let tenant = TenantId::new("default").unwrap();
+    let project = ProjectId::new(Some("rescue-rank".to_string()));
+    let chunks = ["boreal", "cirrus", "delta", "atlas"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, subsystem)| {
+            let mut chunk = MemoryChunk::new(
+                tenant.clone(),
+                format!("Apply the cache-key isolation rule for {subsystem}."),
+                ChunkType::Summary,
+            )
+            .with_project(project.clone());
+            chunk.timestamp_created = index as i64;
+            chunk
+        })
+        .collect::<Vec<_>>();
+    let target_id = chunks[3].chunk_id.clone();
+    let store = SearchMissStore::new(chunks);
+
+    let rescued = exact_lexical_candidates_for_project_scopes(
+        &store,
+        &[ProjectSearchScope {
+            tenant_id: tenant,
+            project_id: Some("rescue-rank".to_string()),
+        }],
+        "cache-key atlas.",
+        3,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rescued[0].0.chunk_id, target_id);
+}
+
+#[tokio::test]
+async fn exact_code_token_rescue_preserves_dotted_identifiers() {
+    let tenant = TenantId::new("default").unwrap();
+    let target = MemoryChunk::new(
+        tenant.clone(),
+        "Release v1.3 fixed the recovery path.",
+        ChunkType::Summary,
+    )
+    .with_project(ProjectId::new(Some("rescue-version".to_string())));
+    let target_id = target.chunk_id.clone();
+    let store = SearchMissStore::new(vec![target]);
+
+    let rescued = exact_lexical_candidates_for_project_scopes(
+        &store,
+        &[ProjectSearchScope {
+            tenant_id: tenant,
+            project_id: Some("rescue-version".to_string()),
+        }],
+        "v1.3",
+        3,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rescued[0].0.chunk_id, target_id);
+}
+
+#[test]
+fn exact_code_token_rescue_rejects_punctuation_only_terms() {
+    assert!(exact_rescue_terms("--- ___").is_empty());
 }
 
 #[tokio::test]

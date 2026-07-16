@@ -128,10 +128,11 @@ use crate::retrieval::{ContextPacker, PackerConfig, PackerInput};
 use crate::store::metadata::MetadataStore;
 use crate::store::usage::{query_hash_hex, UsageEvent, UsageOp};
 use crate::store::{
-    rank_candidate_chunks, DuplicateHealth, FeedbackEntry, HealthCounts, IndexCoverageHealth,
-    OutcomeEvent, OutcomeKind, OutcomeVerifier, PayloadHealth, RankingPolicyMode, RelevanceLabel,
-    RetrievalEpisode, RetrievalEpisodeId, RetrievalEpisodeItem, Store, StoreHealthSnapshot,
-    StoreStats, TenantManager, OUTCOME_POLICY_VERSION,
+    compare_scored_chunks, rank_candidate_chunks, score_candidate_chunk, DuplicateHealth,
+    FeedbackEntry, HealthCounts, IndexCoverageHealth, OutcomeEvent, OutcomeKind, OutcomeVerifier,
+    PayloadHealth, RankingPolicyMode, RelevanceLabel, RetrievalEpisode, RetrievalEpisodeId,
+    RetrievalEpisodeItem, Store, StoreHealthSnapshot, StoreStats, TenantManager,
+    OUTCOME_POLICY_VERSION,
 };
 use crate::task_memory::{
     build_library_digest_artifact, build_project_brief_digest_artifact, build_project_brief_view,
@@ -2303,7 +2304,7 @@ fn exact_rescue_terms(query: &str) -> Vec<String> {
             let cleaned = term
                 .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
                 .to_ascii_lowercase();
-            if cleaned.len() < 3 {
+            if cleaned.len() < 3 || !cleaned.chars().any(|c| c.is_ascii_alphanumeric()) {
                 return None;
             }
             let code_like = cleaned.contains('_')
@@ -2405,66 +2406,19 @@ fn should_run_lexical_overlap_rescue(scored: &[(MemoryChunk, f32)], query: &str,
         .any(|(chunk, _)| chunk_lexical_overlap_count(chunk, &terms) >= min_overlap)
 }
 
-#[cfg(test)]
-async fn exact_lexical_candidates_for_tenants<S: Store>(
-    store: &S,
-    tenants: &[TenantId],
+fn retain_exact_rescue_candidate(
+    candidates: &mut Vec<(MemoryChunk, f32)>,
+    chunk: MemoryChunk,
     query: &str,
-    project_id_filter: Option<&str>,
     limit: usize,
-) -> Result<Vec<(MemoryChunk, f32)>, McpError> {
-    let terms = exact_rescue_terms(query);
-    if terms.is_empty() || limit == 0 {
-        return Ok(Vec::new());
+) {
+    let score = score_candidate_chunk(query, &chunk);
+    if score <= 0.0 {
+        return;
     }
-
-    let scan_limit = if project_id_filter.is_some() {
-        EXACT_RESCUE_PROJECT_SCAN_LIMIT
-    } else {
-        EXACT_RESCUE_GLOBAL_SCAN_LIMIT
-    };
-    let mut candidates = Vec::new();
-
-    for tenant in tenants {
-        let mut offset = 0usize;
-        let mut scanned = 0usize;
-        loop {
-            if scanned >= scan_limit || candidates.len() >= limit {
-                break;
-            }
-            let page_limit = EXACT_RESCUE_PAGE_SIZE.min(scan_limit.saturating_sub(scanned));
-            if page_limit == 0 {
-                break;
-            }
-            let chunks = store
-                .list_chunks_for_project(tenant, project_id_filter, page_limit, offset)
-                .await
-                .map_err(|e| McpError::ToolError(e.to_string()))?;
-            if chunks.is_empty() {
-                break;
-            }
-            scanned = scanned.saturating_add(page_limit);
-            offset = offset.saturating_add(page_limit);
-
-            for chunk in chunks {
-                if project_id_filter.is_some() && chunk.project_id.as_option() != project_id_filter
-                {
-                    continue;
-                }
-                if chunk_contains_exact_rescue_term(&chunk, &terms) {
-                    candidates.push(chunk);
-                    if candidates.len() >= limit {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(rank_candidate_chunks(candidates, query, limit)
-        .into_iter()
-        .map(|(chunk, score)| (chunk, score + EXACT_RESCUE_SCORE_BOOST))
-        .collect())
+    candidates.push((chunk, score));
+    candidates.sort_by(compare_scored_chunks);
+    candidates.truncate(limit);
 }
 
 async fn exact_lexical_candidates_for_project_scopes<S: Store>(
@@ -2488,7 +2442,7 @@ async fn exact_lexical_candidates_for_project_scopes<S: Store>(
         let mut offset = 0usize;
         let mut scanned = 0usize;
         loop {
-            if scanned >= scan_limit || candidates.len() >= limit {
+            if scanned >= scan_limit {
                 break;
             }
             let page_limit = EXACT_RESCUE_PAGE_SIZE.min(scan_limit.saturating_sub(scanned));
@@ -2517,16 +2471,13 @@ async fn exact_lexical_candidates_for_project_scopes<S: Store>(
                     }
                 }
                 if chunk_contains_exact_rescue_term(&chunk, &terms) {
-                    candidates.push(chunk);
-                    if candidates.len() >= limit {
-                        break;
-                    }
+                    retain_exact_rescue_candidate(&mut candidates, chunk, query, limit);
                 }
             }
         }
     }
 
-    Ok(rank_candidate_chunks(candidates, query, limit)
+    Ok(candidates
         .into_iter()
         .map(|(chunk, score)| (chunk, score + EXACT_RESCUE_SCORE_BOOST))
         .collect())

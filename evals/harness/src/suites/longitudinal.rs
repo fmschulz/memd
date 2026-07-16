@@ -864,7 +864,7 @@ async fn consolidate_cluster(
         text: text.clone(),
         supersedes: memory.source_ids.clone(),
         agent_action: format!(
-            "Use tenant-scoped cache keys when changing {}.",
+            "Use tenant scope for {} cache keys; do not use the obsolete process scope rule.",
             memory.fixture.subsystem
         ),
         evidence: memory.source_ids.clone(),
@@ -892,11 +892,11 @@ async fn consolidate_cluster(
         &ConsolidatorIdentity {
             adapter: "longitudinal-deterministic".to_string(),
             command: Some("internal-evaluator".to_string()),
-            model: Some("fixture-oracle-v1".to_string()),
+            model: Some("fixture-oracle-v2".to_string()),
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
         },
         &[format!("topic:{}", memory.fixture.id)],
-        "frozen-longitudinal-prompt-v1",
+        "frozen-longitudinal-prompt-v2",
         &raw_response,
         false,
     )
@@ -1573,5 +1573,36 @@ mod tests {
         let items = vec![make(newer, 1.0, 0), make(older, 0.9, 1)];
         let counts = HashMap::from([(older.to_string(), 100)]);
         assert_eq!(exposure_ranked_ids(&items, &counts, 2, &config)[0], older);
+    }
+
+    #[tokio::test]
+    async fn consolidated_memory_preserves_correction_paraphrase_recall() {
+        let protocol: Protocol =
+            serde_json::from_str(include_str!("../../../bench/longitudinal/protocol.v1.json"))
+                .unwrap();
+        let fixtures: Fixtures =
+            serde_json::from_str(include_str!("../../../bench/longitudinal/fixtures.v1.json"))
+                .unwrap();
+        let treatment = protocol
+            .treatments
+            .iter()
+            .find(|treatment| treatment.id == "staged_consolidation")
+            .unwrap();
+        let tenant = TenantId::new("longitudinal_test").unwrap();
+
+        let result = run_treatment(&protocol, &fixtures, treatment, &tenant)
+            .await
+            .unwrap();
+        let misses = result
+            .rows
+            .iter()
+            .filter(|row| row.phase == "post_feedback" && row.recall_at_3 == 0.0)
+            .map(|row| format!("{}:round{}", row.cluster_id, row.round))
+            .collect::<Vec<_>>();
+
+        assert!(
+            misses.is_empty(),
+            "consolidation lost source-supported paraphrases: {misses:?}"
+        );
     }
 }
