@@ -154,28 +154,19 @@ if [[ "$INSTALL_BINARY" -eq 1 ]]; then
 fi
 
 read -r -d '' ENFORCEMENT_SNIPPET <<'EOF' || true
-Mandatory `memd` CLI contract for substantive technical and scientific work:
+Use the `memd` CLI for shared local memory on substantive technical and scientific work. Load the memd skill for full commands and write-quality rules.
 
-- At session start for substantive work, refresh and read project-root `memory.md`: `memd memory-md --project-dir . --output memory.md` when `.memd/project_scope.json` is available, otherwise include `--tenant-id <tenant>` and `--project-id <project>`.
-- For non-trivial engineering, debugging, analysis, literature review, benchmarking, or multi-step scientific work, search `memd` first with the CLI using the current `tenant_id` and available `project_id`.
-- Preferred retrieval command: `memd agent-context --query "<task>" --k 2 --token-budget 700 --format markdown --output .memd/context.md --log-dir .memd/search-logs`.
-- For direct lookup, use `memd search --query "<query>" --compact --token-budget 2000 --format markdown`.
-- Inside a scoped project (a .memd/project_scope.json created by memd session-start), omit --tenant-id/--project-id; memd resolves them from the scope file. Explicit flags override the scope file.
-- If project-scoped retrieval returns nothing, rerun with `--tenant-id` only (no `--project-id`) before concluding no memory exists.
-- Before saying the work is impossible, blocked, cannot be answered, or needs user context that might already exist in shared memory, run a relevant `memd` CLI search first. If no relevant record is found, say exactly what you checked.
-- If the work changes understanding, runs tools, produces findings, or could matter to later sessions, record it with `memd add` before the final answer.
-- Use `memd add --chunk-type summary|trace|decision|research|plan --tags kind:progress|run|evidence|decision|finish,priority:N,... --text "<summary>"`. Use `priority:N` for durable lessons that should be candidates for future `memory.md` refreshes.
-- For time-anchored facts (meetings, incidents, deploys, dated results), store the event time instead of baking dates into the text: `memd call memory.add --json '{"type":"message","text":"...","event_time_ms":<ms-epoch>}'` (also per-line in `memd batch`). For temporal questions, recall with `"render_event_time": true` on `memory.search` so results carry `[YYYY-MM-DD]` prefixes. (v1.3+)
-- When the store holds multi-chunk documents (one document per add), search with `--dedupe-by-source` so one document's fragments don't crowd out other sources; leave it off for conversational or pre-chunked stores. If a write through the warm worker fails with `memd:dense-index-busy`, an index repair is running — the store is healthy; retry shortly (reads fall back to the cold path automatically). (v1.3.1+)
-- Keep durable writes bounded: a normal single task should leave fewer than 10 durable chunks, usually one decision, one evidence/run record, and one finish summary.
-- Durable writes should contain a decision+rationale, validated fix/result, root cause, command/path/parameter/metric/version, evidence for a claim, or durable follow-up. Avoid "starting", "looking", or "made progress" notes without concrete outcomes.
-- High-priority durable writes with `priority:8+` or `importance:8+` must include a concrete `Agent action:` sentence telling the next agent what to do, check, prefer, avoid, verify, reuse, or resolve; writes without one are admitted but downgraded to priority 7.
-- Do not store full chat logs, play-by-play transcripts, generated digest wrappers, or duplicate summaries that add no new evidence/tags/provenance. Store concise, durable facts that another agent is likely to reuse.
-- If startup memory looks noisy, lacks current project state, or lacks concrete `Agent action:` lines, inspect it with `memd eval-memory-md --project-dir . --agent-usefulness --min-useful-ratio 0.8 --max-generated-wrappers 0` and `memd memory-md --project-dir . --output memory.md --explain-output .memd/memory-explain.json`, and check store health with `memd report --strict`.
-- Do not store secrets or private credentials in `memd`: cookies, tokens, API keys, passwords, verification codes, ID numbers, bank cards, private contact details, third-party account configuration, or sensitive values copied from logs.
-- Do not provide a final substantive answer until the CLI retrieval and CLI write have both happened, unless `memd` is unavailable.
-- If `memd` is unavailable or misconfigured, treat that as a blocker and say so explicitly rather than silently skipping memory usage.
-- Small talk, trivial one-shot questions, and purely local formatting rewrites do not require `memd`.
+- Session start: refresh and read project-root `memory.md` with `memd memory-md`.
+- Before substantive work, and before declaring anything blocked or unknowable, search with `memd agent-context` or `memd search`. Say what you checked when no record matches.
+- Before the final answer, persist reusable decisions, findings, fixes, or evidence with `memd add`.
+- Time-anchored facts: store `event_time_ms` through `memory.add` or `batch`; recall with `render_event_time: true`. Do not put dates in the text. (v1.3+)
+- Document-per-add stores: search with `--dedupe-by-source`; leave it off for conversational stores. Retry `memd:dense-index-busy` writes after the repair; reads fall back automatically. (v1.3.1+)
+- Long writes: retain every `stored_chunk_ids` value. Use individual adds instead of `memory.add_batch` when later retrieval or outcome attribution needs all split-child IDs. (v1.5+)
+- Iterative improvement: retain `retrieval_episode_id` when memory affects a task, then record only independently verified `--used` or `--harmful` chunks with `memd outcome`. Agent self-reports are audit-only; `outcome-v1` is shadow-only. (v1.5+)
+- Consolidation is review-gated: `memd consolidate` stages hidden candidates. List them with `memd consolidate-review --list`, then explicitly accept or reject. Session start cannot promote a run without durable prior promotion intent. (v1.5+)
+- Reproducible retrieval: call `memory.search` with `ranking_time_ms` and require `retrieval_episode_id: null`. This pins ranking decay but is not a lifecycle snapshot. (v1.5+)
+- Never store secrets, credentials, PII, or sensitive log values.
+- Treat unavailable or misconfigured memd as a blocker. Small talk, trivial one-shot questions, and local formatting rewrites do not require memd.
 EOF
 
 upsert_block \
