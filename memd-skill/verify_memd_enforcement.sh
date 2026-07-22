@@ -30,8 +30,13 @@ if ! grep -Fq "<!-- memd-enforcement:start -->" "${HOME}/.codex/AGENTS.md"; then
   exit 1
 fi
 
-if ! grep -Fq "Mandatory \`memd\` CLI contract" "${HOME}/.codex/AGENTS.md"; then
+if ! grep -Fq 'Use the `memd` CLI for shared local memory' "${HOME}/.codex/AGENTS.md"; then
   echo "missing CLI memd contract in ~/.codex/AGENTS.md" >&2
+  exit 1
+fi
+
+if ! grep -Fq 'retrieval_episode_id' "${HOME}/.codex/AGENTS.md"; then
+  echo "missing memd v1.5 outcome contract in ~/.codex/AGENTS.md" >&2
   exit 1
 fi
 
@@ -40,7 +45,7 @@ if ! grep -Fq "<!-- memd-enforcement:start -->" "${HOME}/.claude/CLAUDE.md"; the
   exit 1
 fi
 
-if ! grep -Fq "Mandatory \`memd\` CLI contract" "${HOME}/.claude/CLAUDE.md"; then
+if ! grep -Fq 'Use the `memd` CLI for shared local memory' "${HOME}/.claude/CLAUDE.md"; then
   echo "missing CLI memd contract in ~/.claude/CLAUDE.md" >&2
   exit 1
 fi
@@ -50,8 +55,13 @@ if [[ ! -f "${HOME}/.cursor/rules/memd.mdc" ]]; then
   exit 1
 fi
 
-if ! grep -Fq "Mandatory \`memd\` CLI contract" "${HOME}/.cursor/rules/memd.mdc"; then
+if ! grep -Fq 'Use the `memd` CLI for shared local memory' "${HOME}/.cursor/rules/memd.mdc"; then
   echo "missing CLI memd contract in ~/.cursor/rules/memd.mdc" >&2
+  exit 1
+fi
+
+if ! grep -Fq 'Evidence-bound self-improvement' "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/SKILL.md"; then
+  echo "missing memd v1.5 self-improvement guidance in bundled SKILL.md" >&2
   exit 1
 fi
 
