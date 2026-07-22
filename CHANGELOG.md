@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-07-22
+
 ### Fixed
 
 - `memd call` and `memd batch` now inherit missing `tenant_id` and
@@ -30,6 +32,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Fixed-clock searches ignore future-dated feedback and outcome events. Tier
   diagnostics now use the same metadata reranker as standard search, so debug
   mode no longer reports a different order from the served path.
+- Tiered semantic-cache hits now run and fuse the sparse retrieval leg instead
+  of returning a dense-only cached ranking. A regression test checks that cold
+  and warm hybrid searches preserve the same fused result order.
+- Exact lexical rescue now ranks the full bounded scan before retaining the
+  best candidates, so earlier low-scoring matches cannot hide later correction
+  records. Boundary punctuation is normalized without short-token substring
+  matches, while dotted identifiers and natural inflections remain searchable.
 - `memory.md` now deduplicates project and machine-wide candidates as one
   bounded union, including exact chunk IDs, consolidation lineage, and topic
   matches. Active-project results are assigned to the project section instead
