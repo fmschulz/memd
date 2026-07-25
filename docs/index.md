@@ -1,6 +1,6 @@
 # memd
 
-[![Version](https://img.shields.io/badge/version-1.5.0-blue)](https://github.com/fmschulz/memd/blob/main/CHANGELOG.md){ .md-button }
+[![Version](https://img.shields.io/badge/version-1.5.2-blue)](https://github.com/fmschulz/memd/blob/main/CHANGELOG.md){ .md-button }
 [![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust&logoColor=white)](https://github.com/fmschulz/memd/blob/main/Cargo.toml){ .md-button }
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/fmschulz/memd/blob/main/LICENSE){ .md-button }
 
