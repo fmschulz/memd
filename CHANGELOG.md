@@ -6,6 +6,15 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-07-25
+
+### Changed
+
+- `OutcomeKind` is now `#[non_exhaustive]`. Adding `verifier_error` below breaks
+  any downstream exhaustive `match` on it, so the marker lands in the same
+  release: consumers absorb one break now instead of another every time the
+  eligibility model gains a state. Match arms on the enum need a `_` arm.
+
 ### Added
 
 - `verifier_error` outcome state, for a verifier that produced no verdict
