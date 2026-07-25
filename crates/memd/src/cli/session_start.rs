@@ -244,7 +244,22 @@ pub(super) async fn run_session_start_inner<S: Store>(
                     },
                 )
                 .await;
-                consolidation_spawned = spawn.is_ok();
+                // A contended scope returns Ok with a "skipped" reason and no
+                // child, so success alone does not mean one was started.
+                consolidation_spawned = spawn
+                    .as_ref()
+                    .ok()
+                    .and_then(|v| v.get("spawned_background").and_then(Value::as_bool))
+                    .unwrap_or(false);
+                if !consolidation_spawned {
+                    if let Some(reason) = spawn
+                        .as_ref()
+                        .ok()
+                        .and_then(|v| v.get("skipped").and_then(Value::as_str))
+                    {
+                        skip_reason = Some(reason.to_string());
+                    }
+                }
             }
             Err(e) => {
                 skip_reason = Some(format!("no consolidator backend: {e}"));

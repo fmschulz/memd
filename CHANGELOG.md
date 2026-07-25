@@ -6,6 +6,39 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-07-24
+
+### Fixed
+
+- `memd session-start` no longer stacks background consolidations. It spawned a
+  detached `memd consolidate` whenever the dirty region reached `MIN_REGION`,
+  with nothing checking whether one was already running. Each child opens the
+  store before its CLI handler runs, so the children queued against the warm
+  worker instead of finishing, the dirty region never fell back below the
+  threshold, and every further session start added another. Observed in the
+  field as a standing herd of nine consolidations that starved `memd add` into
+  120-second timeouts while reads stayed instant.
+
+  Background spawns now take a scope-keyed `flock` under the data directory and
+  hand it to the child by clearing `FD_CLOEXEC` in `pre_exec`, after the fork
+  and before the exec, so no other process that execs can pick it up. The lock
+  therefore spans the child's lifetime and the kernel releases it even when the
+  child is killed, leaving nothing stale to reap. A second spawn for
+  the same tenant and project returns `{"skipped": "already_running"}`, and
+  `session-start` reports `consolidation_spawned: false` with that reason
+  rather than counting a skipped spawn as a start. The guard sits in the parent
+  because a child-side check would run only after the child had already
+  contacted the store, which is the contention being avoided.
+
+  Clearing `FD_CLOEXEC` on the parent's own descriptor would have been simpler
+  and is wrong: it leaks the lock into every process spawned by any thread
+  while the claim is open, and each of those then blocks the scope for as long
+  as it lives. Two bounds remain. The child's own descendants inherit the
+  descriptor, so a consolidator CLI outliving its parent holds the lock until
+  it exits, which suppresses further spawns while a consolidation is stuck. And
+  `FD_CLOEXEC` bounds `exec`, not `fork`, so a process that forks without
+  ever exec-ing during the claim would also inherit it.
+
 ## [1.5.0] - 2026-07-22
 
 ### Fixed

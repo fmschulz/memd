@@ -60,7 +60,7 @@ pub(super) async fn run_consolidate<S: Store>(
         );
     }
     if options.background {
-        return spawn_background(&options);
+        return spawn_background(store.as_persistent().map(|s| s.data_dir()), &options);
     }
     let consolidator = select_consolidator()?;
     consolidate_core(store, options, consolidator.as_ref()).await
@@ -581,10 +581,164 @@ fn most_common_ctx_tags(region: &[RegionChunk], limit: usize) -> Vec<String> {
         .collect()
 }
 
+/// Path of the single-flight lock guarding background consolidation for
+/// one scope. The scope is hashed because tenant and project ids are free
+/// text and must not shape a filename.
+fn spawn_lock_path(data_dir: &Path, tenant_id: &str, project_id: Option<&str>) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(tenant_id.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(project_id.unwrap_or("").as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    data_dir.join(format!(".consolidate-{}.lock", &digest[..16]))
+}
+
+/// Outcome of trying to claim the single-flight lock for one scope.
+enum SpawnClaim {
+    /// Free to spawn. Carries the parent's descriptor when a lock was taken,
+    /// and `None` on platforms without `flock`, where no guard is available
+    /// and the previous unguarded behavior stands.
+    Free(Option<std::fs::File>),
+    /// Another background consolidation already owns this scope.
+    Busy,
+}
+
+/// Try to claim the spawn lock for one scope.
+///
+/// The returned descriptor keeps `FD_CLOEXEC`; [`inherit_lock_fd`] is what
+/// hands it to a single child. The parent closes its own copy right after
+/// spawning, so the lock lives as long as the child and the kernel releases it
+/// even if the child is killed.
+#[cfg(unix)]
+fn try_claim_spawn_lock(path: &Path) -> Result<SpawnClaim> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    // Keep the lock off fds 0-2. If stdin/stdout/stderr were closed, open()
+    // hands back one of them and the child's Stdio::null() setup would later
+    // overwrite it, silently dropping the guard and restoring the herd.
+    let file = if opened.as_raw_fd() < 3 {
+        let raw = unsafe { libc::fcntl(opened.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+        if raw < 0 {
+            return Err(MemdError::IoError(std::io::Error::last_os_error()));
+        }
+        drop(opened);
+        std::fs::File::from(unsafe { OwnedFd::from_raw_fd(raw) })
+    } else {
+        opened
+    };
+    let fd = file.as_raw_fd();
+    if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        // EWOULDBLOCK and EAGAIN are the same value on Linux; compare rather
+        // than match so the duplicate arm does not read as unreachable.
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EWOULDBLOCK) || err.raw_os_error() == Some(libc::EAGAIN)
+        {
+            return Ok(SpawnClaim::Busy);
+        }
+        return Err(MemdError::IoError(err));
+    }
+    Ok(SpawnClaim::Free(Some(file)))
+}
+
+/// Hand the claimed lock to one specific child.
+///
+/// `FD_CLOEXEC` is cleared after fork and before exec, so the descriptor
+/// reaches this child and nothing else. Clearing it on the parent's own
+/// descriptor instead would leak the lock into every process spawned by any
+/// thread while the claim is open, and those processes would hold the scope
+/// blocked for as long as they live.
+#[cfg(unix)]
+fn inherit_lock_fd(command: &mut std::process::Command, lock: Option<&std::fs::File>) {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
+    let Some(file) = lock else { return };
+    let fd = file.as_raw_fd();
+    unsafe {
+        command.pre_exec(move || {
+            // `fork` copies the whole descriptor table, so this child starts out
+            // holding every descriptor the parent had, including the store's
+            // SQLite and Tantivy locks. Only `FD_CLOEXEC` drops them at `exec`,
+            // and this code cannot guarantee every descriptor in the process
+            // carries it. Mark the whole range first, then clear the flag on the
+            // one descriptor the child is meant to keep, so inheritance is
+            // stated here rather than inferred from every other open file.
+            //
+            // CLOSE_RANGE_CLOEXEC sets the flag instead of closing, so a
+            // descriptor std still needs for stdio setup is not pulled out from
+            // under it. Kernels without the call (pre-5.9) fall back to the
+            // previous behavior.
+            if libc::close_range(3, libc::c_uint::MAX, libc::CLOSE_RANGE_CLOEXEC as i32) != 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() != Some(libc::ENOSYS) {
+                    return Err(err);
+                }
+            }
+            // fcntl is async-signal-safe, which pre_exec requires.
+            if libc::fcntl(fd, libc::F_SETFD, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Without `flock` there is no guard, so spawning proceeds as it did before.
+#[cfg(not(unix))]
+fn try_claim_spawn_lock(_path: &Path) -> Result<SpawnClaim> {
+    Ok(SpawnClaim::Free(None))
+}
+
 /// Re-exec `memd consolidate` as a detached background child and
 /// return immediately. The child runs the same scope without
 /// `--background`.
-fn spawn_background(options: &ConsolidateOptions) -> Result<Value> {
+///
+/// `lock_root` enables single-flight: without it every `memd session-start`
+/// stacks another detached child, and because those children cannot finish
+/// while they queue behind each other the dirty region never shrinks below
+/// [`MIN_REGION`], so each new session spawns one more. The guard has to sit
+/// here in the parent rather than in the child's CLI handler, because the
+/// child opens the store (contacting the warm worker) before any handler
+/// runs, which is the contention being avoided.
+fn spawn_background(lock_root: Option<&Path>, options: &ConsolidateOptions) -> Result<Value> {
+    let mut lock = None;
+    let mut options = options.clone();
+    if let Some(data_dir) = lock_root {
+        let (tenant_id, project_id) = resolve_scope(
+            &options.project_dir,
+            options.tenant_id.clone(),
+            options.project_id.clone(),
+        )?;
+        let path = spawn_lock_path(data_dir, &tenant_id, project_id.as_deref());
+        match try_claim_spawn_lock(&path)? {
+            SpawnClaim::Free(guard) => lock = guard,
+            SpawnClaim::Busy => return Ok(json!({ "skipped": "already_running" })),
+        }
+        // Pin the child to the scope the lock was keyed on. Left implicit, the
+        // child re-resolves the scope file after the spawn, and a scope edit in
+        // that window would have it consolidate one scope while holding
+        // another's lock, letting a second child claim the free one.
+        options.tenant_id = Some(tenant_id);
+        options.project_id = project_id;
+    }
+    let result = spawn_background_inner(&options, lock.as_ref());
+    // Explicit: closes only the parent's descriptor, after the child has been
+    // spawned and inherited its own copy, which is what keeps the flock held.
+    drop(lock);
+    result
+}
+
+fn spawn_background_inner(
+    options: &ConsolidateOptions,
+    #[cfg_attr(not(unix), allow(unused_variables))] lock: Option<&std::fs::File>,
+) -> Result<Value> {
     let exe = std::env::current_exe()
         .map_err(|e| MemdError::ProtocolError(format!("cannot resolve current executable: {e}")))?;
     let mut command = std::process::Command::new(exe);
@@ -617,6 +771,7 @@ fn spawn_background(options: &ConsolidateOptions) -> Result<Value> {
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
+        inherit_lock_fd(&mut command, lock);
     }
     let child = command.spawn().map_err(|e| {
         MemdError::ProtocolError(format!("failed to spawn background consolidate: {e}"))
@@ -645,6 +800,65 @@ mod tests {
 
     /// Serialises tests that set the process-global `MOCK_RESPONSE_ENV`.
     static MOCK_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[test]
+    fn spawn_lock_is_scope_keyed() {
+        let dir = tempdir().unwrap();
+        let a = spawn_lock_path(dir.path(), "default", Some("virosync"));
+        assert_eq!(a, spawn_lock_path(dir.path(), "default", Some("virosync")));
+        assert_ne!(a, spawn_lock_path(dir.path(), "default", Some("memd")));
+        assert_ne!(a, spawn_lock_path(dir.path(), "other", Some("virosync")));
+        // A free-text scope must not shape the filename.
+        let hostile = spawn_lock_path(dir.path(), "../../etc", Some("a/b"));
+        assert_eq!(hostile.parent(), Some(dir.path()));
+    }
+
+    /// The guard is only useful if the lock outlives the parent that took it.
+    /// Hold it across a real `exec`, then prove a second claim is refused while
+    /// that child lives and succeeds once it is gone.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_lock_survives_exec_and_releases_with_the_child() {
+        let dir = tempdir().unwrap();
+        let path = spawn_lock_path(dir.path(), "default", Some("virosync"));
+
+        let held = match try_claim_spawn_lock(&path).unwrap() {
+            SpawnClaim::Free(guard) => guard.expect("unix claim holds a descriptor"),
+            SpawnClaim::Busy => panic!("first claim must succeed"),
+        };
+        // Hand the lock over exactly as spawn_background_inner does.
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30");
+        inherit_lock_fd(&mut command, Some(&held));
+        let mut child = command.spawn().expect("spawn holder");
+        // The parent's descriptor goes away exactly as it does after a real
+        // background spawn; only the child's inherited copy remains.
+        drop(held);
+
+        assert!(
+            matches!(try_claim_spawn_lock(&path).unwrap(), SpawnClaim::Busy),
+            "second claim must be refused while the child holds the inherited lock"
+        );
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+        // `FD_CLOEXEC` bounds `exec`, not `fork`: any of the ~1000 tests in this
+        // binary that spawns a process during the claim window inherits the
+        // descriptor until its own exec runs, and holds the lock for that
+        // instant. Allow those transient holders to clear before concluding the
+        // kernel failed to release.
+        let released = (0..200).any(|_| {
+            if matches!(try_claim_spawn_lock(&path).unwrap(), SpawnClaim::Free(_)) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            false
+        });
+        assert!(
+            released,
+            "kernel must release the lock when the child dies, leaving no stale state"
+        );
+    }
 
     fn persistent_store(dir: &Path) -> PersistentStore {
         let cfg = PersistentStoreConfig {
