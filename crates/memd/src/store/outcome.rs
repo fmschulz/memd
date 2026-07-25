@@ -107,6 +107,16 @@ pub enum OutcomeKind {
     Corrected,
     Failed,
     Abandoned,
+    /// The verifier produced no verdict: it crashed, timed out, or returned
+    /// something unparseable. Distinct from `Failed`, which asserts the task
+    /// was verified and did not succeed.
+    ///
+    /// Without this state a caller whose verifier broke has only `Failed` to
+    /// report, and `Failed` penalises the chunks that were retrieved. That
+    /// turns verifier flakiness into permanent negative priors on memories
+    /// that may be perfectly good. Recording the event keeps the failure
+    /// visible and attributable while crediting nothing in either direction.
+    VerifierError,
 }
 
 impl OutcomeKind {
@@ -117,6 +127,7 @@ impl OutcomeKind {
             Self::Corrected => "corrected",
             Self::Failed => "failed",
             Self::Abandoned => "abandoned",
+            Self::VerifierError => "verifier_error",
         }
     }
 
@@ -127,6 +138,7 @@ impl OutcomeKind {
             "corrected" => Ok(Self::Corrected),
             "failed" => Ok(Self::Failed),
             "abandoned" => Ok(Self::Abandoned),
+            "verifier_error" => Ok(Self::VerifierError),
             other => Err(MemdError::ValidationError(format!(
                 "invalid retrieval outcome: {other}"
             ))),
@@ -139,6 +151,12 @@ impl OutcomeKind {
 
     pub const fn credits_harmful(self) -> bool {
         matches!(self, Self::Corrected | Self::Failed)
+    }
+
+    /// True when the event records that verification did not happen, rather
+    /// than a verified result. Never eligible for ranking in either direction.
+    pub const fn is_verifier_error(self) -> bool {
+        matches!(self, Self::VerifierError)
     }
 }
 
@@ -604,6 +622,38 @@ mod tests {
             1,
         );
         assert!(!abandoned.ranking_eligible);
+    }
+
+    /// A verifier that produced no verdict must move nothing. Reporting the
+    /// broken run as `failed` is what this state exists to stop, so it is
+    /// checked against full attribution in both directions and against the
+    /// verifier type that would otherwise carry the most weight.
+    #[test]
+    fn verifier_error_credits_nothing_in_either_direction() {
+        assert!(!OutcomeKind::VerifierError.credits_used());
+        assert!(!OutcomeKind::VerifierError.credits_harmful());
+        assert!(OutcomeKind::VerifierError.is_verifier_error());
+        assert_eq!(
+            OutcomeKind::parse("verifier_error").unwrap(),
+            OutcomeKind::VerifierError
+        );
+        assert_eq!(OutcomeKind::VerifierError.as_str(), "verifier_error");
+
+        let used = ChunkId::new();
+        let harmful = ChunkId::new();
+        let event = OutcomeEvent::new(
+            RetrievalEpisodeId::new(),
+            OutcomeKind::VerifierError,
+            OutcomeVerifier::AutomatedTest,
+            vec![used],
+            vec![harmful],
+            Some("ci://run/1".to_string()),
+            1,
+        );
+        assert!(
+            !event.ranking_eligible,
+            "a verifier that produced no verdict must not credit or penalise anything"
+        );
     }
 
     #[test]

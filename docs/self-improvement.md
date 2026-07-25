@@ -109,7 +109,16 @@ documents should use individual `memory.add` calls.
 Only explicitly used chunks on a verified pass or acceptance receive positive
 credit. Only explicitly harmful chunks on a verified correction or failure
 receive negative credit. Rendered-but-unattributed chunks receive no credit,
-and agent self-reports never affect ranking. Priors are scoped to the
+and agent self-reports never affect ranking.
+
+Report `verifier_error` when the verifier itself produced no verdict, because
+it crashed, timed out, or returned something unparseable. `failed` asserts that
+the task was verified and did not succeed, so using it for a broken verifier
+penalises whatever happened to be retrieved and turns verifier flakiness into
+permanent negative priors. A `verifier_error` credits nothing in either
+direction; it is recorded so the failure stays visible and attributable. The
+evidence requirement still applies to the verifier types that carry it, so an
+automated test reporting a broken run should cite the run or log. Priors are scoped to the
 requesting tenant and project, time-decayed, and bounded. Outcomes on an
 aliased chunk therefore cannot alter the origin tenant's ranking prior.
 

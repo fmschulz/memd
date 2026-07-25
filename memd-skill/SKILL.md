@@ -531,7 +531,12 @@ memd outcome "$EPISODE_ID" \
 
 Pass multiple rendered IDs as comma-separated values to `--used` or
 `--harmful`. Use `--harmful` only for chunks that caused a verified correction
-or failure. Only `user`, `automated_test`, `external_tool`, and `task_system`
+or failure. When the verifier itself produced no verdict, because it crashed,
+timed out, or returned something unparseable, report
+`--outcome verifier_error` rather than `failed`. `failed` asserts the task was
+verified and did not succeed, so reporting it for a broken verifier penalises
+whatever happened to be retrieved. A `verifier_error` credits nothing either
+way and keeps the broken run visible. Only `user`, `automated_test`, `external_tool`, and `task_system`
 verifiers can affect the bounded, time-decayed prior; `agent_self_report` is
 audit-only. Unattributed rendered chunks receive no credit. Episode storage
 hashes raw queries, but `task_id`, `thread_id`, evidence references, and an
