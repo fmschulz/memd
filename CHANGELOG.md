@@ -6,6 +6,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-07-25
+
+### Fixed
+
+- 1.5.1 does not build on `aarch64-unknown-linux-musl` or the Apple Silicon
+  targets. The descriptor-table guard added in 1.5.1 calls `libc::close_range`,
+  which `libc` exposes only on linux-gnu, FreeBSD, and Hurd, so those targets
+  fail with `cannot find function close_range in crate libc`. The 1.5.1
+  crates.io release carries the defect; the release binaries were never
+  produced because the build failed. The call is now gated to linux-gnu, where
+  the binding exists. Elsewhere the single-flight guard behaves as before,
+  relying on std's own `FD_CLOEXEC` discipline for unrelated descriptors.
+
 ## [1.5.1] - 2026-07-24
 
 ### Fixed
