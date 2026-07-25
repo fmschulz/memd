@@ -6,6 +6,29 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Added
+
+- `verifier_error` outcome state, for a verifier that produced no verdict
+  because it crashed, timed out, or returned something unparseable. Until now
+  the closest available state was `failed`, which asserts the task was verified
+  and did not succeed and therefore penalises the chunks that were retrieved.
+  Reporting a broken verifier that way turns endpoint flakiness into permanent
+  negative priors on memories that may be perfectly good. Observed at benchmark
+  scale while judging a memory benchmark: 41 empty judge responses and 19
+  client timeouts were scored as wrong answers for the system under test.
+
+  A `verifier_error` credits nothing in either direction, even when used and
+  harmful chunk IDs are supplied, so it can be reported without knowing what
+  the run would have concluded. The event is still persisted and queryable, so
+  verifier failures stay visible instead of silently moving ranking. The
+  evidence requirement is unchanged: verifier types that require an evidence
+  reference still require one, since a broken run is exactly when the log or
+  job reference matters.
+
+  No migration is needed, but the state is not readable by older binaries.
+  Downgrading after recording one makes the outcome list for that episode fail
+  to parse; other episodes and all ranking reads are unaffected.
+
 ### Fixed
 
 - Background consolidation had no machine-wide ceiling. The 1.5.1 lock is keyed

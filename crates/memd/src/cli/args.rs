@@ -560,7 +560,8 @@ pub enum CliCommand {
         #[arg(long)]
         tenant_id: Option<String>,
 
-        /// Outcome: passed, accepted, corrected, failed, or abandoned.
+        /// Outcome: passed, accepted, corrected, failed, abandoned, or
+        /// verifier_error when the verifier produced no verdict.
         #[arg(long)]
         outcome: String,
 
