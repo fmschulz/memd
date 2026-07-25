@@ -101,6 +101,10 @@ impl RankingPolicyMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+// Adding `VerifierError` broke every exhaustive downstream `match`. Marking the
+// enum here means the next state costs consumers nothing, so the eligibility
+// model can grow without a major version each time.
+#[non_exhaustive]
 pub enum OutcomeKind {
     Passed,
     Accepted,
