@@ -6,6 +6,35 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Fixed
+
+- Background consolidation had no machine-wide ceiling. The 1.5.1 lock is keyed
+  on tenant and project, which stops one project stacking spawns but leaves the
+  machine unbounded: every project whose dirty region crosses `MIN_REGION` adds
+  another detached child, and they all queue on the one store writer. A machine
+  with several active projects could therefore still reproduce the starvation
+  1.5.1 set out to fix. Spawning now also claims one of four interchangeable
+  slot locks under the data directory, so at most four background
+  consolidations run at once regardless of how many scopes are active. A spawn
+  past the ceiling returns `{"skipped": "consolidation_slots_busy"}` and is
+  reported by `session-start` as a skip reason rather than a start. The scope
+  lock is still claimed first, so a contended scope reports itself as such
+  instead of consuming a slot it would not use.
+
+- `session-start` dropped background-spawn errors. Only a `skipped` reason was
+  surfaced, so a spawn that failed outright reported
+  `consolidation_spawned: false` with no reason, which reads as "nothing needed
+  doing". 1.5.1 moved scope resolution and lock acquisition into the parent,
+  making that path reachable, and the error is now reported.
+
+- `cargo test` was intermittently red, roughly three runs in twenty. The 1.5.1
+  lock test holds a child process while the rest of the suite runs, and `fork`
+  copies the whole descriptor table, so an unrelated test asserting on a freshly
+  released file lock could observe a copy still held by a child that had not yet
+  reached its `exec`. Both affected assertions now retry briefly, matching the
+  allowance the 1.5.1 test already made for its own release check. Twenty
+  consecutive runs pass.
+
 ## [1.5.2] - 2026-07-25
 
 ### Fixed

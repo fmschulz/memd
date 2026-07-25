@@ -895,7 +895,20 @@ Below is a list of possible subsequent events:\n\
 
         // Reopen the same directory. Before the fix this call returned
         // "Index already exists" and the caller disabled hybrid search.
-        let reopened = Bm25Index::with_path(Some(path.clone()))
+        //
+        // The writer lock can still read as busy for an instant: any test in
+        // this binary that spawns a process forks the whole descriptor table,
+        // so a concurrently running child holds an inherited copy of this
+        // lock until it reaches its own `exec`. Retry briefly so a transient
+        // holder is not mistaken for the regression this test guards.
+        let reopened = (0..200)
+            .find_map(|_| match Bm25Index::with_path(Some(path.clone())) {
+                Ok(index) => Some(index),
+                Err(_) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    None
+                }
+            })
             .expect("reopening an existing bm25 directory must succeed");
         let results = reopened.search(&tenant, "sentinel", 10).unwrap();
         assert!(

@@ -252,13 +252,17 @@ pub(super) async fn run_session_start_inner<S: Store>(
                     .and_then(|v| v.get("spawned_background").and_then(Value::as_bool))
                     .unwrap_or(false);
                 if !consolidation_spawned {
-                    if let Some(reason) = spawn
-                        .as_ref()
-                        .ok()
-                        .and_then(|v| v.get("skipped").and_then(Value::as_str))
-                    {
-                        skip_reason = Some(reason.to_string());
-                    }
+                    skip_reason = match spawn.as_ref() {
+                        Ok(value) => value
+                            .get("skipped")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        // Reported rather than dropped: the spawn now resolves
+                        // scope and takes locks in the parent, so a failure here
+                        // is a real condition and used to surface as a silent
+                        // "nothing happened".
+                        Err(e) => Some(format!("spawn failed: {e}")),
+                    };
                 }
             }
             Err(e) => {
