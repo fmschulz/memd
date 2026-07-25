@@ -675,6 +675,12 @@ fn inherit_lock_fd(command: &mut std::process::Command, lock: Option<&std::fs::F
             // descriptor std still needs for stdio setup is not pulled out from
             // under it. Kernels without the call (pre-5.9) fall back to the
             // previous behavior.
+            //
+            // `libc` only exposes close_range on linux-gnu; aarch64-musl and
+            // the darwin targets have no binding, so gate it rather than break
+            // their builds. Where it is unavailable the guard still holds, it
+            // just relies on std's own FD_CLOEXEC discipline for other files.
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
             if libc::close_range(3, libc::c_uint::MAX, libc::CLOSE_RANGE_CLOEXEC as i32) != 0 {
                 let err = std::io::Error::last_os_error();
                 if err.raw_os_error() != Some(libc::ENOSYS) {
