@@ -581,6 +581,34 @@ fn most_common_ctx_tags(region: &[RegionChunk], limit: usize) -> Vec<String> {
         .collect()
 }
 
+/// Ceiling on background consolidations running at once across every scope.
+///
+/// The per-scope lock stops one project stacking spawns, but nothing bounded
+/// the machine: each project that crosses [`MIN_REGION`] adds a process, and
+/// they all queue on the one store writer. Four keeps several projects making
+/// progress while leaving the herd bounded and small.
+const SPAWN_SLOTS: usize = 4;
+
+/// Path of the slot lock bounding total concurrent background consolidations.
+fn spawn_slot_path(data_dir: &Path, slot: usize) -> PathBuf {
+    data_dir.join(format!(".consolidate-slot-{slot}.lock"))
+}
+
+/// Claim any free slot, bounding concurrency across all scopes.
+///
+/// Slots are interchangeable, so this walks them in order and takes the first
+/// that is free. `Busy` means every slot is held, which is the bound doing its
+/// job rather than an error.
+fn claim_spawn_slot(data_dir: &Path) -> Result<SpawnClaim> {
+    for slot in 0..SPAWN_SLOTS {
+        match try_claim_spawn_lock(&spawn_slot_path(data_dir, slot))? {
+            SpawnClaim::Free(guard) => return Ok(SpawnClaim::Free(guard)),
+            SpawnClaim::Busy => continue,
+        }
+    }
+    Ok(SpawnClaim::Busy)
+}
+
 /// Path of the single-flight lock guarding background consolidation for
 /// one scope. The scope is hashed because tenant and project ids are free
 /// text and must not shape a filename.
@@ -654,13 +682,24 @@ fn try_claim_spawn_lock(path: &Path) -> Result<SpawnClaim> {
 /// descriptor instead would leak the lock into every process spawned by any
 /// thread while the claim is open, and those processes would hold the scope
 /// blocked for as long as they live.
+/// Every descriptor is handed over by one closure. Registering a second
+/// `pre_exec` would run `close_range` again and re-flag the descriptors an
+/// earlier closure had just cleared, silently dropping those locks at `exec`.
 #[cfg(unix)]
-fn inherit_lock_fd(command: &mut std::process::Command, lock: Option<&std::fs::File>) {
-    use std::os::fd::AsRawFd;
+fn inherit_lock_fds(command: &mut std::process::Command, locks: &[&std::fs::File]) {
+    use std::os::fd::{AsRawFd, RawFd};
     use std::os::unix::process::CommandExt;
 
-    let Some(file) = lock else { return };
-    let fd = file.as_raw_fd();
+    // Copied into the closure by value: allocating after `fork` is not
+    // async-signal-safe, so the descriptors travel in a fixed array.
+    let mut fds: [RawFd; SPAWN_SLOTS + 1] = [-1; SPAWN_SLOTS + 1];
+    let count = locks.len().min(fds.len());
+    for (slot, file) in fds.iter_mut().zip(locks.iter().take(count)) {
+        *slot = file.as_raw_fd();
+    }
+    if count == 0 {
+        return;
+    }
     unsafe {
         command.pre_exec(move || {
             // `fork` copies the whole descriptor table, so this child starts out
@@ -688,8 +727,10 @@ fn inherit_lock_fd(command: &mut std::process::Command, lock: Option<&std::fs::F
                 }
             }
             // fcntl is async-signal-safe, which pre_exec requires.
-            if libc::fcntl(fd, libc::F_SETFD, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
+            for fd in fds.iter().take(count) {
+                if libc::fcntl(*fd, libc::F_SETFD, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
             }
             Ok(())
         });
@@ -715,6 +756,7 @@ fn try_claim_spawn_lock(_path: &Path) -> Result<SpawnClaim> {
 /// runs, which is the contention being avoided.
 fn spawn_background(lock_root: Option<&Path>, options: &ConsolidateOptions) -> Result<Value> {
     let mut lock = None;
+    let mut slot = None;
     let mut options = options.clone();
     if let Some(data_dir) = lock_root {
         let (tenant_id, project_id) = resolve_scope(
@@ -727,6 +769,18 @@ fn spawn_background(lock_root: Option<&Path>, options: &ConsolidateOptions) -> R
             SpawnClaim::Free(guard) => lock = guard,
             SpawnClaim::Busy => return Ok(json!({ "skipped": "already_running" })),
         }
+        // The scope lock bounds one project; this bounds the machine. Claimed
+        // second so a contended scope reports itself as such rather than
+        // consuming a slot it will not use.
+        match claim_spawn_slot(data_dir)? {
+            SpawnClaim::Free(guard) => slot = guard,
+            SpawnClaim::Busy => {
+                return Ok(json!({
+                    "skipped": "consolidation_slots_busy",
+                    "slots": SPAWN_SLOTS,
+                }))
+            }
+        }
         // Pin the child to the scope the lock was keyed on. Left implicit, the
         // child re-resolves the scope file after the spawn, and a scope edit in
         // that window would have it consolidate one scope while holding
@@ -734,16 +788,22 @@ fn spawn_background(lock_root: Option<&Path>, options: &ConsolidateOptions) -> R
         options.tenant_id = Some(tenant_id);
         options.project_id = project_id;
     }
-    let result = spawn_background_inner(&options, lock.as_ref());
-    // Explicit: closes only the parent's descriptor, after the child has been
-    // spawned and inherited its own copy, which is what keeps the flock held.
+    let held: Vec<&std::fs::File> = [lock.as_ref(), slot.as_ref()]
+        .into_iter()
+        .flatten()
+        .collect();
+    let result = spawn_background_inner(&options, &held);
+    drop(held);
+    // Explicit: closes only the parent's descriptors, after the child has been
+    // spawned and inherited its own copies, which is what keeps the flocks held.
     drop(lock);
+    drop(slot);
     result
 }
 
 fn spawn_background_inner(
     options: &ConsolidateOptions,
-    #[cfg_attr(not(unix), allow(unused_variables))] lock: Option<&std::fs::File>,
+    #[cfg_attr(not(unix), allow(unused_variables))] locks: &[&std::fs::File],
 ) -> Result<Value> {
     let exe = std::env::current_exe()
         .map_err(|e| MemdError::ProtocolError(format!("cannot resolve current executable: {e}")))?;
@@ -777,7 +837,7 @@ fn spawn_background_inner(
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
-        inherit_lock_fd(&mut command, lock);
+        inherit_lock_fds(&mut command, locks);
     }
     let child = command.spawn().map_err(|e| {
         MemdError::ProtocolError(format!("failed to spawn background consolidate: {e}"))
@@ -819,6 +879,51 @@ mod tests {
         assert_eq!(hostile.parent(), Some(dir.path()));
     }
 
+    /// The per-scope lock bounds one project; this bounds the machine. Claims
+    /// the guards directly rather than through children, so the test adds no
+    /// process to a suite whose other tests hold index locks.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_slots_bound_concurrent_consolidations() {
+        let dir = tempdir().unwrap();
+        let mut held = Vec::new();
+        for slot in 0..SPAWN_SLOTS {
+            // Any test in this binary that spawns a process forks the whole
+            // descriptor table, so a slot can read as busy for the instant
+            // before that child reaches its own `exec`. Retry briefly rather
+            // than mistake that for the ceiling.
+            let claimed = (0..200).find_map(|_| {
+                match claim_spawn_slot(dir.path()).expect("claim must not error") {
+                    SpawnClaim::Free(guard) => Some(guard.expect("unix claim holds a descriptor")),
+                    SpawnClaim::Busy => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        None
+                    }
+                }
+            });
+            held.push(claimed.unwrap_or_else(|| panic!("slot {slot} must become free")));
+        }
+        assert!(
+            matches!(claim_spawn_slot(dir.path()).unwrap(), SpawnClaim::Busy),
+            "a spawn beyond the ceiling must be refused"
+        );
+        // Releasing one consolidation lets the next project through. Same
+        // transient-holder allowance as above: a concurrently forked child can
+        // still hold the descriptor released here until it reaches its `exec`.
+        held.pop();
+        let freed = (0..200).any(|_| {
+            if matches!(
+                claim_spawn_slot(dir.path()).expect("claim must not error"),
+                SpawnClaim::Free(_)
+            ) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            false
+        });
+        assert!(freed, "releasing a consolidation must free its slot");
+    }
+
     /// The guard is only useful if the lock outlives the parent that took it.
     /// Hold it across a real `exec`, then prove a second claim is refused while
     /// that child lives and succeeds once it is gone.
@@ -835,7 +940,7 @@ mod tests {
         // Hand the lock over exactly as spawn_background_inner does.
         let mut command = std::process::Command::new("sleep");
         command.arg("30");
-        inherit_lock_fd(&mut command, Some(&held));
+        inherit_lock_fds(&mut command, &[&held]);
         let mut child = command.spawn().expect("spawn holder");
         // The parent's descriptor goes away exactly as it does after a real
         // background spawn; only the child's inherited copy remains.
