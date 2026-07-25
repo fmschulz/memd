@@ -7,17 +7,28 @@ bound by an immutable manifest and a verified artifact bundle.
 
 ## Evidence status
 
-The present development branch has a frozen longitudinal result for staged
-consolidation and outcome-attributed retrieval. Outcome-only shadow replay
-improved success and MRR without lowering recall. The combined consolidation
-and outcome loop failed its prespecified recall non-regression gate because a
-synthesized lesson dropped terminology needed by a later query variant.
-Outcome-aware ranking therefore remains shadow-only.
+The v1.5.0 release has a frozen longitudinal result for staged consolidation
+and outcome-attributed retrieval. Outcome-only shadow replay raised
+retrieval-choice correctness from 0.2422 to 0.9609 and MRR from 0.6094 to
+0.9688 while holding recall@3 at 0.9766. The full loop passed all seven
+prespecified gates, including recall non-regression, and its summary records
+`promotion_allowed: true`.
 
-No LoCoMo, CodeIR, MemoryData, or LongMemEval comparison for the current source
-revision is claim-bearing yet. Those runs require a clean committed memd
-revision, pinned open-weight answer and judge models, and a validated bundle.
-The sibling `memd-bench` repository owns those public protocols.
+A passed gate is not a serving decision. Outcome-aware ranking stays shadow-only
+until policy selection and the release gate are decided separately, so the
+production ranking is unchanged.
+
+LoCoMo, CodeIR, MemoryData, and LongMemEval results for the released revision
+are claim-bearing and frozen in a verified artifact bundle. The sibling
+`memd-bench` repository owns those protocols, the per-item rows, and the
+analysis notebooks. Retrieval-lane numbers quoted in the
+[README](https://github.com/fmschulz/memd#benchmark) and
+[Comparison](comparison.md) come from that bundle.
+
+An earlier longitudinal run failed the recall non-regression gate because a
+synthesized lesson dropped terminology a later query variant needed. That
+result is preserved as an immutable artifact and motivated the
+retrieval-anchor work; it is not the current result.
 
 ## In-repository release gates
 

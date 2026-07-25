@@ -102,27 +102,29 @@ and [Operational contract](https://fmschulz.github.io/memd/operational-contract/
 
 ## Benchmark
 
-Cross-system retrieval on upstream
-[`locomo10.json`](https://github.com/snap-stanford/locomo) (10 conversations,
-5,882 turns, 1,536 queries, MRR@10 over categories 1–4):
+Retrieval lane comparison on upstream
+[`locomo10.json`](https://github.com/snap-stanford/locomo), 10 conversations,
+5,882 turns, 1,531 evaluated questions, measured on the released v1.5.0 binary:
 
-| System | MRR@10 | Hit@10 | Avg search | Seed |
-|---|---:|---:|---:|---:|
-| **`memd` (hybrid)** | **0.412** | **0.613** | **23.2 ms** | 197 s |
-| `superlocalmemory` v3.4.46 (lexical) | 0.369 | 0.599 | 804.5 ms | 1.8 s |
-| `mem0` v2.0.2 (LLM-extracted) | 0.354 | 0.591 | 40.9 ms | 13,424 s |
+| Lane | MRR@10 | Hit@10 | Mean search |
+|---|---:|---:|---:|
+| hybrid (default) | 0.4762 | 0.6845 | 36.91 ms |
+| BM25 only | 0.3375 | 0.5467 | 14.16 ms |
+| dense only | 0.3228 | 0.5669 | 32.93 ms |
 
-Benchmark caveat: mem0 used a self-hosted vLLM `gemma4-31b` endpoint rather
-than the GPT-4-class model used in the upstream Mem0 paper, and
-superlocalmemory ran in lexical-only fallback because its published semantic
-configuration was unreachable; full protocol:
-https://fmschulz.github.io/memd/benchmarking/.
+Hybrid retrieval buys 0.139 MRR@10 over BM25 for roughly 2.6x the search
+latency. On code retrieval the ordering is different: dense, adaptive, and
+hybrid lanes tie on answer accuracy (73.0%, 72.8%, 72.5%) and each beats BM25
+(65.0%). Pick the lane against your own corpus rather than assuming the
+default.
 
-`memd` leads on MRR@10 (+12% vs SuperLocalMemory, +16% vs Mem0), Hit@10, and
-search latency. Internal task-memory benchmark (`cli_warm`: Hit@3 1.00,
-MRR 0.87, 9.7 ms), Bright-Pro biology adapter, multi-turn token benchmark, and
-reproducibility notes are documented at
-[Benchmarking](https://fmschulz.github.io/memd/benchmarking/).
+Cross-system answer-accuracy comparisons against other memory tools are not
+published here. They live in the benchmark repository behind immutable phase
+manifests and a verified artifact bundle, because a comparison is only
+meaningful when the source commit, binary digest, dataset, answer model, and
+judge are pinned for every system. See
+[Benchmarking](https://fmschulz.github.io/memd/benchmarking/) for the evidence
+contract, the internal release gates, and the reproduction commands.
 
 ## Agent skill
 

@@ -10,23 +10,31 @@ This page is design-first: how each system represents memory, retrieves it,
 runs as a process, persists state, and assigns trust. The cross-system
 retrieval numbers live in [Benchmarking](benchmarking.md).
 
-## Headline benchmark
+## What the measurements say
 
-LoCoMo retrieval, same upstream `locomo10.json`, 10 conversations, 5,882
-turns, 1,536 queries, MRR@10 over categories 1–4:
+LoCoMo retrieval on upstream `locomo10.json`, 10 conversations, 5,882 turns,
+1,531 evaluated questions, measured on the released v1.5.0 binary:
 
-| System | MRR@10 | Hit@10 | Avg search | Seed |
-|---|---:|---:|---:|---:|
-| **`memd` (hybrid)** | **0.412** | **0.613** | **23.2 ms** | 197 s |
-| `superlocalmemory` v3.4.46 (lexical) | 0.369 | 0.599 | 804.5 ms | 1.8 s |
-| `mem0` v2.0.2 (LLM-extracted) | 0.354 | 0.591 | 40.9 ms | 13,424 s |
+| Lane | MRR@10 | Hit@10 | Mean search |
+|---|---:|---:|---:|
+| hybrid (default) | 0.4762 | 0.6845 | 36.91 ms |
+| BM25 only | 0.3375 | 0.5467 | 14.16 ms |
+| dense only | 0.3228 | 0.5669 | 32.93 ms |
 
-`memd` wins quality on every metric and is the fastest at search. Seed cost
-trades off against retrieval quality. On the harder LoCoMo QA-accuracy test,
-where each system answers from its own retrieved memory and a judge scores the
-answer, `memd` again leads (43.5% vs 38.5% Mem0, 38.0% SuperLocalMemory). Full
-per-category numbers, configuration, and reproducibility caveats:
-[Benchmarking](benchmarking.md).
+Fusing dense and sparse buys 0.139 MRR@10 over BM25 alone on conversational
+recall, at roughly 2.6x the search latency. On code retrieval the ordering
+changes: dense (73.0%), adaptive (72.8%), and hybrid (72.5%) tie on answer
+accuracy, and each beats BM25 (65.0%).
+
+Cross-system answer-accuracy results are not reported on this page. Comparing
+memory systems requires every system to run against a pinned dataset, answer
+model, judge, retrieval depth, and token budget, with per-item rows bound to an
+immutable manifest. That evidence lives in the benchmark repository; see
+[Benchmarking](benchmarking.md) for the contract. One result from it is worth
+stating here: on LongMemEval, retrieval quality and answer accuracy came apart.
+Recovering the annotated evidence was close to saturated for every system
+tested, and the differences that remained were in what the answer model did
+with that evidence.
 
 ## Design comparison
 
@@ -54,14 +62,11 @@ system is universally better.
 ingest time to extract or curate memory units, link entities, or annotate
 facts. This has three consequences:
 
-- **Seed cost is large.** On LoCoMo, `mem0` seeded in 13,424 s against
-  `memd`'s ~100–200 s (single run, machine-load dependent), two orders of
-  magnitude less. The extra cost is the extractor running over every turn.
+- **Seed cost is large.** The extractor runs over every turn, so ingest time
+  scales with the LLM rather than with the store.
 - **Write quality is coupled to extractor quality.** Swapping the extractor
-  model — for cost, license, or capability reasons — invalidates the prior
-  memory, because the new model would have produced different units. The
-  `mem0` LoCoMo run uses a self-hosted `gemma4-31b` endpoint; published
-  upstream numbers use a GPT-4-class model.
+  model, for cost, license, or capability reasons, invalidates the prior
+  memory, because the new model would have produced different units.
 - **Extraction can drop information.** A turn that an extractor finds
   unimportant is gone from memory; only re-ingesting raw turns can recover
   it.
@@ -76,9 +81,9 @@ Most of the systems above default to dense vector search. Dense is good at
 paraphrase but bad at the lookup shapes agents often generate: function names,
 file paths, error strings, ticket IDs, commit hashes,
 parameter values. `memd` runs dense (HNSW) and sparse (BM25 over tantivy)
-in parallel and fuses the results. The cross-system LoCoMo gap (+12% MRR@10
-over the lexical-only `superlocalmemory`, +16% over the dense-only `mem0`)
-is the headline data point.
+in parallel and fuses the results. On LoCoMo the fused lane reaches MRR@10
+0.4762 against 0.3375 for BM25 alone and 0.3228 for dense alone, which is the
+clearest measurement supporting the design.
 
 ### Local CLI, not server
 
