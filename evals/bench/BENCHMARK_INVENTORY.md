@@ -28,6 +28,10 @@ Generated stores and large datasets remain local and are not sources of record.
 - `../legacy/locomo-2026-05/`: the former in-repository cross-system LoCoMo
   harness, notebooks, snapshots, and figures. Its results are exploratory
   history and do not meet the current artifact contract.
+- `benchmarks/locomo/` at the repository root: deleted 2026-07-24. It was a
+  fork of the `memd-bench` LoCoMo harness that had diverged in every file and
+  appeared in no inventory. `memd-bench` owns that protocol; recover the
+  deleted copy from git history if a historical invocation must be inspected.
 - The MCP conformance suite was retired when the public executable became
   CLI-first. Current coverage is in `evals/harness/src/suites/cli_contract.rs`;
   `evals/harness/src/mcp_client.rs` remains only as a compatibility wrapper for
