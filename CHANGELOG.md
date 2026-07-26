@@ -6,6 +6,28 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-07-25
+
+### Fixed
+
+- Background consolidation leaked its locks to the consolidator backend. The
+  detached child holds the scope and slot locks through descriptors whose
+  `FD_CLOEXEC` the parent deliberately cleared, then execs a consolidator CLI.
+  Rust's `Command` does not close descriptors, so that backend inherited both
+  flocks and kept them after the child exited. With four slots, orphaned
+  backends could hold every one of them until they died or the machine
+  rebooted, which is the starvation the slot ceiling was added to prevent.
+
+  The child now marks every inherited descriptor close-on-exec before selecting
+  a backend. Marking is not closing: the locks stay held for the child's
+  lifetime and simply stop surviving an `exec`.
+
+- Background consolidation failed outright on Linux 5.9 and 5.10.
+  `CLOSE_RANGE_CLOEXEC` arrived in 5.11, so on those kernels `close_range`
+  exists but rejects the flag with `EINVAL`, and only `ENOSYS` was treated as
+  tolerable. Both are now tolerated, and the sealing path falls back to walking
+  `/proc/self/fd` when the flag is unavailable.
+
 ## [1.6.0] - 2026-07-25
 
 ### Changed

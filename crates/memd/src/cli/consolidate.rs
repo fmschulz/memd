@@ -62,9 +62,52 @@ pub(super) async fn run_consolidate<S: Store>(
     if options.background {
         return spawn_background(store.as_persistent().map(|s| s.data_dir()), &options);
     }
+    // This process may be the detached child, holding the spawn locks through
+    // descriptors whose FD_CLOEXEC the parent deliberately cleared. Consolidation
+    // then execs a consolidator backend, and Rust's Command does not close
+    // descriptors, so without this the backend inherits the locks and keeps them
+    // after this process exits. Seal them: they stay open here, holding the
+    // flocks, and no longer survive an exec.
+    seal_inherited_descriptors();
     let consolidator = select_consolidator()?;
     consolidate_core(store, options, consolidator.as_ref()).await
 }
+
+/// Mark every inherited descriptor close-on-exec, keeping it open in this
+/// process. Marking is not closing, so descriptors this process still needs are
+/// unaffected; only what an `exec` would hand to a child changes.
+#[cfg(unix)]
+fn seal_inherited_descriptors() {
+    // CLOSE_RANGE_CLOEXEC arrived in Linux 5.11. On 5.9 and 5.10 close_range
+    // exists but rejects the flag with EINVAL, so both errors fall through to
+    // the /proc walk rather than leaving descriptors unsealed.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        if libc::close_range(3, libc::c_uint::MAX, libc::CLOSE_RANGE_CLOEXEC as i32) == 0 {
+            return;
+        }
+    }
+    let Ok(entries) = std::fs::read_dir("/proc/self/fd") else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(fd) = entry.file_name().to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        if fd < 3 {
+            continue;
+        }
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags >= 0 {
+                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn seal_inherited_descriptors() {}
 
 pub(super) async fn run_consolidate_review<S: Store>(
     store: &S,
@@ -722,7 +765,14 @@ fn inherit_lock_fds(command: &mut std::process::Command, locks: &[&std::fs::File
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             if libc::close_range(3, libc::c_uint::MAX, libc::CLOSE_RANGE_CLOEXEC as i32) != 0 {
                 let err = std::io::Error::last_os_error();
-                if err.raw_os_error() != Some(libc::ENOSYS) {
+                // CLOSE_RANGE_CLOEXEC arrived in Linux 5.11. On 5.9 and 5.10 the
+                // syscall exists but rejects the flag with EINVAL, so treating
+                // only ENOSYS as tolerable made every spawn fail on those
+                // kernels. Neither is fatal: std already marks its own
+                // descriptors close-on-exec, and the parent seals the rest.
+                let tolerable =
+                    matches!(err.raw_os_error(), Some(libc::ENOSYS) | Some(libc::EINVAL));
+                if !tolerable {
                     return Err(err);
                 }
             }
@@ -877,6 +927,44 @@ mod tests {
         // A free-text scope must not shape the filename.
         let hostile = spawn_lock_path(dir.path(), "../../etc", Some("a/b"));
         assert_eq!(hostile.parent(), Some(dir.path()));
+    }
+
+    /// The consolidate child holds the spawn locks through descriptors whose
+    /// FD_CLOEXEC the parent cleared, and it then execs a consolidator backend.
+    /// Sealing must leave the descriptor open here while stopping it reaching
+    /// that backend, otherwise an orphaned backend keeps the slot forever.
+    #[cfg(unix)]
+    #[test]
+    fn sealing_keeps_the_lock_but_denies_it_to_an_exec() {
+        use std::os::fd::AsRawFd;
+
+        let dir = tempdir().unwrap();
+        let path = spawn_lock_path(dir.path(), "default", Some("virosync"));
+        let held = match try_claim_spawn_lock(&path).unwrap() {
+            SpawnClaim::Free(guard) => guard.expect("unix claim holds a descriptor"),
+            SpawnClaim::Busy => panic!("first claim must succeed"),
+        };
+        // The parent hands the descriptor over by clearing the flag.
+        let fd = held.as_raw_fd();
+        unsafe { libc::fcntl(fd, libc::F_SETFD, 0) };
+        assert_eq!(
+            unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+
+        seal_inherited_descriptors();
+
+        assert_ne!(
+            unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0,
+            "sealing must set close-on-exec so a backend cannot inherit the lock"
+        );
+        // Still open, so the flock is still held: a second claim is refused.
+        assert!(matches!(
+            try_claim_spawn_lock(&path).unwrap(),
+            SpawnClaim::Busy
+        ));
+        drop(held);
     }
 
     /// The per-scope lock bounds one project; this bounds the machine. Claims
