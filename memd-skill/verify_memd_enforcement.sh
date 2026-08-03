@@ -30,13 +30,8 @@ if ! grep -Fq "<!-- memd-enforcement:start -->" "${HOME}/.codex/AGENTS.md"; then
   exit 1
 fi
 
-if ! grep -Fq 'Use the `memd` CLI for shared local memory' "${HOME}/.codex/AGENTS.md"; then
+if ! grep -Fq 'could any file in a repo I can read answer this?' "${HOME}/.codex/AGENTS.md"; then
   echo "missing CLI memd contract in ~/.codex/AGENTS.md" >&2
-  exit 1
-fi
-
-if ! grep -Fq 'retrieval_episode_id' "${HOME}/.codex/AGENTS.md"; then
-  echo "missing memd v1.5 outcome contract in ~/.codex/AGENTS.md" >&2
   exit 1
 fi
 
@@ -45,7 +40,7 @@ if ! grep -Fq "<!-- memd-enforcement:start -->" "${HOME}/.claude/CLAUDE.md"; the
   exit 1
 fi
 
-if ! grep -Fq 'Use the `memd` CLI for shared local memory' "${HOME}/.claude/CLAUDE.md"; then
+if ! grep -Fq 'could any file in a repo I can read answer this?' "${HOME}/.claude/CLAUDE.md"; then
   echo "missing CLI memd contract in ~/.claude/CLAUDE.md" >&2
   exit 1
 fi
@@ -55,7 +50,7 @@ if [[ ! -f "${HOME}/.cursor/rules/memd.mdc" ]]; then
   exit 1
 fi
 
-if ! grep -Fq 'Use the `memd` CLI for shared local memory' "${HOME}/.cursor/rules/memd.mdc"; then
+if ! grep -Fq 'could any file in a repo I can read answer this?' "${HOME}/.cursor/rules/memd.mdc"; then
   echo "missing CLI memd contract in ~/.cursor/rules/memd.mdc" >&2
   exit 1
 fi
@@ -96,7 +91,7 @@ memd --data-dir "${DATA_DIR}" memory-md \
   --output "${TMP_DIR}/memory.md" >/dev/null
 
 test -s "${TMP_DIR}/memory.md"
-grep -Fq "## Latest Project State" "${TMP_DIR}/memory.md"
+grep -Fq "## Project Fact Library" "${TMP_DIR}/memory.md"
 grep -Fq "## Memory health" "${TMP_DIR}/memory.md"
 
 memd --data-dir "${DATA_DIR}" search \

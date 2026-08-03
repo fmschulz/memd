@@ -63,8 +63,14 @@ upsert_block() {
   local tmp
 
   mkdir -p "$(dirname "$target")"
-  touch "$target"
-  tmp="$(mktemp)"
+  [ -e "$target" ] || touch "$target"
+  # Resolve through symlinks and stage the temp file beside the referent, so the
+  # final rename is atomic AND lands on the referent. Renaming onto $target
+  # itself would replace a symlink (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md are
+  # links into ~/.agents/) with a regular file.
+  local real
+  real="$(readlink -f "$target")"
+  tmp="$(mktemp "$(dirname "$real")/.memd-enforcement.XXXXXX")"
 
   "$PYTHON_BIN" - "$target" "$start_marker" "$end_marker" "$content" >"$tmp" <<'PY'
 from pathlib import Path
@@ -90,7 +96,8 @@ else:
 sys.stdout.write(new_text)
 PY
 
-  mv "$tmp" "$target"
+  chmod --reference="$real" "$tmp" 2>/dev/null || true
+  mv "$tmp" "$real"
 }
 
 install_binary() {
@@ -154,19 +161,15 @@ if [[ "$INSTALL_BINARY" -eq 1 ]]; then
 fi
 
 read -r -d '' ENFORCEMENT_SNIPPET <<'EOF' || true
-Use the `memd` CLI for shared local memory on substantive technical and scientific work. Load the memd skill for full commands and write-quality rules.
+`memd` is a local CLI memory store. One test decides whether it is the right home for a fact: **could any file in a repo I can read answer this?** If yes, that file is the home — `tasks/todo.md`, `tasks/METHODS.md`, `tasks/lessons.md`, `docs/handoffs/`, git. If no, it is a cross-repo or cross-machine operational fact, and that is what memd is for: machines, accounts, schedulers, mounts, deploys, tunnels, and the state of other repos.
 
-- Session start: refresh and read project-root `memory.md` with `memd memory-md`.
-- Before substantive work, and before declaring anything blocked or unknowable, search with `memd agent-context` or `memd search`. Say what you checked when no record matches.
-- Before the final answer, persist reusable decisions, findings, fixes, or evidence with `memd add`.
-- Time-anchored facts: store `event_time_ms` through `memory.add` or `batch`; recall with `render_event_time: true`. Do not put dates in the text. (v1.3+)
-- Document-per-add stores: search with `--dedupe-by-source`; leave it off for conversational stores. Retry `memd:dense-index-busy` writes after the repair; reads fall back automatically. (v1.3.1+)
-- Long writes: retain every `stored_chunk_ids` value. Use individual adds instead of `memory.add_batch` when later retrieval or outcome attribution needs all split-child IDs. (v1.5+)
-- Iterative improvement: retain `retrieval_episode_id` when memory affects a task, then record only independently verified `--used` or `--harmful` chunks with `memd outcome`. Agent self-reports are audit-only; `outcome-v1` is shadow-only. (v1.5+)
-- Consolidation is review-gated: `memd consolidate` stages hidden candidates. List them with `memd consolidate-review --list`, then explicitly accept or reject. Session start cannot promote a run without durable prior promotion intent. (v1.5+)
-- Reproducible retrieval: call `memory.search` with `ranking_time_ms` and require `retrieval_episode_id: null`. This pins ranking decay but is not a lifecycle snapshot. (v1.5+)
+- Session start: read project-root `memory.md` if present. It is a generated file, so reading it costs nothing and needs no CLI call.
+- Search (`memd search "<query>"`) on an observable event, not a feeling: a command fails for an environment, account, scheduler, mount, or permission reason; you need another machine's or repo's state; or a number contradicts one recorded earlier.
+- Write (`memd add`) only when the fact you just learned has no repo file to live in. If it belongs in todo/METHODS/lessons/a handoff, put it there instead.
+- No memd call is required to answer. A search returning nothing relevant is a normal result, not a blocker; memd being unavailable is worth one sentence, not a stop.
 - Never store secrets, credentials, PII, or sensitive log values.
-- Treat unavailable or misconfigured memd as a blocker. Small talk, trivial one-shot questions, and local formatting rewrites do not require memd.
+
+Command syntax, tags, and write-quality rules live in the memd skill — load it when you actually touch memd.
 EOF
 
 upsert_block \

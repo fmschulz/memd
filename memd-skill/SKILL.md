@@ -62,24 +62,34 @@ keys, passwords, verification codes, ID numbers, bank cards, private contact
 details, third-party account configuration, or sensitive values copied from
 logs.
 
-## Required CLI Contract
+## CLI Contract
 
-For substantive work:
+memd is not mandatory, and no memd call is required to answer. One test decides
+whether a fact belongs here at all: **could any file in a repo you can read
+answer this?** If yes, that file is the home (`tasks/todo.md`,
+`tasks/METHODS.md`, `tasks/lessons.md`, `docs/handoffs/`, git). If no, it is a
+cross-repo or cross-machine operational fact — machines, accounts, schedulers,
+mounts, deploys, tunnels, the state of other repos — and that is memd's niche.
 
-1. At session start, refresh `memory.md` with `memd memory-md` and read it
-   before task-specific retrieval.
-2. Search task-specific context with `memd agent-context` or `memd search`.
+When you do use it:
+
+1. At session start, read project-root `memory.md` if present. It is generated,
+   so reading it needs no CLI call.
+2. Search on an observable event: a command failed for an environment, account,
+   scheduler, mount, or permission reason; you need another machine's or repo's
+   state; or a number contradicts one recorded earlier.
 3. Use a stable `tenant_id` for the trust domain and `project_id` for narrower
    project scope.
-4. Persist meaningful findings before the final response with `memd add`.
+4. Write only facts that have no repo file to live in.
 5. Attribute only independently verified task outcomes to memories that were
    actually used or harmful; do not train ranking from agent self-reports.
-6. If `memd` is unavailable or misconfigured, say so explicitly and treat that
-   as a blocker instead of silently skipping memory.
+6. If `memd` is unavailable or misconfigured, say so in one sentence and carry
+   on. It is not a blocker.
 
-Before saying a task is impossible, blocked, unknowable, or needs user context
-that might already exist in memory, run a relevant `memd` CLI search first. If
-it returns no useful record, state what you checked.
+If you are about to call something blocked or unknowable *for an environment,
+account, scheduler, mount, or cross-repo reason*, search first — that is the one
+class of blocker memd has a real chance of answering. A blocker in this repo's
+own code or data is not one; read the code instead.
 
 ## Session-Start memory.md
 
@@ -608,7 +618,8 @@ noise), run `memd report --strict`.
 
 ## Practical Rules
 
-- Search before starting substantive work.
+- Search when an observable event calls for it (see the CLI Contract), not as a
+  routine step before every task.
 - Do not repeat known failed approaches unless you have a reason.
 - Store conclusions with enough context for a later agent to trust or challenge
   them.
