@@ -74,23 +74,25 @@ in the report window; tagging or filtering eval-origin events is future work.
 
 ## Session-start state and health
 
-`memd memory-md` starts with `## Latest Project State`, a deterministic
-startup briefing collected from the project directory. It includes scope,
-freshness, git branch and clean/dirty state, active task or handoff signals,
-source-backed next actions, and warnings for scope drift or unreadable memory
-payloads. The task source is classified as missing, parsed with no open tasks,
-parsed with open tasks, or failed to parse. Only the two parsed states can pass
-the startup answerability check.
+`memd memory-md` starts with a single scope line (generation date, tenant,
+project) followed by `## Memory health`. It deliberately does not restate task,
+handoff, or git state: those live in `tasks/todo.md`, `docs/handoffs/`, and git,
+which an agent reads directly. `memory.md` carries only facts no repo file
+holds.
 
-The project and machine-wide searches feed one bounded candidate union before
+Candidates come from one tenant-wide store scan, partitioned by project, rather
+than from a fixed set of search queries. Takeaways whose distinctive tokens are
+already contained in a repo file (`tasks/**`, `docs/handoffs/`, `README.md`,
+`CLAUDE.md`, `AGENTS.md`) are suppressed with reason `covered_by_repo:<path>`.
+The project and machine-wide candidates feed one bounded union before
 section assignment and display truncation. Exact chunk IDs, consolidation
 lineage, and high-confidence topic duplicates are collapsed across that union.
 If the active project's item competes with a machine-wide match, the project
 item is retained.
 
-Below that, `## Memory health` summarizes lines derived from `memd report`.
-This is best-effort and is silently skipped if report generation fails. If
-`Latest Project State` reports `memory degraded`, inspect the store with
+`## Memory health` summarizes lines derived from `memd report`.
+This is best-effort and is silently skipped if report generation fails. If it
+reports `memory degraded`, inspect the store with
 `memd audit --format markdown` or `memd report --strict`; the warning means
 active metadata rows exist whose segment payloads could not be read.
 
