@@ -26,6 +26,21 @@ use crate::store::Store;
 use crate::types::lifecycle::VisibilityPolicy;
 use crate::types::{ChunkId, ChunkStatus, MemoryChunk, TenantId};
 
+/// Invoke `close_range(CLOSE_RANGE_CLOEXEC)` without depending on the glibc
+/// wrapper, which is absent from older glibc releases even when the kernel
+/// supports the syscall.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn close_range_cloexec() -> libc::c_long {
+    unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            3 as libc::c_long,
+            libc::c_uint::MAX as libc::c_long,
+            libc::CLOSE_RANGE_CLOEXEC as libc::c_long,
+        )
+    }
+}
+
 /// Minimum region size below which consolidation is skipped unless
 /// `--force` is passed. Also the dirty-chunk threshold at which
 /// `memd session-start` spawns a background consolidation.
@@ -82,10 +97,8 @@ fn seal_inherited_descriptors() {
     // exists but rejects the flag with EINVAL, so both errors fall through to
     // the /proc walk rather than leaving descriptors unsealed.
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    unsafe {
-        if libc::close_range(3, libc::c_uint::MAX, libc::CLOSE_RANGE_CLOEXEC as i32) == 0 {
-            return;
-        }
+    if close_range_cloexec() == 0 {
+        return;
     }
     let Ok(entries) = std::fs::read_dir("/proc/self/fd") else {
         return;
@@ -758,12 +771,12 @@ fn inherit_lock_fds(command: &mut std::process::Command, locks: &[&std::fs::File
             // under it. Kernels without the call (pre-5.9) fall back to the
             // previous behavior.
             //
-            // `libc` only exposes close_range on linux-gnu; aarch64-musl and
-            // the darwin targets have no binding, so gate it rather than break
-            // their builds. Where it is unavailable the guard still holds, it
-            // just relies on std's own FD_CLOEXEC discipline for other files.
+            // Use the raw syscall on linux-gnu so linking does not require a
+            // recent glibc close_range wrapper. Other targets retain the prior
+            // behavior and rely on std's own FD_CLOEXEC discipline for other
+            // files.
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
-            if libc::close_range(3, libc::c_uint::MAX, libc::CLOSE_RANGE_CLOEXEC as i32) != 0 {
+            if close_range_cloexec() != 0 {
                 let err = std::io::Error::last_os_error();
                 // CLOSE_RANGE_CLOEXEC arrived in Linux 5.11. On 5.9 and 5.10 the
                 // syscall exists but rejects the flag with EINVAL, so treating

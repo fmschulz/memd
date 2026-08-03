@@ -67,3 +67,11 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace
+
+      - name: Reject close_range glibc imports
+        run: |
+          cargo build -p memd
+          if objdump -T target/debug/memd | grep -q 'close_range'; then
+            echo "::error::memd imports glibc close_range and will not link on older glibc"
+            exit 1
+          fi
