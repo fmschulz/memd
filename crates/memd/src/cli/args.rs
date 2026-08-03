@@ -176,12 +176,16 @@ pub enum CliCommand {
         #[arg(long)]
         tenant_id: Option<String>,
 
-        /// Search query
-        #[arg(long)]
-        query: String,
+        /// Search query. Also accepts a bare positional argument.
+        #[arg(long, required_unless_present = "query_positional")]
+        query: Option<String>,
+
+        /// Search query given positionally (`memd search "<query>"`).
+        #[arg(value_name = "QUERY", conflicts_with = "query")]
+        query_positional: Option<String>,
 
         /// Maximum number of results
-        #[arg(long, default_value = "10")]
+        #[arg(long, visible_alias = "limit", default_value = "10")]
         k: usize,
 
         /// Optional project identifier
@@ -350,7 +354,8 @@ pub enum CliCommand {
         #[arg(long, default_value_t = 2)]
         global_limit: usize,
 
-        /// Candidate memories to retrieve per query before scoring
+        /// Unused since scan-first selection considers every stored
+        /// chunk; kept for CLI compatibility.
         #[arg(long, default_value_t = 40)]
         candidate_k: usize,
 
@@ -382,7 +387,8 @@ pub enum CliCommand {
         #[arg(long, default_value_t = 10)]
         project_limit: usize,
 
-        /// Candidate memories to retrieve per query before scoring.
+        /// Unused since scan-first selection considers every stored
+        /// chunk; kept for CLI compatibility.
         #[arg(long, default_value_t = 40)]
         candidate_k: usize,
 
@@ -590,6 +596,32 @@ pub enum CliCommand {
         warm: WarmMode,
     },
 
+    /// Scan Codex session logs for verified memd retrieval usage.
+    ///
+    /// Detects tool-call outputs that rendered a retrieval episode, then
+    /// credits served chunks whose distinctive literals appear in later
+    /// tool-call inputs (commands or patches) of the same session. Writes
+    /// `external_tool` outcome events; `.memd/data/outcome_scan_state.json`
+    /// keeps re-runs from writing duplicate events.
+    OutcomeScan {
+        /// Project directory containing `.memd/project_scope.json`.
+        #[arg(long, default_value = ".")]
+        project_dir: PathBuf,
+
+        /// Session log directory, scanned recursively for `*.jsonl` files.
+        /// Defaults to `~/.codex/sessions`.
+        #[arg(long)]
+        sessions_dir: Option<PathBuf>,
+
+        /// Only scan session files modified within this many days.
+        #[arg(long, default_value_t = 90)]
+        since_days: u64,
+
+        /// Report candidate outcome events without writing events or state.
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        dry_run: bool,
+    },
+
     /// Counterfactual retrieval eval (Phase 3).
     ///
     /// For each query in the benchmark file, runs retrieval twice
@@ -744,9 +776,13 @@ pub enum CliCommand {
         #[arg(long)]
         tenant_id: Option<String>,
 
-        /// Chunk identifier (UUID)
-        #[arg(long)]
-        chunk_id: String,
+        /// Chunk identifier (UUID). Also accepts a bare positional argument.
+        #[arg(long, required_unless_present = "chunk_id_positional")]
+        chunk_id: Option<String>,
+
+        /// Chunk identifier given positionally (`memd get <chunk-id>`).
+        #[arg(value_name = "CHUNK_ID", conflicts_with = "chunk_id")]
+        chunk_id_positional: Option<String>,
     },
 
     /// Delete a chunk (soft delete)
@@ -1164,6 +1200,28 @@ pub enum StoreAccess {
 }
 
 impl CliCommand {
+    /// Fold positional aliases into their long-option fields so every
+    /// downstream consumer sees a single canonical source. Clap cannot make
+    /// one argument both positional and `--long`, so the positional arrives
+    /// in a separate field; the two are mutually exclusive at parse time.
+    pub fn normalize_positional_aliases(&mut self) {
+        match self {
+            CliCommand::Search {
+                query: value @ None,
+                query_positional: positional,
+                ..
+            }
+            | CliCommand::Get {
+                chunk_id: value @ None,
+                chunk_id_positional: positional,
+                ..
+            } => {
+                *value = positional.take();
+            }
+            _ => {}
+        }
+    }
+
     pub fn store_access(&self) -> StoreAccess {
         match self {
             CliCommand::Add { .. } => StoreAccess::Writer,
@@ -1177,6 +1235,7 @@ impl CliCommand {
             CliCommand::Consolidate { .. } => StoreAccess::Writer,
             CliCommand::ConsolidateReview { .. } => StoreAccess::Writer,
             CliCommand::Outcome { .. } => StoreAccess::Writer,
+            CliCommand::OutcomeScan { .. } => StoreAccess::Writer,
             CliCommand::EvalCounterfactual { .. } => StoreAccess::Writer,
             CliCommand::EvalOutcomeRanking { .. } => StoreAccess::Writer,
             CliCommand::SessionStart { .. } => StoreAccess::ReadOnly,

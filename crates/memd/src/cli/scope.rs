@@ -265,7 +265,8 @@ mod tests {
 
         let cmd = CliCommand::Search {
             tenant_id: None,
-            query: "scope fallback".to_string(),
+            query: Some("scope fallback".to_string()),
+            query_positional: None,
             k: 2,
             project_id: None,
             compact: false,

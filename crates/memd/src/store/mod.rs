@@ -236,8 +236,25 @@ pub(crate) fn rank_candidate_chunks(
     scored
 }
 
+/// Marker prefix for [`unsupported_store_capability`] errors so callers can
+/// classify optional-capability gaps without matching on free text.
+const UNSUPPORTED_STORE_CAPABILITY_PREFIX: &str = "store capability unsupported";
+
 fn unsupported_store_capability(capability: &str) -> MemdError {
-    MemdError::StorageError(format!("store capability unsupported: {capability}"))
+    MemdError::StorageError(format!(
+        "{UNSUPPORTED_STORE_CAPABILITY_PREFIX}: {capability}"
+    ))
+}
+
+/// True when `error` marks an optional store capability the active backend
+/// does not implement, as produced by `unsupported_store_capability`. Callers
+/// that can degrade (e.g. ranking without outcome priors) match on this
+/// instead of swallowing every storage error.
+pub(crate) fn is_unsupported_store_capability(error: &MemdError) -> bool {
+    matches!(
+        error,
+        MemdError::StorageError(message) if message.starts_with(UNSUPPORTED_STORE_CAPABILITY_PREFIX)
+    )
 }
 
 /// Store trait for memory operations
