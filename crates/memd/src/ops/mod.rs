@@ -57,7 +57,13 @@ fn cross_tenant_project_fallback_enabled() -> bool {
     ALLOW_CROSS_TENANT_PROJECT_FALLBACK.load(Ordering::Relaxed)
 }
 
-fn configured_project_aliases(primary_tenant: &TenantId, project_id: &str) -> Vec<OriginScope> {
+/// Alias scopes configured for `(tenant, project)`. Shared with the
+/// memory.md scan so its project partitioning honours the same aliases
+/// as scoped search.
+pub(crate) fn configured_project_aliases(
+    primary_tenant: &TenantId,
+    project_id: &str,
+) -> Vec<OriginScope> {
     let Some(lock) = PROJECT_ALIASES.get() else {
         return Vec::new();
     };
