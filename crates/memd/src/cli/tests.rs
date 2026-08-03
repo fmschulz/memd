@@ -325,11 +325,9 @@ async fn memory_md_writes_candidate_explanation_report() {
     assert_eq!(displayed["display_rank"], 1);
     assert_eq!(displayed["filter_reason"], serde_json::Value::Null);
     assert!(displayed["priority_breakdown"]["total"].as_f64().unwrap() > 0.0);
-    assert!(displayed["source"]
-        .as_str()
-        .unwrap()
-        .starts_with("project_"));
-    assert!(displayed["query"].as_str().unwrap().contains("project"));
+    assert_eq!(displayed["source"], "scan");
+    assert_eq!(displayed["mode"], "scan");
+    assert_eq!(displayed["query"], "");
 }
 
 #[tokio::test]
@@ -508,52 +506,6 @@ async fn eval_memory_md_agent_usefulness_passes_synthetic_fixture() {
 }
 
 #[tokio::test]
-async fn eval_memory_md_agent_usefulness_fails_without_latest_work() {
-    let store = MemoryStore::new();
-    let tenant = TenantId::new("memory_md_agent_eval_missing_tenant").unwrap();
-    let project = ProjectId::from("memory_md_agent_eval_missing_project");
-    store
-        .add(
-            MemoryChunk::new(
-                tenant.clone(),
-                "Project architecture configuration deployment key decisions tradeoffs: \
-                     Validation: startup state fixture has a useful fact. \
-                     Agent action: Verify the latest work signal before resuming.",
-                ChunkType::Summary,
-            )
-            .with_project(project.clone())
-            .with_tags(vec!["kind:finish".to_string(), "priority:9".to_string()]),
-        )
-        .await
-        .unwrap();
-
-    let dir = tempdir().unwrap();
-    let error = run_cli(
-        &store,
-        None,
-        CliCommand::EvalMemoryMd {
-            tenant_id: Some("memory_md_agent_eval_missing_tenant".to_string()),
-            project_id: Some("memory_md_agent_eval_missing_project".to_string()),
-            project_dir: dir.path().to_path_buf(),
-            output: PathBuf::from("memory.md"),
-            project_limit: 10,
-            candidate_k: 20,
-            top_n: 10,
-            min_useful_ratio: 0.8,
-            max_generated_wrappers: 0,
-            agent_usefulness: true,
-            gold_file: None,
-        },
-    )
-    .await
-    .expect_err("missing latest work should fail agent-usefulness gate");
-    assert!(
-        error.to_string().contains("latest work signal is missing"),
-        "unexpected error: {error}"
-    );
-}
-
-#[tokio::test]
 async fn eval_memory_md_gold_file_passes_synthetic_project() {
     let store = MemoryStore::new();
     let tenant = TenantId::new("memory_md_gold_eval_tenant").unwrap();
@@ -590,9 +542,8 @@ async fn eval_memory_md_gold_file_passes_synthetic_project() {
     {{
       "name": "gold",
       "project_dir": "{}",
-      "must_contain": ["Latest Project State", "tasks/todo.md"],
-      "must_not_contain": ["Translate this takeaway into a task-specific rule"],
-      "expected_git": false,
+      "must_contain": ["Project Fact Library"],
+      "must_not_contain": ["Latest Project State"],
       "max_fragments": 0,
       "max_unrelated_machine_items": 1
     }}

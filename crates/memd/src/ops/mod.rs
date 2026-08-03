@@ -3838,7 +3838,7 @@ fn render_observed_time_into_text(chunks: &mut [(MemoryChunk, f32)]) {
 
 /// Format Unix milliseconds as a `YYYY-MM-DD` UTC date without a date crate,
 /// via the civil-from-days algorithm (Howard Hinnant, public domain).
-fn format_epoch_ms_date(ms: i64) -> String {
+pub(crate) fn format_epoch_ms_date(ms: i64) -> String {
     let days = ms.div_euclid(86_400_000);
     let z = days + 719_468;
     let era = z.div_euclid(146_097);

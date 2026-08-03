@@ -1,5 +1,9 @@
 use super::action::*;
+use super::collect::{canonical_or_lexical_path, read_text_capped};
 use super::*;
+use crate::store::OutcomePrior;
+use crate::types::ChunkStatus;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
 pub(super) struct Takeaway {
@@ -13,13 +17,10 @@ pub(super) struct Takeaway {
     pub(super) timestamp_created: i64,
     pub(super) tags: Vec<String>,
     pub(super) sources: BTreeSet<String>,
+    /// Constant 1 since scan-first selection replaced the multi-query
+    /// fan-out; kept for struct stability.
+    #[allow(dead_code)]
     pub(super) occurrences: usize,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct RankedTakeawayCollection {
-    pub(super) takeaways: Vec<Takeaway>,
-    pub(super) explanations: Vec<MemoryMdCandidateExplanation>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -28,8 +29,6 @@ pub(super) struct PriorityBreakdown {
     pub(super) kind_weight: f32,
     pub(super) type_weight: f32,
     pub(super) recurrence: f32,
-    pub(super) multi_query: f32,
-    pub(super) search_score: f32,
     pub(super) library_bonus: f32,
     pub(super) utility: f32,
     pub(super) staleness_penalty: f32,
@@ -68,89 +67,134 @@ pub(super) struct TakeawayCategory {
     pub(super) order: u8,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn collect_ranked_takeaways_with_explanations<S: Store>(
+/// One tenant-wide metadata scan replacing the former canned-query
+/// fan-out: every stored chunk is a candidate, partitioned into
+/// (project, machine-wide) by `chunk.project_id == active_project`.
+pub(super) async fn scan_takeaway_candidates<S: Store>(
     store: &S,
-    tenant_id: &str,
-    project_id: Option<&str>,
-    queries: &[(CliQueryMode, &str, &str)],
-    candidate_k: usize,
-    limit: usize,
-    hit_stats: &HashMap<String, HitStats>,
-    section: &str,
-) -> Result<RankedTakeawayCollection> {
-    let mut by_chunk: HashMap<String, Takeaway> = HashMap::new();
+    tenant: &TenantId,
+    active_project: Option<&str>,
+) -> Result<(
+    Vec<Takeaway>,
+    Vec<Takeaway>,
+    Vec<MemoryMdCandidateExplanation>,
+)> {
+    let mut project_takeaways = Vec::new();
+    let mut global_takeaways = Vec::new();
     let mut explanations = Vec::new();
-
-    for (mode, source, query) in queries {
-        let payload = cli_search_payload_silent(
-            store,
-            tenant_id.to_string(),
-            project_id.map(str::to_string),
-            (*query).to_string(),
-            candidate_k,
-            false,
-            None,
-            *mode,
-            false,
-            false,
-            false,
-        )
-        .await?;
-        merge_payload_candidates(
-            &mut by_chunk,
-            &mut explanations,
-            &payload,
-            section,
-            source,
-            query,
-            *mode,
-        );
+    let mut offset = 0usize;
+    let mut raw_rank = 0usize;
+    while offset < READABLE_SCAN_MAX_METADATA_ROWS {
+        let limit = READABLE_SCAN_PAGE_SIZE.min(READABLE_SCAN_MAX_METADATA_ROWS - offset);
+        let chunks = store.list_chunks(tenant, limit, offset).await?;
+        if chunks.is_empty() {
+            break;
+        }
+        let fetched = chunks.len();
+        for chunk in chunks {
+            raw_rank += 1;
+            let is_project = chunk.project_id.as_option() == active_project;
+            let section = if is_project {
+                "project"
+            } else {
+                "machine_wide"
+            };
+            let takeaway = Takeaway {
+                chunk_id: chunk.chunk_id.to_string(),
+                tenant_id: chunk.tenant_id.to_string(),
+                project_id: chunk.project_id.as_option().map(str::to_string),
+                text: chunk.text.trim().to_string(),
+                score: 0.0,
+                priority: 0.0,
+                chunk_type: chunk.chunk_type.to_string(),
+                timestamp_created: chunk.timestamp_created,
+                tags: chunk.tags.clone(),
+                sources: BTreeSet::from(["scan".to_string()]),
+                occurrences: 1,
+            };
+            let mut explanation = MemoryMdCandidateExplanation {
+                section: section.to_string(),
+                source: "scan".to_string(),
+                query: String::new(),
+                mode: "scan".to_string(),
+                raw_rank,
+                chunk_id: takeaway.chunk_id.clone(),
+                tenant_id: takeaway.tenant_id.clone(),
+                project_id: takeaway.project_id.clone(),
+                chunk_type: takeaway.chunk_type.clone(),
+                timestamp_created: takeaway.timestamp_created,
+                search_score: takeaway.score,
+                priority_score: None,
+                priority_breakdown: None,
+                display_status: "candidate".to_string(),
+                filter_reason: None,
+                display_rank: None,
+                generated_digest: is_generated_digest_takeaway(&takeaway.tags),
+                quality_flags: Vec::new(),
+                topic_key: None,
+                tags: takeaway.tags.clone(),
+                matched_sources: vec!["scan".to_string()],
+            };
+            match scan_candidate_filter_reason(chunk.status, &takeaway.tags, &takeaway.text) {
+                Some(reason) => {
+                    explanation.display_status = "filtered".to_string();
+                    explanation.filter_reason = Some(reason.to_string());
+                    explanation.quality_flags.push(reason.to_string());
+                    explanations.push(explanation);
+                }
+                None => {
+                    explanations.push(explanation);
+                    if is_project {
+                        project_takeaways.push(takeaway);
+                    } else {
+                        global_takeaways.push(takeaway);
+                    }
+                }
+            }
+        }
+        if fetched < limit {
+            break;
+        }
+        offset = offset.saturating_add(limit);
     }
+    Ok((project_takeaways, global_takeaways, explanations))
+}
 
-    let tag_counts = recurring_tag_counts(by_chunk.values());
-    let now_ms = now_ms() as i64;
-    let mut breakdowns = HashMap::new();
-    let mut takeaways = by_chunk
-        .into_values()
-        .map(|mut takeaway| {
-            let breakdown = priority_breakdown(&takeaway, &tag_counts, hit_stats, now_ms);
-            takeaway.priority = breakdown.total;
-            breakdowns.insert(takeaway.chunk_id.clone(), breakdown);
-            takeaway
-        })
-        .collect::<Vec<_>>();
-    let scored_takeaways = takeaways.clone();
-    let mut suppressed_reasons = suppress_finishes_covered_by_libraries(&mut takeaways)
-        .into_iter()
-        .map(|id| (id, "covered_by_library".to_string()))
-        .collect::<HashMap<_, _>>();
-    suppressed_reasons.extend(filter_startup_takeaways(&mut takeaways));
-    takeaways.sort_by(|left, right| {
-        right
-            .priority
-            .partial_cmp(&left.priority)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| right.timestamp_created.cmp(&left.timestamp_created))
-    });
-    let displayed_ids = takeaways
-        .iter()
-        .take(limit)
-        .enumerate()
-        .map(|(idx, takeaway)| (takeaway.chunk_id.clone(), idx + 1))
-        .collect::<HashMap<_, _>>();
-    takeaways.truncate(limit);
-    finalize_candidate_explanations(
-        &mut explanations,
-        &scored_takeaways,
-        &suppressed_reasons,
-        &displayed_ids,
-        &breakdowns,
-    );
-    Ok(RankedTakeawayCollection {
-        takeaways,
-        explanations,
-    })
+/// Admission predicate for the tenant-wide scan. Mirrors the filters
+/// the former per-query candidate merge applied, plus a lifecycle
+/// check because `list_chunks` (unlike search) can surface
+/// superseded/expired/error chunks.
+pub(super) fn scan_candidate_filter_reason(
+    status: ChunkStatus,
+    tags: &[String],
+    text: &str,
+) -> Option<&'static str> {
+    if matches!(
+        status,
+        ChunkStatus::Candidate
+            | ChunkStatus::Deleted
+            | ChunkStatus::Error
+            | ChunkStatus::Superseded
+            | ChunkStatus::Expired
+    ) {
+        return Some("not_visible");
+    }
+    if text.is_empty() {
+        return Some("empty_text");
+    }
+    if is_generated_digest_takeaway(tags) {
+        return Some("generated_digest_wrapper");
+    }
+    if is_fragment_like_candidate(tags, text) {
+        return Some("fragment_like");
+    }
+    // Defence-in-depth: skip anything still carrying a
+    // `kind:superseded` tag so consolidated output never competes
+    // with the raw chunks it replaced.
+    if tags.iter().any(|tag| tag.starts_with("kind:superseded")) {
+        return Some("superseded_tag");
+    }
+    None
 }
 
 /// Drop raw `task:kind:task_finish` takeaways already represented by
@@ -205,6 +249,163 @@ pub(super) fn filter_startup_takeaways(takeaways: &mut Vec<Takeaway>) -> HashMap
     suppressed
 }
 
+/// One repo file's token set for the repo-novelty gate. `path` is
+/// relative to the project dir so suppression reasons stay readable.
+#[derive(Debug)]
+pub(in crate::cli) struct RepoDoc {
+    pub(super) path: String,
+    pub(super) tokens: HashSet<String>,
+}
+
+/// Bounds for the repo-novelty index: at most this many files, each
+/// read through `read_text_capped` at 256 KiB.
+const REPO_INDEX_MAX_FILES: usize = 200;
+const REPO_INDEX_READ_CAP_BYTES: u64 = 256 * 1024;
+
+/// Build the repo-novelty index once per refresh: token sets for the
+/// markdown an agent already reads for free — `tasks/**/*.md`,
+/// `docs/handoffs/*.md` (not `_archive/`), and the root `README.md` /
+/// `CLAUDE.md` / `AGENTS.md`. The generated output file itself and
+/// anything under `.memd/` are excluded; otherwise the previous
+/// refresh's `memory.md` would cover every takeaway it rendered and
+/// the next refresh would suppress them all. A missing or unreadable
+/// project dir yields an empty index, which makes the gate a no-op.
+pub(in crate::cli) fn build_repo_index(project_dir: &Path, output_path: &Path) -> Vec<RepoDoc> {
+    let output_norm = canonical_or_lexical_path(output_path);
+    let mut files = Vec::new();
+    collect_markdown_recursive(&project_dir.join("tasks"), 0, &mut files);
+    // Top level only, on purpose: `docs/handoffs/_archive/` stays out.
+    if let Ok(entries) = fs::read_dir(project_dir.join("docs/handoffs")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
+                files.push(path);
+            }
+        }
+    }
+    for name in ["README.md", "CLAUDE.md", "AGENTS.md"] {
+        let path = project_dir.join(name);
+        if path.is_file() {
+            files.push(path);
+        }
+    }
+    files.sort();
+    files.dedup();
+
+    let mut index = Vec::new();
+    for path in files.into_iter().take(REPO_INDEX_MAX_FILES) {
+        if canonical_or_lexical_path(&path) == output_norm
+            || path.components().any(|part| part.as_os_str() == ".memd")
+        {
+            continue;
+        }
+        let Ok((text, _truncated)) = read_text_capped(&path, REPO_INDEX_READ_CAP_BYTES) else {
+            continue;
+        };
+        let tokens = repo_novelty_tokens(&text);
+        if tokens.is_empty() {
+            continue;
+        }
+        let path = path
+            .strip_prefix(project_dir)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        index.push(RepoDoc { path, tokens });
+    }
+    index
+}
+
+fn collect_markdown_recursive(dir: &Path, depth: usize, files: &mut Vec<PathBuf>) {
+    // Depth cap guards against symlink cycles inside `tasks/`.
+    if depth > 8 || files.len() >= REPO_INDEX_MAX_FILES {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if files.len() >= REPO_INDEX_MAX_FILES {
+            return;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            collect_markdown_recursive(&path, depth + 1, files);
+        } else if path.extension().is_some_and(|ext| ext == "md") {
+            files.push(path);
+        }
+    }
+}
+
+/// Shared tokenizer for repo docs and takeaways: lowercase runs of
+/// `[a-z0-9_./-]` of length >= 5, minus common filler words. Keeping
+/// `_./-` glued means paths, flags, and hostnames survive as single
+/// high-signal tokens.
+pub(super) fn repo_novelty_tokens(text: &str) -> HashSet<String> {
+    text.to_ascii_lowercase()
+        .split(|ch: char| {
+            !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | '.' | '/' | '-'))
+        })
+        .filter(|token| token.len() >= 5 && !REPO_NOVELTY_STOPWORDS.contains(token))
+        .map(str::to_string)
+        .collect()
+}
+
+const REPO_NOVELTY_STOPWORDS: &[&str] = &[
+    "about", "added", "after", "again", "always", "because", "before", "being", "between", "could",
+    "doing", "during", "every", "having", "other", "should", "since", "still", "their", "there",
+    "these", "those", "through", "under", "until", "using", "where", "which", "while", "without",
+    "would",
+];
+
+/// The repo-novelty gate: `memory.md` slots are reserved for facts no
+/// repo file holds, so a takeaway mostly contained in one indexed doc
+/// is suppressed — its content is already free at session start.
+/// Covered means >= 0.6 of the takeaway's tokens appear in a single
+/// doc. Takeaways with fewer than 8 tokens carry too little signal
+/// for a containment test, and user-pinned lessons at or above
+/// `USER_PRESERVE_PRIORITY_THRESHOLD` always survive; neither is ever
+/// suppressed. Pure set intersection against the prebuilt index — no
+/// file reads here.
+pub(super) fn suppress_repo_covered(
+    takeaways: &mut Vec<Takeaway>,
+    index: &[RepoDoc],
+) -> HashMap<String, String> {
+    let mut suppressed = HashMap::new();
+    if index.is_empty() {
+        return suppressed;
+    }
+    for takeaway in takeaways.iter() {
+        if user_priority_at_least(&takeaway.tags, USER_PRESERVE_PRIORITY_THRESHOLD) {
+            continue;
+        }
+        if let Some(path) = repo_doc_covering(&takeaway.text, index) {
+            suppressed.insert(takeaway.chunk_id.clone(), format!("covered_by_repo:{path}"));
+        }
+    }
+    takeaways.retain(|takeaway| !suppressed.contains_key(&takeaway.chunk_id));
+    suppressed
+}
+
+/// Containment predicate behind the repo-novelty gate, shared with the
+/// outcome scanner: the covering doc's path when >= 0.6 of `text`'s
+/// tokens appear in a single indexed doc. Texts with fewer than 8
+/// tokens carry too little signal for a containment test and are
+/// never covered.
+pub(in crate::cli) fn repo_doc_covering<'a>(text: &str, index: &'a [RepoDoc]) -> Option<&'a str> {
+    let tokens = repo_novelty_tokens(text);
+    if tokens.len() < 8 {
+        return None;
+    }
+    index
+        .iter()
+        .find(|doc| {
+            let overlap = tokens.intersection(&doc.tokens).count();
+            overlap as f32 / tokens.len() as f32 >= 0.6
+        })
+        .map(|doc| doc.path.as_str())
+}
+
 pub(super) fn takeaway_preferred(candidate: &Takeaway, current: &Takeaway) -> bool {
     candidate
         .priority
@@ -233,63 +434,11 @@ pub(super) fn topic_key(takeaway: &Takeaway) -> String {
 
 pub(super) type ScopedSuppressionReasons = HashMap<(String, String), String>;
 
-pub(super) fn assign_active_project_candidates(
-    project_takeaways: &mut Vec<Takeaway>,
-    global_takeaways: &mut Vec<Takeaway>,
-    project_explanations: &mut Vec<MemoryMdCandidateExplanation>,
-    global_explanations: &mut Vec<MemoryMdCandidateExplanation>,
-    active_project_id: Option<&str>,
-) {
-    let Some(active_project_id) = active_project_id else {
-        return;
-    };
-
-    let mut retained_global = Vec::with_capacity(global_takeaways.len());
-    for takeaway in global_takeaways.drain(..) {
-        if takeaway.project_id.as_deref() == Some(active_project_id) {
-            if let Some(existing) = project_takeaways
-                .iter_mut()
-                .find(|existing| existing.chunk_id == takeaway.chunk_id)
-            {
-                merge_takeaway_evidence(existing, takeaway);
-            } else {
-                project_takeaways.push(takeaway);
-            }
-        } else {
-            retained_global.push(takeaway);
-        }
-    }
-    *global_takeaways = retained_global;
-
-    let mut retained_explanations = Vec::with_capacity(global_explanations.len());
-    for mut explanation in global_explanations.drain(..) {
-        if explanation.project_id.as_deref() == Some(active_project_id) {
-            explanation.section = "project".to_string();
-            project_explanations.push(explanation);
-        } else {
-            retained_explanations.push(explanation);
-        }
-    }
-    *global_explanations = retained_explanations;
-}
-
-pub(super) fn merge_takeaway_evidence(existing: &mut Takeaway, incoming: Takeaway) {
-    existing.score = existing.score.max(incoming.score);
-    existing.priority = existing.priority.max(incoming.priority);
-    existing.timestamp_created = existing.timestamp_created.max(incoming.timestamp_created);
-    existing.occurrences = existing.occurrences.saturating_add(incoming.occurrences);
-    existing.sources.extend(incoming.sources);
-    for tag in incoming.tags {
-        if !existing.tags.contains(&tag) {
-            existing.tags.push(tag);
-        }
-    }
-}
-
 pub(super) fn recompute_union_priorities(
     project_takeaways: &mut [Takeaway],
     global_takeaways: &mut [Takeaway],
     hit_stats: &HashMap<String, HitStats>,
+    outcome_priors: &HashMap<String, OutcomePrior>,
     now_ms: i64,
 ) -> HashMap<String, PriorityBreakdown> {
     let tag_counts = recurring_tag_counts(project_takeaways.iter().chain(global_takeaways.iter()));
@@ -298,7 +447,8 @@ pub(super) fn recompute_union_priorities(
         .iter_mut()
         .chain(global_takeaways.iter_mut())
     {
-        let breakdown = priority_breakdown(takeaway, &tag_counts, hit_stats, now_ms);
+        let breakdown =
+            priority_breakdown(takeaway, &tag_counts, hit_stats, outcome_priors, now_ms);
         takeaway.priority = breakdown.total;
         breakdowns.insert(takeaway.chunk_id.clone(), breakdown);
     }
@@ -687,224 +837,6 @@ pub(super) fn extract_covered_task_ids(text: &str) -> Vec<String> {
     ids
 }
 
-pub(super) fn merge_payload_candidates(
-    by_chunk: &mut HashMap<String, Takeaway>,
-    explanations: &mut Vec<MemoryMdCandidateExplanation>,
-    payload: &Value,
-    section: &str,
-    source: &str,
-    query: &str,
-    mode: CliQueryMode,
-) {
-    let Some(results) = payload.get("results").and_then(Value::as_array) else {
-        return;
-    };
-    for (idx, result) in results.iter().enumerate() {
-        let Some(chunk_id) = result.get("chunk_id").and_then(Value::as_str) else {
-            continue;
-        };
-        let text = result
-            .get("text")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim();
-        let tags = result
-            .get("tags")
-            .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let mut explanation =
-            candidate_explanation(section, source, query, mode, idx + 1, result, &tags, text);
-        if text.is_empty() {
-            explanation.display_status = "filtered".to_string();
-            explanation.filter_reason = Some("empty_text".to_string());
-            explanations.push(explanation);
-            continue;
-        }
-        if is_generated_digest_takeaway(&tags) {
-            explanation.display_status = "filtered".to_string();
-            explanation.filter_reason = Some("generated_digest_wrapper".to_string());
-            explanations.push(explanation);
-            continue;
-        }
-        if is_fragment_like_candidate(&tags, text) {
-            explanation.display_status = "filtered".to_string();
-            explanation.filter_reason = Some("fragment_like".to_string());
-            explanation.quality_flags.push("fragment_like".to_string());
-            explanations.push(explanation);
-            continue;
-        }
-        // Defence-in-depth: the lifecycle visibility filter already
-        // hides superseded chunks, but skip anything still carrying a
-        // `kind:superseded` tag so consolidated output never competes
-        // with the raw chunks it replaced.
-        if tags.iter().any(|tag| tag.starts_with("kind:superseded")) {
-            explanation.display_status = "filtered".to_string();
-            explanation.filter_reason = Some("superseded_tag".to_string());
-            explanations.push(explanation);
-            continue;
-        }
-        let score = result.get("score").and_then(Value::as_f64).unwrap_or(0.0) as f32;
-
-        let entry = by_chunk
-            .entry(chunk_id.to_string())
-            .or_insert_with(|| Takeaway {
-                chunk_id: chunk_id.to_string(),
-                tenant_id: result
-                    .get("tenant_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                project_id: result
-                    .get("project_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                text: text.to_string(),
-                score,
-                priority: 0.0,
-                chunk_type: result
-                    .get("chunk_type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_string(),
-                timestamp_created: result
-                    .get("timestamp_created")
-                    .and_then(Value::as_i64)
-                    .unwrap_or_default(),
-                tags,
-                sources: BTreeSet::new(),
-                occurrences: 0,
-            });
-        entry.score = entry.score.max(score);
-        entry.occurrences = entry.occurrences.saturating_add(1);
-        entry.sources.insert(source.to_string());
-        explanations.push(explanation);
-    }
-}
-
-// This pure builder mirrors the serialized explanation record field-for-field.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn candidate_explanation(
-    section: &str,
-    source: &str,
-    query: &str,
-    mode: CliQueryMode,
-    raw_rank: usize,
-    result: &Value,
-    tags: &[String],
-    text: &str,
-) -> MemoryMdCandidateExplanation {
-    let generated_digest = is_generated_digest_takeaway(tags)
-        || text
-            .to_ascii_lowercase()
-            .contains("task digest status generated");
-    let mut quality_flags = Vec::new();
-    if is_fragment_like_candidate(tags, text) {
-        quality_flags.push("fragment_like".to_string());
-    }
-    if generated_digest
-        || text
-            .to_ascii_lowercase()
-            .contains("task digest status generated")
-    {
-        quality_flags.push("generated_wrapper".to_string());
-    }
-    MemoryMdCandidateExplanation {
-        section: section.to_string(),
-        source: source.to_string(),
-        query: query.to_string(),
-        mode: query_mode_label(mode).to_string(),
-        raw_rank,
-        chunk_id: result
-            .get("chunk_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        tenant_id: result
-            .get("tenant_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        project_id: result
-            .get("project_id")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        chunk_type: result
-            .get("chunk_type")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string(),
-        timestamp_created: result
-            .get("timestamp_created")
-            .and_then(Value::as_i64)
-            .unwrap_or_default(),
-        search_score: result.get("score").and_then(Value::as_f64).unwrap_or(0.0) as f32,
-        priority_score: None,
-        priority_breakdown: None,
-        display_status: "candidate".to_string(),
-        filter_reason: None,
-        display_rank: None,
-        generated_digest,
-        quality_flags,
-        topic_key: None,
-        tags: tags.to_vec(),
-        matched_sources: vec![source.to_string()],
-    }
-}
-
-pub(super) fn finalize_candidate_explanations(
-    explanations: &mut [MemoryMdCandidateExplanation],
-    scored_takeaways: &[Takeaway],
-    suppressed_reasons: &HashMap<String, String>,
-    displayed_ids: &HashMap<String, usize>,
-    breakdowns: &HashMap<String, PriorityBreakdown>,
-) {
-    let by_id = scored_takeaways
-        .iter()
-        .map(|takeaway| (takeaway.chunk_id.as_str(), takeaway))
-        .collect::<HashMap<_, _>>();
-    for explanation in explanations {
-        if explanation.display_status == "filtered" {
-            continue;
-        }
-        if let Some(takeaway) = by_id.get(explanation.chunk_id.as_str()) {
-            explanation.priority_score = Some(takeaway.priority);
-            explanation.priority_breakdown = breakdowns.get(&takeaway.chunk_id).cloned();
-            explanation.matched_sources = takeaway.sources.iter().cloned().collect();
-            explanation.topic_key = Some(topic_key(takeaway));
-        }
-        if let Some(reason) = suppressed_reasons.get(&explanation.chunk_id) {
-            explanation.display_status = "filtered".to_string();
-            explanation.filter_reason = Some(reason.clone());
-            explanation.quality_flags.push(reason.clone());
-        } else if let Some(rank) = displayed_ids.get(&explanation.chunk_id) {
-            explanation.display_status = "displayed".to_string();
-            explanation.display_rank = Some(*rank);
-        } else {
-            explanation.display_status = "filtered".to_string();
-            explanation.filter_reason = Some("below_display_limit".to_string());
-        }
-    }
-}
-
-pub(super) fn query_mode_label(mode: CliQueryMode) -> &'static str {
-    match mode {
-        CliQueryMode::Generic => "generic",
-        CliQueryMode::BriefProject => "brief_project",
-        CliQueryMode::ResumeTask => "resume_task",
-        CliQueryMode::FindFailures => "find_failures",
-        CliQueryMode::FindDecisions => "find_decisions",
-        CliQueryMode::FindEvidence => "find_evidence",
-        CliQueryMode::FindHighlights => "find_highlights",
-    }
-}
-
 pub(super) fn recurring_tag_counts<'a>(
     takeaways: impl Iterator<Item = &'a Takeaway>,
 ) -> HashMap<String, usize> {
@@ -922,15 +854,17 @@ pub(super) fn priority_score(
     takeaway: &Takeaway,
     tag_counts: &HashMap<String, usize>,
     hit_stats: &HashMap<String, HitStats>,
+    outcome_priors: &HashMap<String, OutcomePrior>,
     now_ms: i64,
 ) -> f32 {
-    priority_breakdown(takeaway, tag_counts, hit_stats, now_ms).total
+    priority_breakdown(takeaway, tag_counts, hit_stats, outcome_priors, now_ms).total
 }
 
 pub(super) fn priority_breakdown(
     takeaway: &Takeaway,
     tag_counts: &HashMap<String, usize>,
     hit_stats: &HashMap<String, HitStats>,
+    outcome_priors: &HashMap<String, OutcomePrior>,
     now_ms: i64,
 ) -> PriorityBreakdown {
     let explicit = explicit_priority(&takeaway.tags).unwrap_or(0.0);
@@ -962,8 +896,6 @@ pub(super) fn priority_breakdown(
         .filter_map(|tag| tag_counts.get(tag))
         .map(|count| count.saturating_sub(1).min(5) as f32)
         .sum::<f32>();
-    let multi_query = takeaway.occurrences.saturating_sub(1).min(4) as f32 * 3.0;
-    let search_score = takeaway.score.clamp(0.0, 25.0) * 2.0;
     let library_bonus = if takeaway.tags.iter().any(|tag| {
         tag == "task:role:highlight_library"
             || tag == "task:role:project_brief"
@@ -974,9 +906,15 @@ pub(super) fn priority_breakdown(
         0.0
     };
 
-    // Exposure is not evidence of usefulness. Keep it only to distinguish
-    // never-exposed stale chunks; verified outcomes drive adaptive ranking.
-    let utility = 0.0;
+    // Exposure is not evidence of usefulness; hit stats only feed the
+    // staleness check below. Utility comes from verified, decayed outcome
+    // priors: each net positive credit is worth 4 points, capped at 12 so a
+    // well-used chunk lands in the decision tier without overriding explicit
+    // priority.
+    let utility = outcome_priors
+        .get(&takeaway.chunk_id)
+        .map(|prior| (prior.positive_weight - prior.negative_weight).clamp(0.0, 3.0) * 4.0)
+        .unwrap_or(0.0);
     let staleness_penalty = if !hit_stats.contains_key(&takeaway.chunk_id)
         && takeaway.timestamp_created > 0
         && now_ms.saturating_sub(takeaway.timestamp_created) > STALE_CHUNK_AGE_MS
@@ -990,8 +928,6 @@ pub(super) fn priority_breakdown(
         + kind_weight
         + type_weight
         + recurrence
-        + multi_query
-        + search_score
         + library_bonus
         + utility
         + staleness_penalty;
@@ -1001,8 +937,6 @@ pub(super) fn priority_breakdown(
         kind_weight,
         type_weight,
         recurrence,
-        multi_query,
-        search_score,
         library_bonus,
         utility,
         staleness_penalty,

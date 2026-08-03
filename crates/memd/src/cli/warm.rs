@@ -331,6 +331,7 @@ fn warm_wire_command_from_cli(
         CliCommand::Search {
             tenant_id,
             query,
+            query_positional,
             k,
             project_id,
             compact,
@@ -355,7 +356,14 @@ fn warm_wire_command_from_cli(
         } => (
             WarmWireCommand::Search {
                 tenant_id: super::scope::require_tenant(tenant_id.clone())?,
-                query: query.clone(),
+                query: query
+                    .clone()
+                    .or_else(|| query_positional.clone())
+                    .ok_or_else(|| {
+                        crate::error::MemdError::ValidationError(
+                            "search requires --query or a positional query".to_string(),
+                        )
+                    })?,
                 k: *k,
                 project_id: project_id.clone(),
                 compact: *compact,
@@ -2079,7 +2087,8 @@ mod tests {
     fn search_command(include_superseded: bool, warm: WarmMode) -> CliCommand {
         CliCommand::Search {
             tenant_id: Some("t".to_string()),
-            query: "q".to_string(),
+            query: Some("q".to_string()),
+            query_positional: None,
             k: 1,
             project_id: None,
             compact: false,
@@ -2467,7 +2476,8 @@ mod tests {
 
         let superseded_search = CliCommand::Search {
             tenant_id: Some("t".to_string()),
-            query: "q".to_string(),
+            query: Some("q".to_string()),
+            query_positional: None,
             k: 1,
             project_id: None,
             compact: false,
@@ -2496,7 +2506,8 @@ mod tests {
 
         let get = CliCommand::Get {
             tenant_id: Some("t".to_string()),
-            chunk_id: "019e6d12-c1a7-7330-8bd8-4c9cdb45bc3c".to_string(),
+            chunk_id: Some("019e6d12-c1a7-7330-8bd8-4c9cdb45bc3c".to_string()),
+            chunk_id_positional: None,
         };
         assert!(get.warm_mode().is_none());
         assert_eq!(

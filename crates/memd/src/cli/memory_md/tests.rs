@@ -8,7 +8,7 @@ use crate::store::{
     DuplicateHealth, HealthCounts, IndexCoverageHealth, PayloadHealth, StoreHealthSnapshot,
     StoreStats,
 };
-use crate::types::{ChunkId, MemoryChunk};
+use crate::types::{ChunkId, ChunkStatus, ChunkType, MemoryChunk, ProjectId};
 
 #[test]
 fn explicit_priority_scales_small_values_and_caps_large_values() {
@@ -16,106 +16,6 @@ fn explicit_priority_scales_small_values_and_caps_large_values() {
     assert_eq!(
         explicit_priority(&["importance:120".to_string()]),
         Some(100.0)
-    );
-}
-
-#[test]
-fn git_state_handles_clean_dirty_no_repo_and_missing_git() {
-    let no_repo = tempfile::tempdir().unwrap();
-    let no_repo_state = collect_git_state(no_repo.path(), "git");
-    if no_repo_state.warning.as_deref() == Some("git unavailable: executable not found") {
-        return;
-    }
-    assert!(no_repo_state.not_git_repo);
-    assert!(!no_repo_state.available);
-
-    let missing = collect_git_state(no_repo.path(), "definitely-not-a-git-binary");
-    assert!(!missing.available);
-    assert!(missing
-        .warning
-        .as_deref()
-        .unwrap_or_default()
-        .contains("executable not found"));
-
-    let repo = tempfile::tempdir().unwrap();
-    let init = Command::new("git")
-        .arg("-C")
-        .arg(repo.path())
-        .arg("init")
-        .output()
-        .unwrap();
-    assert!(init.status.success());
-    let clean = collect_git_state(repo.path(), "git");
-    assert!(clean.available);
-    assert_eq!(clean.clean, Some(true));
-
-    fs::write(repo.path().join("dirty.txt"), "dirty").unwrap();
-    let dirty = collect_git_state(repo.path(), "git");
-    assert!(dirty.available);
-    assert_eq!(dirty.clean, Some(false));
-    assert!(dirty.changed_entries > 0);
-}
-
-#[test]
-fn task_state_uses_nested_heading_for_first_open_action() {
-    let dir = tempfile::tempdir().unwrap();
-    let tasks_dir = dir.path().join("tasks");
-    fs::create_dir_all(&tasks_dir).unwrap();
-    fs::write(
-        tasks_dir.join("todo.md"),
-        "# Completed\n\n- [x] old\n\n# Current\n\n## Deep Work\n\n- [ ] implement nested action\n",
-    )
-    .unwrap();
-
-    let scan = collect_task_state(dir.path());
-    let latest = scan.latest_task.expect("latest task");
-    assert_eq!(latest.heading.as_deref(), Some("Deep Work"));
-    assert_eq!(scan.next_actions.len(), 1);
-    assert_eq!(scan.next_actions[0].line, 9);
-    assert_eq!(scan.next_actions[0].source_path, "tasks/todo.md");
-}
-
-#[test]
-fn task_state_ignores_checked_boxes_and_incidental_pending_text() {
-    let dir = tempfile::tempdir().unwrap();
-    let tasks_dir = dir.path().join("tasks");
-    fs::create_dir_all(&tasks_dir).unwrap();
-    fs::write(
-        tasks_dir.join("todo.md"),
-        "# Current\n\n- [x] resolved the pending migration\n- note: this pending migration is already closed\n- [ ] real open item\n",
-    )
-    .unwrap();
-
-    let scan = collect_task_state(dir.path());
-    assert_eq!(scan.next_actions.len(), 1);
-    assert_eq!(scan.next_actions[0].text, "real open item");
-}
-
-#[test]
-fn task_source_state_distinguishes_missing_empty_and_parse_failure() {
-    let missing = tempfile::tempdir().unwrap();
-    assert_eq!(
-        collect_task_state(missing.path()).source_state,
-        TaskSourceState::Missing
-    );
-
-    let completed = tempfile::tempdir().unwrap();
-    fs::create_dir_all(completed.path().join("tasks")).unwrap();
-    fs::write(
-        completed.path().join("tasks/todo.md"),
-        "# Completed\n\n- [x] verified release\n",
-    )
-    .unwrap();
-    assert_eq!(
-        collect_task_state(completed.path()).source_state,
-        TaskSourceState::ParsedNoOpenTasks
-    );
-
-    let unreadable = tempfile::tempdir().unwrap();
-    fs::create_dir_all(unreadable.path().join("tasks/todo.md")).unwrap();
-    assert_eq!(
-        collect_task_state(unreadable.path()).source_state,
-        TaskSourceState::ParseFailed
     );
 }
 
@@ -197,102 +97,6 @@ fn generic_repo_tags_do_not_collapse_unrelated_takeaways() {
 }
 
 #[test]
-fn active_project_candidates_move_out_of_machine_section() {
-    let mut project = Vec::new();
-    let mut global = vec![
-        make_takeaway_with_project("active", Some("project-a")),
-        make_takeaway_with_project("other", Some("project-b")),
-    ];
-    let mut project_explanations = Vec::new();
-    let mut global_explanations = Vec::new();
-
-    assign_active_project_candidates(
-        &mut project,
-        &mut global,
-        &mut project_explanations,
-        &mut global_explanations,
-        Some("project-a"),
-    );
-
-    assert_eq!(
-        project
-            .iter()
-            .map(|takeaway| takeaway.chunk_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["active"]
-    );
-    assert_eq!(
-        global
-            .iter()
-            .map(|takeaway| takeaway.chunk_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["other"]
-    );
-}
-
-#[test]
-fn missing_or_failed_task_source_never_passes_answerability() {
-    for source_state in [TaskSourceState::Missing, TaskSourceState::ParseFailed] {
-        let mut state = make_project_state();
-        state.next_actions.clear();
-        state.task_source_state = source_state;
-
-        let metrics = evaluate_agent_usefulness(&state, &[], &[]);
-
-        assert!(!metrics.no_open_tasks_detected);
-        assert!(!metrics.answerability_passed);
-        assert!(agent_usefulness_failures(&metrics)
-            .iter()
-            .any(|failure| failure.contains("task source")));
-    }
-}
-
-#[test]
-fn task_source_uncertainty_is_rendered_explicitly() {
-    let mut missing = make_project_state();
-    missing.next_actions.clear();
-    missing.task_source_state = TaskSourceState::Missing;
-    let mut rendered = String::new();
-    render_latest_project_state(&mut rendered, &missing);
-    assert!(rendered.contains("is missing; open-task state is unknown"));
-
-    missing.task_source_state = TaskSourceState::ParseFailed;
-    rendered.clear();
-    render_latest_project_state(&mut rendered, &missing);
-    assert!(rendered.contains("could not be parsed; open-task state is unknown"));
-}
-
-#[test]
-fn handoff_state_renders_title_once_and_stable_spacing() {
-    let dir = tempfile::tempdir().unwrap();
-    let handoff_dir = dir.path().join("docs/handoffs");
-    fs::create_dir_all(&handoff_dir).unwrap();
-    fs::write(
-        handoff_dir.join("2026-06-28-release.md"),
-        "# Handoff 2026-06-28\n\nStatus: active\nNext step: ship release\n",
-    )
-    .unwrap();
-
-    let scan = collect_handoff_state(dir.path());
-    let handoff = scan.latest_handoff.expect("latest handoff");
-    assert_eq!(handoff.heading.as_deref(), Some("Handoff 2026-06-28"));
-    assert_eq!(handoff.text, "Status: active | Next step: ship release");
-
-    let rendered_signal = render_state_signal(&handoff);
-    assert!(!rendered_signal.contains("Handoff 2026-06-28 - Handoff 2026-06-28"));
-
-    let mut state = make_project_state();
-    state.latest_handoff = Some(handoff);
-    state.latest_vcs = None;
-    let mut rendered = String::new();
-    render_latest_project_state(&mut rendered, &state);
-    assert!(rendered.contains("- handoff: Handoff 2026-06-28 -"));
-    assert!(rendered.contains("Status: active"));
-    assert!(rendered.contains("Next step: ship release"));
-    assert!(!rendered.contains("\n\n\n### Next Actions"));
-}
-
-#[test]
 fn scope_path_normalization_warns_only_on_real_drift() {
     let dir = tempfile::tempdir().unwrap();
     let configured_same = format!("{}/.", dir.path().display());
@@ -305,39 +109,138 @@ fn scope_path_normalization_warns_only_on_real_drift() {
 }
 
 #[test]
-fn fragment_candidates_are_filtered_before_ranking() {
-    let payload = serde_json::json!({
-        "results": [
-            {
-                "chunk_id": "fragment",
-                "tenant_id": "t",
-                "project_id": "p",
-                "text": "and then continued from a prior chunk",
-                "score": 10.0,
-                "chunk_type": "summary",
-                "timestamp_created": 1,
-                "tags": ["chunk_index:1", "kind:finish"]
-            }
-        ]
-    });
-    let mut by_chunk = HashMap::new();
-    let mut explanations = Vec::new();
-    merge_payload_candidates(
-        &mut by_chunk,
-        &mut explanations,
-        &payload,
-        "project",
-        "project_highlights",
-        "project takeaways",
-        CliQueryMode::FindHighlights,
+fn scan_candidate_filter_reasons_gate_admission() {
+    let no_tags: Vec<String> = Vec::new();
+    for status in [
+        ChunkStatus::Candidate,
+        ChunkStatus::Deleted,
+        ChunkStatus::Error,
+        ChunkStatus::Superseded,
+        ChunkStatus::Expired,
+    ] {
+        assert_eq!(
+            scan_candidate_filter_reason(status, &no_tags, "Decision: keep it."),
+            Some("not_visible")
+        );
+    }
+    assert_eq!(
+        scan_candidate_filter_reason(ChunkStatus::Final, &no_tags, ""),
+        Some("empty_text")
     );
-    assert!(by_chunk.is_empty());
-    let explanation = explanations.first().expect("explanation");
-    assert_eq!(explanation.filter_reason.as_deref(), Some("fragment_like"));
-    assert!(explanation
-        .quality_flags
+    let digest_tags = vec![
+        "task:status:generated".to_string(),
+        "task:role:highlight_library".to_string(),
+    ];
+    assert_eq!(
+        scan_candidate_filter_reason(ChunkStatus::Final, &digest_tags, "Task digest."),
+        Some("generated_digest_wrapper")
+    );
+    let fragment_tags = vec!["chunk_index:1".to_string()];
+    assert_eq!(
+        scan_candidate_filter_reason(
+            ChunkStatus::Final,
+            &fragment_tags,
+            "and then continued from a prior chunk"
+        ),
+        Some("fragment_like")
+    );
+    let superseded_tags = vec!["kind:superseded".to_string()];
+    assert_eq!(
+        scan_candidate_filter_reason(ChunkStatus::Final, &superseded_tags, "Old lesson."),
+        Some("superseded_tag")
+    );
+    assert_eq!(
+        scan_candidate_filter_reason(
+            ChunkStatus::Final,
+            &["kind:decision".to_string()],
+            "Decision: keep project scopes explicit."
+        ),
+        None
+    );
+}
+
+#[tokio::test]
+async fn scan_partitions_candidates_by_active_project_in_one_pass() {
+    let tenant = TenantId::new("t").unwrap();
+    let mut superseded = MemoryChunk::new(
+        tenant.clone(),
+        "Decision: replaced fact.",
+        ChunkType::Decision,
+    )
+    .with_project(ProjectId::from("project-a"));
+    superseded.status = ChunkStatus::Superseded;
+    let chunks = vec![
+        MemoryChunk::new(
+            tenant.clone(),
+            "Decision: active project fact.",
+            ChunkType::Decision,
+        )
+        .with_project(ProjectId::from("project-a"))
+        .with_tags(vec!["kind:decision".to_string()]),
+        MemoryChunk::new(
+            tenant.clone(),
+            "Decision: other project fact.",
+            ChunkType::Decision,
+        )
+        .with_project(ProjectId::from("project-b")),
+        MemoryChunk::new(
+            tenant.clone(),
+            "Decision: tenant-wide fact.",
+            ChunkType::Decision,
+        ),
+        superseded,
+    ];
+    let store = FakeHealthStore::new(chunks.len(), chunks);
+
+    let (project, global, explanations) =
+        scan_takeaway_candidates(&store, &tenant, Some("project-a"))
+            .await
+            .unwrap();
+
+    assert_eq!(
+        project
+            .iter()
+            .map(|takeaway| takeaway.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Decision: active project fact."]
+    );
+    assert_eq!(project[0].sources, BTreeSet::from(["scan".to_string()]));
+    assert_eq!(
+        global
+            .iter()
+            .map(|takeaway| takeaway.text.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "Decision: other project fact.",
+            "Decision: tenant-wide fact."
+        ]
+    );
+    assert_eq!(explanations.len(), 4);
+    assert!(explanations
         .iter()
-        .any(|flag| flag == "fragment_like"));
+        .all(|explanation| explanation.source == "scan"
+            && explanation.mode == "scan"
+            && explanation.query.is_empty()));
+    assert_eq!(
+        explanations
+            .iter()
+            .map(|explanation| explanation.raw_rank)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+    assert_eq!(
+        explanations
+            .iter()
+            .map(|explanation| explanation.section.as_str())
+            .collect::<Vec<_>>(),
+        vec!["project", "machine_wide", "machine_wide", "project"]
+    );
+    let filtered = explanations
+        .iter()
+        .find(|explanation| explanation.filter_reason.is_some())
+        .expect("superseded chunk explanation");
+    assert_eq!(filtered.filter_reason.as_deref(), Some("not_visible"));
+    assert_eq!(filtered.display_status, "filtered");
 }
 
 #[test]
@@ -358,39 +261,6 @@ fn conditional_sentences_are_not_filtered_as_fragments() {
         &[],
         "and then continued from a prior chunk"
     ));
-}
-
-#[cfg(unix)]
-#[test]
-fn command_timeout_drains_large_output_while_waiting() {
-    let mut command = Command::new("sh");
-    command.arg("-c").arg(
-        "i=0; while [ \"$i\" -lt 20000 ]; do printf 'dirty-file-%05d xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' \"$i\"; i=$((i + 1)); done",
-    );
-
-    let output = run_command_with_timeout(command, Duration::from_secs(5)).unwrap();
-
-    assert!(!output.timed_out);
-    assert!(output.status_success);
-    assert!(output.stdout.len() > 128 * 1024);
-}
-
-#[test]
-fn expected_git_failure_checks_true_and_false_expectations() {
-    let mut metrics = make_agent_metrics();
-    metrics.git_state_present = false;
-    assert_eq!(
-        expected_git_failure(&metrics, true).as_deref(),
-        Some("expected git state but git_state_present=false")
-    );
-    assert!(expected_git_failure(&metrics, false).is_none());
-
-    metrics.git_state_present = true;
-    assert_eq!(
-        expected_git_failure(&metrics, false).as_deref(),
-        Some("expected no git state but git_state_present=true")
-    );
-    assert!(expected_git_failure(&metrics, true).is_none());
 }
 
 #[test]
@@ -487,14 +357,12 @@ fn render_memory_md_caps_long_takeaway_text() {
         chunk_type: "summary".to_string(),
         timestamp_created: 0,
         tags: vec!["kind:finish".to_string()],
-        sources: BTreeSet::from(["project_highlights".to_string()]),
+        sources: BTreeSet::from(["scan".to_string()]),
         occurrences: 1,
     };
     let state = make_project_state();
     let rendered = render_memory_md(&state, &[], &[takeaway], &[]);
     assert!(rendered.contains("## Project Fact Library"));
-    assert!(rendered.contains("## Agent Guidance"));
-    assert!(rendered.contains("agent action: `Use this as evidence only after confirming"));
     assert!(rendered.contains("chunk-a"));
     assert!(rendered.contains("..."));
 }
@@ -511,7 +379,7 @@ fn render_memory_md_omits_empty_global_section() {
         chunk_type: "summary".to_string(),
         timestamp_created: 0,
         tags: vec!["kind:finish".to_string()],
-        sources: BTreeSet::from(["project_highlights".to_string()]),
+        sources: BTreeSet::from(["scan".to_string()]),
         occurrences: 1,
     };
     let state = make_project_state();
@@ -553,98 +421,37 @@ fn render_memory_md_groups_takeaways_by_signal_category() {
     assert!(rendered.contains("### Decisions"));
     assert!(rendered.contains("### Validated Fixes"));
     assert!(rendered.contains("### Commands/Paths"));
-    assert!(rendered.contains("reason: `decision or rationale`"));
-    assert!(rendered.contains("reason: `validated fix or result`"));
-    assert!(rendered.contains("reason: `command, path, or parameter evidence`"));
-    assert!(rendered.contains("agent action: `Apply this decision"));
-    assert!(rendered.contains("agent action: `Reuse this validated fix"));
-    assert!(rendered.contains("agent action: `Use or verify this command/path"));
-    assert!(rendered.contains("created_unix_ms: `42`"));
+    assert!(rendered.contains("- chunk: `decision`; priority: `80.0`; tags: `kind:decision`"));
+    assert!(rendered.contains("- chunk: `command`; priority: `60.0`; tags: `kind:run`"));
 }
 
 #[test]
 fn memory_md_quality_report_scores_useful_items_and_wrappers() {
     let content = r#"# memory.md
 
-## Project Takeaways
+## Project Fact Library
 
 ### Decisions
 
 1. Decision: keep project aliases explicit.
-   - reason: `decision or rationale`
-   - agent action: `Apply this decision when the same scope appears: keep project aliases explicit.`
+   - chunk: `decision-a`; priority: `80.0`; tags: `kind:decision`
 
 ### Other Takeaways
 
 1. Task digest status generated. Summary: Highlight library for p contains 2 ranked lessons.
-   - reason: `ranked project takeaway`
-   - tags: `task:status:generated, task:role:highlight_library`
+   - chunk: `digest-a`; priority: `40.0`; tags: `task:status:generated, task:role:highlight_library`
 
-2. Routine status update with no reason.
+2. Routine status update with no category signal.
 
-## Machine-Wide Takeaways
+## Machine-Wide Fact Library
 
 1. Decision outside project section should not be counted.
-   - reason: `decision or rationale`
 "#;
     let report = evaluate_memory_md_quality(content, 10);
     assert_eq!(report.displayed_count, 3);
     assert_eq!(report.useful_count, 1);
     assert_eq!(report.generated_wrapper_count, 1);
-    assert_eq!(report.missing_reason_count, 1);
-    assert_eq!(report.missing_action_count, 2);
     assert!((report.useful_ratio - (1.0 / 3.0)).abs() < f64::EPSILON);
-}
-
-#[test]
-fn explicit_agent_action_overrides_category_template() {
-    let takeaway = make_takeaway(
-        "action",
-        "Decision: keep cache keys scoped. Agent action: Verify tenant and project are present before reusing cached retrieval results.",
-        vec!["kind:decision"],
-        "summary",
-    );
-
-    let state = make_project_state();
-    let rendered = render_memory_md(&state, &[], &[takeaway], &[]);
-
-    assert!(rendered.contains(
-        "agent action: `Verify tenant and project are present before reusing cached retrieval results`"
-    ));
-}
-
-#[test]
-fn explicit_agent_action_skips_explanatory_marker_mentions() {
-    let takeaway = make_takeaway(
-        "action",
-        "Validation: memory quality gate passed. Docs mention Agent action: sentence. Agent action: Write every high-priority durable memory with a concrete action sentence that tells future agents what to verify or reuse.",
-        vec!["kind:finish"],
-        "summary",
-    );
-
-    let state = make_project_state();
-    let rendered = render_memory_md(&state, &[], &[takeaway], &[]);
-
-    assert!(rendered.contains(
-        "agent action: `Write every high-priority durable memory with a concrete action sentence that tells future agents what to verify or reuse`"
-    ));
-}
-
-#[test]
-fn explicit_agent_action_keeps_paths_and_versions() {
-    let takeaway = make_takeaway(
-        "action",
-        "Installed skill bundle. Agent action: Verify future agent sessions read the refreshed ~/.agents/skills/memd skill and use memd 0.61.0 before diagnosing memory-quality behavior.",
-        vec!["kind:finish"],
-        "summary",
-    );
-
-    let state = make_project_state();
-    let rendered = render_memory_md(&state, &[], &[takeaway], &[]);
-
-    assert!(rendered.contains(
-        "agent action: `Verify future agent sessions read the refreshed ~/.agents/skills/memd skill and use memd 0.61.0 before diagnosing memory-quality behavior`"
-    ));
 }
 
 fn make_project_state() -> ProjectState {
@@ -655,53 +462,8 @@ fn make_project_state() -> ProjectState {
         configured_project_dir: Some("/tmp/project-a".to_string()),
         resolved_project_dir: "/tmp/project-a".to_string(),
         scope_warnings: Vec::new(),
-        git: GitState {
-            available: true,
-            not_git_repo: false,
-            branch: Some("main".to_string()),
-            clean: Some(true),
-            changed_entries: 0,
-            summary: "branch `main`; clean".to_string(),
-            warning: None,
-        },
-        latest_task: Some(StateSignal {
-            source_path: "tasks/todo.md".to_string(),
-            line: Some(1),
-            heading: Some("Current Work".to_string()),
-            text: "open action: run validation".to_string(),
-        }),
-        latest_handoff: None,
-        latest_vcs: None,
-        next_actions: vec![NextAction {
-            source_path: "tasks/todo.md".to_string(),
-            line: 2,
-            heading: Some("Current Work".to_string()),
-            text: "run validation".to_string(),
-        }],
-        task_source_state: TaskSourceState::ParsedOpenTasks,
         memory: MemoryState::default(),
         collection_warnings: Vec::new(),
-    }
-}
-
-fn make_agent_metrics() -> AgentUsefulnessMetrics {
-    AgentUsefulnessMetrics {
-        latest_project_state_present: true,
-        scope_present: true,
-        git_state_present: true,
-        git_state_present_or_not_git_repo: true,
-        latest_work_present: true,
-        next_action_present: true,
-        no_open_tasks_detected: false,
-        task_source_state: TaskSourceState::ParsedOpenTasks,
-        scope_health_present: true,
-        memory_degraded_warning_present: false,
-        fragment_count: 0,
-        duplicate_cluster_count: 0,
-        boilerplate_action_count: 0,
-        unrelated_machine_items: 0,
-        source_backed_next_actions: true,
-        answerability_passed: true,
     }
 }
 
@@ -740,6 +502,21 @@ impl Store for FakeHealthStore {
         _k: usize,
     ) -> Result<Vec<MemoryChunk>> {
         Ok(Vec::new())
+    }
+
+    async fn list_chunks(
+        &self,
+        _tenant_id: &TenantId,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<MemoryChunk>> {
+        Ok(self
+            .readable_chunks
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .cloned()
+            .collect())
     }
 
     async fn list_chunks_for_project(
@@ -806,17 +583,6 @@ fn make_takeaway(chunk_id: &str, text: &str, tags: Vec<&str>, chunk_type: &str) 
     }
 }
 
-fn make_takeaway_with_project(chunk_id: &str, project_id: Option<&str>) -> Takeaway {
-    let mut takeaway = make_takeaway(
-        chunk_id,
-        "Machine-wide reusable rule. Agent action: verify before reuse.",
-        vec!["kind:decision"],
-        "decision",
-    );
-    takeaway.project_id = project_id.map(str::to_string);
-    takeaway
-}
-
 #[test]
 fn success_traces_are_not_filed_under_known_failures() {
     // A fully successful trace mentioning "0 failures" used to be
@@ -832,7 +598,7 @@ fn success_traces_are_not_filed_under_known_failures() {
     assert_ne!(cat.heading, "Known Failures", "got: {}", cat.heading);
     assert_eq!(cat.heading, "Validated Fixes");
 
-    // Arrival via a *_failures retrieval query alone is not
+    // Arrival via a failure-flavoured retrieval source alone is not
     // failure evidence either.
     let mut via_query = make_takeaway(
         "via-query",
@@ -1005,8 +771,9 @@ fn library_bonus_outranks_raw_chunk() {
         "summary",
     );
     let raw = make_takeaway("raw", "Plain finish.", vec!["kind:finish"], "summary");
-    let lib_score = priority_score(&library, &counts, &hit_stats, 0);
-    let raw_score = priority_score(&raw, &counts, &hit_stats, 0);
+    let priors = HashMap::new();
+    let lib_score = priority_score(&library, &counts, &hit_stats, &priors, 0);
+    let raw_score = priority_score(&raw, &counts, &hit_stats, &priors, 0);
     assert!(
         lib_score > raw_score + 10.0,
         "library bonus should dominate: lib={lib_score}, raw={raw_score}"
@@ -1027,8 +794,9 @@ fn priority_score_does_not_treat_exposure_as_success() {
             last_ts_ms: 1,
         },
     );
-    let cold_score = priority_score(&cold, &counts, &hits, 1);
-    let hot_score = priority_score(&hot, &counts, &hits, 1);
+    let priors = HashMap::new();
+    let cold_score = priority_score(&cold, &counts, &hits, &priors, 1);
+    let hot_score = priority_score(&hot, &counts, &hits, &priors, 1);
     assert_eq!(hot_score, cold_score, "exposure must not create utility");
 }
 
@@ -1049,8 +817,9 @@ fn priority_score_demotes_unused_old_chunks() {
     // now: a few hours after `recent`; ~365 days after `stale`.
     let now_recent = 1_000_000 + 3 * 3_600_000;
     let now_stale = 1_000_000 + 365 * 86_400_000;
-    let recent_score = priority_score(&recent, &counts, &hits, now_recent);
-    let stale_score = priority_score(&stale, &counts, &hits, now_stale);
+    let priors = HashMap::new();
+    let recent_score = priority_score(&recent, &counts, &hits, &priors, now_recent);
+    let stale_score = priority_score(&stale, &counts, &hits, &priors, now_stale);
     assert!(
         recent_score > stale_score,
         "stale chunk must be demoted: recent={recent_score}, stale={stale_score}"
@@ -1068,56 +837,96 @@ fn generated_digest_candidates_are_skipped_from_takeaways() {
         "kind:decision".to_string(),
         "priority:9".to_string(),
     ]));
-
-    let payload = serde_json::json!({
-        "results": [
-            {
-                "chunk_id": "digest",
-                "tenant_id": "t",
-                "project_id": "p",
-                "text": "Task digest status generated. Summary: Highlight library for p contains 2 ranked lessons.",
-                "score": 25.0,
-                "chunk_type": "summary",
-                "timestamp_created": 10,
-                "tags": tags
-            },
-            {
-                "chunk_id": "raw",
-                "tenant_id": "t",
-                "project_id": "p",
-                "text": "Validated fix: use the stable project scope when restoring the gateway.",
-                "score": 4.0,
-                "chunk_type": "summary",
-                "timestamp_created": 11,
-                "tags": ["kind:finish"]
-            }
-        ]
-    });
-    let mut by_chunk = HashMap::new();
-    let mut explanations = Vec::new();
-    merge_payload_candidates(
-        &mut by_chunk,
-        &mut explanations,
-        &payload,
-        "project",
-        "project_highlights",
-        "project takeaways",
-        CliQueryMode::FindHighlights,
-    );
-    assert!(!by_chunk.contains_key("digest"));
-    assert!(by_chunk.contains_key("raw"));
     assert_eq!(
-        explanations
-            .iter()
-            .find(|item| item.chunk_id == "digest")
-            .and_then(|item| item.filter_reason.as_deref()),
+        scan_candidate_filter_reason(
+            ChunkStatus::Final,
+            &tags,
+            "Task digest status generated. Summary: Highlight library for p contains 2 ranked lessons."
+        ),
         Some("generated_digest_wrapper")
     );
-    assert_eq!(
-        explanations
-            .iter()
-            .find(|item| item.chunk_id == "raw")
-            .map(|item| item.display_status.as_str()),
-        Some("candidate")
+}
+
+#[test]
+fn repo_novelty_tokenizer_keeps_identifier_runs_and_drops_filler() {
+    let tokens = repo_novelty_tokens(
+        "Always run `sacct -M perceus-00` on Dori; tasks/METHODS.md has the exact command.",
     );
+    assert!(tokens.contains("sacct"));
+    assert!(tokens.contains("perceus-00"), "hostname stays one token");
+    assert!(
+        tokens.contains("tasks/methods.md"),
+        "path stays one lowercased token"
+    );
+    assert!(!tokens.contains("dori"), "tokens under 5 chars dropped");
+    assert!(!tokens.contains("always"), "stopwords dropped");
+}
+
+#[test]
+fn repo_coverage_threshold_is_sixty_percent_of_takeaway_tokens() {
+    let index = vec![RepoDoc {
+        path: "tasks/todo.md".to_string(),
+        tokens: repo_novelty_tokens("token1 token2 token3 token4 token5 token6"),
+    }];
+
+    // 10 tokens, 6 in the doc -> exactly 0.6 -> suppressed.
+    let covered = "token1 token2 token3 token4 token5 token6 fresh07 fresh08 fresh09 fresh10";
+    // 10 tokens, 5 in the doc -> 0.5 -> kept.
+    let uncovered = "token1 token2 token3 token4 token5 fresh06 fresh07 fresh08 fresh09 fresh10";
+    // Fully contained but only 6 tokens (< 8) -> gate skipped.
+    let short = "token1 token2 token3 token4 token5 token6";
+    let mut takeaways = vec![
+        make_takeaway("covered", covered, vec![], "summary"),
+        make_takeaway("uncovered", uncovered, vec![], "summary"),
+        make_takeaway("short", short, vec![], "summary"),
+        make_takeaway("pinned", covered, vec!["priority:9"], "summary"),
+    ];
+
+    let suppressed = suppress_repo_covered(&mut takeaways, &index);
+
+    assert_eq!(
+        suppressed.get("covered").map(String::as_str),
+        Some("covered_by_repo:tasks/todo.md")
+    );
+    assert_eq!(suppressed.len(), 1);
+    let kept: Vec<&str> = takeaways
+        .iter()
+        .map(|takeaway| takeaway.chunk_id.as_str())
+        .collect();
+    assert_eq!(kept, vec!["uncovered", "short", "pinned"]);
+}
+
+#[test]
+fn repo_index_excludes_generated_memory_md_and_memd_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("tasks/.memd")).unwrap();
+    fs::create_dir_all(root.join("docs/handoffs/_archive")).unwrap();
+    fs::write(root.join("tasks/todo.md"), "verify consolidation ledger").unwrap();
+    fs::write(
+        root.join("docs/handoffs/session.md"),
+        "tenant scoping notes",
+    )
+    .unwrap();
+    fs::write(
+        root.join("docs/handoffs/_archive/old.md"),
+        "archived handoff",
+    )
+    .unwrap();
+    fs::write(root.join("README.md"), "project readme overview").unwrap();
+    // The previous refresh's output: if it entered the index it would
+    // cover every takeaway it rendered and the next refresh would
+    // suppress them all.
+    fs::write(root.join("tasks/memory.md"), "generated fact library").unwrap();
+    fs::write(root.join("tasks/.memd/state.md"), "internal memd state").unwrap();
+
+    let index = build_repo_index(root, &root.join("tasks/memory.md"));
+
+    let paths: Vec<&str> = index.iter().map(|doc| doc.path.as_str()).collect();
+    assert!(paths.contains(&"tasks/todo.md"), "paths: {paths:?}");
+    assert!(paths.contains(&"docs/handoffs/session.md"));
+    assert!(paths.contains(&"README.md"));
+    assert!(!paths.iter().any(|path| path.contains("memory.md")));
+    assert!(!paths.iter().any(|path| path.contains("_archive")));
+    assert!(!paths.iter().any(|path| path.contains(".memd")));
 }

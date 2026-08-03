@@ -100,10 +100,6 @@ pub(super) fn explicit_action_body<'a>(
         .trim_end()
 }
 
-pub(super) fn inline_code_text(text: &str) -> String {
-    text.replace('`', "'")
-}
-
 pub(super) fn is_concrete_agent_action_text(action: &str) -> bool {
     action.chars().count() >= 24 && contains_action_verb(action)
 }

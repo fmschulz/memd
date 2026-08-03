@@ -1,4 +1,3 @@
-use super::action::*;
 use super::collect::scope_path_drift_warning;
 use super::rank::*;
 use super::state::*;
@@ -6,21 +5,12 @@ use super::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(super) struct AgentUsefulnessMetrics {
-    pub(super) latest_project_state_present: bool,
-    pub(super) scope_present: bool,
-    pub(super) git_state_present: bool,
-    pub(super) git_state_present_or_not_git_repo: bool,
-    pub(super) latest_work_present: bool,
-    pub(super) next_action_present: bool,
-    pub(super) no_open_tasks_detected: bool,
-    pub(super) task_source_state: TaskSourceState,
     pub(super) scope_health_present: bool,
     pub(super) memory_degraded_warning_present: bool,
     pub(super) fragment_count: usize,
     pub(super) duplicate_cluster_count: usize,
     pub(super) boilerplate_action_count: usize,
     pub(super) unrelated_machine_items: usize,
-    pub(super) source_backed_next_actions: bool,
     pub(super) answerability_passed: bool,
 }
 
@@ -29,8 +19,6 @@ pub(super) struct MemoryMdQualityReport {
     pub(super) displayed_count: usize,
     pub(super) useful_count: usize,
     pub(super) generated_wrapper_count: usize,
-    pub(super) missing_reason_count: usize,
-    pub(super) missing_action_count: usize,
     pub(super) useful_ratio: f64,
 }
 
@@ -86,18 +74,6 @@ pub(in crate::cli) async fn run_memory_md_eval<S: Store>(
             report.generated_wrapper_count, options.max_generated_wrappers
         ));
     }
-    if report.missing_reason_count > 0 {
-        failures.push(format!(
-            "{} displayed items are missing reason metadata",
-            report.missing_reason_count
-        ));
-    }
-    if report.missing_action_count > 0 {
-        failures.push(format!(
-            "{} displayed items are missing concrete agent action guidance",
-            report.missing_action_count
-        ));
-    }
     let agent_usefulness = if options.agent_usefulness {
         let metrics: AgentUsefulnessMetrics = serde_json::from_value(
             refresh
@@ -123,8 +99,6 @@ pub(in crate::cli) async fn run_memory_md_eval<S: Store>(
         "useful_count": report.useful_count,
         "useful_ratio": report.useful_ratio,
         "generated_wrapper_count": report.generated_wrapper_count,
-        "missing_reason_count": report.missing_reason_count,
-        "missing_action_count": report.missing_action_count,
         "thresholds": {
             "min_useful_ratio": min_useful_ratio,
             "max_generated_wrappers": options.max_generated_wrappers,
@@ -154,7 +128,6 @@ pub(super) struct MemoryMdGoldProject {
     pub(super) project_dir: PathBuf,
     pub(super) must_contain: Option<Vec<String>>,
     pub(super) must_not_contain: Option<Vec<String>>,
-    pub(super) expected_git: Option<bool>,
     pub(super) max_fragments: Option<usize>,
     pub(super) max_unrelated_machine_items: Option<usize>,
 }
@@ -207,11 +180,6 @@ pub(super) async fn run_memory_md_gold_eval<S: Store>(
             MemdError::ValidationError(format!("invalid agent_usefulness metrics: {error}"))
         })?;
         let mut project_failures = agent_usefulness_failures(&metrics);
-        if let Some(expected_git) = project.expected_git {
-            if let Some(failure) = expected_git_failure(&metrics, expected_git) {
-                project_failures.push(failure);
-            }
-        }
         if let Some(max_fragments) = project.max_fragments {
             if metrics.fragment_count > max_fragments {
                 project_failures.push(format!(
@@ -267,33 +235,6 @@ pub(super) async fn run_memory_md_gold_eval<S: Store>(
 
 pub(super) fn agent_usefulness_failures(metrics: &AgentUsefulnessMetrics) -> Vec<String> {
     let mut failures = Vec::new();
-    if !metrics.latest_project_state_present {
-        failures.push("latest project state is missing".to_string());
-    }
-    if !metrics.scope_present {
-        failures.push("scope is missing".to_string());
-    }
-    if !metrics.git_state_present_or_not_git_repo {
-        failures.push("git state is missing for a git project".to_string());
-    }
-    if !metrics.latest_work_present {
-        failures.push("latest work signal is missing".to_string());
-    }
-    match metrics.task_source_state {
-        TaskSourceState::Missing => {
-            failures.push("task source `tasks/todo.md` is missing".to_string());
-        }
-        TaskSourceState::ParseFailed => {
-            failures.push("task source `tasks/todo.md` could not be parsed".to_string());
-        }
-        TaskSourceState::ParsedOpenTasks if !metrics.next_action_present => {
-            failures.push("next actions are missing while open tasks exist".to_string());
-        }
-        TaskSourceState::ParsedNoOpenTasks if !metrics.no_open_tasks_detected => {
-            failures.push("task source has no open tasks but state was not recorded".to_string());
-        }
-        TaskSourceState::ParsedNoOpenTasks | TaskSourceState::ParsedOpenTasks => {}
-    }
     if !metrics.scope_health_present {
         failures.push("scope health is missing".to_string());
     }
@@ -315,24 +256,10 @@ pub(super) fn agent_usefulness_failures(metrics: &AgentUsefulnessMetrics) -> Vec
             metrics.unrelated_machine_items
         ));
     }
-    if !metrics.source_backed_next_actions {
-        failures.push("one or more next actions lack source path or line".to_string());
-    }
     if !metrics.answerability_passed {
         failures.push("answerability_passed=false".to_string());
     }
     failures
-}
-
-pub(super) fn expected_git_failure(
-    metrics: &AgentUsefulnessMetrics,
-    expected_git: bool,
-) -> Option<String> {
-    match (expected_git, metrics.git_state_present) {
-        (true, false) => Some("expected git state but git_state_present=false".to_string()),
-        (false, true) => Some("expected no git state but git_state_present=true".to_string()),
-        _ => None,
-    }
 }
 
 pub(super) fn evaluate_agent_usefulness(
@@ -343,14 +270,6 @@ pub(super) fn evaluate_agent_usefulness(
     // These metrics are computed from the same structured state and filtered
     // startup items used by the renderer. They are a deterministic regression
     // gate for startup answerability, not an independent semantic judge.
-    let latest_project_state_present = true;
-    let scope_present = !state.tenant_id.is_empty() && !state.resolved_project_dir.is_empty();
-    let git_state_present = state.git.available;
-    let git_state_present_or_not_git_repo = state.git.available || state.git.not_git_repo;
-    let latest_work_present =
-        state.latest_task.is_some() || state.latest_handoff.is_some() || state.latest_vcs.is_some();
-    let next_action_present = !state.next_actions.is_empty();
-    let no_open_tasks_detected = state.task_source_state == TaskSourceState::ParsedNoOpenTasks;
     let scope_health_present = scope_health_checked(state);
     let memory_degraded_warning_present = state
         .memory
@@ -373,39 +292,15 @@ pub(super) fn evaluate_agent_usefulness(
         .iter()
         .filter(|takeaway| !is_machine_wide_startup_relevant(takeaway))
         .count();
-    let source_backed_next_actions = state
-        .next_actions
-        .iter()
-        .all(|action| !action.source_path.is_empty() && action.line > 0);
-    let task_source_answerable = matches!(
-        state.task_source_state,
-        TaskSourceState::ParsedNoOpenTasks | TaskSourceState::ParsedOpenTasks
-    );
-    let answerability_passed = latest_project_state_present
-        && scope_present
-        && git_state_present_or_not_git_repo
-        && latest_work_present
-        && task_source_answerable
-        && (next_action_present || no_open_tasks_detected)
-        && fragment_count == 0
-        && boilerplate_action_count == 0;
+    let answerability_passed = fragment_count == 0 && boilerplate_action_count == 0;
 
     AgentUsefulnessMetrics {
-        latest_project_state_present,
-        scope_present,
-        git_state_present,
-        git_state_present_or_not_git_repo,
-        latest_work_present,
-        next_action_present,
-        no_open_tasks_detected,
-        task_source_state: state.task_source_state,
         scope_health_present,
         memory_degraded_warning_present,
         fragment_count,
         duplicate_cluster_count,
         boilerplate_action_count,
         unrelated_machine_items,
-        source_backed_next_actions,
         answerability_passed,
     }
 }
@@ -450,14 +345,6 @@ pub(super) fn evaluate_memory_md_quality(content: &str, top_n: usize) -> MemoryM
         .iter()
         .filter(|item| is_generated_wrapper_display_item(item))
         .count();
-    let missing_reason_count = items
-        .iter()
-        .filter(|item| !item.details.iter().any(|line| line.contains("reason: `")))
-        .count();
-    let missing_action_count = items
-        .iter()
-        .filter(|item| !has_concrete_agent_action(item))
-        .count();
     let useful_ratio = if displayed_count == 0 {
         0.0
     } else {
@@ -468,8 +355,6 @@ pub(super) fn evaluate_memory_md_quality(content: &str, top_n: usize) -> MemoryM
         displayed_count,
         useful_count,
         generated_wrapper_count,
-        missing_reason_count,
-        missing_action_count,
         useful_ratio,
     }
 }
@@ -544,45 +429,7 @@ pub(super) fn ordered_item_text(line: &str) -> Option<&str> {
 }
 
 pub(super) fn is_useful_display_item(item: &DisplayedMemoryMdItem) -> bool {
-    if is_generated_wrapper_display_item(item) {
-        return false;
-    }
-    if !has_concrete_agent_action(item) {
-        return false;
-    }
-
-    matches!(
-        item.category.as_str(),
-        "Decisions"
-            | "Validated Fixes"
-            | "Known Failures"
-            | "Commands/Paths"
-            | "Open Follow-ups"
-            | "Evidence"
-    ) || {
-        let lowered = item.text.to_ascii_lowercase();
-        lowered.contains("decision:")
-            || lowered.contains("rationale:")
-            || lowered.contains("validation:")
-            || lowered.contains("validated")
-            || lowered.contains("root cause")
-            || lowered.contains("command:")
-            || lowered.contains("path:")
-            || lowered.contains("follow-up:")
-            || lowered.contains("next step:")
-    }
-}
-
-pub(super) fn has_concrete_agent_action(item: &DisplayedMemoryMdItem) -> bool {
-    item.details.iter().any(|line| {
-        let lowered = line.to_ascii_lowercase();
-        let Some(action) = lowered.strip_prefix("- agent action: `") else {
-            return false;
-        };
-        let action = action.trim_end_matches('`').trim();
-        is_concrete_agent_action_text(action)
-            && !action.contains("translate this takeaway into a task-specific rule")
-    })
+    item.category != "Other Takeaways"
 }
 
 pub(super) fn is_generated_wrapper_display_item(item: &DisplayedMemoryMdItem) -> bool {

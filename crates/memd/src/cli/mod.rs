@@ -26,6 +26,7 @@ mod eval_write_quality;
 mod maintenance;
 mod memory_md;
 mod ops_bridge;
+mod outcome_scan;
 mod paths;
 mod purge;
 mod read_commands;
@@ -56,6 +57,7 @@ use memory_md::{
     refresh_memory_md_with_health, run_memory_md_eval, MemoryMdEvalOptions, MemoryMdOptions,
 };
 use ops_bridge::cli_call_tool;
+use outcome_scan::{run_outcome_scan, OutcomeScanOptions};
 use paths::{
     absolutize_project_dir, normalize_absolute, path_is_inside, read_omf_input,
     read_stdin_to_string, reject_if_any_symlink_inside_outdir, resolve_data_dir,
@@ -123,6 +125,7 @@ pub async fn run_cli<S: Store>(
         CliCommand::Search {
             tenant_id,
             query,
+            query_positional,
             k,
             project_id,
             compact,
@@ -144,6 +147,15 @@ pub async fn run_cli<S: Store>(
         } => {
             let tenant_id = scope::require_tenant(tenant_id)?;
             let episode_tenant_id = tenant_id.clone();
+            // `main` folds the positional form into `query` via
+            // `normalize_positional_aliases`, and clap requires one of the two.
+            // A direct library caller can still skip that, so fail loudly here
+            // rather than silently searching for the empty string.
+            let query = query.or(query_positional).ok_or_else(|| {
+                MemdError::ValidationError(
+                    "search requires --query or a positional query".to_string(),
+                )
+            })?;
             let mut payload = cli_search_payload(
                 store,
                 tenant_id,
@@ -396,6 +408,25 @@ pub async fn run_cli<S: Store>(
             println!("{}", serde_json::to_string_pretty(&payload)?);
         }
 
+        CliCommand::OutcomeScan {
+            project_dir,
+            sessions_dir,
+            since_days,
+            dry_run,
+        } => {
+            let result = run_outcome_scan(
+                store,
+                OutcomeScanOptions {
+                    project_dir,
+                    sessions_dir,
+                    since_days,
+                    dry_run,
+                },
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+
         CliCommand::EvalCounterfactual {
             tenant_id,
             project_id,
@@ -562,9 +593,15 @@ pub async fn run_cli<S: Store>(
         CliCommand::Get {
             tenant_id,
             chunk_id,
+            chunk_id_positional,
         } => {
             let tenant_id = scope::require_tenant(tenant_id)?;
             let tenant = TenantId::new(&tenant_id)?;
+            let chunk_id = chunk_id.or(chunk_id_positional).ok_or_else(|| {
+                MemdError::ValidationError(
+                    "get requires --chunk-id or a positional chunk id".to_string(),
+                )
+            })?;
             let cid = ChunkId::parse(&chunk_id)?;
             let chunk = store.get(&tenant, &cid).await?;
 

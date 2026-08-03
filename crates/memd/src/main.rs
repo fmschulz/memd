@@ -169,6 +169,7 @@ async fn main() {
         eprintln!("error: memd requires a CLI subcommand. Use --help for usage.");
         std::process::exit(1);
     };
+    cmd.normalize_positional_aliases();
 
     // Initialize logging
     let is_warm_worker = matches!(&cmd, CliCommand::WarmWorker { .. });
