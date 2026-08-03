@@ -69,6 +69,12 @@ markdown_extensions:
 plugins:
   - search
 
+# Session handoffs are local working notes. mkdocs builds every .md under
+# docs/, nav or not, so without this they deploy to the public site and are
+# reachable by URL.
+exclude_docs: |
+  handoffs/
+
 nav:
   - Home: index.md
   - Quick start: quickstart.md

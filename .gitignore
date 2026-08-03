@@ -108,3 +108,6 @@ test-install.sh
 /benchmark-data/
 /run-output/
 /fable-work/
+
+# Session handoffs: local working notes, never published (public repo + public docs site)
+docs/handoffs/
