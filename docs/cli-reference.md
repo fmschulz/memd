@@ -21,7 +21,7 @@ For write-quality expectations and cleanup safety, see the
 | `memd export`, `memd export-markdown`, `memd export-omf`, `memd import-omf` | Portable local memory operations. |
 | `memd init` | Write `.memd/` scope files and CLI guardrail blocks. |
 | `memd doctor` | Diagnose binary discovery (incl. PATH-binary version skew), the resolved `--data-dir`, warm-worker reachability and worker-vs-CLI version skew, global agent rules, Claude Code SessionStart hook, and current project scope; `--strict` exits 2 when any check fails. |
-| `memd memory-md` | Refresh project-root `memory.md` with `Latest Project State` plus ranked fact libraries for session-start use. |
+| `memd memory-md` | Refresh project-root `memory.md` with ranked fact libraries for session-start use. |
 | `memd eval-memory-md` | Gate startup-memory quality with `--min-useful-ratio`, `--max-generated-wrappers`, and optional `--agent-usefulness`. |
 | `memd eval-retrieval` | Gate retrieval quality with precision, hit-rate, recall, and MRR thresholds. |
 | `memd eval-write-quality` | Gate write admission, duplicate reuse, storage growth, and retention compaction. |
@@ -43,9 +43,9 @@ list of every physical chunk created by document splitting.
 - `memory-md --explain-output <path>` writes a JSON candidate audit with query
   source, score components, tags, display/filter decisions, structured project
   state, and agent-usefulness metrics.
-- `memory-md` renders `Latest Project State` before fact libraries. That
-  section includes scope, freshness, git status, latest task/handoff signals,
-  source-backed next actions, the parsed state of `tasks/todo.md`, and warnings
+- `memory-md` renders a scope line and `Memory health` before the fact
+  libraries. It omits task, handoff, and git state by design: those have repo
+  homes. Takeaways already covered by a repo file are suppressed, and warnings
   for scope drift or unreadable memory payloads. Missing or unreadable task
   files are reported as unknown; they are not treated as proof that no work is
   open.
