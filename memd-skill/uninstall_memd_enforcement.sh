@@ -22,7 +22,11 @@ remove_block() {
     return
   fi
 
-  tmp="$(mktemp)"
+  # Stage beside the referent so the rename is atomic and does not replace a
+  # symlink with a regular file (see the matching note in the installer).
+  local real
+  real="$(readlink -f "$target")"
+  tmp="$(mktemp "$(dirname "$real")/.memd-enforcement.XXXXXX")"
   if "$PYTHON_BIN" - "$target" "$START_MARKER" "$END_MARKER" >"$tmp" <<'PY'
 from pathlib import Path
 import sys
@@ -46,7 +50,8 @@ else:
     sys.stdout.write("")
 PY
   then
-    mv "$tmp" "$target"
+    chmod --reference="$real" "$tmp" 2>/dev/null || true
+    mv "$tmp" "$real"
     echo "removed memd enforcement block from $target"
     REMOVED+=("$target enforcement block")
   else
