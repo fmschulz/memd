@@ -1,6 +1,7 @@
 use super::action::*;
 use super::collect::{canonical_or_lexical_path, read_text_capped};
 use super::*;
+use crate::ops::configured_project_aliases;
 use crate::store::OutcomePrior;
 use crate::types::ChunkStatus;
 use std::collections::HashSet;
@@ -70,6 +71,9 @@ pub(super) struct TakeawayCategory {
 /// One tenant-wide metadata scan replacing the former canned-query
 /// fan-out: every stored chunk is a candidate, partitioned into
 /// (project, machine-wide) by `chunk.project_id == active_project`.
+/// Configured project aliases count as the active project so
+/// historically mis-scoped chunks stay readable, matching the scope
+/// expansion the search path applies.
 pub(super) async fn scan_takeaway_candidates<S: Store>(
     store: &S,
     tenant: &TenantId,
@@ -79,6 +83,9 @@ pub(super) async fn scan_takeaway_candidates<S: Store>(
     Vec<Takeaway>,
     Vec<MemoryMdCandidateExplanation>,
 )> {
+    let alias_scopes = active_project
+        .map(|project| configured_project_aliases(tenant, project))
+        .unwrap_or_default();
     let mut project_takeaways = Vec::new();
     let mut global_takeaways = Vec::new();
     let mut explanations = Vec::new();
@@ -93,7 +100,11 @@ pub(super) async fn scan_takeaway_candidates<S: Store>(
         let fetched = chunks.len();
         for chunk in chunks {
             raw_rank += 1;
-            let is_project = chunk.project_id.as_option() == active_project;
+            let is_project = chunk.project_id.as_option() == active_project
+                || alias_scopes.iter().any(|alias| {
+                    alias.origin_tenant_id == chunk.tenant_id.as_str()
+                        && alias.origin_project_id.as_deref() == chunk.project_id.as_option()
+                });
             let section = if is_project {
                 "project"
             } else {
@@ -193,6 +204,13 @@ pub(super) fn scan_candidate_filter_reason(
     // with the raw chunks it replaced.
     if tags.iter().any(|tag| tag.starts_with("kind:superseded")) {
         return Some("superseded_tag");
+    }
+    // Ephemeral-admitted writes (write admission stamps
+    // `admission:ephemeral` alongside the History lifecycle tier) are
+    // short-lived hidden context; search hides them via the default
+    // visibility policy, so the scan must too.
+    if tags.iter().any(|tag| tag == "admission:ephemeral") {
+        return Some("ephemeral_admission");
     }
     None
 }

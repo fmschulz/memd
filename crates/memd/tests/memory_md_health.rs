@@ -197,14 +197,9 @@ fn health_header_reflects_ledger_and_chunks() {
     let content = std::fs::read_to_string(project_dir.join("memory.md")).unwrap();
 
     assert_eq!(content.matches("## Memory health").count(), 1);
-    assert_eq!(content.matches("## Latest Project State").count(), 1);
-    let latest_pos = content
-        .find("## Latest Project State")
-        .expect("latest project state header");
-    let health_pos = content.find("## Memory health").expect("health header");
     assert!(
-        latest_pos < health_pos,
-        "latest project state must appear before memory health:\n{content}"
+        !content.contains("## Latest Project State"),
+        "memory.md must not restate repo-readable project state:\n{content}"
     );
     assert!(content.contains(&format!(
         "- chunks: {active} active (+{admitted} added, {rejected} rejected, 7d)"
@@ -231,7 +226,10 @@ fn fresh_store_renders_zero_state_header() {
     let content = std::fs::read_to_string(project_dir.join("memory.md")).unwrap();
 
     assert_eq!(content.matches("## Memory health").count(), 1);
-    assert_eq!(content.matches("## Latest Project State").count(), 1);
+    assert!(
+        !content.contains("## Latest Project State"),
+        "memory.md must not restate repo-readable project state:\n{content}"
+    );
     assert!(content.contains("- chunks: 0 active (+0 added, 0 rejected, 7d)"));
     assert!(content.contains("- retrieval: 0 searches (7d)"));
     assert!(content.contains("- learned: 0 high-priority + 0 consolidated lessons (7d)"));
