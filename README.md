@@ -1,6 +1,6 @@
 # memd
 
-[![Version](https://img.shields.io/badge/version-1.6.1-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.7.0-blue)](CHANGELOG.md)
 [![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust&logoColor=white)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-fmschulz.github.io%2Fmemd-blue)](https://fmschulz.github.io/memd/)

@@ -1,6 +1,6 @@
 # memd
 
-[![Version](https://img.shields.io/badge/version-1.6.1-blue)](https://github.com/fmschulz/memd/blob/main/CHANGELOG.md){ .md-button }
+[![Version](https://img.shields.io/badge/version-1.7.0-blue)](https://github.com/fmschulz/memd/blob/main/CHANGELOG.md){ .md-button }
 [![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust&logoColor=white)](https://github.com/fmschulz/memd/blob/main/Cargo.toml){ .md-button }
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/fmschulz/memd/blob/main/LICENSE){ .md-button }
 
@@ -32,19 +32,26 @@ private CLI-managed warm worker driven by ordinary CLI commands.
 
 ---
 
-## Headline number
+## What hybrid retrieval buys
 
-Cross-system LoCoMo retrieval (10 conversations, 5,882 turns, 1,536 queries):
+LoCoMo retrieval over 1,531 questions, one build, one corpus, one machine. Only
+the retrieval path varies, so the comparison isolates fusion from everything
+else:
 
-| System | MRR@10 | Hit@10 | Avg search |
-| --- | ---: | ---: | ---: |
-| **`memd` (hybrid)** | **0.412** | **0.613** | **23.2 ms** |
-| `superlocalmemory` v3.4.46 (lexical) | 0.369 | 0.599 | 804.5 ms |
-| `mem0` v2.0.2 (LLM-extracted) | 0.354 | 0.591 | 40.9 ms |
+| Retrieval | MRR@10 | p50 latency |
+| --- | ---: | ---: |
+| **hybrid (dense + BM25, RRF)** | **0.4766** | 27.0 ms |
+| dense only | 0.3230 | 21.3 ms |
+| BM25 only | 0.3376 | 8.3 ms |
 
-`memd` leads on MRR@10 (+12% vs SuperLocalMemory, +16% vs Mem0), Hit@10, and
-search latency. Caveats: mem0 used a self-hosted gemma4-31b, and
-superlocalmemory ran lexical-only — full protocol in [Benchmarking](benchmarking.md).
+Fusion adds 0.139 MRR@10 over the better single channel at roughly 3x the
+sparse-only latency.
+
+Cross-system accuracy numbers are not published here. Comparing memory systems
+requires every system to share a pinned dataset, answer model, judge, retrieval
+depth, and token budget, with per-item rows bound to an immutable manifest; that
+evidence lives in the benchmark repository. See [Benchmarking](benchmarking.md)
+for the contract.
 
 ---
 

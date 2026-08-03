@@ -6,6 +6,37 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-08-03
+
+### Changed
+
+- `memory.md` carries only facts no repo file holds. The `Latest Project State`
+  and `Next Actions` sections are removed: they restated `tasks/todo.md`,
+  `docs/handoffs/`, and git, which agents read directly. Output is now a scope
+  line, `Memory health`, and the fact libraries.
+- Takeaway selection scans the store instead of running four fixed queries.
+  Candidates previously had to resemble one of those queries to be scored at
+  all, so high-priority chunks could go unranked indefinitely. `search_score`
+  and `multi_query` are removed from the priority breakdown.
+- Verified retrieval outcomes now feed ranking. `utility` was hardcoded to
+  `0.0`; it is derived from `outcome_priors` and capped at decision tier.
+
+### Added
+
+- Repo-novelty gate: takeaways whose distinctive tokens are already contained
+  in `tasks/**`, `docs/handoffs/`, `README.md`, `CLAUDE.md`, or `AGENTS.md` are
+  suppressed with reason `covered_by_repo:<path>`.
+- `memd outcome-scan`: derives verified retrieval outcomes from agent session
+  transcripts by matching distinctive literals from served chunks against
+  commands run afterwards. Reads tool-call inputs only, so being shown a chunk
+  again is never counted as using it. Supports `--dry-run`.
+- `memd search` accepts a positional query, `--limit` as an alias for `--k`,
+  and `memd get` accepts a positional chunk id. The previous forms still work
+  and supplying both errors.
+- `[[server.project_aliases]]` entries make chunks stored under a historical
+  tenant readable from the canonical one without moving data, preserving
+  `chunk_id` and `timestamp_created`.
+
 ## [1.6.1] - 2026-07-25
 
 ### Fixed
