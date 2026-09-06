@@ -11,6 +11,72 @@ use crate::store::{
 use crate::types::{ChunkId, ChunkStatus, ChunkType, MemoryChunk, ProjectId};
 
 #[test]
+fn atomic_replace_overwrites_complete_file_and_cleans_temps() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("memory.md");
+    fs::write(&output, "old complete file\n").unwrap();
+
+    atomic_replace(&output, b"new complete file\n").unwrap();
+
+    assert_eq!(fs::read_to_string(&output).unwrap(), "new complete file\n");
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+
+    let blocked = dir.path().join("blocked.md");
+    fs::create_dir(&blocked).unwrap();
+    assert!(atomic_replace(&blocked, b"must not publish").is_err());
+    assert!(blocked.is_dir());
+    assert!(fs::read_dir(dir.path()).unwrap().all(|entry| !entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .ends_with(".tmp")));
+}
+
+#[cfg(unix)]
+#[test]
+fn atomic_replace_preserves_existing_output_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("generated-memory.md");
+    let output = dir.path().join("memory.md");
+    fs::write(&target, "old complete file\n").unwrap();
+    symlink("generated-memory.md", &output).unwrap();
+
+    atomic_replace(&output, b"new complete file\n").unwrap();
+
+    assert!(fs::symlink_metadata(&output)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(fs::read_to_string(&target).unwrap(), "new complete file\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn atomic_replace_preserves_permissions_and_creates_private_files() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let existing = dir.path().join("existing.md");
+    fs::write(&existing, "old\n").unwrap();
+    fs::set_permissions(&existing, fs::Permissions::from_mode(0o640)).unwrap();
+
+    atomic_replace(&existing, b"replacement\n").unwrap();
+    assert_eq!(
+        fs::metadata(&existing).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+
+    let new_output = dir.path().join("new.md");
+    atomic_replace(&new_output, b"new\n").unwrap();
+    assert_eq!(
+        fs::metadata(new_output).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[test]
 fn explicit_priority_scales_small_values_and_caps_large_values() {
     assert_eq!(explicit_priority(&["priority:7".to_string()]), Some(70.0));
     assert_eq!(

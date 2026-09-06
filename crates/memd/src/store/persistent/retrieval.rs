@@ -17,9 +17,13 @@ impl PersistentStore {
         k: usize,
         ranking_time_ms: Option<i64>,
     ) -> Result<Vec<(MemoryChunk, f32)>> {
+        let query_preview_end = query
+            .char_indices()
+            .nth(50)
+            .map_or(query.len(), |(index, _)| index);
         debug!(
             tenant_id = %tenant_id,
-            query = &query[..query.len().min(50)],
+            query = &query[..query_preview_end],
             k = k,
             hybrid = self.hybrid_searcher.is_some(),
             dense = self.dense_searcher.is_some(),

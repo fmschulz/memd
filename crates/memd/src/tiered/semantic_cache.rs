@@ -283,7 +283,14 @@ impl SemanticCache {
         };
 
         let mut query_index = self.query_index.write();
-        query_index.push(index_entry);
+        if let Some(existing) = query_index
+            .iter_mut()
+            .find(|existing| existing.cache_key == index_entry.cache_key)
+        {
+            *existing = index_entry;
+        } else {
+            query_index.push(index_entry);
+        }
     }
 
     /// Invalidate all cache entries for a tenant
@@ -434,10 +441,17 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 fn embedding_hash(embedding: &[f32], tenant_id: &TenantId, project_id: Option<&str>) -> String {
     let mut hasher = Sha256::new();
 
-    // Include tenant and project in hash
-    hasher.update(tenant_id.as_str().as_bytes());
-    if let Some(proj) = project_id {
-        hasher.update(proj.as_bytes());
+    let tenant = tenant_id.as_str().as_bytes();
+    hasher.update((tenant.len() as u64).to_le_bytes());
+    hasher.update(tenant);
+
+    match project_id {
+        None => hasher.update([0]),
+        Some(project) => {
+            hasher.update([1]);
+            hasher.update((project.len() as u64).to_le_bytes());
+            hasher.update(project.as_bytes());
+        }
     }
 
     // Include embedding bytes
@@ -505,6 +519,14 @@ mod tests {
 
     fn make_chunk_id() -> ChunkId {
         ChunkId::new()
+    }
+
+    fn make_result(chunk_id: &ChunkId) -> Vec<CachedResult> {
+        vec![CachedResult {
+            chunk_id: chunk_id.clone(),
+            score: 1.0,
+            text_preview: String::new(),
+        }]
     }
 
     #[test]
@@ -736,6 +758,63 @@ mod tests {
             miss_no_project.is_none(),
             "No project should not see Project A's cache"
         );
+    }
+
+    #[test]
+    fn test_cache_keys_isolate_ambiguous_scopes() {
+        let cache = SemanticCache::new(SemanticCacheConfig::default());
+        let embedding = make_embedding(42);
+        let scopes = [
+            (make_tenant("ab"), Some("c".to_string()), make_chunk_id()),
+            (make_tenant("a"), Some("bc".to_string()), make_chunk_id()),
+            (make_tenant("scope"), None, make_chunk_id()),
+            (make_tenant("scope"), Some(String::new()), make_chunk_id()),
+        ];
+
+        for (tenant, project, chunk_id) in &scopes {
+            cache.insert(
+                embedding.clone(),
+                tenant.clone(),
+                project.clone(),
+                make_result(chunk_id),
+                1,
+            );
+        }
+        assert_eq!(cache.get_stats().entry_count, 4);
+        for (tenant, project, chunk_id) in &scopes {
+            let hit = cache
+                .lookup(&embedding, tenant, project.as_deref(), 1)
+                .unwrap();
+            assert_eq!(&hit.results[0].chunk_id, chunk_id);
+        }
+    }
+
+    #[test]
+    fn test_cache_replacement_keeps_index_bounded() {
+        let cache = SemanticCache::new(SemanticCacheConfig::default());
+        let embedding = make_embedding(42);
+        let tenant = make_tenant("test_tenant");
+        let first = make_chunk_id();
+        let replacement = make_chunk_id();
+
+        cache.insert(
+            embedding.clone(),
+            tenant.clone(),
+            None,
+            make_result(&first),
+            1,
+        );
+        cache.insert(
+            embedding.clone(),
+            tenant.clone(),
+            None,
+            make_result(&replacement),
+            1,
+        );
+
+        assert_eq!(cache.get_stats().entry_count, 1);
+        let hit = cache.lookup(&embedding, &tenant, None, 1).unwrap();
+        assert_eq!(hit.results[0].chunk_id, replacement);
     }
 
     #[test]

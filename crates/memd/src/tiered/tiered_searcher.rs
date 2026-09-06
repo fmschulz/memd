@@ -258,10 +258,12 @@ impl<W: WarmTierSearch> TieredSearcher<W> {
         // Increment query counter
         self.query_counter.fetch_add(1, Ordering::Relaxed);
 
+        // Keep the cache generation tied to the snapshot this search starts from.
+        let version = self.warm_tier.get_version();
+
         // Step 1: Cache lookup (if enabled)
         let cache_start = Instant::now();
         let cache_result = if self.config.enable_cache {
-            let version = self.warm_tier.get_version();
             self.cache
                 .lookup(query_embedding, tenant_id, project_id, version)
         } else {
@@ -270,10 +272,11 @@ impl<W: WarmTierSearch> TieredSearcher<W> {
         timing.cache_lookup_ms = cache_start.elapsed().as_millis() as u64;
 
         // If cache hit, return immediately
-        if let Some(hit) = cache_result {
+        if let Some(hit) = cache_result.filter(|hit| hit.results.len() >= k) {
             let results: Vec<ScoredChunk> = hit
                 .results
                 .into_iter()
+                .take(k)
                 .map(|r| ScoredChunk {
                     chunk_id: r.chunk_id,
                     score: r.score,
@@ -337,7 +340,6 @@ impl<W: WarmTierSearch> TieredSearcher<W> {
                 })
                 .collect();
 
-            let version = self.warm_tier.get_version();
             self.cache.insert(
                 query_embedding.to_vec(),
                 tenant_id.clone(),
@@ -721,6 +723,7 @@ mod tests {
         results: RwLock<Vec<SearchResult>>,
         embeddings: RwLock<std::collections::HashMap<ChunkId, Vec<f32>>>,
         version: AtomicU64,
+        replacement_on_search: RwLock<Option<Vec<SearchResult>>>,
     }
 
     impl MockWarmTier {
@@ -729,6 +732,7 @@ mod tests {
                 results: RwLock::new(Vec::new()),
                 embeddings: RwLock::new(std::collections::HashMap::new()),
                 version: AtomicU64::new(1),
+                replacement_on_search: RwLock::new(None),
             }
         }
 
@@ -743,8 +747,15 @@ mod tests {
 
     impl WarmTierSearch for MockWarmTier {
         fn search(&self, _query_embedding: &[f32], k: usize) -> Result<Vec<SearchResult>> {
-            let results = self.results.read();
-            Ok(results.iter().take(k).cloned().collect())
+            let results = {
+                let results = self.results.read();
+                results.iter().take(k).cloned().collect()
+            };
+            if let Some(replacement) = self.replacement_on_search.write().take() {
+                *self.results.write() = replacement;
+                self.version.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(results)
         }
 
         fn get_embedding(&self, chunk_id: &ChunkId) -> Option<Vec<f32>> {
@@ -935,13 +946,62 @@ mod tests {
         let tenant = make_tenant();
 
         // First search populates cache
-        let result1 = searcher.search(&embedding, &tenant, None, 10).unwrap();
+        let result1 = searcher.search(&embedding, &tenant, None, 1).unwrap();
         assert!(!result1.cache_hit);
 
         // Second search should hit cache
-        let result2 = searcher.search(&embedding, &tenant, None, 10).unwrap();
+        let result2 = searcher.search(&embedding, &tenant, None, 1).unwrap();
         assert!(result2.cache_hit);
         assert_eq!(result2.source_tier, SourceTier::Cache);
+    }
+
+    #[test]
+    fn test_cache_respects_increasing_and_decreasing_k() {
+        let warm = Arc::new(MockWarmTier::new());
+        let embedding = vec![1.0, 0.0, 0.0, 0.0];
+        for score in [0.9, 0.8, 0.7] {
+            warm.add_chunk(ChunkId::new(), embedding.clone(), score);
+        }
+
+        let (searcher, _, _, _) = make_searcher_with_warm(warm);
+        let tenant = make_tenant();
+
+        let small = searcher.search(&embedding, &tenant, None, 1).unwrap();
+        assert!(!small.cache_hit);
+        assert_eq!(small.results.len(), 1);
+
+        let large = searcher.search(&embedding, &tenant, None, 3).unwrap();
+        assert!(!large.cache_hit);
+        assert_eq!(large.results.len(), 3);
+
+        let medium = searcher.search(&embedding, &tenant, None, 2).unwrap();
+        assert!(medium.cache_hit);
+        assert_eq!(medium.results.len(), 2);
+    }
+
+    #[test]
+    fn test_cache_publication_uses_version_captured_before_search() {
+        let warm = Arc::new(MockWarmTier::new());
+        let old_chunk_id = ChunkId::new();
+        let new_chunk_id = ChunkId::new();
+        let embedding = vec![1.0, 0.0, 0.0, 0.0];
+        warm.add_chunk(old_chunk_id.clone(), embedding.clone(), 0.9);
+        *warm.replacement_on_search.write() = Some(vec![SearchResult {
+            chunk_id: new_chunk_id.clone(),
+            score: 1.0,
+        }]);
+
+        let (searcher, _, _, _) = make_searcher_with_warm(warm.clone());
+        let tenant = make_tenant();
+
+        let first = searcher.search(&embedding, &tenant, None, 1).unwrap();
+        assert!(!first.cache_hit);
+        assert_eq!(first.results[0].chunk_id, old_chunk_id);
+        assert_eq!(warm.get_version(), 2);
+
+        let second = searcher.search(&embedding, &tenant, None, 1).unwrap();
+        assert!(!second.cache_hit);
+        assert_eq!(second.results[0].chunk_id, new_chunk_id);
     }
 
     #[test]

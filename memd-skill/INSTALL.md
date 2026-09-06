@@ -104,10 +104,11 @@ The script:
 - writes the same contract as a Cursor user rule at `~/.cursor/rules/memd.mdc`
   (`alwaysApply: true`)
 - wires a Claude Code `SessionStart` hook in `~/.claude/settings.json`
-- makes CLI retrieval mandatory before substantive work
-- makes CLI writes mandatory before final substantive answers
-- adds a pre-refusal rule requiring a relevant CLI memory search before an
-  agent says work is impossible, blocked, or unknowable
+- directs agents to read an existing `memory.md` and search when a specific
+  environment failure, cross-machine question, or conflicting fact calls for it
+- reserves memory writes for operational facts that readable repository files
+  cannot answer; project plans, test results, and handoffs stay in those files
+- makes clear that no memory call is required for routine work
 - tells agents not to store full chat logs, play-by-play transcripts, cookies,
   tokens, API keys, passwords, verification codes, ID numbers, bank cards,
   private contact details, third-party account configuration, or sensitive log
@@ -130,6 +131,8 @@ hook, and the current project's `.memd` scope. Use `--format json` for
 machine-readable output.
 
 ## Basic CLI Workflow
+
+Use the disposable `quickstart` tenant below to check the installation.
 
 Add a memory:
 
@@ -168,7 +171,7 @@ memd agent-context \
   --log-dir .memd/search-logs
 ```
 
-Refresh project-root `memory.md` at session start:
+Refresh project-root `memory.md` when checking startup wiring or stale content:
 
 ```bash
 memd memory-md \
@@ -200,23 +203,20 @@ printf '%s\n' \
   | memd batch --jsonl -
 ```
 
-Record progress:
+Record a verified operational fact that repository files cannot answer:
 
 ```bash
 memd add \
   --tenant-id quickstart \
   --project-id auth \
   --chunk-type summary \
-  --tags kind:progress,task:jwt-auth \
-  --text "Mapped auth middleware touchpoints; next step is RS256 issuance and validation tests."
+  --tags kind:evidence \
+  --text "$OPERATIONAL_FACT"
 ```
 
-Keep writes concise and reusable. `memd` is for durable facts, decisions,
-evidence, commands, parameters, validation, and follow-ups; it is not a place
-to archive full chat logs or sensitive credentials. Routine `kind:progress`
-summaries are short-lived by default; use `kind:evidence`, `kind:decision`,
-`kind:finish`, `priority:N`, or `retention:durable` when a result should
-survive as project knowledge.
+Set `OPERATIONAL_FACT` to the verified observation, affected machine or scope,
+evidence, and an action for the next agent. Keep project progress and validation
+in repository files. Never store chat transcripts or sensitive credentials.
 
 Use `memd audit` or `memd cleanup-plan` when checking older stores. They report
 legacy routine progress summaries without expiry and keep the generated
@@ -232,12 +232,10 @@ When the `SessionStart` hook fires in a repo with no `.memd/project_scope.json`,
 - `tenant_id`: `$MEMD_DEFAULT_TENANT`, then `$USER`, then `"default"`
 - `project_id`: lower-cased basename of the repo
 
-This is what makes the "clone the installer, open any repo in Claude Code /
-Codex / Cursor, and memd just works" UX hold. Auto-scope writes ONLY
-`.memd/project_scope.json` — it never touches `AGENTS.md`, `CLAUDE.md`, or
-writes tenant guardrails on the user's behalf. Opt out by setting
-`MEMD_AUTO_SCOPE=0` in the environment, or dropping an empty `.memd-skip`
-file in the repo root.
+Auto-scope writes only `.memd/project_scope.json`. It does not edit agent rules
+or tenant guardrails. `MEMD_AUTO_SCOPE=0` disables scope creation; an empty
+`.memd-skip` file skips startup even for an initialized repository. Invalid
+existing scopes are preserved and reported for repair.
 
 ### Explicit (full guardrails)
 
@@ -273,7 +271,7 @@ That verifier checks:
 - `memd session-start` creates a project scope in a temp project
 - `memd doctor --strict --format json` passes against a temp project scope
 - `memd add` stores a test memory
-- `memd memory-md` renders `Latest Project State` and `Memory health` headers
+- `memd memory-md` renders `Project Fact Library` and `Memory health` headers
 - `memd search` recovers it
 - `memd agent-context` writes a CLI-only context file and JSONL audit log
 
