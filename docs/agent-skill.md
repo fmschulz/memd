@@ -7,20 +7,23 @@ Linux x86_64/aarch64 as static musl) built by cargo-dist.
 
 ## What it does
 
-The skill is the **default way to make an agent use `memd` correctly**. It
-upserts CLI guardrail blocks into `~/.codex/AGENTS.md` and
+The installer provides the skill, upserts CLI guardrail blocks into
+`~/.codex/AGENTS.md` and
 `~/.claude/CLAUDE.md`, writes the matching Cursor user rule to
 `~/.cursor/rules/memd.mdc`, and wires a Claude Code `SessionStart` hook in
 `~/.claude/settings.json`, so agent sessions are told to:
 
-1. Refresh `memory.md` at session start.
-2. Search `memd` before substantive work.
-3. Record meaningful progress, evidence, and decisions with `memd add`.
-4. Run a `memd` search **before** claiming a task is impossible, blocked,
-   or unknowable.
-5. Keep stored memories concise and reusable; do not store full chat logs,
-   secrets, credentials, private account data, or sensitive values copied from
-   logs.
+1. Read the generated `memory.md` if present.
+2. Search for a specific environment failure, cross-machine fact, or conflict
+   with an earlier observation.
+3. Store only facts that readable repository files cannot answer. Keep project
+   plans, commands, corrections, and handoffs in the repository.
+4. Verify retrieved facts against current evidence and attribute only memories
+   that affected an independently verified task outcome.
+5. Keep secrets and sensitive log values out of memory.
+
+No memory call is required for routine work. A retrieval hit shows that a
+record was found; it does not show that the record saved work.
 
 The installer does not register external client tools or wrap commands.
 The write-quality rules are documented in the
@@ -48,8 +51,9 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/fmschulz/memd/releases/
 The prebuilt installer installs only the binary. For everything without
 compiling, run `make install-prebuilt` from a clone — it tests the prebuilt
 release binary and builds from source only if that fails. `make install`
-always builds from source, `make install-binary` installs only the binary,
-`make menu` opens an interactive TUI to pick components, and
+uses the same path. `make install-source` always builds from source,
+`make install-binary` installs only the binary. `make menu` opens an
+interactive TUI to pick components, and
 `make uninstall` removes what `make install` installed.
 
 Linux releases are static musl, so there is no `GLIBC_... not found` pitfall.
@@ -59,7 +63,7 @@ as manual source-install paths.
 What `make install` does:
 
 1. Stops any running warm worker.
-2. Builds and installs the binary on `PATH`.
+2. Installs a compatible prebuilt binary, or builds from source, on `PATH`.
 3. Installs the agent skill.
 4. Upserts a CLI-first instruction block into:
     - `~/.codex/AGENTS.md`
@@ -71,7 +75,12 @@ What `make install` does:
 When the SessionStart hook fires in a repo without `.memd/project_scope.json`,
 `memd session-start` auto-creates a minimal scope from
 `$MEMD_DEFAULT_TENANT` (then `$USER`, then `"default"`) and the repo basename.
-Set `MEMD_AUTO_SCOPE=0` or add `.memd-skip` in the repo root to opt out.
+Set `MEMD_AUTO_SCOPE=0` to disable scope creation. Add `.memd-skip` in the repo
+root to skip startup even with an existing scope. Invalid existing scopes are
+preserved and reported. Generated `memory.md` and explanation files are replaced
+atomically, so readers see a complete prior or current file. An asynchronous
+host hook can still leave a reader with the prior file; check its generation
+date when freshness matters.
 
 For a repo-local install (writes `.memd/` plus per-repo `AGENTS.md` and
 `CLAUDE.md` guardrail blocks):

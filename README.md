@@ -11,7 +11,13 @@ task history, and canonical collaboration artifacts. A hybrid dense + sparse
 stack indexes it; an explicit trust boundary decides what counts as verified.
 
 Agents retrieve bounded context with `memd agent-context` or `memd search`,
-read the generated context file, and record durable progress with `memd add`.
+read the generated context file, and record operational facts with `memd add`.
+Keep project plans, test results, and handoffs in repository files. Use memory
+for facts those files cannot answer, such as another machine's mounts,
+scheduler constraints, or deployment state. A larger model context still needs
+those facts to be supplied; whether memd saves work should be measured through
+verified task outcomes.
+
 For low-latency local use, `memd` keeps the store and indexes hot through a
 private CLI-managed warm worker driven by ordinary CLI commands.
 
@@ -23,7 +29,7 @@ private CLI-managed warm worker driven by ordinary CLI commands.
 | --- | --- | --- |
 | Raw memory | Store and search chunks: code, docs, notes, traces, decisions | `memd add`, `memd search`, `memd get`, `memd stats` |
 | Agent context | Bounded pre-work context + JSON audit logs | `memd agent-context --output .memd/context.md` |
-| Startup memory | Refresh project `memory.md` with latest project state, ranked fact libraries, and concrete action guidance | `memd memory-md`, `memd eval-memory-md --agent-usefulness` |
+| Startup memory | Refresh project `memory.md` with scope, health warnings, and ranked facts filtered against repository documents | `memd memory-md`, `memd eval-memory-md --agent-usefulness` |
 | Usefulness report | Usage-ledger and store self-diagnosis for growth, learning, retrieval, and warnings | `memd report --strict` |
 | Warm CLI | Keep store/index state hot for repeated local calls | `memd warm start`, `memd warm status` |
 | Batch CLI | Many structured operations in one loaded process | `memd batch --jsonl requests.jsonl` |
@@ -37,8 +43,8 @@ Use `--compact` and `--token-budget` to keep agent context small.
 High-priority durable writes (`priority:8+` or `importance:8+`) must include
 a concrete `Agent action:` line. The gate accepts a sentence of at least 24
 characters containing an imperative verb (verify, run, use, check, avoid,
-prefer, record, treat, ...). Tell the next agent what to verify, run, reuse, or
-avoid.
+prefer, record, treat, ...). A write missing that action is admitted at
+priority 7 with a warning. Tell the next agent what to verify, run, reuse, or avoid.
 
 ## 30-second quickstart
 

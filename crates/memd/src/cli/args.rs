@@ -687,8 +687,9 @@ pub enum CliCommand {
     ///
     /// Refreshes `memory.md` synchronously and, when enough chunks
     /// have accumulated, spawns a detached background consolidation.
-    /// Safe to wire into a SessionStart hook for every repo: a
-    /// missing `.memd` scope is a clean no-op.
+    /// Safe to wire into a SessionStart hook for every repo: a missing
+    /// `.memd` scope is created automatically unless `MEMD_AUTO_SCOPE=0`
+    /// or a `.memd-skip` marker disables startup for the repository.
     SessionStart {
         /// Project directory containing the `.memd` scope/state files.
         #[arg(long, default_value = ".")]

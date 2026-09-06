@@ -53,7 +53,7 @@ pub(super) fn find_project_scope(start: &Path) -> Result<Option<ProjectScopeConf
             .map(Some)
             .map_err(|err| {
                 MemdError::ValidationError(format!(
-                    "malformed {}: {err}; re-create it with: memd session-start --project-dir {} (or pass --tenant-id explicitly)",
+                    "malformed {}: {err}; repair this scope file or run memd init with explicit --tenant-id and --project-id for {}",
                     scope_path.display(),
                     current.display()
                 ))
@@ -344,7 +344,7 @@ mod tests {
             panic!("unexpected error variant");
         };
         assert!(
-            message.contains("malformed") && message.contains("session-start"),
+            message.contains("malformed") && message.contains("memd init"),
             "unexpected message: {message}"
         );
 

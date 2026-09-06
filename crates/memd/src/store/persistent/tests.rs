@@ -12,6 +12,22 @@ use std::fs;
 use std::sync::Arc;
 use tempfile::tempdir;
 
+#[tokio::test(flavor = "current_thread")]
+async fn hybrid_search_debug_preview_handles_multibyte_query() {
+    let (store, _dir) = make_test_store();
+    let tenant = make_tenant();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    store
+        .hybrid_search(&tenant, &"€".repeat(51), 1)
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn sparse_only_store_searches_without_a_dense_index() {
     let dir = tempdir().unwrap();

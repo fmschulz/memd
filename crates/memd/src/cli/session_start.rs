@@ -12,19 +12,19 @@
 //! dropping a `.memd-skip` file in the repo root.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::args::ProjectScopeConfig;
-use super::consolidate::{
-    dirty_region_size, resolve_scope, run_consolidate, ConsolidateOptions, MIN_REGION,
-};
-use super::memory_md::{refresh_memory_md, MemoryMdOptions};
+use super::consolidate::{dirty_region_size, run_consolidate, ConsolidateOptions, MIN_REGION};
+use super::memory_md::{read_project_scope, refresh_memory_md_with_health, MemoryMdOptions};
 use super::paths::absolutize_project_dir;
 use crate::error::Result;
-use crate::store::Store;
-use crate::types::TenantId;
+use crate::store::{Store, TenantManager};
+use crate::types::{ProjectId, TenantId};
 
 /// Maximum length of an auto-derived `tenant_id` or `project_id`. Both
 /// are written into directory names downstream, so we keep them short.
@@ -107,20 +107,37 @@ pub(super) async fn run_session_start_inner<S: Store>(
 ) -> Result<Value> {
     let project_dir = absolutize_project_dir(&options.project_dir)?;
 
-    // No `.memd` scope file (or it's malformed) → either auto-create
-    // or no-op cleanly. Distinguish "fresh create" from "recovered
-    // from a malformed file the user / a crashed tool left behind"
-    // so the JSON output makes the silent overwrite explicit.
+    // The marker disables all startup work, including refresh and recovery,
+    // even when this repository was initialized previously.
+    if project_dir.join(".memd-skip").exists() {
+        return Ok(json!({ "skipped": "memd_skip_present" }));
+    }
+
+    let scope_path = project_dir.join(".memd").join("project_scope.json");
+    let mut resolved_scope = match validated_project_scope(&project_dir) {
+        Ok(scope) => scope.map(|scope| (scope.tenant_id, scope.project_id)),
+        Err(error) => return Ok(invalid_scope_response(&scope_path, &error)),
+    };
+    // Preserve the legacy `.memd/config.json` fallback when there is no
+    // project_scope.json. Auto-scope only applies when neither source resolves.
+    if resolved_scope.is_none() {
+        let legacy_path = project_dir.join(".memd/config.json");
+        match read_legacy_scope(&legacy_path) {
+            Ok(scope) => resolved_scope = scope,
+            Err(error) => return Ok(invalid_scope_response(&legacy_path, &error)),
+        }
+    }
+
+    // Auto-create only a truly absent scope. If another startup creates it
+    // after our read, create_new leaves that file untouched and we validate
+    // the winner before proceeding.
     let mut auto_scoped = false;
-    let mut recovered_from_malformed = false;
-    if resolve_scope(&project_dir, None, None).is_err() {
-        let scope_path = project_dir.join(".memd").join("project_scope.json");
-        let was_malformed = scope_path.exists();
+    if resolved_scope.is_none() {
         match maybe_auto_create_scope(&project_dir, &auto_inputs)? {
             AutoScopeOutcome::Created => {
                 auto_scoped = true;
-                recovered_from_malformed = was_malformed;
             }
+            AutoScopeOutcome::AlreadyExists => {}
             AutoScopeOutcome::SkippedDisabled => {
                 return Ok(json!({ "skipped": "auto_scope_disabled" }));
             }
@@ -128,16 +145,15 @@ pub(super) async fn run_session_start_inner<S: Store>(
                 return Ok(json!({ "skipped": "memd_skip_present" }));
             }
         }
+        resolved_scope = match validated_project_scope(&project_dir) {
+            Ok(scope) => scope.map(|scope| (scope.tenant_id, scope.project_id)),
+            Err(error) => return Ok(invalid_scope_response(&scope_path, &error)),
+        };
     }
 
-    let (tenant_id, project_id) = match resolve_scope(&project_dir, None, None) {
-        Ok(scope) => scope,
-        Err(_) => {
-            // Auto-create succeeded above but resolve still failed —
-            // likely a malformed file written by the user; bail
-            // cleanly so we never crash the session.
-            return Ok(json!({ "skipped": "no_scope" }));
-        }
+    let (tenant_id, project_id) = match resolved_scope {
+        Some(scope) => scope,
+        None => return Ok(json!({ "skipped": "no_scope" })),
     };
 
     // Reconcile staged candidates before generating agent-facing context.
@@ -192,8 +208,15 @@ pub(super) async fn run_session_start_inner<S: Store>(
     };
 
     // 1. Refresh memory.md synchronously.
-    let memory_md = refresh_memory_md(
+    // The persistent store already carries the resolved data directory. Build
+    // the lightweight manager from that exact path so session-start sees the
+    // same central health and exposure ledgers as `memd memory-md`.
+    let tenant_manager = store
+        .as_persistent()
+        .map(|persistent| TenantManager::new(persistent.data_dir().to_path_buf()));
+    let memory_md = refresh_memory_md_with_health(
         store,
+        tenant_manager.as_ref(),
         MemoryMdOptions {
             tenant_id: Some(tenant_id.clone()),
             project_id: project_id.clone(),
@@ -277,15 +300,85 @@ pub(super) async fn run_session_start_inner<S: Store>(
         "consolidation_spawned": consolidation_spawned,
         "consolidation_skipped": skip_reason,
         "auto_scoped": auto_scoped,
-        "auto_scope_recovered_malformed": recovered_from_malformed,
         "consolidation_recovery": consolidation_recovery,
     }))
+}
+
+fn validated_project_scope(project_dir: &Path) -> Result<Option<ProjectScopeConfig>> {
+    let scope = read_project_scope(project_dir)?;
+    if let Some(scope) = &scope {
+        TenantId::validate(&scope.tenant_id)?;
+        ProjectId::validate_opt(scope.project_id.as_deref())?;
+    }
+    Ok(scope)
+}
+
+#[derive(Deserialize)]
+struct LegacyScopeConfig {
+    #[serde(default)]
+    tenant_id: Option<String>,
+    #[serde(default)]
+    project_id: Option<String>,
+}
+
+fn read_legacy_scope(path: &Path) -> Result<Option<(String, Option<String>)>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match std::fs::symlink_metadata(path) {
+                Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(None)
+                }
+                Ok(_) => {
+                    return Err(crate::error::MemdError::ValidationError(format!(
+                        "unable to read {}: {error}",
+                        path.display()
+                    )))
+                }
+                Err(metadata_error) => {
+                    return Err(crate::error::MemdError::ValidationError(format!(
+                        "unable to inspect {} after read failure ({error}): {metadata_error}",
+                        path.display()
+                    )))
+                }
+            }
+        }
+        Err(error) => {
+            return Err(crate::error::MemdError::ValidationError(format!(
+                "unable to read {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    let scope: LegacyScopeConfig = serde_json::from_str(&text).map_err(|error| {
+        crate::error::MemdError::ValidationError(format!(
+            "failed to parse {}: {error}",
+            path.display()
+        ))
+    })?;
+    let tenant_id = scope.tenant_id.ok_or_else(|| {
+        crate::error::MemdError::ValidationError(format!("{} is missing tenant_id", path.display()))
+    })?;
+    TenantId::validate(&tenant_id)?;
+    ProjectId::validate_opt(scope.project_id.as_deref())?;
+    Ok(Some((tenant_id, scope.project_id)))
+}
+
+fn invalid_scope_response(path: &Path, error: &crate::error::MemdError) -> Value {
+    json!({
+        "skipped": "invalid_project_scope",
+        "project_scope": path,
+        "diagnostic": format!(
+            "existing scope file was preserved because it is invalid or unreadable: {error}"
+        ),
+    })
 }
 
 /// Outcome of the auto-scope attempt when no scope file is present.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum AutoScopeOutcome {
     Created,
+    AlreadyExists,
     SkippedDisabled,
     SkippedMarker,
 }
@@ -319,10 +412,23 @@ pub(super) fn maybe_auto_create_scope(
     let memd_dir = project_dir.join(".memd");
     std::fs::create_dir_all(&memd_dir)?;
     let path = memd_dir.join("project_scope.json");
-    std::fs::write(
-        &path,
-        format!("{}\n", serde_json::to_string_pretty(&scope)?),
-    )?;
+    let serialized = format!("{}\n", serde_json::to_string_pretty(&scope)?);
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Ok(AutoScopeOutcome::AlreadyExists);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if let Err(error) = file.write_all(serialized.as_bytes()) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(error.into());
+    }
     Ok(AutoScopeOutcome::Created)
 }
 
@@ -372,7 +478,9 @@ fn sanitize_id(raw: &str, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::MemoryStore;
+    use crate::hit_stats::{record_hits_to_data_dir, HitRecord};
+    use crate::store::{MemoryStore, PersistentStore, PersistentStoreConfig};
+    use crate::types::{ChunkType, MemoryChunk};
     use tempfile::tempdir;
 
     fn disabled_inputs() -> AutoScopeInputs {
@@ -422,6 +530,46 @@ mod tests {
         .unwrap();
         assert_eq!(result["skipped"], "memd_skip_present");
         assert!(!dir.path().join(".memd/project_scope.json").exists());
+    }
+
+    #[tokio::test]
+    async fn memd_skip_marker_suppresses_initialized_repository() {
+        let store = MemoryStore::new();
+        let dir = tempdir().unwrap();
+        let memd_dir = dir.path().join(".memd");
+        std::fs::create_dir_all(&memd_dir).unwrap();
+        let existing = ProjectScopeConfig {
+            tenant_id: "preexisting".to_string(),
+            project_id: Some("keep_me".to_string()),
+            interface: "cli".to_string(),
+            cli_command: "memd".to_string(),
+            agent_context_output: ".memd/context.md".to_string(),
+            project_dir: dir.path().display().to_string(),
+        };
+        let scope_bytes = format!("{}\n", serde_json::to_string_pretty(&existing).unwrap());
+        std::fs::write(memd_dir.join("project_scope.json"), &scope_bytes).unwrap();
+        std::fs::write(dir.path().join("memory.md"), "keep existing memory\n").unwrap();
+        std::fs::write(dir.path().join(".memd-skip"), "").unwrap();
+
+        let result = run_session_start_inner(
+            &store,
+            SessionStartOptions {
+                project_dir: dir.path().to_path_buf(),
+            },
+            enabled_inputs("ignored"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["skipped"], "memd_skip_present");
+        assert_eq!(
+            std::fs::read(memd_dir.join("project_scope.json")).unwrap(),
+            scope_bytes.as_bytes()
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("memory.md")).unwrap(),
+            "keep existing memory\n"
+        );
     }
 
     #[tokio::test]
@@ -549,13 +697,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_scope_recovers_from_malformed_existing_scope() {
+    async fn invalid_existing_scope_is_preserved_with_diagnostic() {
         let store = MemoryStore::new();
         let dir = tempdir().unwrap();
         let project_dir = dir.path().join("recover-me");
         std::fs::create_dir_all(project_dir.join(".memd")).unwrap();
-        // Pre-existing file that resolve_scope will reject.
-        std::fs::write(project_dir.join(".memd/project_scope.json"), "{not json").unwrap();
+        let scope_path = project_dir.join(".memd/project_scope.json");
+        let original = b"{not json";
+        std::fs::write(&scope_path, original).unwrap();
 
         let result = run_session_start_inner(
             &store,
@@ -567,15 +716,141 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result["auto_scoped"], true);
-        assert_eq!(result["auto_scope_recovered_malformed"], true);
-        // The replacement file should now parse cleanly as the full
-        // ProjectScopeConfig schema (the strict consumer).
-        let scope: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(project_dir.join(".memd/project_scope.json")).unwrap(),
+        assert_eq!(result["skipped"], "invalid_project_scope");
+        assert_eq!(result["project_scope"], scope_path.display().to_string());
+        assert!(result["diagnostic"]
+            .as_str()
+            .unwrap()
+            .contains("was preserved"));
+        assert_eq!(std::fs::read(&scope_path).unwrap(), original);
+        assert!(!project_dir.join("memory.md").exists());
+    }
+
+    #[tokio::test]
+    async fn invalid_legacy_scope_is_preserved_without_creating_project_scope() {
+        let store = MemoryStore::new();
+        let dir = tempdir().unwrap();
+        let project_dir = dir.path().join("legacy-repo");
+        std::fs::create_dir_all(project_dir.join(".memd")).unwrap();
+        let legacy_path = project_dir.join(".memd/config.json");
+        let project_scope_path = project_dir.join(".memd/project_scope.json");
+        let original = b"{not legacy json";
+        std::fs::write(&legacy_path, original).unwrap();
+
+        let result = run_session_start_inner(
+            &store,
+            SessionStartOptions {
+                project_dir: project_dir.clone(),
+            },
+            enabled_inputs("would_mask_routing"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["skipped"], "invalid_project_scope");
+        assert_eq!(result["project_scope"], legacy_path.display().to_string());
+        assert!(result["diagnostic"]
+            .as_str()
+            .unwrap()
+            .contains("was preserved"));
+        assert_eq!(std::fs::read(legacy_path).unwrap(), original);
+        assert!(!project_scope_path.exists());
+        assert!(!project_dir.join("memory.md").exists());
+    }
+
+    #[test]
+    fn auto_scope_create_new_does_not_truncate_existing_file() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".memd")).unwrap();
+        let scope_path = dir.path().join(".memd/project_scope.json");
+        let original = b"created by a concurrent startup\n";
+        std::fs::write(&scope_path, original).unwrap();
+
+        let outcome = maybe_auto_create_scope(dir.path(), &enabled_inputs("alice")).unwrap();
+
+        assert_eq!(outcome, AutoScopeOutcome::AlreadyExists);
+        assert_eq!(std::fs::read(scope_path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn session_start_uses_central_exposure_ledger() {
+        let data = tempdir().unwrap();
+        let project = tempdir().unwrap();
+        let store = PersistentStore::open(PersistentStoreConfig {
+            data_dir: data.path().to_path_buf(),
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            enable_tiered_search: false,
+            backfill_hnsw_on_startup: false,
+            backfill_canonical_text_on_startup: false,
+            ..Default::default()
+        })
+        .unwrap();
+        let tenant = TenantId::new("central_tenant").unwrap();
+        let project_id = "central_project";
+        let chunk_id = store
+            .add(
+                MemoryChunk::new(
+                    tenant.clone(),
+                    "Validation: central-only exposure keeps an old startup fact active. \
+                     Agent action: Verify session-start reads the store exposure ledger.",
+                    ChunkType::Summary,
+                )
+                .with_project(ProjectId::from(project_id))
+                .with_tags(vec!["kind:evidence".to_string()]),
+            )
+            .await
+            .unwrap();
+        store
+            .metadata()
+            .force_timestamp_created(&chunk_id, 1)
+            .unwrap();
+        record_hits_to_data_dir(
+            data.path(),
+            &[HitRecord {
+                ts_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as i64,
+                chunk_id: chunk_id.to_string(),
+                tenant_id: tenant.to_string(),
+                project_id: Some(project_id.to_string()),
+                query_mode: "generic".to_string(),
+                rank: 1,
+                score: 1.0,
+                rendered: true,
+            }],
+        );
+        std::fs::create_dir_all(project.path().join(".memd")).unwrap();
+        let scope = ProjectScopeConfig {
+            tenant_id: tenant.to_string(),
+            project_id: Some(project_id.to_string()),
+            interface: "cli".to_string(),
+            cli_command: "memd".to_string(),
+            agent_context_output: ".memd/context.md".to_string(),
+            project_dir: project.path().display().to_string(),
+        };
+        std::fs::write(
+            project.path().join(".memd/project_scope.json"),
+            format!("{}\n", serde_json::to_string_pretty(&scope).unwrap()),
         )
         .unwrap();
-        assert_eq!(scope["tenant_id"], "alice");
-        assert_eq!(scope["project_id"], "recover_me");
+
+        run_session_start_inner(
+            &store,
+            SessionStartOptions {
+                project_dir: project.path().to_path_buf(),
+            },
+            enabled_inputs("ignored"),
+        )
+        .await
+        .unwrap();
+
+        let rendered = std::fs::read_to_string(project.path().join("memory.md")).unwrap();
+        assert!(rendered.contains(&chunk_id.to_string()), "{rendered}");
+        assert!(
+            rendered.contains("priority: `14.0`"),
+            "central exposure should prevent the old-chunk penalty:\n{rendered}"
+        );
     }
 }

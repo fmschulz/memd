@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs;
+use std::ffi::OsString;
+use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -89,13 +90,6 @@ pub(super) struct MemoryMdEvalOptions {
     pub(super) max_generated_wrappers: usize,
     pub(super) agent_usefulness: bool,
     pub(super) gold_file: Option<PathBuf>,
-}
-
-pub(super) async fn refresh_memory_md<S: Store>(
-    store: &S,
-    options: MemoryMdOptions,
-) -> Result<Value> {
-    refresh_memory_md_with_health(store, None, options).await
 }
 
 pub(super) async fn refresh_memory_md_with_health<S: Store>(
@@ -258,7 +252,7 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
         &project_takeaways,
         &global_takeaways,
     );
-    std::fs::write(&output_path, rendered)?;
+    atomic_replace(&output_path, rendered.as_bytes())?;
 
     let explain_output = if let Some(path) = options.explain_output {
         let path = if path.is_absolute() {
@@ -280,7 +274,8 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
             "project": project_explanations,
             "machine_wide": global_explanations,
         });
-        std::fs::write(&path, serde_json::to_string_pretty(&report)?)?;
+        let rendered_report = serde_json::to_string_pretty(&report)?;
+        atomic_replace(&path, rendered_report.as_bytes())?;
         Some(path)
     } else {
         None
@@ -300,16 +295,101 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
     }))
 }
 
-fn read_project_scope(project_dir: &std::path::Path) -> Result<Option<ProjectScopeConfig>> {
+pub(super) fn read_project_scope(project_dir: &Path) -> Result<Option<ProjectScopeConfig>> {
     let path = project_dir.join(".memd/project_scope.json");
-    if !path.exists() {
-        return Ok(None);
-    }
-    let text = std::fs::read_to_string(&path)?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match std::fs::symlink_metadata(&path) {
+                Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(None)
+                }
+                Ok(_) => {
+                    return Err(MemdError::ValidationError(format!(
+                        "unable to read {}: {error}",
+                        path.display()
+                    )))
+                }
+                Err(metadata_error) => {
+                    return Err(MemdError::ValidationError(format!(
+                        "unable to inspect {} after read failure ({error}): {metadata_error}",
+                        path.display()
+                    )))
+                }
+            }
+        }
+        Err(error) => {
+            return Err(MemdError::ValidationError(format!(
+                "unable to read {}: {error}",
+                path.display()
+            )))
+        }
+    };
     let scope = serde_json::from_str(&text).map_err(|e| {
         MemdError::ValidationError(format!("failed to parse {}: {e}", path.display()))
     })?;
     Ok(Some(scope))
+}
+
+/// Replace a file through a unique temporary name in the destination
+/// directory, so readers see either the previous complete file or the new
+/// complete file. A failed write or rename removes only the temp file created
+/// by this call.
+fn atomic_replace(path: &Path, contents: &[u8]) -> Result<()> {
+    use std::io::Write;
+
+    let destination = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            std::fs::canonicalize(path).map_err(|error| {
+                MemdError::ValidationError(format!(
+                    "unable to resolve output symlink {}: {error}",
+                    path.display()
+                ))
+            })?
+        }
+        Ok(_) => path.to_path_buf(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
+        Err(error) => return Err(error.into()),
+    };
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = destination.file_name().ok_or_else(|| {
+        MemdError::ValidationError(format!(
+            "output path has no file name: {}",
+            destination.display()
+        ))
+    })?;
+    let existing_permissions = match std::fs::metadata(&destination) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+
+    let mut temp_name = OsString::from(".");
+    temp_name.push(file_name);
+    temp_name.push(format!(".{}.tmp", uuid::Uuid::now_v7()));
+    let temp_path = parent.join(temp_name);
+    let mut open_options = OpenOptions::new();
+    open_options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open_options.mode(0o600);
+    }
+    let mut temp_file = open_options.open(&temp_path)?;
+
+    let publish_result = (|| -> std::io::Result<()> {
+        if let Some(permissions) = existing_permissions {
+            std::fs::set_permissions(&temp_path, permissions)?;
+        }
+        temp_file.write_all(contents)?;
+        drop(temp_file);
+        std::fs::rename(&temp_path, &destination)
+    })();
+    if let Err(error) = publish_result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 fn now_ms() -> u128 {
