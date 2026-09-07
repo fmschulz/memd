@@ -32,7 +32,7 @@ For write-quality expectations and cleanup safety, see the
 | `memd purge-archive` | Read-only verification for `memd purge --archive` files: validates format/counts/payload flags, emits SHA-256, and can enforce expected tenant/project. |
 | `memd consolidate` | Call the configured LLM (Claude Haiku or Codex Spark, selected by `MEMD_CONSOLIDATOR`) and stage validated output under a journaled run ID. Candidate summaries remain hidden until review. `--promote` requests promotion in the same run; `--legacy-immediate` is a deprecated alias for one compatibility release. Exact source-set reruns reuse the existing run. |
 | `memd consolidate-review` | List staged runs, accept one for atomic promotion, or reject it while leaving every source active. |
-| `memd session-start` | Auto-create a minimal `.memd/project_scope.json` when missing, recover consolidation runs idle for at least 30 seconds, refresh `memory.md` synchronously, then stage a background consolidation when enough chunks have accumulated. Recovery promotes only runs with durable promotion intent. A writer-lock failure is reported in `consolidation_recovery` without suppressing context refresh. Wired into Claude Code via the bundled skill installer; a Codex hook template lives at `memd-skill/examples/codex_session_start_hook.json`. |
+| `memd session-start` | Resolve an existing project or legacy scope, or auto-create a minimal `.memd/project_scope.json` when neither provides one. Recover consolidation runs idle for at least 30 seconds, refresh `memory.md` synchronously, then attempt background consolidation when at least 10 dirty chunks have accumulated. Recovery promotes only runs with durable promotion intent. A writer-lock failure is reported in `consolidation_recovery` without suppressing context refresh. See [startup scope and output behavior](agent-skill.md#install). |
 | `memd eval-counterfactual` | Replay a JSONL benchmark file; write an overlap@k / rank-shift report under `evals/bench/reports/`. Monitors whether `kind:consolidated` lessons are load-bearing in retrieval. |
 | `memd eval-outcome-ranking` | Compare the served order with the source-deduplicated `outcome-v1` shadow order against JSONL relevant/harmful judgments. Writes JSON and Markdown counterfactual reports without activating the policy. |
 | `memd maintenance` | Disk hygiene: sweep orphan HNSW snapshots; `--aggressive` also force-merges the Tantivy sparse index and reports before/after segment counts. |
@@ -40,25 +40,26 @@ For write-quality expectations and cleanup safety, see the
 `memd add` returns the primary `chunk_id` and `stored_chunk_ids`, an ordered
 list of every physical chunk created by document splitting.
 
-- `memory-md --explain-output <path>` writes a JSON candidate audit with query
-  source, score components, tags, display/filter decisions, structured project
-  state, and agent-usefulness metrics.
-- `memory-md` renders a scope line and `Memory health` before the fact
-  libraries. It omits task, handoff, and git state by design: those have repo
-  homes. Takeaways already covered by a repo file are suppressed, and warnings
-  for scope drift or unreadable memory payloads. Missing or unreadable task
-  files are reported as unknown; they are not treated as proof that no work is
-  open.
+- `memory-md --explain-output <path>` writes a JSON candidate audit with scan
+  source, score components, tags, display/filter decisions, scope and memory
+  health state, and agent-usefulness metrics.
+- `memory-md` renders a generation date and scope before the fact libraries.
+  `Memory health` includes available health metrics and warnings for scope
+  drift, unreadable payloads, or incomplete health scans. Task, handoff, and
+  git state belong in repository files. Takeaways covered by indexed repository
+  documents are suppressed using a token-overlap heuristic; lessons tagged
+  `priority:8+` or `importance:8+` are exempt. Missing or unreadable repository files
+  are skipped by that coverage check.
 - Project and machine-wide candidates are assigned and deduplicated as one
   bounded pool before display limits are applied. Exact IDs, consolidation
   lineage, and high-confidence topic matches appear in one section only, with
   the active project's section taking precedence.
-- `eval-memory-md --agent-usefulness` fails when startup context lacks current
-  state, git state for a git repo, source-backed next actions when open tasks
-  exist, a readable task source, scope-health warnings, or when displayed
-  startup items include continuation fragments or generated boilerplate
-  actions. `--gold-file` can run the same checks over local multi-project
-  fixtures.
+- `eval-memory-md --agent-usefulness` adds checks for an unreported scope
+  mismatch, continuation fragments, generated boilerplate actions, and more
+  than two unrelated machine-wide items. Duplicate counts and degraded-memory
+  warnings are reported as metrics. `--gold-file` runs these checks over local
+  multi-project fixtures with required or forbidden text and fragment or
+  unrelated-item limits when specified.
 - `eval-retrieval` gates with `--min-precision-at-k`,
   `--min-hit-rate-at-k`, `--min-known-recall-at-k`, and `--min-mrr`.
 - `eval-outcome-ranking --queries <jsonl> --report-json <path>` records normal

@@ -338,19 +338,33 @@ pub(super) fn read_project_scope(project_dir: &Path) -> Result<Option<ProjectSco
 fn atomic_replace(path: &Path, contents: &[u8]) -> Result<()> {
     use std::io::Write;
 
-    let destination = match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            std::fs::canonicalize(path).map_err(|error| {
-                MemdError::ValidationError(format!(
-                    "unable to resolve output symlink {}: {error}",
-                    path.display()
-                ))
-            })?
+    let mut destination = path.to_path_buf();
+    let mut symlink_hops = 0;
+    loop {
+        match std::fs::symlink_metadata(&destination) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                if symlink_hops == 40 {
+                    return Err(MemdError::ValidationError(format!(
+                        "unable to resolve output symlink {}: too many symlink levels",
+                        path.display()
+                    )));
+                }
+                symlink_hops += 1;
+                let target = std::fs::read_link(&destination)?;
+                destination = if target.is_absolute() {
+                    target
+                } else {
+                    destination
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(target)
+                };
+            }
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
         }
-        Ok(_) => path.to_path_buf(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
-        Err(error) => return Err(error.into()),
-    };
+    }
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
     let file_name = destination.file_name().ok_or_else(|| {
         MemdError::ValidationError(format!(
@@ -358,8 +372,8 @@ fn atomic_replace(path: &Path, contents: &[u8]) -> Result<()> {
             destination.display()
         ))
     })?;
-    let existing_permissions = match std::fs::metadata(&destination) {
-        Ok(metadata) => Some(metadata.permissions()),
+    let existing_permissions = match OpenOptions::new().write(true).open(&destination) {
+        Ok(file) => Some(file.metadata()?.permissions()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };

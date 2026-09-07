@@ -54,6 +54,125 @@ fn atomic_replace_preserves_existing_output_symlink() {
 
 #[cfg(unix)]
 #[test]
+fn atomic_replace_preserves_dangling_output_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+
+    let relative_target = dir.path().join("relative-target.md");
+    let relative_output = dir.path().join("relative-output.md");
+    symlink("relative-target.md", &relative_output).unwrap();
+    atomic_replace(&relative_output, b"relative\n").unwrap();
+    assert!(fs::symlink_metadata(&relative_output)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(fs::read_to_string(&relative_target).unwrap(), "relative\n");
+    assert_eq!(fs::read_to_string(&relative_output).unwrap(), "relative\n");
+
+    let absolute_target = dir.path().join("absolute-target.md");
+    let absolute_output = dir.path().join("absolute-output.md");
+    symlink(&absolute_target, &absolute_output).unwrap();
+    atomic_replace(&absolute_output, b"absolute\n").unwrap();
+    assert!(fs::symlink_metadata(&absolute_output)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(fs::read_to_string(&absolute_target).unwrap(), "absolute\n");
+    assert_eq!(fs::read_to_string(&absolute_output).unwrap(), "absolute\n");
+
+    let links = dir.path().join("links");
+    let targets = dir.path().join("targets");
+    fs::create_dir(&links).unwrap();
+    fs::create_dir(&targets).unwrap();
+    let chained_output = dir.path().join("chained-output.md");
+    let intermediate = links.join("intermediate.md");
+    let chained_target = targets.join("chained-target.md");
+    symlink("links/intermediate.md", &chained_output).unwrap();
+    symlink("../targets/chained-target.md", &intermediate).unwrap();
+    atomic_replace(&chained_output, b"chained\n").unwrap();
+    assert!(fs::symlink_metadata(&chained_output)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(fs::symlink_metadata(&intermediate)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(fs::read_to_string(&chained_target).unwrap(), "chained\n");
+    assert_eq!(fs::read_to_string(&chained_output).unwrap(), "chained\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn atomic_replace_symlink_errors_leave_no_temp_files() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cycle_a = dir.path().join("cycle-a.md");
+    let cycle_b = dir.path().join("cycle-b.md");
+    symlink("cycle-b.md", &cycle_a).unwrap();
+    symlink("cycle-a.md", &cycle_b).unwrap();
+    assert!(atomic_replace(&cycle_a, b"must not publish").is_err());
+    assert!(fs::symlink_metadata(&cycle_a)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(fs::symlink_metadata(&cycle_b)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+
+    let missing_parent_output = dir.path().join("missing-parent-output.md");
+    symlink("missing/target.md", &missing_parent_output).unwrap();
+    assert!(atomic_replace(&missing_parent_output, b"must not publish").is_err());
+    assert!(fs::symlink_metadata(&missing_parent_output)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(!dir.path().join("missing").exists());
+    assert!(fs::read_dir(dir.path()).unwrap().all(|entry| !entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .ends_with(".tmp")));
+}
+
+#[cfg(unix)]
+#[test]
+fn atomic_replace_honors_existing_file_write_access() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("readonly.md");
+    fs::write(&output, "old\n").unwrap();
+    fs::set_permissions(&output, fs::Permissions::from_mode(0o444)).unwrap();
+
+    let account_can_write = OpenOptions::new().write(true).open(&output).is_ok();
+    let result = atomic_replace(&output, b"replacement\n");
+    if account_can_write {
+        result.expect("replacement should match the account's successful write probe");
+        assert_eq!(fs::read_to_string(&output).unwrap(), "replacement\n");
+    } else {
+        assert!(
+            result.is_err(),
+            "replacement must fail when the account cannot open the existing file for writing"
+        );
+        assert_eq!(fs::read_to_string(&output).unwrap(), "old\n");
+        assert_eq!(
+            fs::metadata(&output).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
+    }
+    assert!(fs::read_dir(dir.path()).unwrap().all(|entry| !entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .ends_with(".tmp")));
+}
+
+#[cfg(unix)]
+#[test]
 fn atomic_replace_preserves_permissions_and_creates_private_files() {
     use std::os::unix::fs::PermissionsExt;
 

@@ -72,15 +72,33 @@ What `make install` does:
 6. Wires the Claude Code `SessionStart` hook.
 7. Prints a verification recipe.
 
-When the SessionStart hook fires in a repo without `.memd/project_scope.json`,
-`memd session-start` auto-creates a minimal scope from
-`$MEMD_DEFAULT_TENANT` (then `$USER`, then `"default"`) and the repo basename.
+`memd session-start` reads `.memd/project_scope.json` first. When that file is
+absent, it uses a valid legacy `.memd/config.json` scope. When neither provides
+a scope, it creates a minimal project scope from `$MEMD_DEFAULT_TENANT` (then
+`$USER`, then `"default"`) and the repo basename. Derived IDs are lowercased,
+separator runs become underscores, and IDs are capped at 64 characters.
 Set `MEMD_AUTO_SCOPE=0` to disable scope creation. Add `.memd-skip` in the repo
-root to skip startup even with an existing scope. Invalid existing scopes are
-preserved and reported. Generated `memory.md` and explanation files are replaced
-atomically, so readers see a complete prior or current file. An asynchronous
-host hook can still leave a reader with the prior file; check its generation
-date when freshness matters.
+root to skip startup even with an existing scope. Invalid or unreadable scopes
+are preserved and reported, and startup stops before refreshing `memory.md`.
+A valid `.memd/config.json` with neither `tenant_id` nor `project_id`, such as
+a wiki-only configuration, allows automatic scope creation. A legacy file with
+a project but no tenant is invalid.
+
+Generated `memory.md` and explanation files are replaced atomically, so readers
+see a complete prior or current file. Output symlinks are followed even when
+their target file does not yet exist; the target directory must exist. Existing
+Unix mode bits are preserved. New output files use mode `0600` (owner read/write).
+For shared access, change the target file's permissions after it is first written.
+Replacement requires write access to both an existing target and its directory.
+It changes the inode and does not preserve ownership, access-control lists,
+extended attributes, or hard-link identity. Complete-file visibility does not
+guarantee recovery after a system crash. A process killed before replacement can
+leave its temporary output file behind.
+
+An asynchronous host hook can still leave a reader with the prior file; check
+its generation date when freshness matters. Concurrent first starts can briefly
+report a scope as invalid while another process finishes creating it; retry
+startup after the first process exits.
 
 For a repo-local install (writes `.memd/` plus per-repo `AGENTS.md` and
 `CLAUDE.md` guardrail blocks):

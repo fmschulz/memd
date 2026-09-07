@@ -226,16 +226,23 @@ retention-review action non-destructive.
 
 ### Implicit (no per-repo setup)
 
-When the `SessionStart` hook fires in a repo with no `.memd/project_scope.json`,
-`memd session-start` auto-creates a minimal scope file using:
+`memd session-start` reads `.memd/project_scope.json` first, then a legacy
+`.memd/config.json` scope if the project scope file is absent. When neither
+provides a scope, it creates a minimal project scope using:
 
 - `tenant_id`: `$MEMD_DEFAULT_TENANT`, then `$USER`, then `"default"`
-- `project_id`: lower-cased basename of the repo
+- `project_id`: basename of the repo
+
+Derived IDs are lowercased, separator runs become underscores, and IDs are
+capped at 64 characters.
 
 Auto-scope writes only `.memd/project_scope.json`. It does not edit agent rules
 or tenant guardrails. `MEMD_AUTO_SCOPE=0` disables scope creation; an empty
-`.memd-skip` file skips startup even for an initialized repository. Invalid
-existing scopes are preserved and reported for repair.
+`.memd-skip` file skips startup even for an initialized repository. Invalid or
+unreadable scopes are preserved and reported, and startup stops before
+refreshing `memory.md`. A valid legacy config with neither `tenant_id` nor
+`project_id` allows scope creation. A legacy config with a project but no tenant
+is invalid.
 
 ### Explicit (full guardrails)
 
@@ -333,7 +340,7 @@ Check:
 1. You ran `./memd-skill/install_memd_enforcement.sh`
 2. The enforcement block exists in both instruction files and the Cursor rule
 3. The clients were restarted after the files changed
-4. The work is substantive enough to trigger the contract
+4. The task involves an operational fact unavailable in readable repository files
 
 ## Next
 

@@ -265,14 +265,14 @@ impl<W: WarmTierSearch> TieredSearcher<W> {
         let cache_start = Instant::now();
         let cache_result = if self.config.enable_cache {
             self.cache
-                .lookup(query_embedding, tenant_id, project_id, version)
+                .lookup_with_limit(query_embedding, tenant_id, project_id, version, k)
         } else {
             None
         };
         timing.cache_lookup_ms = cache_start.elapsed().as_millis() as u64;
 
         // If cache hit, return immediately
-        if let Some(hit) = cache_result.filter(|hit| hit.results.len() >= k) {
+        if let Some(hit) = cache_result {
             let results: Vec<ScoredChunk> = hit
                 .results
                 .into_iter()
@@ -340,12 +340,13 @@ impl<W: WarmTierSearch> TieredSearcher<W> {
                 })
                 .collect();
 
-            self.cache.insert(
+            self.cache.insert_with_limit(
                 query_embedding.to_vec(),
                 tenant_id.clone(),
                 project_id.map(|s| s.to_string()),
                 cached_results,
                 version,
+                k,
             );
         }
 
@@ -886,7 +887,7 @@ mod tests {
 
         warm.add_chunk(chunk_id.clone(), embedding.clone(), 0.95);
 
-        let (searcher, _, _, _) = make_searcher_with_warm(warm);
+        let (searcher, cache, _, _) = make_searcher_with_warm(warm);
         let tenant = make_tenant();
 
         let result = searcher.search(&embedding, &tenant, None, 10).unwrap();
@@ -897,6 +898,11 @@ mod tests {
         assert_eq!(result.results.len(), 1);
         assert_eq!(result.results[0].chunk_id, chunk_id);
         assert_eq!(result.results[0].source_tier, SourceTier::Warm);
+
+        let repeated = searcher.search(&embedding, &tenant, None, 10).unwrap();
+        assert!(repeated.cache_hit);
+        assert_eq!(repeated.results.len(), 1);
+        assert_eq!(cache.get_stats().cache_hits, 1);
     }
 
     #[test]
@@ -963,7 +969,7 @@ mod tests {
             warm.add_chunk(ChunkId::new(), embedding.clone(), score);
         }
 
-        let (searcher, _, _, _) = make_searcher_with_warm(warm);
+        let (searcher, cache, _, _) = make_searcher_with_warm(warm);
         let tenant = make_tenant();
 
         let small = searcher.search(&embedding, &tenant, None, 1).unwrap();
@@ -973,6 +979,9 @@ mod tests {
         let large = searcher.search(&embedding, &tenant, None, 3).unwrap();
         assert!(!large.cache_hit);
         assert_eq!(large.results.len(), 3);
+        let stats = cache.get_stats();
+        assert_eq!(stats.cache_hits, 0);
+        assert_eq!(stats.cache_misses, 1);
 
         let medium = searcher.search(&embedding, &tenant, None, 2).unwrap();
         assert!(medium.cache_hit);
