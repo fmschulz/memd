@@ -404,7 +404,7 @@ memories without one are unchanged. JSON surface only (`call` / `batch`):
 
 ```bash
 memd call memory.search \
-  --json '{"query":"kickoff meeting","k":5,"render_event_time":true}'
+  --json '{"query":"remote mount read-only","k":5,"render_event_time":true}'
 ```
 
 Source dedup (v1.3+): `memd search --dedupe-by-source` collapses results
@@ -453,7 +453,7 @@ Never bake dates into the text itself (they pollute retrieval); pass
 
 ```bash
 memd call memory.add \
-  --json '{"type":"message","text":"Kickoff meeting with Dana: agreed to ship v2 by June.","event_time_ms":1749168000000,"tags":["kind:evidence"]}'
+  --json '{"type":"message","text":"Remote mount /mnt/research became read-only after the host restarted.","event_time_ms":1749168000000,"tags":["kind:evidence"]}'
 ```
 
 The same field works per-line in `memd batch` (`memory.add` /
