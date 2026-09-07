@@ -356,6 +356,9 @@ fn read_legacy_scope(path: &Path) -> Result<Option<(String, Option<String>)>> {
             path.display()
         ))
     })?;
+    if scope.tenant_id.is_none() && scope.project_id.is_none() {
+        return Ok(None);
+    }
     let tenant_id = scope.tenant_id.ok_or_else(|| {
         crate::error::MemdError::ValidationError(format!("{} is missing tenant_id", path.display()))
     })?;
@@ -758,6 +761,96 @@ mod tests {
         assert!(!project_dir.join("memory.md").exists());
     }
 
+    #[tokio::test]
+    async fn legacy_config_without_scope_is_preserved_while_auto_scoping() {
+        let store = MemoryStore::new();
+        let dir = tempdir().unwrap();
+        let project_dir = dir.path().join("wiki-repo");
+        std::fs::create_dir_all(project_dir.join(".memd")).unwrap();
+        let legacy_path = project_dir.join(".memd/config.json");
+        let original = b"{\n  \"wiki\": {\"outdir\": \"wiki\"}\n}\n";
+        std::fs::write(&legacy_path, original).unwrap();
+
+        let result = run_session_start_inner(
+            &store,
+            SessionStartOptions {
+                project_dir: project_dir.clone(),
+            },
+            enabled_inputs("alice"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["auto_scoped"], true);
+        assert_eq!(std::fs::read(&legacy_path).unwrap(), original);
+        let scope: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(project_dir.join(".memd/project_scope.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(scope["tenant_id"], "alice");
+        assert_eq!(scope["project_id"], "wiki_repo");
+        assert!(project_dir.join("memory.md").exists());
+    }
+
+    #[tokio::test]
+    async fn valid_legacy_scope_is_preserved_as_fallback() {
+        let store = MemoryStore::new();
+        let dir = tempdir().unwrap();
+        let project_dir = dir.path().join("legacy-repo");
+        std::fs::create_dir_all(project_dir.join(".memd")).unwrap();
+        let legacy_path = project_dir.join(".memd/config.json");
+        let original = b"{\n  \"tenant_id\": \"legacy_tenant\",\n  \"project_id\": \"legacy_project\",\n  \"wiki\": {\"outdir\": \"wiki\"}\n}\n";
+        std::fs::write(&legacy_path, original).unwrap();
+
+        let result = run_session_start_inner(
+            &store,
+            SessionStartOptions {
+                project_dir: project_dir.clone(),
+            },
+            enabled_inputs("would_replace_legacy"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["auto_scoped"], false);
+        assert_eq!(result["memory_md"]["tenant_id"], "legacy_tenant");
+        assert_eq!(result["memory_md"]["project_id"], "legacy_project");
+        assert_eq!(std::fs::read(&legacy_path).unwrap(), original);
+        assert!(!project_dir.join(".memd/project_scope.json").exists());
+        assert!(project_dir.join("memory.md").exists());
+    }
+
+    #[tokio::test]
+    async fn legacy_project_without_tenant_remains_invalid() {
+        let store = MemoryStore::new();
+        let dir = tempdir().unwrap();
+        let project_dir = dir.path().join("legacy-repo");
+        std::fs::create_dir_all(project_dir.join(".memd")).unwrap();
+        let legacy_path = project_dir.join(".memd/config.json");
+        let original = b"{\"project_id\":\"must_not_be_replaced\"}\n";
+        std::fs::write(&legacy_path, original).unwrap();
+
+        let result = run_session_start_inner(
+            &store,
+            SessionStartOptions {
+                project_dir: project_dir.clone(),
+            },
+            enabled_inputs("would_mask_routing"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["skipped"], "invalid_project_scope");
+        assert_eq!(result["project_scope"], legacy_path.display().to_string());
+        assert!(result["diagnostic"]
+            .as_str()
+            .unwrap()
+            .contains("missing tenant_id"));
+        assert_eq!(std::fs::read(&legacy_path).unwrap(), original);
+        assert!(!project_dir.join(".memd/project_scope.json").exists());
+        assert!(!project_dir.join("memory.md").exists());
+    }
+
     #[test]
     fn auto_scope_create_new_does_not_truncate_existing_file() {
         let dir = tempdir().unwrap();
@@ -776,7 +869,7 @@ mod tests {
     async fn session_start_uses_central_exposure_ledger() {
         let data = tempdir().unwrap();
         let project = tempdir().unwrap();
-        let store = PersistentStore::open(PersistentStoreConfig {
+        let mut config = PersistentStoreConfig {
             data_dir: data.path().to_path_buf(),
             enable_dense_search: false,
             enable_hybrid_search: false,
@@ -784,8 +877,8 @@ mod tests {
             backfill_hnsw_on_startup: false,
             backfill_canonical_text_on_startup: false,
             ..Default::default()
-        })
-        .unwrap();
+        };
+        let store = PersistentStore::open(config.clone()).unwrap();
         let tenant = TenantId::new("central_tenant").unwrap();
         let project_id = "central_project";
         let chunk_id = store
@@ -835,6 +928,9 @@ mod tests {
             format!("{}\n", serde_json::to_string_pretty(&scope).unwrap()),
         )
         .unwrap();
+        drop(store);
+        config.read_only = true;
+        let store = PersistentStore::open(config).unwrap();
 
         run_session_start_inner(
             &store,

@@ -150,14 +150,14 @@ chunks remain active and searchable. The tenant-wide lesson records
 
 ## Session-start hook
 
-The session-start hook ties everything together:
-
 ```bash
 memd session-start --project-dir "$CLAUDE_PROJECT_DIR"
 ```
 
-It recovers stale consolidation runs, refreshes `memory.md` synchronously,
-then stages a background consolidation when **≥ 10 dirty chunks** have
-accumulated. Background proposals remain hidden and can be found with
-`memd consolidate-review --list`. The
-[skill installer](agent-skill.md) wires this into Claude Code by default.
+It resolves the project scope, recovers stale consolidation runs, and refreshes
+`memory.md` synchronously. With at least 10 dirty chunks, it attempts background
+consolidation. Missing backends or scope contention are reported in
+`consolidation_skipped`. Background proposals remain hidden and can be found
+with `memd consolidate-review --list`. A `.memd-skip` marker skips all startup
+work, and an invalid or unreadable scope stops startup before refresh. See
+[Agent skill](agent-skill.md#install) for scope resolution and hook installation.

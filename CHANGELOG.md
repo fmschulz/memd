@@ -6,6 +6,22 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-09-06
+
+### Fixed
+
+- Semantic-cache keys distinguish tenant and project boundaries. Replacing an entry does not grow the query index.
+- Cached searches reuse short result sets for the same or a smaller retrieval limit, retry larger requests, and count only accepted cache hits. Cache entries use the store version read before retrieval.
+- `memory.md` and explanation reports are replaced atomically, follow existing or dangling output symlinks, preserve existing Unix mode bits, and check write access to an existing target.
+- Session startup preserves invalid scope files, permits automatic scope creation with a wiki-only legacy configuration, respects `.memd-skip` for initialized projects, and reads the central health and exposure ledgers.
+- Search logging truncates query previews at Unicode character boundaries.
+
+### Changed
+
+- Agent instructions make memory lookup optional and keep project state in repository files.
+- New `memory.md` and explanation files use Unix mode `0600`. Atomic replacement requires write access to the destination directory and changes the inode. It guarantees complete-file visibility for readers but does not guarantee crash recovery.
+- Session-start JSON omits `auto_scope_recovered_malformed`. Invalid scopes are preserved and reported with `skipped: invalid_project_scope`.
+
 ## [1.7.0] - 2026-08-03
 
 ### Changed

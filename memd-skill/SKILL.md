@@ -125,6 +125,14 @@ For `priority:8+` or `importance:8+` writes, include a concrete `Agent action:`
 sentence. Without one, the write is admitted at priority 7 with a warning.
 The digest displays a bounded text summary; use `memd get` for the full record.
 
+Output writes follow symlinks and preserve existing Unix mode bits.
+New files use mode `0600`. Set the target file's permissions after the first
+write if other users need access. Replacement requires write access to an
+existing target and its directory. It changes the inode and does not preserve
+ownership, access-control lists, extended attributes, or hard-link identity.
+Readers see a complete old or new file, but replacement does not guarantee
+recovery after a system crash.
+
 ### Automatic session-start
 
 When the host is wired up (the bundled `memd-skill/install_memd_enforcement.sh`
@@ -135,21 +143,30 @@ script adds a Claude Code `SessionStart` hook; Codex users can copy
 memd session-start --project-dir "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || true
 ```
 
-This recovers stale journaled consolidation runs, refreshes `memory.md`
-synchronously, and — when ≥10 dirty chunks have accumulated since the last
-consolidation — stages a detached `memd consolidate` in the background.
+This recovers stale journaled consolidation runs and refreshes `memory.md`
+synchronously. With at least 10 dirty chunks since the last consolidation,
+it attempts a detached `memd consolidate` in the background. Missing backends
+or scope contention are reported in `consolidation_skipped`.
 Recovery skips runs updated within the last 30 seconds and promotes only a
 run whose durable promotion intent was recorded before the interruption.
 
-If `.memd/project_scope.json` is missing, `session-start` auto-creates a
-minimal scope file using `$MEMD_DEFAULT_TENANT` (then `$USER`, then
-`"default"`) as `tenant_id` and the lower-cased repo basename as
-`project_id`. Auto-scope writes ONLY `.memd/project_scope.json` — it never
-touches `AGENTS.md`, `CLAUDE.md`, or writes tenant guardrails on the user's
-behalf. `MEMD_AUTO_SCOPE=0` disables automatic scope creation. A `.memd-skip`
-file skips session startup even when the repository already has a scope.
-An invalid existing scope is preserved and reported for repair. Run `memd init`
-explicitly when you want the full guardrail suite.
+`session-start` reads `.memd/project_scope.json` first, then a valid legacy
+`.memd/config.json` scope when the project scope is absent. If neither provides
+a scope, it creates `.memd/project_scope.json` using `$MEMD_DEFAULT_TENANT`
+(then `$USER`, then `"default"`) as `tenant_id` and the repo basename as
+`project_id`. Derived IDs use lowercase ASCII letters, digits, and underscores;
+separator runs collapse, leading and trailing separators are removed, and IDs
+are capped at 64 characters. Empty IDs fall back to `default` for the tenant
+and `project` for the project.
+
+Automatic scope creation leaves agent rules and tenant guardrails unchanged.
+`MEMD_AUTO_SCOPE=0` disables creation; `.memd-skip` skips session startup even
+with an existing scope. Invalid or unreadable scopes are preserved and reported
+without refreshing `memory.md`. A valid legacy configuration with neither scope
+field, such as a wiki-only configuration, allows automatic scope creation.
+A legacy project without a tenant is invalid. Concurrent first starts can
+briefly report an incomplete scope; retry after the first process exits.
+Run `memd init` explicitly when you want the full guardrail suite.
 
 ### Write-time priority
 
@@ -532,10 +549,10 @@ This writes `.memd/memory_guardrails.md`, `.memd/tenant_scope.json`, and
 `.memd/project_scope.json`, and can upsert CLI guardrail blocks into local
 `AGENTS.md` and `CLAUDE.md`.
 
-Automatic session startup does not require `memd init`. The `SessionStart`
-hook creates a memd-managed
-`.memd/project_scope.json` (do not hand-write this file; partial JSON fails to
-parse) on first use. See [Automatic session-start](#automatic-session-start).
+Automatic session startup does not require `memd init`. It reuses an existing
+scope or creates `.memd/project_scope.json` when no scope is available.
+See [Automatic session-start](#automatic-session-start) for resolution and
+opt-out rules.
 Run `memd init` only when you want the full guardrail suite for a repo.
 
 ## Verify the install

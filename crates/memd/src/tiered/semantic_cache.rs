@@ -89,6 +89,13 @@ pub struct CacheHit {
     pub cache_key: String,
 }
 
+/// Internal cache value with retrieval metadata.
+#[derive(Debug, Clone)]
+struct CacheRecord {
+    entry: CacheEntry,
+    retrieval_limit: usize,
+}
+
 /// Index entry for fast similarity lookup
 struct QueryIndexEntry {
     /// Cache key for lookup in moka cache
@@ -147,7 +154,7 @@ impl Default for AtomicStats {
 /// to be served from cache. Entries are invalidated via TTL or version tracking.
 pub struct SemanticCache {
     /// Moka cache with TTL-based expiration
-    entries: Cache<String, CacheEntry>,
+    entries: Cache<String, CacheRecord>,
     /// Index for similarity search (protected by RwLock)
     query_index: RwLock<Vec<QueryIndexEntry>>,
     /// Configuration
@@ -183,6 +190,18 @@ impl SemanticCache {
         project_id: Option<&str>,
         current_version: u64,
     ) -> Option<CacheHit> {
+        self.lookup_with_limit(query_embedding, tenant_id, project_id, current_version, 0)
+    }
+
+    /// Look up a similar query with enough coverage for `requested_limit`.
+    pub(crate) fn lookup_with_limit(
+        &self,
+        query_embedding: &[f32],
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        current_version: u64,
+        requested_limit: usize,
+    ) -> Option<CacheHit> {
         self.stats.total_lookups.fetch_add(1, Ordering::Relaxed);
 
         let now_ms = current_time_ms();
@@ -217,10 +236,10 @@ impl SemanticCache {
 
         // Check if the cached entry is still valid
         let (cache_key, similarity) = best_match?;
-        let mut entry = self.entries.get(&cache_key)?;
+        let mut record = self.entries.get(&cache_key)?;
 
         // Version check: entry must be from current or newer version
-        if entry.memory_version < current_version {
+        if record.entry.memory_version < current_version {
             self.stats
                 .version_invalidations
                 .fetch_add(1, Ordering::Relaxed);
@@ -228,21 +247,28 @@ impl SemanticCache {
             return None;
         }
 
+        // Reuse results only when the cached search requested at least this limit.
+        if record.retrieval_limit < requested_limit {
+            self.stats.cache_misses.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+
         // Update hit statistics
-        entry.last_hit = now_ms;
-        entry.hit_count += 1;
-        entry.confidence = (entry.confidence + self.config.confidence_boost_on_hit).min(1.0);
+        record.entry.last_hit = now_ms;
+        record.entry.hit_count += 1;
+        record.entry.confidence =
+            (record.entry.confidence + self.config.confidence_boost_on_hit).min(1.0);
 
         // Re-insert with updated stats
-        self.entries.insert(cache_key.clone(), entry.clone());
+        self.entries.insert(cache_key.clone(), record.clone());
 
         self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
 
         Some(CacheHit {
-            results: entry.results.clone(),
+            results: record.entry.results.clone(),
             similarity,
-            confidence: entry.confidence,
-            age_ms: (now_ms - entry.created_at).max(0) as u64,
+            confidence: record.entry.confidence,
+            age_ms: (now_ms - record.entry.created_at).max(0) as u64,
             cache_key,
         })
     }
@@ -255,6 +281,27 @@ impl SemanticCache {
         project_id: Option<String>,
         results: Vec<CachedResult>,
         memory_version: u64,
+    ) {
+        let retrieval_limit = results.len();
+        self.insert_with_limit(
+            query_embedding,
+            tenant_id,
+            project_id,
+            results,
+            memory_version,
+            retrieval_limit,
+        );
+    }
+
+    /// Insert results produced by a search with the given retrieval limit.
+    pub(crate) fn insert_with_limit(
+        &self,
+        query_embedding: Vec<f32>,
+        tenant_id: TenantId,
+        project_id: Option<String>,
+        results: Vec<CachedResult>,
+        memory_version: u64,
+        retrieval_limit: usize,
     ) {
         let cache_key = embedding_hash(&query_embedding, &tenant_id, project_id.as_deref());
         let now_ms = current_time_ms();
@@ -272,7 +319,13 @@ impl SemanticCache {
         };
 
         // Add to moka cache
-        self.entries.insert(cache_key.clone(), entry);
+        self.entries.insert(
+            cache_key.clone(),
+            CacheRecord {
+                entry,
+                retrieval_limit,
+            },
+        );
 
         // Add to query index
         let index_entry = QueryIndexEntry {
@@ -317,7 +370,7 @@ impl SemanticCache {
         for entry in query_index.iter() {
             if entry.tenant_id == *tenant_id {
                 if let Some(cached) = self.entries.get(&entry.cache_key) {
-                    if cached.memory_version < min_version {
+                    if cached.entry.memory_version < min_version {
                         keys_to_remove.push(entry.cache_key.clone());
                     }
                 }
@@ -342,6 +395,7 @@ impl SemanticCache {
         for entry in query_index.iter() {
             if let Some(cached) = self.entries.get(&entry.cache_key) {
                 let contains_chunk = cached
+                    .entry
                     .results
                     .iter()
                     .any(|r| chunk_ids.contains(&r.chunk_id));
@@ -369,7 +423,7 @@ impl SemanticCache {
 
         for entry in query_index.iter() {
             if let Some(cached) = self.entries.get(&entry.cache_key) {
-                total_confidence += cached.confidence;
+                total_confidence += cached.entry.confidence;
                 count += 1;
             }
         }
@@ -674,6 +728,44 @@ mod tests {
             (hit3.confidence - 0.8).abs() < 0.01,
             "Confidence should be 0.8 after third hit"
         );
+    }
+
+    #[test]
+    fn test_result_limit_controls_cache_acceptance() {
+        let cache = SemanticCache::new(SemanticCacheConfig::default());
+        let tenant = make_tenant("test_tenant");
+        let embedding = make_embedding(42);
+        let results = [make_chunk_id(), make_chunk_id()]
+            .iter()
+            .map(|chunk_id| CachedResult {
+                chunk_id: chunk_id.clone(),
+                score: 0.9,
+                text_preview: String::new(),
+            })
+            .collect();
+
+        cache.insert_with_limit(embedding.clone(), tenant.clone(), None, results, 1, 3);
+
+        let repeat = cache
+            .lookup_with_limit(&embedding, &tenant, None, 1, 3)
+            .unwrap();
+        assert_eq!(repeat.results.len(), 2);
+
+        let smaller = cache
+            .lookup_with_limit(&embedding, &tenant, None, 1, 2)
+            .unwrap();
+        assert_eq!(smaller.results.len(), 2);
+
+        let confidence_before_miss = cache.get_stats().avg_confidence;
+        assert!(cache
+            .lookup_with_limit(&embedding, &tenant, None, 1, 5)
+            .is_none());
+
+        let stats = cache.get_stats();
+        assert_eq!(stats.total_lookups, 3);
+        assert_eq!(stats.cache_hits, 2);
+        assert_eq!(stats.cache_misses, 1);
+        assert!((stats.avg_confidence - confidence_before_miss).abs() < f32::EPSILON);
     }
 
     #[test]
