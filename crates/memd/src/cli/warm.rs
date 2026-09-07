@@ -851,6 +851,10 @@ async fn execute_warm_wire_command<S: Store>(
     }
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "Keep both startup diagnostics inline; the sole caller immediately reports them."
+)]
 async fn ensure_warm_worker(
     config: &WarmProcessConfig,
 ) -> std::result::Result<(), (MemdError, MemdError)> {
