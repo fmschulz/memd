@@ -22,6 +22,27 @@ impl SqliteMetadataStore {
         let mut conn = self.pool.get();
         let tx = conn.transaction()?;
 
+        let existing_json = tx
+            .query_row(
+                "SELECT canonical_json FROM task_artifacts WHERE artifact_id = ?1",
+                [artifact.artifact_id.as_str()],
+                |row| row.get::<usize, String>(0),
+            )
+            .optional()?;
+        reject_experience_artifact_overwrite(existing_json, artifact)?;
+
+        if artifact.artifact_kind != ArtifactKind::Digest {
+            reject_cross_tenant_task_write(
+                tx.query_row(
+                    "SELECT tenant_id FROM tasks WHERE task_id = ?1",
+                    [artifact.task_id.as_str()],
+                    |row| row.get::<usize, String>(0),
+                )
+                .optional()?,
+                artifact,
+            )?;
+        }
+
         tx.execute(
             "INSERT OR REPLACE INTO task_artifacts (
                 artifact_id, tenant_id, project_id, task_id, parent_task_id,
@@ -368,6 +389,31 @@ impl SqliteMetadataStore {
         Ok(())
     }
 
+    /// Reject a different payload that would replace an experience artifact.
+    pub fn ensure_task_artifact_write_safe(&self, artifact: &TaskArtifact) -> Result<()> {
+        let conn = self.pool.get();
+        let existing_json = conn
+            .query_row(
+                "SELECT canonical_json FROM task_artifacts WHERE artifact_id = ?1",
+                [artifact.artifact_id.as_str()],
+                |row| row.get::<usize, String>(0),
+            )
+            .optional()?;
+        reject_experience_artifact_overwrite(existing_json, artifact)?;
+        if artifact.artifact_kind != ArtifactKind::Digest {
+            reject_cross_tenant_task_write(
+                conn.query_row(
+                    "SELECT tenant_id FROM tasks WHERE task_id = ?1",
+                    [artifact.task_id.as_str()],
+                    |row| row.get::<usize, String>(0),
+                )
+                .optional()?,
+                artifact,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Fetch the canonical task artifact envelope by ID.
     pub fn get_task_artifact(
         &self,
@@ -390,6 +436,21 @@ impl SqliteMetadataStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Fetch the canonical task artifact envelope by its global ID.
+    pub fn get_task_artifact_global(&self, artifact_id: &str) -> Result<Option<TaskArtifact>> {
+        let conn = self.pool.get();
+        let canonical_json = conn
+            .query_row(
+                "SELECT canonical_json FROM task_artifacts WHERE artifact_id = ?1",
+                [artifact_id],
+                |row| row.get::<usize, String>(0),
+            )
+            .optional()?;
+        canonical_json
+            .map(|json| serde_json::from_str(&json).map_err(Into::into))
+            .transpose()
     }
 
     /// List canonical task artifacts for one logical task ordered by creation time.
@@ -497,6 +558,39 @@ impl SqliteMetadataStore {
             tasks.push(row?);
         }
         Ok(tasks)
+    }
+
+    /// Fetch one logical task record by its global ID.
+    pub fn get_task_global(&self, task_id: &str) -> Result<Option<TaskRecord>> {
+        let conn = self.pool.get();
+        let result = conn.query_row(
+            "SELECT task_id, tenant_id, project_id, status, goal, scientific_question,
+                    hypothesis, last_artifact_id, started_at_ms, finished_at_ms, updated_at_ms
+             FROM tasks
+             WHERE task_id = ?1",
+            [task_id],
+            |row| {
+                Ok(TaskRecord {
+                    task_id: row.get(0)?,
+                    tenant_id: TenantId::new(row.get::<usize, String>(1)?)
+                        .map_err(|error| sql_decode_error(1, error))?,
+                    project_id: crate::types::ProjectId::from(row.get::<usize, Option<String>>(2)?),
+                    status: row.get(3)?,
+                    goal: row.get(4)?,
+                    scientific_question: row.get(5)?,
+                    hypothesis: row.get(6)?,
+                    last_artifact_id: row.get(7)?,
+                    started_at_ms: row.get(8)?,
+                    finished_at_ms: row.get(9)?,
+                    updated_at_ms: row.get(10)?,
+                })
+            },
+        );
+        match result {
+            Ok(task) => Ok(Some(task)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Resolve projection chunk IDs for exact task filters.
@@ -752,4 +846,40 @@ impl SqliteMetadataStore {
 
         Ok(resolved)
     }
+}
+
+fn reject_experience_artifact_overwrite(
+    existing_json: Option<String>,
+    incoming: &TaskArtifact,
+) -> Result<()> {
+    let Some(existing_json) = existing_json else {
+        return Ok(());
+    };
+    let existing: TaskArtifact = serde_json::from_str(&existing_json)?;
+    if existing == *incoming {
+        return Ok(());
+    }
+    if existing.experience.is_some() || incoming.experience.is_some() {
+        return Err(MemdError::ValidationError(format!(
+            "artifact_id collision for '{}': experience artifacts cannot be overwritten",
+            incoming.artifact_id
+        )));
+    }
+    Ok(())
+}
+
+fn reject_cross_tenant_task_write(
+    existing_tenant: Option<String>,
+    incoming: &TaskArtifact,
+) -> Result<()> {
+    if existing_tenant
+        .as_deref()
+        .is_some_and(|tenant| tenant != incoming.tenant_id.as_str())
+    {
+        return Err(MemdError::ValidationError(format!(
+            "task_id collision for '{}': existing tenant differs from '{}'",
+            incoming.task_id, incoming.tenant_id
+        )));
+    }
+    Ok(())
 }

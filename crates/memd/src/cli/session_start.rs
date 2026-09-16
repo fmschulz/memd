@@ -12,23 +12,42 @@
 //! dropping a `.memd-skip` file in the repo root.
 
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::args::ProjectScopeConfig;
+use super::args::{NativeHookHarness, ProjectScopeConfig};
 use super::consolidate::{dirty_region_size, run_consolidate, ConsolidateOptions, MIN_REGION};
 use super::memory_md::{read_project_scope, refresh_memory_md_with_health, MemoryMdOptions};
 use super::paths::absolutize_project_dir;
-use crate::error::Result;
+use super::provenance::capture_execution_context;
+use crate::error::{MemdError, Result};
 use crate::store::{Store, TenantManager};
+use crate::task_memory::ExecutionContext;
 use crate::types::{ProjectId, TenantId};
 
 /// Maximum length of an auto-derived `tenant_id` or `project_id`. Both
 /// are written into directory names downstream, so we keep them short.
 const MAX_AUTO_ID_LEN: usize = 64;
+const MAX_NATIVE_HOOK_BYTES: u64 = 64 * 1024;
+
+#[derive(Debug, Deserialize)]
+struct NativeHookPayload {
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    thread_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    parent_agent_id: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
 
 /// Options for the `session-start` subcommand.
 #[derive(Debug, Clone)]
@@ -96,8 +115,103 @@ impl AutoScopeInputs {
 pub(super) async fn run_session_start<S: Store>(
     store: &S,
     options: SessionStartOptions,
+    execution_context: Option<ExecutionContext>,
 ) -> Result<Value> {
-    run_session_start_inner(store, options, AutoScopeInputs::from_env()).await
+    let mut result = run_session_start_inner(store, options, AutoScopeInputs::from_env()).await?;
+    if let Some(execution_context) = execution_context {
+        let result_object = result.as_object_mut().ok_or_else(|| {
+            MemdError::ProtocolError("session-start result must be a JSON object".to_string())
+        })?;
+        result_object.insert(
+            "execution_context".to_string(),
+            serde_json::to_value(execution_context)?,
+        );
+    }
+    Ok(result)
+}
+
+pub(super) fn read_native_hook_context(
+    harness: NativeHookHarness,
+    project_dir: &Path,
+) -> Result<ExecutionContext> {
+    let stdin = std::io::stdin();
+    parse_native_hook_context(harness, stdin.lock(), project_dir)
+}
+
+pub(super) fn native_hook_project_dir(requested: &Path, context: &ExecutionContext) -> PathBuf {
+    if requested != Path::new(".") {
+        return requested.to_path_buf();
+    }
+    context
+        .cwd
+        .as_deref()
+        .filter(|cwd| !cwd.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| requested.to_path_buf())
+}
+
+fn parse_native_hook_context(
+    harness: NativeHookHarness,
+    reader: impl Read,
+    project_dir: &Path,
+) -> Result<ExecutionContext> {
+    let payload = read_bounded_hook_payload(reader)?;
+    let payload: NativeHookPayload = serde_json::from_slice(&payload)?;
+    let cwd = nonempty(payload.cwd)
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                project_dir.join(path)
+            }
+        })
+        .unwrap_or_else(|| project_dir.to_path_buf());
+    let mut context = capture_execution_context(&cwd);
+    let harness_name = match harness {
+        NativeHookHarness::Claude => "claude",
+        NativeHookHarness::Codex => "codex",
+    };
+    if context.harness.as_deref() != Some(harness_name) {
+        context.native_session_id = None;
+        context.native_thread_id = None;
+    }
+    context.harness = Some(harness_name.to_string());
+    if let Some(model) = nonempty(payload.model) {
+        context.model = Some(model);
+    }
+    if let Some(agent_id) = nonempty(payload.agent_id) {
+        context.native_agent_id = Some(agent_id);
+    }
+    if let Some(parent_id) = nonempty(payload.parent_agent_id) {
+        context.native_parent_id = Some(parent_id);
+    }
+    if let Some(session_id) = nonempty(payload.session_id) {
+        context.native_session_id = Some(session_id);
+    }
+    if let Some(thread_id) = nonempty(payload.thread_id) {
+        context.native_thread_id = Some(thread_id);
+    }
+    Ok(context)
+}
+
+fn read_bounded_hook_payload(reader: impl Read) -> Result<Vec<u8>> {
+    let mut payload = Vec::new();
+    reader
+        .take(MAX_NATIVE_HOOK_BYTES + 1)
+        .read_to_end(&mut payload)?;
+    if payload.len() as u64 > MAX_NATIVE_HOOK_BYTES {
+        return Err(MemdError::ValidationError(format!(
+            "native hook payload exceeds {MAX_NATIVE_HOOK_BYTES} bytes"
+        )));
+    }
+    Ok(payload)
+}
+
+fn nonempty(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 pub(super) async fn run_session_start_inner<S: Store>(
@@ -498,6 +612,63 @@ mod tests {
             default_tenant: tenant.to_string(),
             enabled: true,
         }
+    }
+
+    #[test]
+    fn native_hook_payload_keeps_only_allowlisted_context() {
+        let dir = tempdir().unwrap();
+        let payload = json!({
+            "session_id": "claude-session",
+            "thread_id": "claude-thread",
+            "agent_id": "worker-2",
+            "parent_agent_id": "lead-1",
+            "model": "claude-fable-5",
+            "cwd": dir.path(),
+            "prompt": "do not retain this prompt",
+            "transcript_path": "/private/native-transcript.jsonl",
+            "tool_input": {"secret": "do not retain this tool input"}
+        });
+
+        let context = parse_native_hook_context(
+            NativeHookHarness::Claude,
+            std::io::Cursor::new(serde_json::to_vec(&payload).unwrap()),
+            Path::new("/unused"),
+        )
+        .unwrap();
+        let serialized = serde_json::to_string(&context).unwrap();
+
+        assert_eq!(context.harness.as_deref(), Some("claude"));
+        assert_eq!(context.native_session_id.as_deref(), Some("claude-session"));
+        assert_eq!(context.native_thread_id.as_deref(), Some("claude-thread"));
+        assert_eq!(context.native_agent_id.as_deref(), Some("worker-2"));
+        assert_eq!(context.native_parent_id.as_deref(), Some("lead-1"));
+        assert_eq!(context.model.as_deref(), Some("claude-fable-5"));
+        assert_eq!(context.cwd.as_deref(), dir.path().to_str());
+        assert_eq!(
+            native_hook_project_dir(Path::new("."), &context),
+            dir.path()
+        );
+        assert_eq!(
+            native_hook_project_dir(Path::new("/explicit/project"), &context),
+            Path::new("/explicit/project")
+        );
+        assert!(!serialized.contains("prompt"));
+        assert!(!serialized.contains("transcript"));
+        assert!(!serialized.contains("tool_input"));
+        assert!(!serialized.contains("do not retain"));
+    }
+
+    #[test]
+    fn native_hook_payload_is_bounded() {
+        let payload = vec![b' '; MAX_NATIVE_HOOK_BYTES as usize + 1];
+        let error = parse_native_hook_context(
+            NativeHookHarness::Codex,
+            std::io::Cursor::new(payload),
+            Path::new("."),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("exceeds 65536 bytes"));
     }
 
     #[tokio::test]

@@ -16,14 +16,22 @@ The installer provides the skill, upserts CLI guardrail blocks into
 1. Read the generated `memory.md` if present.
 2. Search for a specific environment failure, cross-machine fact, or conflict
    with an earlier observation.
-3. Store only facts that readable repository files cannot answer. Keep project
-   plans, commands, corrections, and handoffs in the repository.
+3. Store operational facts that readable repository files cannot answer, or
+   concise reusable experience cases linked to repository evidence. Keep full
+   plans, commands, logs, corrections, and handoffs in the repository.
 4. Verify retrieved facts against current evidence and attribute only memories
    that affected an independently verified task outcome.
 5. Keep secrets and sensitive log values out of memory.
 
 No memory call is required for routine work. A retrieval hit shows that a
 record was found; it does not show that the record saved work.
+
+For a failure that may recur, the [experience workflow](experience-how-to.md)
+records the problem, attempts, explicit checks, and a conditional lesson.
+Search and structured writes capture available caller provenance before warm
+dispatch. A passive reuse observation receives no success credit. The
+experience commands require a source build from `main`; published 1.7.1
+binaries do not include them.
 
 The installer does not register external client tools or wrap commands.
 The write-quality rules are documented in the

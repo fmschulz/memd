@@ -39,6 +39,8 @@ pub(super) async fn cli_search_payload<S: Store>(
     no_text: bool,
     include_artifact: bool,
     include_superseded: bool,
+    task_id: Option<String>,
+    thread_id: Option<String>,
 ) -> Result<Value> {
     cli_search_payload_inner(
         store,
@@ -53,6 +55,8 @@ pub(super) async fn cli_search_payload<S: Store>(
         no_text,
         include_artifact,
         include_superseded,
+        task_id,
+        thread_id,
         true,
         false,
     )
@@ -90,6 +94,8 @@ pub(super) async fn cli_search_payload_silent<S: Store>(
         no_text,
         include_artifact,
         include_superseded,
+        None,
+        None,
         false,
         true,
     )
@@ -110,6 +116,8 @@ async fn cli_search_payload_inner<S: Store>(
     no_text: bool,
     include_artifact: bool,
     include_superseded: bool,
+    task_id: Option<String>,
+    thread_id: Option<String>,
     log_hits: bool,
     suppress_usage_event: bool,
 ) -> Result<Value> {
@@ -126,6 +134,8 @@ async fn cli_search_payload_inner<S: Store>(
         no_text,
         include_artifact,
         include_superseded,
+        task_id.as_deref(),
+        thread_id.as_deref(),
         RankingPolicyMode::Shadow,
         suppress_usage_event,
     )
@@ -598,6 +608,8 @@ pub(super) async fn cli_agent_context_payload<S: Store>(
             no_text,
             include_artifact,
             false,
+            task_id,
+            thread_id,
             RankingPolicyMode::Off,
             true,
         )
@@ -778,6 +790,8 @@ pub(super) async fn direct_memory_search_payload<S: Store>(
     no_text: bool,
     include_artifact: bool,
     include_superseded: bool,
+    task_id: Option<&str>,
+    thread_id: Option<&str>,
     ranking_policy: RankingPolicyMode,
     suppress_usage_event: bool,
 ) -> Result<Value> {
@@ -793,6 +807,8 @@ pub(super) async fn direct_memory_search_payload<S: Store>(
         include_text: no_text.then_some(false),
         include_artifact: include_artifact.then_some(true),
         include_superseded: include_superseded.then_some(true),
+        task_id: task_id.map(str::to_string),
+        thread_id: thread_id.map(str::to_string),
         ranking_policy: Some(ranking_policy),
         suppress_usage_event,
         suppress_retrieval_episode: suppress_usage_event,

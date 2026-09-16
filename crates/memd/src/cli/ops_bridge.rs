@@ -216,6 +216,11 @@ pub(super) async fn cli_call_tool<S: Store>(
     tool: &str,
     arguments: Value,
 ) -> std::result::Result<Value, McpError> {
+    if tool.starts_with("experience.") {
+        return super::experience::call(store, tool, arguments)
+            .await
+            .map_err(|error| McpError::ToolError(error.to_string()));
+    }
     let metrics = MetricsCollector::default();
     let mut structural_runtime: Option<CliStructuralRuntime> = None;
 

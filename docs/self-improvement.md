@@ -4,6 +4,14 @@
 through five cooperating mechanisms. Each is independent and can be inspected
 in isolation.
 
+[Experience memory](experience-memory.md) adds a structured account of
+problems, attempts, checks, and applicable lessons. Its passing receipts record
+process results and source coverage; they do not by themselves measure whether
+memory improved a later task. The passive outcome scanner emits
+`observed_used`, which is excluded from ranking credit. Recognizable legacy
+scanner acceptances are also excluded from outcome priors while remaining in
+the historical ledger.
+
 ## 1. Heuristic priority at write time
 
 All public write paths pass through the same preparation service. It

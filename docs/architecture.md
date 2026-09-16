@@ -4,6 +4,13 @@
 shared operation surface used by the direct CLI commands, `memd call`, and the
 warm/batch execution modes.
 
+Experience cases use the same canonical task-artifact store. The CLI captures
+execution context before warm dispatch, so records identify the requesting
+session. Explicit checks run in that CLI process; the worker receives only
+their receipts. Lesson recall reads canonical cases and applies exact
+environment conditions and lexical symptom matching. It is separate from
+hybrid chunk ranking. See [Experience memory](experience-memory.md).
+
 ![memd architecture — clients, CLI surface, hybrid retrieval, persistent store, on-disk layout](figures/architecture.svg)
 
 The figure shows five layers: clients (same machine), the CLI surface plus the

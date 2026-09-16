@@ -9,6 +9,7 @@ pub mod consolidate;
 pub mod dedup;
 pub mod embeddings;
 pub mod error;
+pub mod experience;
 pub mod hit_stats;
 pub mod index;
 pub mod logging;
@@ -37,6 +38,15 @@ pub use compaction::{
 pub use config::{load_config, Config, ServerConfig};
 pub use embeddings::{CandleEmbedder, Embedder, EmbeddingConfig, EmbeddingResult, MockEmbedder};
 pub use error::{MemdError, Result};
+pub use experience::{
+    export_bundle as export_experience_bundle, get as get_experience,
+    import_bundle as import_experience_bundle, record as record_experience, record_check,
+    resolve_case as resolve_experience_case, retrieve_lessons, validate_check_target,
+    ApplicableLesson, CheckReceipt, CheckTarget, ConditionalLesson, ExperienceBundleV1,
+    ExperienceCase, ExperienceContext, ExperienceEvent, ExperienceResolutionState, ImportReport,
+    LessonApplicability, LessonQuery, LessonRecall, LessonVisibility, RecallAbstention,
+    RecordEvent, SourceFingerprint, SourceFingerprintCoverage,
+};
 pub use index::{HnswConfig, HnswIndex, SearchResult};
 pub use logging::init_logging;
 pub use metrics::{
@@ -63,9 +73,9 @@ pub use task_memory::{
     derive_artifact_trust_tier, derive_chunk_promotion_state, derive_chunk_trust_tier,
     infer_decision_items, infer_evidence_items, infer_failure_items, infer_highlight_items,
     ArtifactKind, ContributorRef, DatasetRef, DecisionViewItem, EntityRef, EvidenceViewItem,
-    FailureViewItem, HighlightViewItem, ProjectBriefView, ProjectionKind, RunDigestItem,
-    TaskArtifact, TaskArtifactWriteResult, TaskProjection, TaskProvenance, TaskRecord,
-    TaskResumeView, TaskSearchFilters, TrustTier, DIGEST_ROLE_DECISION_LIBRARY,
+    ExecutionContext, FailureViewItem, HighlightViewItem, ProjectBriefView, ProjectionKind,
+    RunDigestItem, TaskArtifact, TaskArtifactWriteResult, TaskProjection, TaskProvenance,
+    TaskRecord, TaskResumeView, TaskSearchFilters, TrustTier, DIGEST_ROLE_DECISION_LIBRARY,
     DIGEST_ROLE_EVIDENCE_LIBRARY, DIGEST_ROLE_FAILURE_LIBRARY, DIGEST_ROLE_HIGHLIGHT_LIBRARY,
     DIGEST_ROLE_PROJECT_BRIEF, DIGEST_ROLE_TASK_RESUME,
 };

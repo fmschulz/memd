@@ -80,7 +80,65 @@ list of every physical chunk created by document splitting.
   `--min-duplicate-reuse-rate`, `--max-total-chunks`, `--max-disk-bytes`, and
   `--require-retention-compaction`.
 
-### Consolidation review
+## Experience
+
+The `experience` commands require a source build from `main`; published 1.7.1
+binaries do not include them. Shared options are `--tenant-id`, `--project-id`,
+`--output PATH`, and `--warm auto|off|required`. Scope follows the normal
+project configuration rules. See the [worked procedure](experience-how-to.md).
+
+| Command | Input and behavior |
+| --- | --- |
+| `experience record --json JSON` | Accepts `event`, optional `observed_at_ms`, and optional `provenance` with evidence fields such as `path`, `uri`, `repo`, and `commit`. `--input FILE` reads the same object from a file. |
+| `experience get PROBLEM_ID` | Returns the problem, events, current lessons, conflicts, and `resolution_state`. |
+| `experience check ATTEMPT_ID -- PROGRAM ARGS` | Runs the explicit program locally and records a receipt for that attempt. Repeated `--evidence PATH` selects source files. `--timeout-seconds` defaults to 60 and accepts 1–3600. |
+| `experience find QUERY` | Returns applicable current lessons or abstains. Options: `--machine`, `--tool`, `--version`, `--include-shared`, and `--limit` (default 5). |
+| `experience export PROBLEM_ID...` | Writes a `memd-experience` version 1 JSON bundle to stdout. |
+| `experience import FILE` | Validates and imports a bundle; returns inserted and replayed artifact IDs. Exact replay inserts nothing. |
+
+Record event fields:
+
+| `event.kind` | Fields |
+| --- | --- |
+| `problem` | `description`, `symptom_terms` |
+| `attempt` | `problem_id`, `action`, optional `previous_attempt_id`; the preceding attempt is required after the first attempt |
+| `lesson` | `problem_id`, `supporting_check_id`, `guidance`, `symptom_terms`, `applicability`, optional `visibility` and `conflicts_with` |
+| `correction` | `problem_id`, `supersedes_id`, `replacement` (the lesson fields above) |
+
+`applicability` contains optional exact-match `machine`, `tool`, and `version`
+strings. `visibility` defaults to `project`; `shared` also permits recall by
+other projects in the same tenant when they request `--include-shared`.
+
+Check statuses are `passed`, `failed`, `timed_out`, and `source_unverified`.
+The last means the program succeeded but source fingerprints were missing or
+changed. Only `passed` supports a lesson. A successful memd exit means that
+the receipt was stored; inspect `status` to determine the verifier's result.
+Interrupted checks return an error when no complete receipt is available.
+
+The corresponding structured operations are `experience.record`,
+`experience.record_check`, `experience.get`, `experience.find`,
+`experience.export`, and `experience.import`. They accept tenant/project scope
+in their arguments. `experience.record_check` accepts a caller-reported receipt
+and does not execute a command. The CLI `experience check` is the execution
+entry point. See [Trust boundary](trust-boundary.md#experience-checks).
+
+### Caller execution context
+
+Search and structured-operation requests capture available execution context
+before warm routing. The allowlisted fields include native session and thread
+IDs, harness, reported model, host, directory, and Git state.
+Absent model or identity values remain absent. Explicit semantic task IDs
+remain separate from native conversation IDs.
+
+`session-start --native-hook codex|claude` accepts a bounded JSON hook payload
+on stdin and returns its allowlisted execution context, including agent and
+parent IDs when present. These hook-only IDs are not automatically attached
+to later CLI writes. The adapter does not ingest
+the transcript or create a machine-global current-session identity file.
+Native hook configuration and trust are managed by the harness; the adapter's
+presence does not establish that a hook is installed or active.
+
+## Consolidation review
 
 The default command creates a hidden, validated proposal and returns its
 `run_id`, candidate IDs, consolidator command, model, and version:
@@ -174,7 +232,8 @@ Artifact collaboration uses four specialized tools with tight schemas:
 - `artifact.decision` — choose between alternatives with `why_chosen`.
 - `artifact.verification` — distinct-writer countersignature; with a different
   `agent_id` than the parent's and `supports_claim = true` it promotes the
-  underlying claim to `VerifiedRecord` trust.
+  underlying claim to `VerifiedRecord` trust. The IDs are caller supplied;
+  this records claimed review independence, not authenticated identity.
 
 Inspection and retrieval:
 

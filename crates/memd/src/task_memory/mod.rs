@@ -231,6 +231,45 @@ pub struct ContributorRef {
     pub contribution: Option<String>,
 }
 
+/// Execution context observed by the client that invoked memd.
+///
+/// These values are process- or hook-observed and may be self-reported by the
+/// calling harness. They record reproducibility context, not authenticated
+/// identity. Unknown values remain absent rather than being inferred from
+/// model configuration or native transcripts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionContext {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub harness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub native_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub native_thread_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub native_agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub native_parent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub origin_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub repo_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub repo_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub repo_dirty: Option<bool>,
+    /// Optional SHA-256 of HEAD plus the staged and unstaged tracked diff.
+    ///
+    /// Normal CLI capture leaves this absent. Explicit check execution may
+    /// populate it; untracked evidence needs its own file hash.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub repo_tracked_diff_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cwd: Option<String>,
+    pub observed_at_ms: i64,
+}
+
 /// Optional provenance for a canonical task artifact.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskProvenance {
@@ -248,6 +287,8 @@ pub struct TaskProvenance {
     pub tool_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub execution: Option<ExecutionContext>,
 }
 
 impl From<&TaskProvenance> for Source {
@@ -374,6 +415,9 @@ pub struct TaskArtifact {
     pub digest_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub source_updated_at_ms: Option<i64>,
+    /// Optional typed problem-solving experience carried by this artifact.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub experience: Option<crate::experience::ExperienceEvent>,
     #[serde(default, skip_serializing_if = "TaskProvenance::is_empty")]
     pub provenance: TaskProvenance,
     pub timestamp_created: i64,
@@ -449,6 +493,7 @@ impl TaskArtifact {
             promotion_state: PromotionState::Raw,
             digest_key: None,
             source_updated_at_ms: None,
+            experience: None,
             provenance: TaskProvenance::default(),
             timestamp_created: now_ms,
             timestamp_observed: None,

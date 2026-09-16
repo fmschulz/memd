@@ -161,15 +161,17 @@ if [[ "$INSTALL_BINARY" -eq 1 ]]; then
 fi
 
 read -r -d '' ENFORCEMENT_SNIPPET <<'EOF' || true
-`memd` is a local CLI memory store. One test decides whether it is the right home for a fact: **could any file in a repo I can read answer this?** If yes, that file is the home — `tasks/todo.md`, `tasks/METHODS.md`, `tasks/lessons.md`, `docs/handoffs/`, git. If no, it is a cross-repo or cross-machine operational fact, and that is what memd is for: machines, accounts, schedulers, mounts, deploys, tunnels, and the state of other repos.
+`memd` is a local CLI memory store. Repository files remain authoritative for source, plans, progress, exact commands, full logs, corrections, and handoffs. Use memd for concise cross-machine or cross-repo operational facts that no readable repository file can answer. Use it for a concise case of a nontrivial failure, attempted repair, and check result. The case links to the repository evidence and does not replace or copy it.
 
 - Session start: read project-root `memory.md` if present. It is a generated file, so reading it costs nothing and needs no CLI call.
-- Search (`memd search "<query>"`) on an observable event, not a feeling: a command fails for an environment, account, scheduler, mount, or permission reason; you need another machine's or repo's state; or a number contradicts one recorded earlier.
-- Write (`memd add`) only when the fact you just learned has no repo file to live in. If it belongs in todo/METHODS/lessons/a handoff, put it there instead.
+- Search raw memory (`memd search "<query>"`) on an observable event: an environment, account, scheduler, mount, or permission failure; a need for another machine's or repo's state; or a contradiction with a recorded number.
+- Before applying an experience lesson, use `memd experience find` with the target machine, tool, and version, then use `memd experience get` to inspect the complete case and its conditions.
+- Write raw memory (`memd add`) only when the fact has no repository home. Record experience problems, attempts, and checks as observed. Add a conditional lesson only after a client-executed, source-stable check passes. Do not force a memd write for every task.
+- `observed_used` records reuse only. It never means success and gives no ranking credit.
 - No memd call is required to answer. A search returning nothing relevant is a normal result, not a blocker; memd being unavailable is worth one sentence, not a stop.
-- Never store secrets, credentials, PII, or sensitive log values.
+- Never store secrets, credentials, PII, prompts, transcripts, native tool-input dumps, full logs, or sensitive log values. Check receipts retain argv and evidence paths, so keep secrets out of both. Provenance is observed or self-reported, not authenticated identity. Leave unknown identity and model fields absent.
 
-Command syntax, tags, and write-quality rules live in the memd skill — load it when you actually touch memd.
+Command syntax, tags, and write-quality rules live in the memd skill. Load it when you use memd.
 EOF
 
 upsert_block \

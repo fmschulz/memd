@@ -78,8 +78,10 @@ exclude_docs: |
 nav:
   - Home: index.md
   - Quick start: quickstart.md
+  - Record a checked repair: experience-how-to.md
   - Concepts:
       - Architecture: architecture.md
+      - Experience memory: experience-memory.md
       - Comparison: comparison.md
       - Trust boundary: trust-boundary.md
       - Data layout: data-layout.md

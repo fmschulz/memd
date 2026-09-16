@@ -7,13 +7,17 @@
 `memd` is a local memory CLI for coding agents and AI scientists. Each trusted
 machine gets one shared, persistent store: raw searchable content, structured
 task history, and canonical collaboration artifacts. A hybrid dense + sparse
-stack indexes it; an explicit trust boundary decides what counts as verified.
+stack indexes it. Experience cases connect problems, attempts, check receipts,
+and conditional lessons, with the calling session's provenance.
 
 Agents retrieve bounded context with `memd agent-context` or `memd search`,
 read the generated context file, and record operational facts with `memd add`.
 Keep project plans, test results, and handoffs in repository files. Use memd
 for facts those files cannot answer, such as another machine's mounts or
 deployment state.
+Concise experience cases can also preserve reusable repairs, linked to the
+repository evidence. These commands require a source build from `main`;
+published 1.7.1 binaries do not include them.
 For low-latency local use, `memd` keeps the store and indexes hot through a
 private CLI-managed warm worker driven by ordinary CLI commands.
 
@@ -23,7 +27,8 @@ private CLI-managed warm worker driven by ordinary CLI commands.
 
 | Surface | Purpose | Primary CLI commands |
 | --- | --- | --- |
-| **Raw memory** | Store and search chunks: code, docs, notes, traces, decisions | `memd add`, `memd search`, `memd get`, `memd stats` |
+| **Raw memory** | Store operational facts and index selected source material for retrieval | `memd add`, `memd search`, `memd get`, `memd stats` |
+| **Experience cases** | Preserve attempts and checks; return applicable current lessons or an explicit abstention | `memd experience record`, `check`, `get`, `find`, `export`, `import` |
 | **Agent context** | Bounded pre-work context + JSON audit logs | `memd agent-context --output .memd/context.md` |
 | **Startup memory** | Refresh project `memory.md` with scope, health warnings, and ranked facts filtered against repository documents | `memd memory-md`, `memd eval-memory-md --agent-usefulness` |
 | **Usefulness report** | Usage-ledger and store self-diagnosis for growth, learning, retrieval, and warnings | `memd report --strict` |
@@ -60,6 +65,8 @@ for the contract.
 
 ## Start here
 
+- [Record a checked repair](experience-how-to.md): a runnable case with failure, repair, recall, and transfer.
+- [Experience memory](experience-memory.md): provenance, check coverage, applicability, and trust limits.
 - [**Quick start**](quickstart.md) — install, store first memory, retrieve, build agent context.
 - [**Operational contract**](operational-contract.md) — what agents should write, avoid, verify, and clean up.
 - [**Architecture**](architecture.md) — hybrid retrieval, storage, trust boundary diagram.

@@ -1,26 +1,27 @@
 # memd Skill
 
 This skill teaches agents to use `memd` through the CLI as a shared local
-knowledge base.
+memory store. Repository files remain authoritative for source, task state,
+commands, logs, corrections, and handoffs.
 
-It covers:
+The skill covers:
 
 - when to retrieve with `memd agent-context`
 - when to search with `memd search`
 - when to refresh project-root `memory.md` with `memd memory-md`
 - when to write with `memd add`
+- when to record a checked problem-attempt-lesson case with `memd experience`
 - when to keep retrieval hot with `memd warm start` and `--warm required`
 - when to amortize scripted operations with `memd batch --jsonl`
-- how to record progress, runs, evidence, decisions, and outcomes as durable
-  CLI memories
+- how to link concise reusable cases to evidence stored in repository files
 - how multiple agents share the same tenant and project scope
 - how to install CLI-first enforcement into `~/.codex/AGENTS.md` and
   `~/.claude/CLAUDE.md`
 - how to require a CLI memory check before agents say work is impossible or
   blocked
 
-The `memd` binary is installed from prebuilt releases (static musl on Linux) —
-see [INSTALL.md](INSTALL.md).
+The prebuilt `1.7.1` release supports raw memory. Build the current memd `main`
+branch to use `memd experience`. See [INSTALL.md](INSTALL.md).
 
 Start with:
 

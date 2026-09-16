@@ -1,6 +1,11 @@
 # memd Example Index
 
-These examples use the skill + CLI workflow.
+These optional examples document the low-level storage and indexing commands.
+For routine repository work, keep source, progress, exact commands, full logs,
+corrections, and handoffs in repository files. Use raw memory only for an
+operational fact that no readable repository can answer. Use an
+[experience case](../references/experience.md) for a concise lesson drawn from
+a failed approach and checked repair. Link the case to repository evidence.
 
 ## Task Lifecycle Across Sessions
 

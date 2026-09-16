@@ -16,7 +16,7 @@ use super::{
     OutcomePrior, RetrievalEpisode, RetrievalEpisodeId, RetrievalEpisodeItem, Store, StoreStats,
 };
 use crate::compaction::CompactionResult;
-use crate::error::Result;
+use crate::error::{MemdError, Result};
 use crate::task_memory::{
     ArtifactKind, TaskArtifact, TaskArtifactWriteResult, TaskProjection, TaskRecord,
     TaskSearchFilters,
@@ -151,6 +151,7 @@ impl Store for MemoryStore {
         artifact: TaskArtifact,
         projections: Vec<TaskProjection>,
     ) -> Result<TaskArtifactWriteResult> {
+        validate_task_artifact_write(&self.task_artifacts.read().unwrap(), &artifact)?;
         let projection_chunk_ids = self
             .add_batch(
                 projections
@@ -172,6 +173,7 @@ impl Store for MemoryStore {
             .collect::<Vec<_>>();
 
         let mut task_store = self.task_artifacts.write().unwrap();
+        validate_task_artifact_write(&task_store, &artifact)?;
         task_store
             .entry(tenant.clone())
             .or_default()
@@ -208,6 +210,20 @@ impl Store for MemoryStore {
             .get(tenant_id.as_str())
             .and_then(|artifacts| artifacts.get(artifact_id))
             .cloned())
+    }
+
+    async fn get_task_artifact_global(&self, artifact_id: &str) -> Result<Option<TaskArtifact>> {
+        let task_store = self.task_artifacts.read().unwrap();
+        let mut matches = task_store
+            .values()
+            .filter_map(|artifacts| artifacts.get(artifact_id));
+        let artifact = matches.next().cloned();
+        if matches.next().is_some() {
+            return Err(crate::error::MemdError::StorageError(format!(
+                "artifact_id '{artifact_id}' is duplicated across tenants"
+            )));
+        }
+        Ok(artifact)
     }
 
     async fn list_task_artifacts(
@@ -330,6 +346,35 @@ impl Store for MemoryStore {
         tasks.sort_by_key(|task| std::cmp::Reverse(task.updated_at_ms));
         tasks.truncate(limit);
         Ok(tasks)
+    }
+
+    async fn get_task_global(&self, task_id: &str) -> Result<Option<TaskRecord>> {
+        let tenants = {
+            let task_store = self.task_artifacts.read().unwrap();
+            task_store
+                .iter()
+                .filter(|(_, artifacts)| {
+                    artifacts
+                        .values()
+                        .any(|artifact| artifact.task_id == task_id)
+                })
+                .map(|(tenant, _)| tenant.clone())
+                .collect::<Vec<_>>()
+        };
+        if tenants.len() > 1 {
+            return Err(crate::error::MemdError::StorageError(format!(
+                "task_id '{task_id}' is duplicated across tenants"
+            )));
+        }
+        let Some(tenant) = tenants.first() else {
+            return Ok(None);
+        };
+        let tenant = TenantId::new(tenant.clone())?;
+        Ok(self
+            .list_tasks(&tenant, None, usize::MAX)
+            .await?
+            .into_iter()
+            .find(|task| task.task_id == task_id))
     }
 
     async fn list_tenants(&self) -> Result<Vec<TenantId>> {
@@ -593,7 +638,7 @@ impl Store for MemoryStore {
             events.sort_by_key(|event| std::cmp::Reverse(event.timestamp_ms));
             for event in events
                 .into_iter()
-                .filter(|event| event.ranking_eligible && event.timestamp_ms <= now_ms)
+                .filter(|event| event.contributes_to_ranking() && event.timestamp_ms <= now_ms)
             {
                 let (positive, attributed) = if event.outcome.credits_used() {
                     (true, &event.used_chunk_ids)
@@ -866,6 +911,37 @@ impl Store for MemoryStore {
     fn run_compaction_if_needed(&self, _tenant_id: &TenantId) -> Result<Option<CompactionResult>> {
         Ok(None)
     }
+}
+
+fn validate_task_artifact_write(
+    task_store: &HashMap<String, HashMap<String, TaskArtifact>>,
+    incoming: &TaskArtifact,
+) -> Result<()> {
+    for artifacts in task_store.values() {
+        if let Some(existing) = artifacts.get(&incoming.artifact_id) {
+            if existing != incoming
+                && (existing.experience.is_some() || incoming.experience.is_some())
+            {
+                return Err(MemdError::ValidationError(format!(
+                    "artifact_id collision for '{}': experience artifacts cannot be overwritten",
+                    incoming.artifact_id
+                )));
+            }
+        }
+        if incoming.artifact_kind != ArtifactKind::Digest
+            && artifacts.values().any(|artifact| {
+                artifact.artifact_kind != ArtifactKind::Digest
+                    && artifact.task_id == incoming.task_id
+                    && artifact.tenant_id != incoming.tenant_id
+            })
+        {
+            return Err(MemdError::ValidationError(format!(
+                "task_id collision for '{}': existing tenant differs from '{}'",
+                incoming.task_id, incoming.tenant_id
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn current_time_ms() -> i64 {

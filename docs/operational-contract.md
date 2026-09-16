@@ -1,9 +1,9 @@
 # Operational contract
 
-This contract keeps `memd` useful without turning it into a transcript dump.
-Agents should retrieve bounded context before substantive work, write only
-durable facts after meaningful progress, and inspect quality with the same CLI
-that stores the memory.
+Use `memd` for operational facts that readable repository files cannot answer,
+and for concise reusable experience cases linked to repository evidence.
+Search when a failure, missing context, or conflicting observation gives a
+specific question. Routine work requires no memory call.
 
 ## Scope first
 
@@ -60,71 +60,29 @@ Full topology: [Shared topology](shared-topology.md).
 
 ## Write budget
 
-A typical single task should leave fewer than 10 durable chunks. Prefer 1 to 4
-records:
-
-- one decision, if a design or operational choice was made
-- one evidence/run record, if commands, parameters, metrics, or failures matter
-- one finish summary, if the result should be reusable later
-- one durable follow-up, only when the next session would otherwise lose it
+Keep full plans, progress, exact commands, logs, and handoffs in repository
+files. A raw memory should state a useful operational fact unavailable there.
+A reusable experience case records its problem, meaningful attempts, checks,
+and any supported lesson. There is no target number of writes per task.
 
 Do not write every tool call. Do not store chat history, play-by-play progress,
 large logs, secrets, credentials, private account data, or guessed conclusions.
-Concrete `kind:progress` summaries without explicit priority or durable
-category tags are retained as short-lived reviewable context rather than
-permanent memory. Add explicit priority only when the progress record is a
-durable lesson that should remain a candidate for future startup context.
+Existing raw `kind:progress` records have retention rules, but repository
+working notes are the preferred place for new progress reports.
 
 ## Durable writes
 
-Durable records should contain at least one of these signals:
-
-- decision plus rationale
-- validated fix or result
-- root cause of a failure
-- command, path, parameter, metric, or version needed to reproduce work
-- evidence that supports or contradicts a claim
-- durable follow-up with enough context to resume safely
-
-Examples:
-
-```bash
-memd add \
-  --tenant-id "$TENANT_ID" \
-  --project-id "$PROJECT_ID" \
-  --chunk-type decision \
-  --tags kind:decision,task:"$TASK_ID",priority:8 \
-  --text "Decision: use tenant/project-scoped retrieval. Rationale: global summaries hid project-specific failures. Agent action: Verify tenant_id and project_id before reusing retrieval results."
-```
-
-```bash
-memd add \
-  --tenant-id "$TENANT_ID" \
-  --project-id "$PROJECT_ID" \
-  --chunk-type trace \
-  --tags kind:run,task:"$TASK_ID",tool:cargo-test,status:passed \
-  --text "cargo test -p memd passed after adding write-admission coverage; 831 passed, 4 ignored."
-```
-
-```bash
-memd add \
-  --tenant-id "$TENANT_ID" \
-  --project-id "$PROJECT_ID" \
-  --chunk-type summary \
-  --tags kind:finish,task:"$TASK_ID",priority:8 \
-  --text "Implemented memory-md candidate explanations. Validation: live explain report filtered generated wrappers and cargo test -p memd passed. Agent action: Run eval-memory-md before claiming startup memory quality is fixed."
-```
+Record the observed fact and the conditions that bound it. Distinguish a
+reported result from a check performed in the current session. Preserve
+provenance and point to the source evidence. Use
+[Record a checked repair](experience-how-to.md) for the problem, attempt,
+check, and lesson commands.
 
 Use `priority:8` or `priority:9` only for lessons that should plausibly appear
 in future `memory.md` refreshes. Lower-priority routine records remain
-searchable without dominating startup context.
-
-Routine `kind:progress` summaries without explicit priority, evidence,
-decision, finish, consolidated, or `retention:durable` tags receive a 14-day
-retention window by default. Use them for active handoff context, not permanent
-project knowledge. If the result should survive cleanup, tag it as
-`kind:evidence`, `kind:decision`, `kind:finish`, or add an explicit
-`priority:N`/`retention:durable` tag.
+searchable without dominating startup context. Priority is a retrieval hint,
+not proof that the record is correct. Passive `observed_used` events receive
+no success credit.
 
 ## Low-value writes
 
@@ -138,7 +96,7 @@ These should be rejected, downgraded, or avoided:
 - broad claims without validation or uncertainty
 - routine progress summaries that should have been a short-lived handoff note
 
-If an intermediate note is needed for handoff, make it concrete: name the file,
+Write intermediate handoff notes in the repository. Name the relevant file,
 command, error, partial conclusion, and next check.
 
 High-priority durable records with `priority:8+` or `importance:8+` must

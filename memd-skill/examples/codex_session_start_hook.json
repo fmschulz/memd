@@ -1,12 +1,12 @@
 {
-  "_comment": "memd SessionStart hook for Codex CLI. Copy this into your project's .codex/hooks.json (merging with any existing hooks). It auto-creates a minimal .memd/project_scope.json when missing, refreshes memory.md, and kicks a background consolidation when enough new chunks have accumulated. Set MEMD_AUTO_SCOPE=0 or add .memd-skip in the repo root to opt out.",
+  "_comment": "memd SessionStart hook for Codex CLI. Merge this example into the project's .codex/hooks.json. The native adapter reads hook JSON from standard input, uses its cwd for the default project directory, and returns only allowlisted execution context. It does not persist a current-session identity. It creates a minimal .memd/project_scope.json when needed, refreshes memory.md, and starts background consolidation after enough new chunks accumulate. Set MEMD_AUTO_SCOPE=0 or add .memd-skip in the repo root to opt out.",
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "memd session-start --project-dir . 2>/dev/null || true"
+            "command": "memd session-start --native-hook codex 2>/dev/null || true"
           }
         ]
       }
