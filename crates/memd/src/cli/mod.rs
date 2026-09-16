@@ -23,11 +23,14 @@ mod eval_counterfactual;
 mod eval_outcome_ranking;
 mod eval_retrieval;
 mod eval_write_quality;
+mod experience;
+mod experience_check;
 mod maintenance;
 mod memory_md;
 mod ops_bridge;
 mod outcome_scan;
 mod paths;
+mod provenance;
 mod purge;
 mod read_commands;
 mod render;
@@ -39,8 +42,8 @@ mod warm;
 mod write_commands;
 
 pub use args::{
-    CliCommand, CliQueryMode, ExportFormat, ReportFormat, SearchReranker, StoreAccess, WarmCommand,
-    WarmMode, WarmProcessConfig,
+    CliCommand, CliQueryMode, ExportFormat, NativeHookHarness, ReportFormat, SearchReranker,
+    StoreAccess, WarmCommand, WarmMode, WarmProcessConfig,
 };
 use args::{ProjectScopeConfig, SearchRerankerOptions, TenantScopeConfig};
 use audit::{render_audit_report, run_audit, strict_should_fail, AuditOptions};
@@ -53,6 +56,7 @@ use eval_counterfactual::{run_eval_counterfactual, EvalCounterfactualOptions};
 use eval_outcome_ranking::{run_eval_outcome_ranking, EvalOutcomeRankingOptions};
 use eval_retrieval::{run_eval_retrieval, EvalRetrievalOptions};
 use eval_write_quality::{run_eval_write_quality, EvalWriteQualityOptions};
+pub use experience::{prepare_experience_command, ExperienceCommand};
 use memory_md::{
     refresh_memory_md_with_health, run_memory_md_eval, MemoryMdEvalOptions, MemoryMdOptions,
 };
@@ -62,6 +66,10 @@ use paths::{
     absolutize_project_dir, normalize_absolute, path_is_inside, read_omf_input,
     read_stdin_to_string, reject_if_any_symlink_inside_outdir, resolve_data_dir,
     resolve_export_markdown_data_dirs,
+};
+pub use provenance::{
+    capture_execution_context, capture_tracked_diff_sha256, enrich_operation_arguments,
+    prepare_execution_context,
 };
 use purge::{
     inspect_purge_archive, render_purge_archive_inspection, run_purge, PurgeArchiveInspectOptions,
@@ -78,7 +86,9 @@ use search::{
     apply_search_reranker, cli_agent_context_payload, cli_search_payload, export_format_name,
     finalize_search_episode,
 };
-use session_start::{run_session_start, SessionStartOptions};
+use session_start::{
+    native_hook_project_dir, read_native_hook_context, run_session_start, SessionStartOptions,
+};
 use warm::run_warm_worker;
 pub use warm::{run_warm_admin, try_run_warm_client, warm_socket_path};
 use write_commands::{
@@ -94,6 +104,11 @@ pub async fn run_cli<S: Store>(
     cmd: CliCommand,
 ) -> Result<()> {
     match cmd {
+        CliCommand::Experience { .. } => {
+            return Err(MemdError::ValidationError(
+                "experience commands require client-side preparation".into(),
+            ));
+        }
         CliCommand::Add {
             tenant_id,
             text,
@@ -128,6 +143,8 @@ pub async fn run_cli<S: Store>(
             query_positional,
             k,
             project_id,
+            task_id,
+            thread_id,
             compact,
             dedupe_by_source,
             token_budget,
@@ -169,6 +186,8 @@ pub async fn run_cli<S: Store>(
                 no_text,
                 include_artifact,
                 include_superseded,
+                task_id,
+                thread_id,
             )
             .await?;
             payload = apply_search_reranker(
@@ -471,8 +490,22 @@ pub async fn run_cli<S: Store>(
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
 
-        CliCommand::SessionStart { project_dir } => {
-            let result = run_session_start(store, SessionStartOptions { project_dir }).await?;
+        CliCommand::SessionStart {
+            mut project_dir,
+            native_hook,
+        } => {
+            let execution_context = native_hook
+                .map(|harness| read_native_hook_context(harness, &project_dir))
+                .transpose()?;
+            if let Some(context) = execution_context.as_ref() {
+                project_dir = native_hook_project_dir(&project_dir, context);
+            }
+            let result = run_session_start(
+                store,
+                SessionStartOptions { project_dir },
+                execution_context,
+            )
+            .await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
 

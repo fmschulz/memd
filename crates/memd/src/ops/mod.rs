@@ -146,10 +146,11 @@ use crate::task_memory::{
     build_task_resume_view, derive_artifact_promotion_state, derive_artifact_trust_tier,
     derive_chunk_trust_tier, infer_decision_items, infer_evidence_items, infer_failure_items,
     infer_highlight_items, stable_digest_identity, ArtifactKind, ContributorRef, DatasetRef,
-    DecisionViewItem, EntityRef, EvidenceViewItem, FailureViewItem, HighlightViewItem,
-    ProjectBriefView, TaskArtifact, TaskProvenance, TaskResumeView, TaskSearchFilters, TrustTier,
-    DIGEST_ROLE_DECISION_LIBRARY, DIGEST_ROLE_EVIDENCE_LIBRARY, DIGEST_ROLE_FAILURE_LIBRARY,
-    DIGEST_ROLE_HIGHLIGHT_LIBRARY, DIGEST_ROLE_PROJECT_BRIEF, DIGEST_ROLE_TASK_RESUME,
+    DecisionViewItem, EntityRef, EvidenceViewItem, ExecutionContext, FailureViewItem,
+    HighlightViewItem, ProjectBriefView, TaskArtifact, TaskProvenance, TaskResumeView,
+    TaskSearchFilters, TrustTier, DIGEST_ROLE_DECISION_LIBRARY, DIGEST_ROLE_EVIDENCE_LIBRARY,
+    DIGEST_ROLE_FAILURE_LIBRARY, DIGEST_ROLE_HIGHLIGHT_LIBRARY, DIGEST_ROLE_PROJECT_BRIEF,
+    DIGEST_ROLE_TASK_RESUME,
 };
 use crate::tiered::TieredTiming;
 use crate::types::{
@@ -1841,6 +1842,7 @@ fn params_to_task_provenance(params: Option<TaskProvenanceParams>) -> TaskProven
             tool_name: p.tool_name,
             tool_version: p.tool_version,
             tool_call_id: p.tool_call_id,
+            execution: p.execution,
         })
         .unwrap_or_default()
 }

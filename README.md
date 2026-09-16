@@ -8,15 +8,17 @@
 `memd` is a local memory CLI for coding agents and AI scientists. Each trusted
 machine gets one shared, persistent store: raw searchable content, structured
 task history, and canonical collaboration artifacts. A hybrid dense + sparse
-stack indexes it; an explicit trust boundary decides what counts as verified.
+stack indexes it. Experience cases connect problems, attempts, check receipts,
+and conditional lessons, with the calling session's provenance.
 
 Agents retrieve bounded context with `memd agent-context` or `memd search`,
 read the generated context file, and record operational facts with `memd add`.
 Keep project plans, test results, and handoffs in repository files. Use memory
 for facts those files cannot answer, such as another machine's mounts,
 scheduler constraints, or deployment state. A larger model context still needs
-those facts to be supplied; whether memd saves work should be measured through
-verified task outcomes.
+those facts to be supplied. Record a concise case when a checked repair could
+help another session, and link to repository evidence. Whether memd saves work should be measured
+through verified task outcomes.
 
 For low-latency local use, `memd` keeps the store and indexes hot through a
 private CLI-managed warm worker driven by ordinary CLI commands.
@@ -27,19 +29,26 @@ private CLI-managed warm worker driven by ordinary CLI commands.
 
 | Surface | Purpose | Primary CLI commands |
 | --- | --- | --- |
-| Raw memory | Store and search chunks: code, docs, notes, traces, decisions | `memd add`, `memd search`, `memd get`, `memd stats` |
+| Raw memory | Store operational facts and index selected source material for retrieval | `memd add`, `memd search`, `memd get`, `memd stats` |
+| Experience cases | Connect problems, attempts, check receipts, lessons, and corrections; recall only applicable lessons | `memd experience record`, `check`, `get`, `find` |
 | Agent context | Bounded pre-work context + JSON audit logs | `memd agent-context --output .memd/context.md` |
 | Startup memory | Refresh project `memory.md` with scope, health warnings, and ranked facts filtered against repository documents | `memd memory-md`, `memd eval-memory-md --agent-usefulness` |
 | Usefulness report | Usage-ledger and store self-diagnosis for growth, learning, retrieval, and warnings | `memd report --strict` |
 | Warm CLI | Keep store/index state hot for repeated local calls | `memd warm start`, `memd warm status` |
 | Batch CLI | Many structured operations in one loaded process | `memd batch --jsonl requests.jsonl` |
-| Export/import | Manual cross-machine moves through portable OMF | `memd export-omf`, `memd import-omf` |
+| Export/import | Transfer raw chunks through OMF or complete canonical experience cases through versioned bundles | `memd export-omf`, `memd import-omf`, `memd experience export`, `import` |
 | Operations | Structured memory/task/artifact/context/code/debug ops | `memd call task.start --json '{...}'` |
 | Guardrails | Pin tenant/project scope and verify CLI-first agent wiring | `memd init`, `memd doctor` |
 
 Use `memd search --mode brief_project|resume_task|find_failures|find_decisions|find_evidence|find_highlights`
 when retrieval should bias toward persisted digests and canonical summaries.
 Use `--compact` and `--token-budget` to keep agent context small.
+Experience commands require a source build from `main`; published 1.7.1
+binaries do not include them. Follow [Record a checked repair](https://fmschulz.github.io/memd/experience-how-to/)
+for a runnable failure, repair, recall, and transfer example. The
+[experience model](https://fmschulz.github.io/memd/experience-memory/) explains
+source coverage, abstention, and the limits of caller-reported provenance.
+
 High-priority durable writes (`priority:8+` or `importance:8+`) must include
 a concrete `Agent action:` line. The gate accepts a sentence of at least 24
 characters containing an imperative verb (verify, run, use, check, avoid,

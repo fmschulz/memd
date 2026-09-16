@@ -1,8 +1,8 @@
 use memd::cli::{run_cli, CliCommand};
 use memd::store::persistent::{PersistentStore, PersistentStoreConfig};
 use memd::store::{
-    stable_query_hash, OutcomeEvent, OutcomeKind, OutcomeVerifier, RankingPolicyMode,
-    RetrievalEpisode, RetrievalEpisodeId, RetrievalEpisodeItem, Store,
+    stable_query_hash, OutcomeEvent, OutcomeEventId, OutcomeKind, OutcomeVerifier,
+    RankingPolicyMode, RetrievalEpisode, RetrievalEpisodeId, RetrievalEpisodeItem, Store,
 };
 use memd::types::{ChunkType, MemoryChunk, ProjectId, TenantId};
 
@@ -677,6 +677,116 @@ async fn eligible_outcomes_produce_project_scoped_decayed_priors() {
         .await
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+async fn legacy_codex_scanner_acceptance_does_not_enter_persistent_priors() {
+    let temp = tempfile::tempdir().unwrap();
+    let tenant = TenantId::new("legacy_scanner_prior_tenant").unwrap();
+    let project = "legacy_scanner_project";
+    let store = open_store(temp.path());
+    let chunk_id = store
+        .add(
+            MemoryChunk::new(tenant.clone(), "shared prior target", ChunkType::Doc)
+                .with_project(ProjectId::from(project)),
+        )
+        .await
+        .unwrap();
+    let now = 1_700_000_001_000;
+    let legacy_episode_id = RetrievalEpisodeId::new();
+    let verified_episode_id = RetrievalEpisodeId::new();
+    for episode_id in [&legacy_episode_id, &verified_episode_id] {
+        store
+            .record_retrieval_episode(
+                RetrievalEpisode {
+                    episode_id: episode_id.clone(),
+                    tenant_id: tenant.clone(),
+                    project_id: Some(project.to_string()),
+                    query_hash: stable_query_hash("legacy scanner prior"),
+                    query_mode: "generic".to_string(),
+                    requested_k: 1,
+                    fetched_k: 1,
+                    rendered_k: 1,
+                    policy_version: "outcome-v1".to_string(),
+                    policy_mode: RankingPolicyMode::Shadow,
+                    task_id: None,
+                    thread_id: None,
+                    created_at_ms: now - 1_000,
+                    expires_at_ms: now + 86_400_000,
+                },
+                vec![RetrievalEpisodeItem {
+                    episode_id: episode_id.clone(),
+                    chunk_id: chunk_id.clone(),
+                    origin_tenant_id: tenant.clone(),
+                    origin_project_id: Some(project.to_string()),
+                    original_rank: 0,
+                    original_score: 1.0,
+                    lane_scores_json: "{}".to_string(),
+                    outcome_adjustment: 0.0,
+                    served_rank: Some(0),
+                    shadow_rank: Some(0),
+                    rendered: true,
+                    source_dedup_group: None,
+                }],
+            )
+            .await
+            .unwrap();
+    }
+
+    // Simulate an already-persisted event from the old scanner. New writes
+    // reject this eligibility combination, but existing audit history must
+    // remain readable while the aggregation boundary ignores it.
+    let connection = rusqlite::Connection::open(temp.path().join("metadata.db")).unwrap();
+    connection
+        .execute(
+            "INSERT INTO outcome_events (
+                 event_id, episode_id, outcome, verifier_type,
+                 used_chunk_ids_json, harmful_chunk_ids_json, evidence_reference,
+                 ranking_eligible, timestamp_ms
+             ) VALUES (?1, ?2, 'accepted', 'external_tool', ?3, '[]', ?4, 1, ?5)",
+            rusqlite::params![
+                OutcomeEventId::new().to_string(),
+                legacy_episode_id.to_string(),
+                serde_json::to_string(&vec![chunk_id.to_string()]).unwrap(),
+                "codex:rollout-2026-09-15.jsonl:42",
+                now - 2,
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    store
+        .record_outcome(
+            &tenant,
+            OutcomeEvent::new(
+                verified_episode_id,
+                OutcomeKind::Accepted,
+                OutcomeVerifier::ExternalTool,
+                vec![chunk_id.clone()],
+                Vec::new(),
+                Some("ci://verified-acceptance/42".to_string()),
+                now - 1,
+            ),
+        )
+        .await
+        .unwrap();
+
+    let legacy_events = store
+        .list_outcomes_for_episode(&tenant, &legacy_episode_id)
+        .await
+        .unwrap();
+    assert_eq!(legacy_events.len(), 1);
+    assert!(
+        legacy_events[0].ranking_eligible,
+        "stored history is unchanged"
+    );
+
+    let priors = store
+        .outcome_priors(&tenant, Some(project), std::slice::from_ref(&chunk_id), now)
+        .await
+        .unwrap();
+    assert_eq!(priors.len(), 1);
+    assert_eq!(priors[0].eligible_episode_count, 1);
+    assert!(priors[0].positive_weight > 0.99);
 }
 
 #[tokio::test]

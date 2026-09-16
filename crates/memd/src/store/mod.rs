@@ -297,6 +297,11 @@ pub trait Store: Send + Sync {
         Err(unsupported_store_capability("task artifact lookup"))
     }
 
+    /// Fetch one canonical task artifact by its store-global ID.
+    async fn get_task_artifact_global(&self, _artifact_id: &str) -> Result<Option<TaskArtifact>> {
+        Err(unsupported_store_capability("global task artifact lookup"))
+    }
+
     /// List canonical task artifacts for one logical task.
     async fn list_task_artifacts(
         &self,
@@ -323,6 +328,11 @@ pub trait Store: Send + Sync {
         _limit: usize,
     ) -> Result<Vec<TaskRecord>> {
         Err(unsupported_store_capability("task listing"))
+    }
+
+    /// Fetch one logical task by its store-global ID.
+    async fn get_task_global(&self, _task_id: &str) -> Result<Option<TaskRecord>> {
+        Err(unsupported_store_capability("global task lookup"))
     }
 
     /// List tenants known to this store.

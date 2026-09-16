@@ -347,6 +347,7 @@ impl PersistentStore {
         projections: Vec<TaskProjection>,
     ) -> Result<TaskArtifactWriteResult> {
         self.ensure_writable("add_task_artifact")?;
+        self.metadata.ensure_task_artifact_write_safe(&artifact)?;
         let projection_kinds = projections
             .iter()
             .map(|projection| projection.kind.as_str().to_string())

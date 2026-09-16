@@ -6,9 +6,8 @@
 //! literal from a served chunk showing up in a *later* tool-call input
 //! of the same session is passive evidence the memory was used. Only
 //! inputs count as usage — scanning outputs would credit "the agent was
-//! shown the chunk again". Verified hits become `external_tool`
-//! `accepted` outcome events, which feed `outcome_priors` and the
-//! `memory.md` utility term.
+//! shown the chunk again". Hits become non-ranking `external_tool`
+//! `observed_used` outcome events.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -21,9 +20,7 @@ use super::memory_md::{build_repo_index, repo_doc_covering, RepoDoc};
 use super::paths::absolutize_project_dir;
 use super::scope;
 use crate::error::{MemdError, Result};
-use crate::store::{
-    OutcomeEvent, OutcomeEventId, OutcomeKind, OutcomeVerifier, RetrievalEpisodeId, Store,
-};
+use crate::store::{OutcomeEvent, OutcomeKind, OutcomeVerifier, RetrievalEpisodeId, Store};
 use crate::types::{ChunkId, TenantId};
 
 /// Shorter literals ("src/main.rs", "--force") are too common to tie a
@@ -57,6 +54,7 @@ struct Serve {
 struct Action {
     line: usize,
     text: String,
+    timestamp_ms: Option<i64>,
 }
 
 #[derive(Debug, Default)]
@@ -71,6 +69,7 @@ struct Hit {
     literal: String,
     serve_line: usize,
     action_line: usize,
+    action_timestamp_ms: i64,
     action_excerpt: String,
 }
 
@@ -274,40 +273,45 @@ pub(super) async fn run_outcome_scan<S: Store>(
                 .filter(|item| item.rendered)
                 .map(|item| item.chunk_id.to_string())
                 .collect::<HashSet<_>>();
-            let used_chunk_ids = episode_hits
+            let credited_hits = episode_hits
+                .into_iter()
+                .filter(|hit| rendered.contains(&hit.chunk_id))
+                .collect::<Vec<_>>();
+            let used_chunk_ids = credited_hits
                 .iter()
                 .map(|hit| hit.chunk_id.clone())
                 .collect::<BTreeSet<_>>()
                 .into_iter()
-                .filter(|chunk_id| rendered.contains(chunk_id))
                 .filter_map(|chunk_id| ChunkId::parse(&chunk_id).ok())
                 .collect::<Vec<_>>();
             if used_chunk_ids.is_empty() {
                 skipped_not_rendered += 1;
                 continue;
             }
-            // The session file's mtime is the honest usage time; outside the
-            // episode retention window record_outcome would reject it.
-            if mtime_ms < episode.created_at_ms || mtime_ms > episode.expires_at_ms {
+            let evidence_action = credited_hits
+                .iter()
+                .min_by_key(|hit| hit.action_line)
+                .expect("per-episode hit group is non-empty");
+            // The action record carries the causal usage time. A live session
+            // file's mtime can move hours later as unrelated turns append.
+            if evidence_action.action_timestamp_ms < episode.created_at_ms
+                || evidence_action.action_timestamp_ms > episode.expires_at_ms
+            {
                 skipped_outside_window += 1;
                 continue;
             }
-            let evidence_line = episode_hits
-                .iter()
-                .map(|hit| hit.action_line)
-                .min()
-                .expect("per-episode hit group is non-empty");
-            let event = OutcomeEvent {
-                event_id: OutcomeEventId::new(),
-                episode_id: episode_uuid,
-                outcome: OutcomeKind::Accepted,
-                verifier: OutcomeVerifier::ExternalTool,
+            let event = OutcomeEvent::new(
+                episode_uuid,
+                OutcomeKind::ObservedUsed,
+                OutcomeVerifier::ExternalTool,
                 used_chunk_ids,
-                harmful_chunk_ids: Vec::new(),
-                evidence_reference: Some(format!("codex:{session_name}:{evidence_line}")),
-                ranking_eligible: true,
-                timestamp_ms: mtime_ms,
-            };
+                Vec::new(),
+                Some(format!(
+                    "codex:{session_name}:{}",
+                    evidence_action.action_line
+                )),
+                evidence_action.action_timestamp_ms,
+            );
             if options.dry_run {
                 events_planned += 1;
             } else {
@@ -447,6 +451,9 @@ fn parse_session(text: &str) -> SessionSignals {
                     signals.actions.push(Action {
                         line: line_number,
                         text: action_text.to_string(),
+                        timestamp_ms: value.get("timestamp").and_then(Value::as_str).and_then(
+                            |timestamp| crate::structural::parse_iso_datetime(timestamp).ok(),
+                        ),
                     });
                 }
             }
@@ -650,11 +657,11 @@ fn compute_hits(
                 if seen_before {
                     continue;
                 }
-                let Some(action) = signals
-                    .actions
-                    .iter()
-                    .find(|action| action.line > serve.line && action.text.contains(literal))
-                else {
+                let Some(action) = signals.actions.iter().find(|action| {
+                    action.line > serve.line
+                        && action.timestamp_ms.is_some()
+                        && action.text.contains(literal)
+                }) else {
                     continue;
                 };
                 if !credited.insert((chunk_id.clone(), literal.clone())) {
@@ -667,6 +674,9 @@ fn compute_hits(
                         literal: literal.clone(),
                         serve_line: serve.line,
                         action_line: action.line,
+                        action_timestamp_ms: action
+                            .timestamp_ms
+                            .expect("matched actions have native timestamps"),
                         action_excerpt: excerpt_around(&action.text, literal),
                     },
                 ));
@@ -692,6 +702,10 @@ fn excerpt_around(text: &str, literal: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::{
+        stable_query_hash, MemoryStore, RankingPolicyMode, RetrievalEpisode, RetrievalEpisodeItem,
+    };
+    use crate::types::{ChunkType, MemoryChunk};
 
     #[test]
     fn literal_extraction_keeps_backticks_paths_and_flags() {
@@ -730,6 +744,7 @@ mod tests {
         Action {
             line,
             text: text.to_string(),
+            timestamp_ms: Some(1_700_000_000_000 + line as i64),
         }
     }
 
@@ -803,12 +818,12 @@ mod tests {
         let chunk = "019f0000-0000-7000-8000-000000000002";
         let session = format!(
             concat!(
-                "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"custom_tool_call_output\",",
+                "{{\"timestamp\":\"2026-09-15T12:00:00Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"custom_tool_call_output\",",
                 "\"output\":[{{\"type\":\"input_text\",\"text\":\"chunk {chunk} ... ",
                 "\\\"retrieval_episode_id\\\": \\\"{episode}\\\"\"}}]}}}}\n",
-                "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"custom_tool_call_output\",",
+                "{{\"timestamp\":\"2026-09-15T12:00:01Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"custom_tool_call_output\",",
                 "\"output\":\"rerendered scripts/from_memory_only.sh\"}}}}\n",
-                "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"function_call\",",
+                "{{\"timestamp\":\"2026-09-15T12:00:02.345Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"function_call\",",
                 "\"arguments\":\"{{\\\"cmd\\\":\\\"bash scripts/from_memory_only.sh\\\"}}\"}}}}\n",
             ),
             chunk = chunk,
@@ -824,6 +839,10 @@ mod tests {
             "outputs must never become actions"
         );
         assert_eq!(signals.actions[0].line, 3);
+        assert_eq!(
+            signals.actions[0].timestamp_ms,
+            Some(crate::structural::parse_iso_datetime("2026-09-15T12:00:02.345Z").unwrap())
+        );
 
         let literals = HashMap::from([(
             chunk.to_string(),
@@ -832,6 +851,231 @@ mod tests {
         let hits = compute_hits(&signals, &literals);
         assert_eq!(hits.len(), 1, "the input on line 3 is genuine usage");
         assert_eq!(hits[0].1.action_line, 3);
+    }
+
+    #[tokio::test]
+    async fn current_custom_tool_reuse_records_native_time_once_after_append() {
+        let project = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let tenant = TenantId::new("outcome_scan_current_log").unwrap();
+        let store = MemoryStore::new();
+        let literal = "scripts/from_memory_observation.sh";
+        let unrendered_literal = "scripts/unrendered_memory.sh";
+        let chunk_id = store
+            .add(MemoryChunk::new(
+                tenant.clone(),
+                format!("Run `{literal}` after setup."),
+                ChunkType::Doc,
+            ))
+            .await
+            .unwrap();
+        let unrendered_chunk_id = store
+            .add(MemoryChunk::new(
+                tenant.clone(),
+                format!("Do not render `{unrendered_literal}`."),
+                ChunkType::Doc,
+            ))
+            .await
+            .unwrap();
+        let action_timestamp = "2026-09-15T12:00:02.345Z";
+        let action_timestamp_ms = crate::structural::parse_iso_datetime(action_timestamp).unwrap();
+        let episode_id = RetrievalEpisodeId::new();
+        store
+            .record_retrieval_episode(
+                RetrievalEpisode {
+                    episode_id: episode_id.clone(),
+                    tenant_id: tenant.clone(),
+                    project_id: None,
+                    query_hash: stable_query_hash("current custom tool records"),
+                    query_mode: "generic".to_string(),
+                    requested_k: 2,
+                    fetched_k: 2,
+                    rendered_k: 1,
+                    policy_version: crate::store::OUTCOME_POLICY_VERSION.to_string(),
+                    policy_mode: RankingPolicyMode::Shadow,
+                    task_id: None,
+                    thread_id: None,
+                    created_at_ms: action_timestamp_ms - 1_000,
+                    expires_at_ms: action_timestamp_ms + 86_400_000,
+                },
+                vec![
+                    RetrievalEpisodeItem {
+                        episode_id: episode_id.clone(),
+                        chunk_id: chunk_id.clone(),
+                        origin_tenant_id: tenant.clone(),
+                        origin_project_id: None,
+                        original_rank: 0,
+                        original_score: 1.0,
+                        lane_scores_json: "{}".to_string(),
+                        outcome_adjustment: 0.0,
+                        served_rank: Some(0),
+                        shadow_rank: Some(0),
+                        rendered: true,
+                        source_dedup_group: None,
+                    },
+                    RetrievalEpisodeItem {
+                        episode_id: episode_id.clone(),
+                        chunk_id: unrendered_chunk_id.clone(),
+                        origin_tenant_id: tenant.clone(),
+                        origin_project_id: None,
+                        original_rank: 1,
+                        original_score: 0.5,
+                        lane_scores_json: "{}".to_string(),
+                        outcome_adjustment: 0.0,
+                        served_rank: None,
+                        shadow_rank: Some(1),
+                        rendered: false,
+                        source_dedup_group: None,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+
+        std::fs::create_dir_all(project.path().join(".memd")).unwrap();
+        std::fs::write(
+            project.path().join(".memd/project_scope.json"),
+            serde_json::json!({
+                "tenant_id": tenant.as_str(),
+                "project_id": null,
+                "interface": "cli",
+                "cli_command": "memd",
+                "agent_context_output": ".memd/context.md",
+                "project_dir": "."
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let search_output = serde_json::json!({
+            "retrieval_episode_id": episode_id.to_string(),
+            "results": [
+                {"chunk_id": chunk_id.to_string()},
+                {"chunk_id": unrendered_chunk_id.to_string()}
+            ]
+        })
+        .to_string();
+        let session_path = sessions.path().join("rollout-2026-09-15-current.jsonl");
+        let records = [
+            serde_json::json!({
+                "timestamp": "2026-09-15T12:00:01Z",
+                "type": "response_item",
+                "ordinal": 1,
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "id": "output-1",
+                    "call_id": "call-1",
+                    "output": [
+                        {"type": "text", "text": search_output},
+                        {"type": "text", "text": ""}
+                    ],
+                    "internal_chat_message_metadata_passthrough": {}
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-09-15T11:00:00Z",
+                "type": "response_item",
+                "ordinal": 2,
+                "payload": {
+                    "type": "custom_tool_call",
+                    "id": "input-1",
+                    "status": "completed",
+                    "call_id": "call-2",
+                    "name": "functions.exec",
+                    "input": format!(
+                        "await tools.exec_command({{cmd: \\\"bash {unrendered_literal}\\\"}});"
+                    ),
+                    "internal_chat_message_metadata_passthrough": {}
+                }
+            }),
+            serde_json::json!({
+                "timestamp": action_timestamp,
+                "type": "response_item",
+                "ordinal": 3,
+                "payload": {
+                    "type": "custom_tool_call",
+                    "id": "input-2",
+                    "status": "completed",
+                    "call_id": "call-3",
+                    "name": "functions.exec",
+                    "input": format!(
+                        "await tools.exec_command({{cmd: \\\"bash {literal}\\\"}});"
+                    ),
+                    "internal_chat_message_metadata_passthrough": {}
+                }
+            }),
+        ];
+        std::fs::write(
+            &session_path,
+            records
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let options = || OutcomeScanOptions {
+            project_dir: project.path().to_path_buf(),
+            sessions_dir: Some(sessions.path().to_path_buf()),
+            since_days: 30,
+            dry_run: false,
+        };
+        let first = run_outcome_scan(&store, options()).await.unwrap();
+        assert_eq!(first["events_written"], 1);
+        let events = store
+            .list_outcomes_for_episode(&tenant, &episode_id)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].outcome, OutcomeKind::ObservedUsed);
+        assert!(!events[0].ranking_eligible);
+        assert_eq!(events[0].used_chunk_ids, vec![chunk_id]);
+        assert_eq!(events[0].timestamp_ms, action_timestamp_ms);
+        assert_eq!(
+            events[0].evidence_reference.as_deref(),
+            Some("codex:rollout-2026-09-15-current.jsonl:3")
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&session_path)
+            .unwrap();
+        use std::io::Write as _;
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "timestamp": "2026-09-15T18:00:00Z",
+                "type": "response_item",
+                "ordinal": 4,
+                "payload": {
+                    "type": "custom_tool_call",
+                    "id": "input-3",
+                    "status": "completed",
+                    "call_id": "call-4",
+                    "name": "functions.exec",
+                    "input": format!(
+                        "await tools.exec_command({{cmd: \\\"bash {literal}\\\"}});"
+                    ),
+                    "internal_chat_message_metadata_passthrough": {}
+                }
+            })
+        )
+        .unwrap();
+        drop(file);
+
+        let second = run_outcome_scan(&store, options()).await.unwrap();
+        assert_eq!(second["events_written"], 0);
+        assert_eq!(second["events_skipped"]["already_recorded"], 1);
+        let events = store
+            .list_outcomes_for_episode(&tenant, &episode_id)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].timestamp_ms, action_timestamp_ms);
     }
 
     #[test]

@@ -193,6 +193,18 @@ async fn main() {
         std::process::exit(1);
     }
 
+    cmd = match memd::cli::prepare_experience_command(cmd, &data_dir, args.in_memory).await {
+        Ok(cmd) => cmd,
+        Err(error) => {
+            eprintln!("error: {error}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(error) = memd::cli::prepare_execution_context(&mut cmd) {
+        eprintln!("error: {error}");
+        std::process::exit(1);
+    }
+
     // Resolve the retrieval strategy once, here, so an unset --search-variant
     // takes the model-derived default (dense-only for bge-base) and warm
     // workers are spawned with the same concrete variant.

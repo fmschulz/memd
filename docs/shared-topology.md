@@ -4,6 +4,13 @@ The recommended deployment is **one shared local data directory per trusted
 machine or trust domain**, with multiple coding-agent and AI-scientist
 sessions using the same `memd` CLI binary and tenant/project conventions.
 
+Each machine keeps its own store. Complete experience cases can move between
+stores through explicit `experience export` and `experience import` commands.
+These preserve canonical IDs and provenance, reject conflicting content, and
+treat exact replay as a no-op. They do not provide continuous replication or
+automatic merging of divergent case histories. See
+[Experience memory](experience-memory.md#case-transfer).
+
 ```mermaid
 flowchart LR
   subgraph machine["Shared local machine"]

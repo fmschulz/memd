@@ -28,7 +28,7 @@ use super::{
     write_cli_log, write_rendered, CliAddRenderOptions,
 };
 
-const WARM_WIRE_PROTOCOL: &str = "3";
+const WARM_WIRE_PROTOCOL: &str = "5";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -38,6 +38,10 @@ enum WarmWireCommand {
         query: String,
         k: usize,
         project_id: Option<String>,
+        #[serde(default)]
+        task_id: Option<String>,
+        #[serde(default)]
+        thread_id: Option<String>,
         compact: bool,
         /// Wire-compatible default: older workers/clients omit the field.
         #[serde(default)]
@@ -134,7 +138,7 @@ struct WarmLocalOutputs {
 enum WarmWireRequest {
     Ping,
     Shutdown,
-    Command { command: WarmWireCommand },
+    Command { command: Box<WarmWireCommand> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -334,6 +338,8 @@ fn warm_wire_command_from_cli(
             query_positional,
             k,
             project_id,
+            task_id,
+            thread_id,
             compact,
             dedupe_by_source,
             token_budget,
@@ -366,6 +372,8 @@ fn warm_wire_command_from_cli(
                     })?,
                 k: *k,
                 project_id: project_id.clone(),
+                task_id: task_id.clone(),
+                thread_id: thread_id.clone(),
                 compact: *compact,
                 dedupe_by_source: *dedupe_by_source,
                 token_budget: *token_budget,
@@ -646,6 +654,8 @@ async fn execute_warm_wire_command<S: Store>(
             query,
             k,
             project_id,
+            task_id,
+            thread_id,
             compact,
             dedupe_by_source,
             token_budget,
@@ -668,6 +678,8 @@ async fn execute_warm_wire_command<S: Store>(
                 no_text,
                 include_artifact,
                 false,
+                task_id,
+                thread_id,
             )
             .await?;
             payload = apply_search_reranker(payload, &query, &reranker)?;
@@ -926,7 +938,7 @@ pub async fn try_run_warm_client(config: &WarmProcessConfig, cmd: &CliCommand) -
     let response = match warm_request(
         &warm_socket_path(config),
         &WarmWireRequest::Command {
-            command: wire_command,
+            command: Box::new(wire_command),
         },
     )
     .await
@@ -1788,7 +1800,7 @@ async fn handle_warm_connection<S: Store>(
                 }
             };
             let _ = store.probe_external_mutation().await;
-            let response = match execute_warm_wire_command(store, tenant_manager, command).await {
+            let response = match execute_warm_wire_command(store, tenant_manager, *command).await {
                 Ok((output, log_payload)) => WarmWireResponse::ok_output(output, log_payload),
                 Err(error) => WarmWireResponse::for_command_error(&error),
             };
@@ -2095,6 +2107,8 @@ mod tests {
             query_positional: None,
             k: 1,
             project_id: None,
+            task_id: None,
+            thread_id: None,
             compact: false,
             dedupe_by_source: false,
             token_budget: None,
@@ -2122,6 +2136,61 @@ mod tests {
             output: None,
             warm,
         }
+    }
+
+    fn client_call(thread_id: &str) -> CliCommand {
+        let context = crate::task_memory::ExecutionContext {
+            harness: Some("codex".to_string()),
+            native_thread_id: Some(thread_id.to_string()),
+            observed_at_ms: 42,
+            ..Default::default()
+        };
+        let arguments = crate::cli::enrich_operation_arguments(
+            "artifact.create",
+            json!({"artifact_kind": "evidence"}),
+            &context,
+        )
+        .unwrap();
+        CliCommand::Call {
+            tool: "artifact.create".to_string(),
+            json: Some(serde_json::to_string(&arguments).unwrap()),
+            input: None,
+            output: None,
+            warm: WarmMode::Auto,
+        }
+    }
+
+    #[test]
+    fn warm_wire_keeps_each_calling_clients_native_thread() {
+        let first = warm_wire_command_from_cli(&client_call("thread-a"))
+            .unwrap()
+            .unwrap()
+            .0;
+        let second = warm_wire_command_from_cli(&client_call("thread-b"))
+            .unwrap()
+            .unwrap()
+            .0;
+
+        let WarmWireCommand::Call {
+            arguments: first, ..
+        } = first
+        else {
+            panic!("expected call wire command");
+        };
+        let WarmWireCommand::Call {
+            arguments: second, ..
+        } = second
+        else {
+            panic!("expected call wire command");
+        };
+        assert_eq!(
+            first["provenance"]["execution"]["native_thread_id"],
+            "thread-a"
+        );
+        assert_eq!(
+            second["provenance"]["execution"]["native_thread_id"],
+            "thread-b"
+        );
     }
 
     #[test]
@@ -2342,6 +2411,8 @@ mod tests {
                 query: "q".to_string(),
                 k: 3,
                 project_id: Some("p".to_string()),
+                task_id: Some("task".to_string()),
+                thread_id: Some("thread".to_string()),
                 compact: true,
                 dedupe_by_source: false,
                 token_budget: Some(100),
@@ -2424,7 +2495,9 @@ mod tests {
         ];
 
         for command in commands {
-            let request = WarmWireRequest::Command { command };
+            let request = WarmWireRequest::Command {
+                command: Box::new(command),
+            };
             let encoded = serde_json::to_string(&request).unwrap();
             let decoded: WarmWireRequest = serde_json::from_str(&encoded).unwrap();
             assert_eq!(
@@ -2484,6 +2557,8 @@ mod tests {
             query_positional: None,
             k: 1,
             project_id: None,
+            task_id: None,
+            thread_id: None,
             compact: false,
             dedupe_by_source: false,
             token_budget: None,

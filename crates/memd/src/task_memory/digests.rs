@@ -150,12 +150,41 @@ pub fn stable_digest_identity(role: &str, scope_key: &str) -> (String, String, S
     )
 }
 
-pub fn build_task_resume_view(task: TaskRecord, artifacts: &[TaskArtifact]) -> TaskResumeView {
+pub fn build_task_resume_view(mut task: TaskRecord, artifacts: &[TaskArtifact]) -> TaskResumeView {
     let mut sorted = artifacts.to_vec();
-    sorted.sort_by_key(|artifact| std::cmp::Reverse(artifact.timestamp_created));
+    sorted.sort_by_key(|artifact| {
+        std::cmp::Reverse((
+            artifact
+                .timestamp_observed
+                .unwrap_or(artifact.timestamp_created),
+            artifact.timestamp_created,
+            artifact.artifact_id.clone(),
+        ))
+    });
 
     let latest_summary = sorted.iter().find_map(|artifact| artifact.event_summary());
-    let blockers = dedupe_keep_order(sorted.iter().flat_map(|artifact| artifact.blockers.clone()));
+    // Progress/finish records describe the current task state. Historical
+    // blockers remain in their source artifacts; unioning them resurrects
+    // already resolved problems on every resume.
+    let current_state = sorted.iter().find(|artifact| {
+        matches!(
+            artifact.artifact_kind,
+            ArtifactKind::TaskStart | ArtifactKind::TaskProgress | ArtifactKind::TaskFinish
+        ) && artifact.experience.is_none()
+    });
+    let blockers = current_state
+        .map(|artifact| dedupe_keep_order(artifact.blockers.clone()))
+        .unwrap_or_default();
+    let followups = current_state
+        .map(|artifact| dedupe_keep_order(artifact.followups.clone()))
+        .unwrap_or_default();
+    if let Some(state) = current_state {
+        if state.status.is_some() {
+            task.status = state.status.clone();
+        }
+        task.finished_at_ms = (state.artifact_kind == ArtifactKind::TaskFinish)
+            .then_some(state.timestamp_observed.unwrap_or(state.timestamp_created));
+    }
     let what_worked = dedupe_keep_order(
         sorted
             .iter()
@@ -170,11 +199,6 @@ pub fn build_task_resume_view(task: TaskRecord, artifacts: &[TaskArtifact]) -> T
         sorted
             .iter()
             .flat_map(|artifact| artifact.validation.clone()),
-    );
-    let followups = dedupe_keep_order(
-        sorted
-            .iter()
-            .flat_map(|artifact| artifact.followups.clone()),
     );
     let recent_runs = sorted
         .iter()
@@ -825,6 +849,46 @@ pub fn build_project_brief_digest_artifact(view: &ProjectBriefView) -> TaskArtif
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_resume_keeps_resolved_blockers_historical_despite_late_arrival() {
+        let tenant = TenantId::new("team").unwrap();
+        let mut failed = TaskArtifact::new(ArtifactKind::TaskProgress, tenant.clone(), "task");
+        failed.timestamp_created = 100;
+        failed.timestamp_observed = Some(10);
+        failed.status = Some("blocked".into());
+        failed.blockers = vec!["missing mount".into()];
+        failed.what_failed = vec!["read input before mounting".into()];
+        failed.followups = vec!["mount the volume".into()];
+        let mut fixed = TaskArtifact::new(ArtifactKind::TaskFinish, tenant.clone(), "task");
+        fixed.timestamp_created = 20;
+        fixed.timestamp_observed = Some(20);
+        fixed.status = Some("completed".into());
+        fixed.summary = Some("Mount repaired and input checked".into());
+        fixed.followups = vec!["check mount health next week".into()];
+        let task = TaskRecord {
+            task_id: "task".into(),
+            tenant_id: tenant,
+            project_id: ProjectId::none(),
+            status: failed.status.clone(),
+            goal: None,
+            scientific_question: None,
+            hypothesis: None,
+            last_artifact_id: failed.artifact_id.clone(),
+            started_at_ms: Some(1),
+            finished_at_ms: Some(20),
+            updated_at_ms: 100,
+        };
+        let view = build_task_resume_view(task, &[fixed, failed]);
+        assert_eq!(view.task.status.as_deref(), Some("completed"));
+        assert!(view.blockers.is_empty());
+        assert_eq!(view.followups, ["check mount health next week"]);
+        assert_eq!(view.what_failed, ["read input before mounting"]);
+        assert_eq!(
+            view.latest_summary.as_deref(),
+            Some("Mount repaired and input checked")
+        );
+    }
 
     #[test]
     fn task_resume_digest_reuses_real_task_id() {

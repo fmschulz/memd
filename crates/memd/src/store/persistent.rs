@@ -1856,6 +1856,10 @@ impl Store for PersistentStore {
         self.metadata.get_task_artifact(tenant_id, artifact_id)
     }
 
+    async fn get_task_artifact_global(&self, artifact_id: &str) -> Result<Option<TaskArtifact>> {
+        self.metadata.get_task_artifact_global(artifact_id)
+    }
+
     async fn list_task_artifacts(
         &self,
         tenant_id: &TenantId,
@@ -1879,6 +1883,10 @@ impl Store for PersistentStore {
         limit: usize,
     ) -> Result<Vec<TaskRecord>> {
         self.metadata.list_tasks(tenant_id, project_id, limit)
+    }
+
+    async fn get_task_global(&self, task_id: &str) -> Result<Option<TaskRecord>> {
+        self.metadata.get_task_global(task_id)
     }
 
     async fn list_tenants(&self) -> Result<Vec<TenantId>> {

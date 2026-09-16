@@ -34,7 +34,7 @@ uuid.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["signal"] }
 futures-util.workspace = true
 async-trait.workspace = true
 sha2.workspace = true

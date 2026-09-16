@@ -181,7 +181,12 @@ pub(super) fn apply_operation_scope_at(
 pub fn resolve_command_scope(cmd: &mut CliCommand) -> Result<()> {
     let cwd = current_dir();
     match cmd {
-        CliCommand::Add {
+        CliCommand::Experience {
+            tenant_id,
+            project_id,
+            ..
+        }
+        | CliCommand::Add {
             tenant_id,
             project_id,
             ..
@@ -269,6 +274,8 @@ mod tests {
             query_positional: None,
             k: 2,
             project_id: None,
+            task_id: None,
+            thread_id: None,
             compact: false,
             dedupe_by_source: false,
             token_budget: None,

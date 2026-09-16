@@ -5,9 +5,13 @@ use serde_json::{json, Value};
 
 use crate::error::{MemdError, Result};
 use crate::store::{Store, TenantManager};
+use crate::task_memory::ExecutionContext;
 
 use super::scope::{apply_operation_scope, apply_operation_scope_at, OperationScopeCache};
-use super::{cli_call_tool, read_stdin_to_string, unwrap_content_payload};
+use super::{
+    capture_execution_context, cli_call_tool, enrich_operation_arguments, read_stdin_to_string,
+    unwrap_content_payload,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BatchCallInput {
@@ -40,6 +44,16 @@ pub(super) fn scope_batch_jsonl(input: &str, continue_on_error: bool) -> Result<
 }
 
 fn scope_batch_jsonl_at(input: &str, start: &Path, continue_on_error: bool) -> Result<String> {
+    let context = capture_execution_context(start);
+    scope_batch_jsonl_at_with_context(input, start, continue_on_error, Some(&context))
+}
+
+fn scope_batch_jsonl_at_with_context(
+    input: &str,
+    start: &Path,
+    continue_on_error: bool,
+    context: Option<&ExecutionContext>,
+) -> Result<String> {
     let mut out = String::new();
     let mut scope_cache = OperationScopeCache::default();
     for raw_line in input.lines() {
@@ -60,7 +74,13 @@ fn scope_batch_jsonl_at(input: &str, start: &Path, continue_on_error: bool) -> R
                 let arguments = request.arguments.take().unwrap_or_else(|| json!({}));
                 if arguments.is_object() || arguments.is_null() {
                     request.arguments = Some(
-                        match apply_operation_scope_at(start, arguments.clone(), &mut scope_cache) {
+                        match apply_operation_scope_at(start, arguments.clone(), &mut scope_cache)
+                            .and_then(|arguments| match context {
+                                Some(context) => {
+                                    enrich_operation_arguments(&request.tool, arguments, context)
+                                }
+                                None => Ok(arguments),
+                            }) {
                             Ok(arguments) => arguments,
                             Err(error) if !continue_on_error => return Err(error),
                             Err(error) => {
@@ -89,6 +109,8 @@ pub(super) async fn run_batch_jsonl<S: Store>(
     continue_on_error: bool,
 ) -> Result<String> {
     let mut scope_cache = OperationScopeCache::default();
+    let cwd = std::env::current_dir()?;
+    let context = capture_execution_context(&cwd);
     run_batch_jsonl_with_scope_cache(
         store,
         tenant_manager,
@@ -96,6 +118,7 @@ pub(super) async fn run_batch_jsonl<S: Store>(
         continue_on_error,
         &mut scope_cache,
         false,
+        Some(&context),
     )
     .await
 }
@@ -114,6 +137,7 @@ pub(super) async fn run_pre_scoped_batch_jsonl<S: Store>(
         continue_on_error,
         &mut scope_cache,
         true,
+        None,
     )
     .await
 }
@@ -125,6 +149,7 @@ async fn run_batch_jsonl_with_scope_cache<S: Store>(
     continue_on_error: bool,
     scope_cache: &mut OperationScopeCache,
     pre_scoped: bool,
+    context: Option<&ExecutionContext>,
 ) -> Result<String> {
     let mut out = String::new();
     let mut processed = 0usize;
@@ -197,22 +222,28 @@ async fn run_batch_jsonl_with_scope_cache<S: Store>(
             out.push('\n');
             continue;
         }
-        let arguments = match apply_operation_scope(arguments, scope_cache) {
-            Ok(arguments) => arguments,
-            Err(error) if !continue_on_error => return Err(error),
-            Err(error) => {
-                let row = json!({
-                    "ok": false,
-                    "index": index,
-                    "line": line_number + 1,
-                    "tool": request.tool,
-                    "error": error.to_string(),
-                });
-                out.push_str(&serde_json::to_string(&row)?);
-                out.push('\n');
-                continue;
-            }
-        };
+        let arguments =
+            match apply_operation_scope(arguments, scope_cache).and_then(
+                |arguments| match context {
+                    Some(context) => enrich_operation_arguments(&request.tool, arguments, context),
+                    None => Ok(arguments),
+                },
+            ) {
+                Ok(arguments) => arguments,
+                Err(error) if !continue_on_error => return Err(error),
+                Err(error) => {
+                    let row = json!({
+                        "ok": false,
+                        "index": index,
+                        "line": line_number + 1,
+                        "tool": request.tool,
+                        "error": error.to_string(),
+                    });
+                    out.push_str(&serde_json::to_string(&row)?);
+                    out.push('\n');
+                    continue;
+                }
+            };
 
         let started = std::time::Instant::now();
         match cli_call_tool(store, tenant_manager, &request.tool, arguments).await {
@@ -280,6 +311,8 @@ pub(super) async fn stream_batch_jsonl<S: Store>(
 
     let mut processed = 0usize;
     let mut scope_cache = OperationScopeCache::default();
+    let cwd = std::env::current_dir()?;
+    let context = capture_execution_context(&cwd);
     for (line_number, raw_line) in input.lines().enumerate() {
         let raw_line = raw_line?;
         let line = raw_line.trim();
@@ -296,6 +329,7 @@ pub(super) async fn stream_batch_jsonl<S: Store>(
             continue_on_error,
             &mut scope_cache,
             false,
+            Some(&context),
         )
         .await
         {
@@ -362,6 +396,31 @@ mod tests {
         assert_eq!(explicit["arguments"]["tenant_id"], "explicit");
         assert!(explicit["arguments"].get("project_id").is_none());
         assert_eq!(lines[2], "not-json");
+    }
+
+    #[test]
+    fn warm_batch_payload_carries_one_client_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = ExecutionContext {
+            harness: Some("codex".to_string()),
+            native_thread_id: Some("thread-a".to_string()),
+            observed_at_ms: 42,
+            ..Default::default()
+        };
+        let input = concat!(
+            "{\"tool\":\"artifact.create\",\"arguments\":{",
+            "\"tenant_id\":\"t\",\"artifact_kind\":\"evidence\"}}\n"
+        );
+
+        let output =
+            scope_batch_jsonl_at_with_context(input, dir.path(), false, Some(&context)).unwrap();
+        let request: Value = serde_json::from_str(output.trim()).unwrap();
+
+        assert_eq!(request["arguments"]["thread_id"], "thread-a");
+        assert_eq!(
+            request["arguments"]["provenance"]["execution"]["native_thread_id"],
+            "thread-a"
+        );
     }
 
     #[test]

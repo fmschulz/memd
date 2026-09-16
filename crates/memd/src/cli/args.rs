@@ -68,6 +68,13 @@ pub enum SearchReranker {
     MemReranker4B,
 }
 
+/// Native hook payload format accepted by `session-start`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum NativeHookHarness {
+    Claude,
+    Codex,
+}
+
 /// Administrative warm-worker commands.
 #[derive(Debug, Clone, Subcommand)]
 pub enum WarmCommand {
@@ -135,6 +142,19 @@ pub(super) struct ProjectScopeConfig {
 /// CLI subcommands for memory operations
 #[derive(Debug, Clone, Subcommand)]
 pub enum CliCommand {
+    /// Linked problems, attempts, executed checks, and conditional lessons.
+    Experience {
+        #[arg(long, global = true)]
+        tenant_id: Option<String>,
+        #[arg(long, global = true)]
+        project_id: Option<String>,
+        #[arg(long, global = true)]
+        output: Option<PathBuf>,
+        #[arg(long, global = true, value_enum, default_value = "auto")]
+        warm: WarmMode,
+        #[command(subcommand)]
+        command: super::experience::ExperienceCommand,
+    },
     /// Add a memory chunk
     Add {
         /// Tenant identifier
@@ -191,6 +211,16 @@ pub enum CliCommand {
         /// Optional project identifier
         #[arg(long)]
         project_id: Option<String>,
+
+        /// Optional memd task identifier for retrieval-outcome attribution.
+        /// Defaults to MEMD_TASK_ID when that variable is set.
+        #[arg(long)]
+        task_id: Option<String>,
+
+        /// Optional native thread identifier for retrieval-outcome attribution.
+        /// Defaults to the calling client's observed native thread.
+        #[arg(long)]
+        thread_id: Option<String>,
 
         /// Use memory.search compact shaping instead of the legacy raw chunk array
         #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
@@ -566,8 +596,9 @@ pub enum CliCommand {
         #[arg(long)]
         tenant_id: Option<String>,
 
-        /// Outcome: passed, accepted, corrected, failed, abandoned, or
-        /// verifier_error when the verifier produced no verdict.
+        /// Outcome: passed, accepted, corrected, failed, abandoned,
+        /// observed_used for non-ranking reuse, or verifier_error when the
+        /// verifier produced no verdict.
         #[arg(long)]
         outcome: String,
 
@@ -596,13 +627,14 @@ pub enum CliCommand {
         warm: WarmMode,
     },
 
-    /// Scan Codex session logs for verified memd retrieval usage.
+    /// Scan Codex session logs for observed memd retrieval reuse.
     ///
     /// Detects tool-call outputs that rendered a retrieval episode, then
-    /// credits served chunks whose distinctive literals appear in later
+    /// records served chunks whose distinctive literals appear in later
     /// tool-call inputs (commands or patches) of the same session. Writes
-    /// `external_tool` outcome events; `.memd/data/outcome_scan_state.json`
-    /// keeps re-runs from writing duplicate events.
+    /// non-ranking `external_tool` `observed_used` events;
+    /// `.memd/data/outcome_scan_state.json` keeps re-runs from writing
+    /// duplicate events.
     OutcomeScan {
         /// Project directory containing `.memd/project_scope.json`.
         #[arg(long, default_value = ".")]
@@ -694,6 +726,11 @@ pub enum CliCommand {
         /// Project directory containing the `.memd` scope/state files.
         #[arg(long, default_value = ".")]
         project_dir: PathBuf,
+
+        /// Read one bounded native SessionStart event from stdin.
+        /// Only session identity, model, and cwd fields are retained.
+        #[arg(long, value_enum)]
+        native_hook: Option<NativeHookHarness>,
     },
 
     /// Invoke a local memd operation by its historical tool name.
@@ -1225,6 +1262,7 @@ impl CliCommand {
 
     pub fn store_access(&self) -> StoreAccess {
         match self {
+            CliCommand::Experience { .. } => StoreAccess::Writer,
             CliCommand::Add { .. } => StoreAccess::Writer,
             CliCommand::Search { .. } => StoreAccess::ReadOnly,
             CliCommand::AgentContext { .. } => StoreAccess::ReadOnly,

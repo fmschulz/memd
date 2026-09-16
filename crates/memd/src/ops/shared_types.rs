@@ -372,6 +372,8 @@ pub struct TaskProvenanceParams {
     pub tool_version: Option<String>,
     #[serde(default)]
     pub tool_call_id: Option<String>,
+    #[serde(default)]
+    pub execution: Option<ExecutionContext>,
 }
 
 /// Parameters for task.start

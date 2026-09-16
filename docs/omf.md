@@ -8,6 +8,11 @@ to ignore.
 
 This document is the source of truth for the wire format and trust semantics.
 
+OMF transfers raw memory chunks. Use `experience export` and `experience
+import` to preserve complete canonical experience cases, including artifact
+IDs, causal links, check receipts, and provenance. Those versioned bundles
+are a separate format; see [Experience memory](experience-memory.md#case-transfer).
+
 ## Envelope
 
 ```json

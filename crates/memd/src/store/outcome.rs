@@ -101,13 +101,15 @@ impl RankingPolicyMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-// Adding `VerifierError` broke every exhaustive downstream `match`. Marking the
-// enum here means the next state costs consumers nothing, so the eligibility
-// model can grow without a major version each time.
+// Outcome states may grow as the evidence model does. Keep downstream matches
+// forward-compatible instead of turning each wire addition into a major bump.
 #[non_exhaustive]
 pub enum OutcomeKind {
     Passed,
     Accepted,
+    /// A retrieved chunk was reused in a later action, without evidence that
+    /// the action or task succeeded. This audit signal never affects ranking.
+    ObservedUsed,
     Corrected,
     Failed,
     Abandoned,
@@ -128,6 +130,7 @@ impl OutcomeKind {
         match self {
             Self::Passed => "passed",
             Self::Accepted => "accepted",
+            Self::ObservedUsed => "observed_used",
             Self::Corrected => "corrected",
             Self::Failed => "failed",
             Self::Abandoned => "abandoned",
@@ -139,6 +142,7 @@ impl OutcomeKind {
         match value {
             "passed" => Ok(Self::Passed),
             "accepted" => Ok(Self::Accepted),
+            "observed_used" => Ok(Self::ObservedUsed),
             "corrected" => Ok(Self::Corrected),
             "failed" => Ok(Self::Failed),
             "abandoned" => Ok(Self::Abandoned),
@@ -315,9 +319,13 @@ impl OutcomeEvent {
         evidence_reference: Option<String>,
         timestamp_ms: i64,
     ) -> Self {
-        let ranking_eligible = verifier.is_ranking_eligible()
-            && ((outcome.credits_used() && !used_chunk_ids.is_empty())
-                || (outcome.credits_harmful() && !harmful_chunk_ids.is_empty()));
+        let ranking_eligible = expected_ranking_eligibility(
+            outcome,
+            verifier,
+            !used_chunk_ids.is_empty(),
+            !harmful_chunk_ids.is_empty(),
+            evidence_reference.as_deref(),
+        );
         Self {
             event_id: OutcomeEventId::new(),
             episode_id,
@@ -330,6 +338,60 @@ impl OutcomeEvent {
             timestamp_ms,
         }
     }
+
+    /// Whether this event may contribute to ranking priors.
+    ///
+    /// The legacy scanner wrote passive reuse as eligible `accepted` events.
+    /// Keep those rows for audit history while excluding their exact
+    /// provenance signature from aggregation.
+    pub(crate) fn contributes_to_ranking(&self) -> bool {
+        self.ranking_eligible
+            && !is_legacy_codex_scanner_outcome(
+                self.outcome,
+                self.verifier,
+                self.evidence_reference.as_deref(),
+            )
+    }
+}
+
+fn expected_ranking_eligibility(
+    outcome: OutcomeKind,
+    verifier: OutcomeVerifier,
+    has_used_chunks: bool,
+    has_harmful_chunks: bool,
+    evidence_reference: Option<&str>,
+) -> bool {
+    verifier.is_ranking_eligible()
+        && !is_legacy_codex_scanner_outcome(outcome, verifier, evidence_reference)
+        && ((outcome.credits_used() && has_used_chunks)
+            || (outcome.credits_harmful() && has_harmful_chunks))
+}
+
+/// Identify events written by the legacy passive Codex scanner.
+///
+/// Match the full old signature so a user-verified `accepted` event, or an
+/// external verifier with another `codex:` reference convention, keeps its
+/// normal semantics.
+pub(crate) fn is_legacy_codex_scanner_outcome(
+    outcome: OutcomeKind,
+    verifier: OutcomeVerifier,
+    evidence_reference: Option<&str>,
+) -> bool {
+    if outcome != OutcomeKind::Accepted || verifier != OutcomeVerifier::ExternalTool {
+        return false;
+    }
+    let Some(reference) = evidence_reference.and_then(|reference| reference.strip_prefix("codex:"))
+    else {
+        return false;
+    };
+    let Some((session, line)) = reference.rsplit_once(':') else {
+        return false;
+    };
+    !session.is_empty()
+        && session.ends_with(".jsonl")
+        && !session.contains('/')
+        && !session.contains('\\')
+        && line.parse::<usize>().is_ok_and(|line| line > 0)
 }
 
 pub fn stable_query_hash(query: &str) -> String {
@@ -555,9 +617,13 @@ pub fn validate_outcome_event(
             "outcome attribution is limited to chunks rendered in the episode".to_string(),
         ));
     }
-    let expected_eligible = event.verifier.is_ranking_eligible()
-        && ((event.outcome.credits_used() && !used.is_empty())
-            || (event.outcome.credits_harmful() && !harmful.is_empty()));
+    let expected_eligible = expected_ranking_eligibility(
+        event.outcome,
+        event.verifier,
+        !used.is_empty(),
+        !harmful.is_empty(),
+        event.evidence_reference.as_deref(),
+    );
     if event.ranking_eligible != expected_eligible {
         return Err(MemdError::ValidationError(
             "outcome ranking eligibility does not match its verifier and attribution".to_string(),
@@ -589,6 +655,58 @@ mod tests {
             1,
         );
         assert!(!event.ranking_eligible);
+    }
+
+    #[test]
+    fn observed_use_and_legacy_scanner_events_never_credit_success() {
+        assert_eq!(OutcomeKind::ObservedUsed.as_str(), "observed_used");
+        assert_eq!(
+            OutcomeKind::parse("observed_used").unwrap(),
+            OutcomeKind::ObservedUsed
+        );
+        assert_eq!(
+            serde_json::to_string(&OutcomeKind::ObservedUsed).unwrap(),
+            "\"observed_used\""
+        );
+        assert!(!OutcomeKind::ObservedUsed.credits_used());
+        assert!(!OutcomeKind::ObservedUsed.credits_harmful());
+
+        let chunk_id = ChunkId::new();
+        let observed = OutcomeEvent::new(
+            RetrievalEpisodeId::new(),
+            OutcomeKind::ObservedUsed,
+            OutcomeVerifier::ExternalTool,
+            vec![chunk_id.clone()],
+            Vec::new(),
+            Some("codex:rollout-2026-09-15.jsonl:42".to_string()),
+            1,
+        );
+        assert!(!observed.ranking_eligible);
+
+        let legacy = OutcomeEvent {
+            event_id: OutcomeEventId::new(),
+            episode_id: RetrievalEpisodeId::new(),
+            outcome: OutcomeKind::Accepted,
+            verifier: OutcomeVerifier::ExternalTool,
+            used_chunk_ids: vec![chunk_id.clone()],
+            harmful_chunk_ids: Vec::new(),
+            evidence_reference: Some("codex:rollout-2026-09-15.jsonl:42".to_string()),
+            ranking_eligible: true,
+            timestamp_ms: 1,
+        };
+        assert!(!legacy.contributes_to_ranking());
+
+        let verified = OutcomeEvent::new(
+            RetrievalEpisodeId::new(),
+            OutcomeKind::Accepted,
+            OutcomeVerifier::ExternalTool,
+            vec![chunk_id],
+            Vec::new(),
+            Some("ci://verified-acceptance/42".to_string()),
+            1,
+        );
+        assert!(verified.ranking_eligible);
+        assert!(verified.contributes_to_ranking());
     }
 
     #[test]

@@ -403,9 +403,9 @@ impl SqliteMetadataStore {
         }
         let conn = self.pool.get();
         let mut statement = conn.prepare(
-            "SELECT o.episode_id, i.chunk_id, o.outcome,
-                    o.used_chunk_ids_json, o.harmful_chunk_ids_json,
-                    o.timestamp_ms
+            "SELECT o.episode_id, i.chunk_id, o.outcome, o.verifier_type,
+                    o.evidence_reference, o.used_chunk_ids_json,
+                    o.harmful_chunk_ids_json, o.timestamp_ms
              FROM outcome_events o
              JOIN retrieval_episode_items i ON i.episode_id = o.episode_id
              JOIN retrieval_episodes e ON e.episode_id = o.episode_id
@@ -424,15 +424,26 @@ impl SqliteMetadataStore {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
                 ))
             },
         )?;
         let mut priors = HashMap::<ChunkId, OutcomePrior>::new();
         let mut seen_episode_chunks = HashSet::<(String, ChunkId)>::new();
         for row in rows {
-            let (episode_id, chunk_id, outcome, used_json, harmful_json, timestamp_ms) = row?;
+            let (
+                episode_id,
+                chunk_id,
+                outcome,
+                verifier,
+                evidence_reference,
+                used_json,
+                harmful_json,
+                timestamp_ms,
+            ) = row?;
             let Ok(chunk_id) = ChunkId::parse(&chunk_id) else {
                 continue;
             };
@@ -440,10 +451,18 @@ impl SqliteMetadataStore {
                 continue;
             }
             let outcome = OutcomeKind::parse(&outcome)?;
+            let verifier = OutcomeVerifier::parse(&verifier)?;
+            if crate::store::outcome::is_legacy_codex_scanner_outcome(
+                outcome,
+                verifier,
+                evidence_reference.as_deref(),
+            ) {
+                continue;
+            }
             let attributed = if outcome.credits_used() {
-                parse_chunk_id_json(3, used_json)?
+                parse_chunk_id_json(5, used_json)?
             } else if outcome.credits_harmful() {
-                parse_chunk_id_json(4, harmful_json)?
+                parse_chunk_id_json(6, harmful_json)?
             } else {
                 continue;
             };
