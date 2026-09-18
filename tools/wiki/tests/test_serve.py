@@ -672,6 +672,76 @@ class MultiProjectIntegrationTests(unittest.TestCase):
         self.assertNotIn('href="/projects/treeviz/"', text)
         self.assertNotIn('href="/libraries/failures/"', text)
 
+    def test_new_project_is_discovered_without_restarting_server(self) -> None:
+        project_root = self.outdir / "new-project"
+        project_root.mkdir()
+        (project_root / "index.md").write_text("# New project\n", encoding="utf-8")
+        (project_root / "manifest.json").write_text(
+            '{"schema_version": 2}\n', encoding="utf-8"
+        )
+        status, body = self._get("/new-project/")
+        self.assertEqual(status, 200)
+        self.assertIn(b"New project", body)
+
+    def test_landing_has_search_source_and_build_timestamp(self) -> None:
+        (self.outdir / "manifest.json").write_text(
+            '{"schema_version": 2, "built_at": "2026-09-07T12:00:00+00:00"}\n',
+            encoding="utf-8",
+        )
+        status, body = self._get("/")
+        self.assertEqual(status, 200)
+        text = body.decode("utf-8")
+        self.assertIn("data-project-search", text)
+        self.assertIn('href="/manifest.json"', text)
+        self.assertIn("Built 2026-09-07T12:00:00+00:00", text)
+
+    def test_source_snapshot_is_not_labeled_as_build_time(self) -> None:
+        (self.outdir / "manifest.json").write_text(
+            '{"source_snapshot_at_ms": 1700000000000}\n', encoding="utf-8"
+        )
+        status, body = self._get("/")
+        self.assertEqual(status, 200)
+        self.assertIn(b"Source snapshot 2023-11-14T22:13:20+00:00", body)
+        self.assertNotIn(b"Built ", body)
+
+    def test_missing_or_symlinked_manifest_has_no_source_link(self) -> None:
+        status, body = self._get("/")
+        self.assertEqual(status, 200)
+        self.assertNotIn(b"Source manifest", body)
+        source = self.outdir / "private.json"
+        source.write_text('{"built_at": "UNSAFE"}\n', encoding="utf-8")
+        (self.outdir / "manifest.json").symlink_to(source)
+        status, body = self._get("/")
+        self.assertEqual(status, 200)
+        self.assertNotIn(b"Source manifest", body)
+        self.assertNotIn(b"UNSAFE", body)
+        self.assertEqual(self._get("/manifest.json")[0], 404)
+
+    def test_corrupt_manifest_does_not_break_page(self) -> None:
+        (self.outdir / "manifest.json").write_text("invalid JSON\n", encoding="utf-8")
+        status, body = self._get("/")
+        self.assertEqual(status, 200)
+        self.assertNotIn(b"Built ", body)
+        self.assertNotIn(b"Source snapshot ", body)
+
+    def test_current_symlink_swap_updates_project_roster(self) -> None:
+        first = self.outdir / "release-one"
+        second = self.outdir / "release-two"
+        for release, slug in ((first, "old-project"), (second, "new-project")):
+            project = release / slug
+            project.mkdir(parents=True)
+            (release / "index.md").write_text(f"# {slug}\n", encoding="utf-8")
+            (project / "index.md").write_text(f"# {slug}\n", encoding="utf-8")
+        current = self.outdir / "current"
+        current.symlink_to(first, target_is_directory=True)
+        self.server.RequestHandlerClass = make_handler(current, quiet=True)
+        self.assertEqual(self._get("/old-project/")[0], 200)
+        candidate = self.outdir / "candidate"
+        candidate.symlink_to(second, target_is_directory=True)
+        candidate.replace(current)
+        self.assertEqual(self._get("/new-project/")[0], 200)
+        self.assertEqual(self._get("/old-project/")[0], 404)
+
 
 if __name__ == "__main__":
     unittest.main()

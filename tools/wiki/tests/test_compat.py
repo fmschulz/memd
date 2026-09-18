@@ -4,8 +4,11 @@ import sys
 import unittest
 from pathlib import Path
 
+import tomllib
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from compiled_wiki import __version__
 from compiled_wiki.compat import (  # noqa: E402
     ServerIncompatibleError,
     check_server_compat,
@@ -13,6 +16,11 @@ from compiled_wiki.compat import (  # noqa: E402
 
 
 class CheckServerCompatTests(unittest.TestCase):
+    def test_package_version_matches_project_metadata(self) -> None:
+        pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        metadata = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        self.assertEqual(__version__, metadata["project"]["version"])
+
     def test_exact_match_is_ok(self) -> None:
         result = check_server_compat("0.9.0", "0.9.0")
         self.assertEqual(result.severity, "ok")

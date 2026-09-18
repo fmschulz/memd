@@ -29,6 +29,7 @@ import html
 import os
 import posixpath
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Tuple
 
@@ -141,8 +142,10 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
 <style>
+* {{ box-sizing: border-box; }}
 body {{
   max-width: 960px;
   margin: 2em auto;
@@ -151,7 +154,27 @@ body {{
   line-height: 1.5;
   color: #24292f;
 }}
-a {{ color: #0969da; }}
+a {{ color: #0969da; overflow-wrap: anywhere; }}
+main p {{ overflow-wrap: anywhere; }}
+.wiki-tools {{
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5em 1em;
+  margin-bottom: 1.5em;
+  color: #57606a;
+  font-size: 0.9em;
+}}
+.wiki-tools nav {{ flex: 1 1 20em; }}
+.wiki-meta {{ white-space: nowrap; }}
+.project-search {{ flex: 1 0 100%; }}
+.project-search input {{
+  width: 100%;
+  padding: 0.6em 0.75em;
+  border: 1px solid #8c959f;
+  border-radius: 6px;
+  font: inherit;
+}}
 code {{
   background: #f6f8fa;
   padding: 0.15em 0.3em;
@@ -174,13 +197,56 @@ hr {{ border: none; border-top: 1px solid #d0d7de; }}
   color: #57606a;
   font-size: 0.9em;
 }}
+@media (max-width: 600px) {{
+  body {{ margin: 1em auto; padding: 0 0.75em; }}
+  h1 {{ font-size: 1.65em; }}
+  h2 {{ font-size: 1.3em; }}
+  .wiki-meta {{ white-space: normal; }}
+  ul {{ padding-left: 1.4em; }}
+}}
 </style>
 </head>
 <body>
+{tools}
+<main id="wiki-content">
 {body}
+</main>
+{script}
 </body>
 </html>
 """
+
+_PROJECT_SEARCH_SCRIPT = """<script>
+(() => {
+  const input = document.querySelector('[data-project-search]');
+  if (!input) return;
+  const headings = [...document.querySelectorAll('#wiki-content > h2')];
+  const groups = headings.map((heading) => {
+    const nodes = [heading];
+    let node = heading.nextElementSibling;
+    while (node && node.tagName !== 'H2') {
+      nodes.push(node);
+      node = node.nextElementSibling;
+    }
+    return {nodes, text: nodes.map((item) => item.textContent).join(' ').toLowerCase()};
+  });
+  if (!headings.length) {
+    const items = document.querySelectorAll(
+      '#wiki-content > ul > li, #wiki-content > ol > li'
+    );
+    for (const item of items) {
+      groups.push({nodes: [item], text: item.textContent.toLowerCase()});
+    }
+  }
+  input.addEventListener('input', () => {
+    const query = input.value.trim().toLowerCase();
+    for (const group of groups) {
+      const hidden = query !== '' && !group.text.includes(query);
+      for (const node of group.nodes) node.hidden = hidden;
+    }
+  });
+})();
+</script>"""
 
 
 def render_page(
@@ -188,12 +254,42 @@ def render_page(
     *,
     title: str = "memd-wiki",
     link_rewriter: Optional[LinkRewriter] = None,
+    breadcrumbs: Sequence[tuple[str, str]] = (),
+    source_url: str | None = None,
+    timestamp: str | None = None,
+    project_search: bool = False,
 ) -> str:
     """Wrap the rendered body in a minimal self-contained HTML document."""
     body = markdown_to_html(md, link_rewriter=link_rewriter)
+    tools: list[str] = []
+    if breadcrumbs:
+        links = [
+            f'<a href="{html.escape(url, quote=True)}">{html.escape(label)}</a>'
+            for label, url in breadcrumbs
+        ]
+        tools.append(f'<nav aria-label="Breadcrumb">{" / ".join(links)}</nav>')
+    metadata: list[str] = []
+    if timestamp:
+        metadata.append(html.escape(timestamp))
+    if source_url:
+        metadata.append(
+            f'<a href="{html.escape(source_url, quote=True)}">Source manifest</a>'
+        )
+    if metadata:
+        tools.append(f'<div class="wiki-meta">{" · ".join(metadata)}</div>')
+    if project_search:
+        tools.append(
+            '<label class="project-search">Search projects '
+            '<input type="search" data-project-search autocomplete="off"></label>'
+        )
+    tools_html = (
+        f'<header class="wiki-tools">{"".join(tools)}</header>' if tools else ""
+    )
     return _PAGE_TEMPLATE.format(
         title=html.escape(title, quote=False),
+        tools=tools_html,
         body=body,
+        script=_PROJECT_SEARCH_SCRIPT if project_search else "",
     )
 
 

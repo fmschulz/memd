@@ -6,6 +6,7 @@
 # Sources checked:
 #   - Cargo.toml                          [workspace.package].version  (canonical)
 #   - tools/wiki/pyproject.toml           [project].version
+#   - tools/wiki/compiled_wiki/__init__.py __version__
 #   - README.md                           shields.io version badge
 #   - docs/index.md                       shields.io version badge
 #   - CHANGELOG.md                        top "## [X.Y.Z]" header
@@ -33,16 +34,19 @@ drift=0
 report() {
   local file="$1" actual="$2"
   if [[ "${actual}" != "${CANONICAL}" ]]; then
-    printf '  ✗ %s: expected %s, found %s\n' "${file}" "${CANONICAL}" "${actual}" >&2
+    printf '  FAIL %s: expected %s, found %s\n' "${file}" "${CANONICAL}" "${actual}" >&2
     drift=1
   else
-    printf '  ✓ %s: %s\n' "${file}" "${actual}"
+    printf '  OK %s: %s\n' "${file}" "${actual}"
   fi
 }
 
 # tools/wiki/pyproject.toml
 wiki_version="$(awk -F\" '/^version[[:space:]]*=/ {print $2; exit}' tools/wiki/pyproject.toml)"
 report "tools/wiki/pyproject.toml" "${wiki_version}"
+
+wiki_runtime_version="$(awk -F\" '/^__version__[[:space:]]*=/ {print $2; exit}' tools/wiki/compiled_wiki/__init__.py)"
+report "tools/wiki/compiled_wiki/__init__.py" "${wiki_runtime_version}"
 
 # README.md badge — supports the shields.io 'version-X.Y.Z-color' pattern.
 readme_version="$(grep -oE 'shields\.io/badge/version-[0-9]+\.[0-9]+\.[0-9]+' README.md | head -1 | awk -F- '{print $NF}')"
@@ -61,7 +65,7 @@ if latest_tag="$(git tag --sort=-creatordate | head -1)"; then
   if [[ -n "${latest_tag}" ]]; then
     tag_version="${latest_tag#v}"
     if [[ "${tag_version}" == "${CANONICAL}" ]]; then
-      printf '  ✓ git tag %s matches canonical\n' "${latest_tag}"
+      printf '  OK git tag %s matches canonical\n' "${latest_tag}"
     else
       printf '  ! git tag %s does not match canonical %s (advisory; no v%s release exists yet)\n' \
         "${latest_tag}" "${CANONICAL}" "${CANONICAL}"
