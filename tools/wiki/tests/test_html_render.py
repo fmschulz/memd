@@ -233,6 +233,21 @@ class PageTemplateTests(unittest.TestCase):
         )
         self.assertIn('href="/rewritten/foo.md"', html_out)
 
+    def test_render_page_has_responsive_navigation_and_project_search(self) -> None:
+        html_out = render_page(
+            "## Project A\n\nSummary",
+            breadcrumbs=(("All projects", "/"),),
+            source_url="/manifest.json",
+            timestamp="Built 2026-09-07T12:00:00+00:00",
+            project_search=True,
+        )
+        self.assertIn('name="viewport"', html_out)
+        self.assertIn('aria-label="Breadcrumb"', html_out)
+        self.assertIn('href="/manifest.json"', html_out)
+        self.assertIn("Built 2026-09-07T12:00:00+00:00", html_out)
+        self.assertIn("data-project-search", html_out)
+        self.assertIn("@media (max-width: 600px)", html_out)
+
 
 class LinkRewriterTests(unittest.TestCase):
     """Unit tests for ``make_link_rewriter`` (P3 rewriter behavior).

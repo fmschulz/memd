@@ -10,7 +10,7 @@ Phase summary:
   response so internal ``.md`` links resolve to the routes
   they were filed under.
 - **Multi-project (this change)** discovers top-level project
-  subdirectories at serve startup. Every URL whose first segment
+  subdirectories on each request. Every URL whose first segment
   matches a discovered project slug is routed into that
   subdirectory as its own wiki mount; the emitted links are
   prefixed with the project slug so navigation stays self-
@@ -27,6 +27,8 @@ exercised without binding a port.
 
 from __future__ import annotations
 
+import datetime
+import json
 import re
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -34,12 +36,12 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import FrozenSet, Optional, Tuple
 
+from . import __version__
 from .containment import (
     OutdirContainmentError,
     normalize_absolute,
     reject_if_any_symlink_inside_outdir,
 )
-from . import __version__
 from .html_render import make_link_rewriter, render_page
 
 HTML_CONTENT_TYPE = "text/html; charset=utf-8"
@@ -201,21 +203,19 @@ def make_handler(outdir: Path, *, quiet: bool = False) -> type:
     ``http.server`` contract: ``ThreadingHTTPServer`` instantiates one
     handler per request.
 
-    Project slugs are discovered once at factory time. Adding or
-    removing a project subdirectory on disk requires a service
-    restart to take effect.
+    Project slugs are read for each request so an atomically published
+    compiled tree takes effect without a service restart.
     """
     outdir_abs = normalize_absolute(outdir)
-    project_slugs = discover_project_slugs(outdir_abs)
-
     class WikiRequestHandler(BaseHTTPRequestHandler):
         server_version = f"memd-wiki-serve/{__version__}"
 
         def do_GET(self) -> None:  # noqa: N802 — http.server API.
             url_path = self.path.split("?", 1)[0]
+            project_slugs = discover_project_slugs(outdir_abs)
             route = resolve_route(outdir, url_path, project_slugs=project_slugs)
             if route.status is HTTPStatus.OK and route.file_path is not None:
-                self._respond_file(route.file_path, route.content_type, url_path)
+                self._respond_file(route.file_path, route.content_type, project_slugs)
                 return
             self._respond_bytes(
                 route.status, b"not found\n", PLAIN_CONTENT_TYPE
@@ -236,7 +236,10 @@ def make_handler(outdir: Path, *, quiet: bool = False) -> type:
             self.wfile.write(body)
 
         def _respond_file(
-            self, path: Path, content_type: str, url_path: str
+            self,
+            path: Path,
+            content_type: str,
+            project_slugs: frozenset[str],
         ) -> None:
             if content_type.startswith("text/html"):
                 markdown = path.read_text(encoding="utf-8")
@@ -251,14 +254,62 @@ def make_handler(outdir: Path, *, quiet: bool = False) -> type:
                     relative_to_outdir, project_slugs
                 )
                 rewriter = make_link_rewriter(relative_to_mount, base_path=base_path)
+                manifest_url = f"{base_path}/manifest.json"
+                manifest_route = resolve_route(
+                    outdir_abs, manifest_url, project_slugs=project_slugs
+                )
                 body = render_page(
-                    markdown, title=path.name, link_rewriter=rewriter
+                    markdown,
+                    title=path.name,
+                    link_rewriter=rewriter,
+                    breadcrumbs=_breadcrumbs(base_path, relative_to_mount),
+                    source_url=manifest_url if manifest_route.file_path else None,
+                    timestamp=(
+                        _manifest_timestamp(manifest_route.file_path)
+                        if manifest_route.file_path
+                        else None
+                    ),
+                    project_search=(
+                        relative_to_outdir == Path("index.md") and bool(project_slugs)
+                    ),
                 ).encode("utf-8")
             else:
                 body = path.read_bytes()
             self._respond_bytes(HTTPStatus.OK, body, content_type)
 
     return WikiRequestHandler
+
+
+def _manifest_timestamp(path: Path) -> str | None:
+    """Read a display-only build/source timestamp from a wiki manifest."""
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        built_at = manifest.get("built_at")
+        if isinstance(built_at, str) and built_at:
+            return f"Built {built_at}"
+        snapshot_ms = manifest.get("source_snapshot_at_ms")
+        if isinstance(snapshot_ms, int):
+            timestamp = datetime.datetime.fromtimestamp(
+                snapshot_ms / 1000, tz=datetime.timezone.utc
+            )
+            return f"Source snapshot {timestamp.isoformat()}"
+    except (OSError, ValueError, TypeError, AttributeError, OverflowError):
+        pass
+    return None
+
+
+def _breadcrumbs(base_path: str, relative_path: Path) -> tuple[tuple[str, str], ...]:
+    """Build links back to the project list and current wiki mount."""
+    crumbs: list[tuple[str, str]] = [("All projects", "/")]
+    if base_path:
+        crumbs.append((base_path.lstrip("/"), f"{base_path}/"))
+    parts = list(relative_path.with_suffix("").parts)
+    if parts == ["index"]:
+        return tuple(crumbs)
+    label = " / ".join(parts)
+    route = f"{base_path}/{'/'.join(parts)}/"
+    crumbs.append((label, route))
+    return tuple(crumbs)
 
 
 def _split_project_prefix(
