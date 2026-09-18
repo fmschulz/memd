@@ -11,6 +11,7 @@ The skill covers:
 - when to refresh project-root `memory.md` with `memd memory-md`
 - when to write with `memd add`
 - when to record a checked problem-attempt-lesson case with `memd experience`
+- how to review proposals, route corrections and suggest skills from checked cases
 - when to keep retrieval hot with `memd warm start` and `--warm required`
 - when to amortize scripted operations with `memd batch --jsonl`
 - how to link concise reusable cases to evidence stored in repository files
@@ -21,10 +22,12 @@ The skill covers:
   blocked
 
 The prebuilt `1.7.1` release supports raw memory. Build the current memd `main`
-branch to use `memd experience`. See [INSTALL.md](INSTALL.md).
+branch to use `memd experience` and detailed consolidation review.
+See [INSTALL.md](INSTALL.md).
 
 Start with:
 
 - [INSTALL.md](INSTALL.md)
 - [SKILL.md](SKILL.md)
+- [Reflection workflow](references/reflection.md)
 - [examples/INDEX.md](examples/INDEX.md)

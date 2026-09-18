@@ -1,6 +1,6 @@
 ---
 name: memd
-description: Use the memd CLI to retrieve operational memory, record reusable problem-attempt-check-lesson cases across sessions, and evaluate retrieval through verified outcomes while repository files retain source evidence and task state.
+description: Use memd to retrieve operational memory, record checked experience cases, review pending lessons, route corrections to their source, and suggest skills from repeated checked work. Repository files retain source evidence and task state.
 ---
 
 # memd
@@ -39,8 +39,8 @@ HTTP or an agent-visible integration surface.
 
 Install the prebuilt binary (static musl on Linux) using
 [INSTALL.md](INSTALL.md). The released `1.7.1` binary predates
-`memd experience`; build the current memd `main` branch when those commands are
-needed.
+`memd experience` and detailed consolidation review; build the current memd
+`main` branch when those commands are needed.
 
 Installer:
 
@@ -56,6 +56,8 @@ Use `memd` when agents need to:
 - preserve a nontrivial failure, attempted repairs, check results, and the
   conditions for a verified lesson when one is available
 - share those facts across agents and sessions
+- review pending lessons, route corrections, or suggest skills from repeated
+  checked cases using the [reflection workflow](references/reflection.md)
 
 Small talk, trivial one-shot answers, and purely local formatting rewrites do
 not need `memd`.
@@ -133,4 +135,5 @@ Read only the file for the task in front of you.
 | Recording, checking, recalling, or transferring an experience case | [Experience cases](references/experience.md) |
 | Judging whether an entry is worth writing, and how to word it | [Write quality](references/write-quality.md) |
 | Evidence-bound self-improvement | [Consolidation and verified outcomes](references/self-improvement.md) |
+| Reviewing lessons, routing corrections, or proposing reusable skills | [Reflection](references/reflection.md) |
 | Tenant/project scoping, and verifying the install | [Scope and installation](references/scope-and-install.md) |

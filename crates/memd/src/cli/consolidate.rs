@@ -24,7 +24,7 @@ use crate::consolidate::Consolidator;
 use crate::error::{MemdError, Result};
 use crate::store::Store;
 use crate::types::lifecycle::VisibilityPolicy;
-use crate::types::{ChunkId, ChunkStatus, MemoryChunk, TenantId};
+use crate::types::{ChunkId, ChunkStatus, MemoryChunk, ProjectId, TenantId};
 
 /// Invoke `close_range(CLOSE_RANGE_CLOEXEC)` without depending on the glibc
 /// wrapper, which is absent from older glibc releases even when the kernel
@@ -61,6 +61,17 @@ pub(super) struct ConsolidateOptions {
     pub(super) force: bool,
     pub(super) promote: bool,
     pub(super) legacy_immediate: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ConsolidateReviewOptions {
+    pub(super) run_id: Option<String>,
+    pub(super) tenant_id: Option<String>,
+    pub(super) project_id: Option<String>,
+    pub(super) list: bool,
+    pub(super) limit: usize,
+    pub(super) accept: bool,
+    pub(super) reject: bool,
 }
 
 /// Entry point: resolves the consolidator backend from the
@@ -124,26 +135,30 @@ fn seal_inherited_descriptors() {}
 
 pub(super) async fn run_consolidate_review<S: Store>(
     store: &S,
-    run_id: Option<&str>,
-    list: bool,
-    limit: usize,
-    accept: bool,
-    reject: bool,
+    options: ConsolidateReviewOptions,
 ) -> Result<Value> {
     let persistent = store.as_persistent().ok_or_else(|| {
         MemdError::ValidationError("consolidate-review requires a persistent store".to_string())
     })?;
-    if list {
-        if run_id.is_some() || accept || reject {
+    let tenant_id = options
+        .tenant_id
+        .as_deref()
+        .map(TenantId::new)
+        .transpose()?;
+    ProjectId::validate_opt(options.project_id.as_deref())?;
+
+    if options.list {
+        if options.run_id.is_some() || options.accept || options.reject {
             return Err(MemdError::ValidationError(
                 "consolidate-review --list does not accept a run id or decision".to_string(),
             ));
         }
         let mut staged = Vec::new();
-        for run in persistent
-            .metadata()
-            .list_staged_consolidation_runs(limit.clamp(1, 1_000))?
-        {
+        for run in persistent.metadata().list_staged_consolidation_runs(
+            tenant_id.as_ref(),
+            options.project_id.as_deref(),
+            options.limit.clamp(1, 1_000),
+        )? {
             let candidate_count = persistent
                 .metadata()
                 .get_consolidation_entries(&run.run_id)?
@@ -178,18 +193,105 @@ pub(super) async fn run_consolidate_review<S: Store>(
             "count": count,
         }));
     }
-    if accept == reject {
+    if options.accept && options.reject {
         return Err(MemdError::ValidationError(
             "consolidate-review requires exactly one of --accept or --reject".to_string(),
         ));
     }
-    let run_id = run_id.ok_or_else(|| {
+    let run_id = options.run_id.as_deref().ok_or_else(|| {
         MemdError::ValidationError(
             "consolidate-review requires a run id unless --list is used".to_string(),
         )
     })?;
     let run_id = crate::consolidate::journal::ConsolidationRunId::parse(run_id)?;
-    let decision = if accept {
+    let run = persistent
+        .metadata()
+        .get_consolidation_run(&run_id)?
+        .ok_or_else(|| {
+            unknown_review_run(&run_id, tenant_id.as_ref(), options.project_id.as_deref())
+        })?;
+    if tenant_id
+        .as_ref()
+        .is_some_and(|tenant| tenant != &run.tenant_id)
+        || options
+            .project_id
+            .as_deref()
+            .is_some_and(|project| run.project_id.as_deref() != Some(project))
+    {
+        return Err(unknown_review_run(
+            &run_id,
+            tenant_id.as_ref(),
+            options.project_id.as_deref(),
+        ));
+    }
+
+    if !options.accept && !options.reject {
+        let entries = persistent.metadata().get_consolidation_entries(&run_id)?;
+        let lineage = persistent.metadata().get_memory_lineage(&run_id)?;
+        let mut candidates = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let payload =
+                review_payload(store, &run.tenant_id, entry.candidate_chunk_id.as_ref()).await?;
+            candidates.push(json!({
+                "entry_index": entry.entry_index,
+                "state": entry.state.as_str(),
+                "source_set_hash": entry.source_set_hash,
+                "validation_error": entry.validation_error,
+                "created_at_ms": entry.created_at_ms,
+                "updated_at_ms": entry.updated_at_ms,
+                "candidate": payload,
+            }));
+        }
+        let source_ids = lineage
+            .iter()
+            .map(|edge| edge.source_chunk_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut sources = Vec::with_capacity(source_ids.len());
+        for source_id in source_ids {
+            sources.push(review_payload(store, &run.tenant_id, Some(&source_id)).await?);
+        }
+        let lineage = lineage
+            .into_iter()
+            .map(|edge| {
+                json!({
+                    "source_chunk_id": edge.source_chunk_id.to_string(),
+                    "result_chunk_id": edge.result_chunk_id.to_string(),
+                    "relation": edge.relation.as_str(),
+                    "tenant_id": edge.tenant_id.to_string(),
+                    "project_id": edge.project_id,
+                    "created_at_ms": edge.created_at_ms,
+                })
+            })
+            .collect::<Vec<_>>();
+        return Ok(json!({
+            "run": {
+                "run_id": run.run_id.to_string(),
+                "tenant_id": run.tenant_id.to_string(),
+                "project_id": run.project_id,
+                "state": run.state.as_str(),
+                "input_hash": run.input_hash,
+                "prompt_hash": run.prompt_hash,
+                "response_hash": run.response_hash,
+                "audit_artifact_path": run.audit_artifact_path,
+                "validation_result": run.validation_result,
+                "error": run.error,
+                "promotion_requested": run.promotion_requested,
+                "consolidator": {
+                    "adapter": run.consolidator,
+                    "command": run.consolidator_command,
+                    "model": run.consolidator_model,
+                    "version": run.consolidator_version,
+                },
+                "created_at_ms": run.created_at_ms,
+                "updated_at_ms": run.updated_at_ms,
+            },
+            "candidates": candidates,
+            "sources": sources,
+            "lineage": lineage,
+        }));
+    }
+
+    let decision = if options.accept {
         crate::consolidate::service::ConsolidationReviewDecision::Accept
     } else {
         crate::consolidate::service::ConsolidationReviewDecision::Reject
@@ -202,6 +304,40 @@ pub(super) async fn run_consolidate_review<S: Store>(
         "state": execution.state.as_str(),
         "candidate_chunk_ids": execution.candidate_chunk_ids.iter().map(ToString::to_string).collect::<Vec<_>>(),
         "source_count": execution.source_count,
+    }))
+}
+
+fn unknown_review_run(
+    run_id: &crate::consolidate::journal::ConsolidationRunId,
+    tenant_id: Option<&TenantId>,
+    project_id: Option<&str>,
+) -> MemdError {
+    if tenant_id.is_some() || project_id.is_some() {
+        MemdError::ValidationError(format!(
+            "consolidation run {run_id} not found in requested scope"
+        ))
+    } else {
+        MemdError::ValidationError(format!("unknown consolidation run {run_id}"))
+    }
+}
+
+async fn review_payload<S: Store>(
+    store: &S,
+    tenant_id: &TenantId,
+    chunk_id: Option<&ChunkId>,
+) -> Result<Value> {
+    let Some(chunk_id) = chunk_id else {
+        return Ok(json!({
+            "chunk_id": null,
+            "payload_missing": true,
+            "payload": null,
+        }));
+    };
+    let payload = store.get(tenant_id, chunk_id).await?;
+    Ok(json!({
+        "chunk_id": chunk_id.to_string(),
+        "payload_missing": payload.is_none(),
+        "payload": payload,
     }))
 }
 
@@ -1516,9 +1652,20 @@ mod tests {
                 .status,
             ChunkStatus::Candidate
         );
-        let pending = run_consolidate_review(&store, None, true, 100, false, false)
-            .await
-            .unwrap();
+        let pending = run_consolidate_review(
+            &store,
+            ConsolidateReviewOptions {
+                run_id: None,
+                tenant_id: None,
+                project_id: None,
+                list: true,
+                limit: 100,
+                accept: false,
+                reject: false,
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(pending["count"], 1);
         assert_eq!(pending["staged_runs"][0]["run_id"], result["run_id"]);
     }

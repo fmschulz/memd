@@ -562,10 +562,18 @@ pub enum CliCommand {
         warm: WarmMode,
     },
 
-    /// Accept or reject a validated staged consolidation run.
+    /// Inspect, accept, or reject a consolidation run.
     ConsolidateReview {
         /// Consolidation run UUID returned by `memd consolidate`.
         run_id: Option<String>,
+
+        /// Optional tenant scope. Defaults to the current project scope when present.
+        #[arg(long)]
+        tenant_id: Option<String>,
+
+        /// Optional project scope. Defaults to the current project scope when present.
+        #[arg(long)]
+        project_id: Option<String>,
 
         /// List validated runs awaiting review.
         #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["accept", "reject"])]
@@ -582,6 +590,10 @@ pub enum CliCommand {
         /// Reject the run and keep every candidate hidden.
         #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["accept", "list"])]
         reject: bool,
+
+        /// Route accept/reject through the local warm worker when available.
+        #[arg(long, value_enum, default_value = "auto")]
+        warm: WarmMode,
     },
 
     /// Record a verified task outcome against one retrieval episode.
@@ -1272,7 +1284,13 @@ impl CliCommand {
             // Opens and mutates an isolated scratch PersistentStore.
             CliCommand::EvalWriteQuality { .. } => StoreAccess::Writer,
             CliCommand::Consolidate { .. } => StoreAccess::Writer,
-            CliCommand::ConsolidateReview { .. } => StoreAccess::Writer,
+            CliCommand::ConsolidateReview { accept, reject, .. } => {
+                if *accept || *reject {
+                    StoreAccess::Writer
+                } else {
+                    StoreAccess::ReadOnly
+                }
+            }
             CliCommand::Outcome { .. } => StoreAccess::Writer,
             CliCommand::OutcomeScan { .. } => StoreAccess::Writer,
             CliCommand::EvalCounterfactual { .. } => StoreAccess::Writer,
@@ -1322,6 +1340,12 @@ impl CliCommand {
             | CliCommand::Purge { warm, .. }
             | CliCommand::Report { warm, .. }
             | CliCommand::ImportOmf { warm, .. } => Some(*warm),
+            CliCommand::ConsolidateReview {
+                accept,
+                reject,
+                warm,
+                ..
+            } if *accept || *reject => Some(*warm),
             _ => None,
         }
     }

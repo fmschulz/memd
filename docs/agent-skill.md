@@ -121,6 +121,25 @@ also carry the current repo-built binary at `bin/linux-x64/memd`; it updates
 only unique existing standard skill directories among `~/.agents/skills`,
 `~/.claude/skills`, and `~/.codex/skills`.
 
+## Reflection
+
+Ask the agent to use memd to reflect on the project's checked work and propose
+improvements. The [reflection workflow](https://github.com/fmschulz/memd/blob/main/memd-skill/references/reflection.md)
+reviews a small set of pending proposals and checked experience cases in the
+selected tenant and project. Each proposal includes its evidence, conditions,
+conflicts and intended destination.
+
+Corrections go to the source that owns the guidance: a skill, repository file,
+canonical rule or operational memory. Repeated workflows need at least two
+distinct checked cases to support a skill suggestion. The agent reads
+existing skills before proposing an amendment or a new draft. Inspection does
+not accept pending memory or edit files.
+
+Detailed proposal inspection requires a source build from `main`; the published
+1.7.1 binary does not include it. See [consolidation review](cli-reference.md#consolidation-review)
+for commands and [self-improvement](self-improvement.md) for the limits of
+consolidation evidence.
+
 ## Verify
 
 ```bash

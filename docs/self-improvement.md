@@ -54,7 +54,8 @@ Safety:
   is excluded from search, direct retrieval payloads, agent context,
   `memory.md`, exports, and reports until promotion commits.
 - The default command stops after validation. Inspect staged runs with
-  `memd consolidate-review --list`, then use
+  `memd consolidate-review --list`, read a selected proposal and its sources
+  with `memd consolidate-review <run_id>`, then use
   `memd consolidate-review <run_id> --accept` or `--reject`.
 - Acceptance records durable promotion intent, then changes every candidate
   to `Final` and every same-project source to `Superseded` in one immediate
@@ -66,6 +67,17 @@ Safety:
   seconds are treated as in flight; malformed runs are terminally rejected so
   they cannot block recovery of later runs. Transient I/O and storage errors
   remain recoverable.
+
+The [memd skill](agent-skill.md#reflection) uses these proposals and checked
+experience cases for a bounded review. It routes corrections to their owning
+skill, repository record or operational memory, and suggests reusable skills
+when distinct checked cases support the same workflow. The agent reasons from
+these records. Skill suggestions require supporting experience checks;
+candidate confidence alone supplies no such evidence.
+
+The [reflection validation notebook](https://github.com/fmschulz/memd/blob/main/evals/bench/reflection/validation.ipynb)
+exercises scoped inspection and checked-case discovery with isolated fixtures.
+It records executable checks, not a measurement of agent-task improvement.
 
 ## 3. Retrieval exposure
 

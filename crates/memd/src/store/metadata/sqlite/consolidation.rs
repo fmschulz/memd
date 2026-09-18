@@ -336,7 +336,12 @@ impl SqliteMetadataStore {
 
     /// List validated candidates awaiting an explicit promotion/rejection
     /// decision. These runs are intentionally absent from automatic recovery.
-    pub fn list_staged_consolidation_runs(&self, limit: usize) -> Result<Vec<ConsolidationRun>> {
+    pub fn list_staged_consolidation_runs(
+        &self,
+        tenant_id: Option<&TenantId>,
+        project_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ConsolidationRun>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -344,9 +349,14 @@ impl SqliteMetadataStore {
         let mut statement = conn.prepare(&format!(
             "SELECT {CONSOLIDATION_RUN_COLUMNS} FROM consolidation_runs
              WHERE state = 'validated' AND promotion_requested = 0
-             ORDER BY updated_at_ms ASC, run_id ASC LIMIT ?1"
+               AND (?1 IS NULL OR tenant_id = ?1)
+               AND (?2 IS NULL OR project_id = ?2)
+             ORDER BY updated_at_ms ASC, run_id ASC LIMIT ?3"
         ))?;
-        let rows = statement.query_map([limit as i64], row_to_consolidation_run)?;
+        let rows = statement.query_map(
+            rusqlite::params![tenant_id.map(TenantId::as_str), project_id, limit as i64],
+            row_to_consolidation_run,
+        )?;
         let mut runs = Vec::new();
         for row in rows {
             runs.push(row?);
