@@ -18,7 +18,9 @@ use super::args::{
     WarmCommand, WarmMode, WarmProcessConfig,
 };
 use super::batch::{read_batch_input, run_pre_scoped_batch_jsonl, scope_batch_jsonl};
-use super::consolidate::{run_consolidate, ConsolidateOptions};
+use super::consolidate::{
+    run_consolidate, run_consolidate_review, ConsolidateOptions, ConsolidateReviewOptions,
+};
 use super::purge::{run_purge, PurgeOptions};
 use super::report::{cli_report_rendered, ReportOptions};
 use super::{
@@ -28,7 +30,7 @@ use super::{
     write_cli_log, write_rendered, CliAddRenderOptions,
 };
 
-const WARM_WIRE_PROTOCOL: &str = "5";
+const WARM_WIRE_PROTOCOL: &str = "6";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -120,6 +122,12 @@ enum WarmWireCommand {
         force: bool,
         promote: bool,
         legacy_immediate: bool,
+    },
+    ConsolidateReview {
+        run_id: String,
+        tenant_id: Option<String>,
+        project_id: Option<String>,
+        accept: bool,
     },
     Batch {
         jsonl_content: String,
@@ -280,6 +288,9 @@ fn remove_stale_warm_socket_temps(socket: &Path) {
 }
 
 fn warm_routable(cmd: &CliCommand) -> bool {
+    if let CliCommand::ConsolidateReview { accept, reject, .. } = cmd {
+        return *accept || *reject;
+    }
     matches!(
         cmd,
         CliCommand::Search {
@@ -619,6 +630,26 @@ fn warm_wire_command_from_cli(
                 log_dir: None,
             },
         ),
+        CliCommand::ConsolidateReview {
+            run_id: Some(run_id),
+            tenant_id,
+            project_id,
+            list: false,
+            accept,
+            reject,
+            ..
+        } if *accept != *reject => (
+            WarmWireCommand::ConsolidateReview {
+                run_id: run_id.clone(),
+                tenant_id: tenant_id.clone(),
+                project_id: project_id.clone(),
+                accept: *accept,
+            },
+            WarmLocalOutputs {
+                output: None,
+                log_dir: None,
+            },
+        ),
         CliCommand::Batch {
             jsonl,
             stream: false,
@@ -847,6 +878,27 @@ async fn execute_warm_wire_command<S: Store>(
                     force,
                     promote,
                     legacy_immediate,
+                },
+            )
+            .await?;
+            Ok((serde_json::to_string_pretty(&result)? + "\n", None))
+        }
+        WarmWireCommand::ConsolidateReview {
+            run_id,
+            tenant_id,
+            project_id,
+            accept,
+        } => {
+            let result = run_consolidate_review(
+                store,
+                ConsolidateReviewOptions {
+                    run_id: Some(run_id),
+                    tenant_id,
+                    project_id,
+                    list: false,
+                    limit: 100,
+                    accept,
+                    reject: !accept,
                 },
             )
             .await?;

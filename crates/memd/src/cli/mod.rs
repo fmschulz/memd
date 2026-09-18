@@ -10,7 +10,7 @@ use crate::error::{MemdError, Result};
 use crate::store::metadata::MetadataStore;
 use crate::store::writer_lock::acquire_writer_lock;
 use crate::store::{Store, TenantManager};
-use crate::types::{ChunkId, TenantId};
+use crate::types::{ChunkId, ChunkStatus, TenantId};
 
 mod args;
 mod audit;
@@ -50,7 +50,9 @@ use audit::{render_audit_report, run_audit, strict_should_fail, AuditOptions};
 use batch::{read_batch_input, run_batch_jsonl, stream_batch_jsonl};
 use call::parse_call_arguments;
 use cleanup_plan::{render_cleanup_plan, run_cleanup_plan, CleanupPlanOptions};
-use consolidate::{run_consolidate, run_consolidate_review, ConsolidateOptions};
+use consolidate::{
+    run_consolidate, run_consolidate_review, ConsolidateOptions, ConsolidateReviewOptions,
+};
 use doctor::{failing_checks, run_doctor, DoctorOptions};
 use eval_counterfactual::{run_eval_counterfactual, EvalCounterfactualOptions};
 use eval_outcome_ranking::{run_eval_outcome_ranking, EvalOutcomeRankingOptions};
@@ -384,14 +386,27 @@ pub async fn run_cli<S: Store>(
 
         CliCommand::ConsolidateReview {
             run_id,
+            tenant_id,
+            project_id,
             list,
             limit,
             accept,
             reject,
+            warm: _,
         } => {
-            let result =
-                run_consolidate_review(store, run_id.as_deref(), list, limit, accept, reject)
-                    .await?;
+            let result = run_consolidate_review(
+                store,
+                ConsolidateReviewOptions {
+                    run_id,
+                    tenant_id,
+                    project_id,
+                    list,
+                    limit,
+                    accept,
+                    reject,
+                },
+            )
+            .await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
 
@@ -636,7 +651,10 @@ pub async fn run_cli<S: Store>(
                 )
             })?;
             let cid = ChunkId::parse(&chunk_id)?;
-            let chunk = store.get(&tenant, &cid).await?;
+            let chunk = store
+                .get(&tenant, &cid)
+                .await?
+                .filter(|chunk| chunk.status != ChunkStatus::Candidate);
 
             if let Some(c) = chunk {
                 info!(chunk_id = %cid, "chunk found");

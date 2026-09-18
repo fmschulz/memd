@@ -31,7 +31,7 @@ For write-quality expectations and cleanup safety, see the
 | `memd purge` | Dry-run or archive-first cleanup of hidden rows; `--apply` verifies the archive before mutation, and `--include-unreadable-active` previews active metadata rows whose segment payload cannot be loaded. |
 | `memd purge-archive` | Read-only verification for `memd purge --archive` files: validates format/counts/payload flags, emits SHA-256, and can enforce expected tenant/project. |
 | `memd consolidate` | Call the configured LLM (Claude Haiku or Codex Spark, selected by `MEMD_CONSOLIDATOR`) and stage validated output under a journaled run ID. Candidate summaries remain hidden until review. `--promote` requests promotion in the same run; `--legacy-immediate` is a deprecated alias for one compatibility release. Exact source-set reruns reuse the existing run. |
-| `memd consolidate-review` | List staged runs, accept one for atomic promotion, or reject it while leaving every source active. |
+| `memd consolidate-review` | List staged runs, inspect a proposal and its sources, accept it for atomic promotion, or reject it while leaving every source active. |
 | `memd session-start` | Resolve an existing project or legacy scope, or auto-create a minimal `.memd/project_scope.json` when neither provides one. Recover consolidation runs idle for at least 30 seconds, refresh `memory.md` synchronously, then attempt background consolidation when at least 10 dirty chunks have accumulated. Recovery promotes only runs with durable promotion intent. A writer-lock failure is reported in `consolidation_recovery` without suppressing context refresh. See [startup scope and output behavior](agent-skill.md#install). |
 | `memd eval-counterfactual` | Replay a JSONL benchmark file; write an overlap@k / rank-shift report under `evals/bench/reports/`. Monitors whether `kind:consolidated` lessons are load-bearing in retrieval. |
 | `memd eval-outcome-ranking` | Compare the served order with the source-deduplicated `outcome-v1` shadow order against JSONL relevant/harmful judgments. Writes JSON and Markdown counterfactual reports without activating the policy. |
@@ -146,8 +146,26 @@ The default command creates a hidden, validated proposal and returns its
 ```bash
 memd consolidate --project-dir .
 memd consolidate-review --list
+memd consolidate-review <run_id>
 memd consolidate-review <run_id> --accept
 ```
+
+With only a run ID, the command reads candidate text, sources, lineage,
+validation state and consolidator provenance. It does not accept or reject
+the run. List and inspection open the store read-only, including while a
+warm worker is active. Candidate text remains excluded from ordinary recall.
+The run's `validated` state describes consolidation validation, not a check
+that the proposed advice worked.
+
+`--tenant-id` and `--project-id` restrict listing, inspection and decisions.
+Without an explicit tenant, the command uses the repository's scope when one
+exists. Without either flags or a scope file, it is a store-wide administrator
+view. An explicit tenant without a project covers that tenant's projects.
+List filters apply before `--limit`, whose default is 100 runs.
+
+Accept and reject support `--warm auto|off|required`, with `auto` as the default.
+This routes the decision through the warm worker when available. List and
+inspection remain read-only regardless of `--warm`.
 
 Use `--reject` instead of `--accept` to close the run without changing its
 sources. Acceptance records durable promotion intent before the atomic

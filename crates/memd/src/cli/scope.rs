@@ -234,6 +234,11 @@ pub fn resolve_command_scope(cmd: &mut CliCommand) -> Result<()> {
             tenant_id,
             project_id,
             ..
+        }
+        | CliCommand::ConsolidateReview {
+            tenant_id,
+            project_id,
+            ..
         } => {
             let (resolved_tenant, resolved_project) =
                 resolve_optional(&cwd, tenant_id.take(), project_id.take())?;

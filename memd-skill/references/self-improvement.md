@@ -3,14 +3,19 @@
 memd supports three separate learning loops. Keep them inspectable and gated:
 
 1. **Content improvement:** stage deduplicated lessons with `memd consolidate`,
-   inspect them with `memd consolidate-review --list`, and accept or reject the
-   run. Candidate text stays hidden until an accepted run promotes atomically.
+   list pending runs with `memd consolidate-review --list`, inspect a selected
+   proposal with `memd consolidate-review RUN_ID`, then accept or reject the
+   run. Candidate text stays hidden from ordinary recall until acceptance.
 2. **Retrieval improvement:** capture a `retrieval_episode_id` from normal
    search or agent context, then attach a verified task outcome only after an
    external result exists.
 3. **Experience reuse:** record a nontrivial problem, attempts, a client-run
    source-stable check, and a conditional lesson. At reuse, query the explicit
    target conditions and inspect the complete case before acting.
+
+For review cards, correction routing and skill suggestions from repeated
+checked cases, use [Reflection](reflection.md). A consolidation candidate's
+confidence is not a successful experience check.
 
 Experience check receipts and retrieval outcomes serve different purposes. A
 check receipt establishes whether one recorded attempt passed against stable
