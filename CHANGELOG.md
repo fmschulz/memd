@@ -6,6 +6,24 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-09-19
+
+### Added
+
+- `memd experience` records problems, repair attempts, checks, conditional lessons, and corrections. Recall filters lessons by machine, tool, and version. Versioned bundles transfer complete cases.
+- `memd consolidate-review` inspects pending proposal text, source evidence, validation, and provenance within the selected tenant and project. `--list` lists runs awaiting review.
+- The agent skill covers lesson review, correction routing, and skill suggestions from repeated checked cases.
+
+### Changed
+
+- Experience lessons require successful, source-stable check receipts. Observed reuse remains separate from verified success.
+- Wiki navigation includes project filtering, breadcrumbs, source timestamps, and live project discovery, with layouts for narrow screens.
+
+### Fixed
+
+- Ordinary `memd get` hides pending consolidation candidates. Review decisions use the warm worker and enforce tenant and project scope.
+- The wiki runtime version matches its package version and is included in the version consistency check.
+
 ## [1.7.1] - 2026-09-06
 
 ### Fixed

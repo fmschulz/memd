@@ -1,6 +1,6 @@
 # memd
 
-[![Version](https://img.shields.io/badge/version-1.7.1-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.8.0-blue)](CHANGELOG.md)
 [![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust&logoColor=white)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-fmschulz.github.io%2Fmemd-blue)](https://fmschulz.github.io/memd/)
@@ -43,8 +43,8 @@ private CLI-managed warm worker driven by ordinary CLI commands.
 Use `memd search --mode brief_project|resume_task|find_failures|find_decisions|find_evidence|find_highlights`
 when retrieval should bias toward persisted digests and canonical summaries.
 Use `--compact` and `--token-budget` to keep agent context small.
-Experience commands require a source build from `main`; published 1.7.1
-binaries do not include them. Follow [Record a checked repair](https://fmschulz.github.io/memd/experience-how-to/)
+Use memd 1.8.0 or later for experience commands.
+Follow [Record a checked repair](https://fmschulz.github.io/memd/experience-how-to/)
 for a runnable failure, repair, recall, and transfer example. The
 [experience model](https://fmschulz.github.io/memd/experience-memory/) explains
 source coverage, abstention, and the limits of caller-reported provenance.

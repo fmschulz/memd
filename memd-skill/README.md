@@ -21,9 +21,8 @@ The skill covers:
 - how to require a CLI memory check before agents say work is impossible or
   blocked
 
-The prebuilt `1.7.1` release supports raw memory. Build the current memd `main`
-branch to use `memd experience` and detailed consolidation review.
-See [INSTALL.md](INSTALL.md).
+Install memd 1.8.0 or later for `memd experience` and detailed consolidation
+review. See [INSTALL.md](INSTALL.md).
 
 Start with:
 

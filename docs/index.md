@@ -1,6 +1,6 @@
 # memd
 
-[![Version](https://img.shields.io/badge/version-1.7.1-blue)](https://github.com/fmschulz/memd/blob/main/CHANGELOG.md){ .md-button }
+[![Version](https://img.shields.io/badge/version-1.8.0-blue)](https://github.com/fmschulz/memd/blob/main/CHANGELOG.md){ .md-button }
 [![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust&logoColor=white)](https://github.com/fmschulz/memd/blob/main/Cargo.toml){ .md-button }
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/fmschulz/memd/blob/main/LICENSE){ .md-button }
 
@@ -16,8 +16,7 @@ Keep project plans, test results, and handoffs in repository files. Use memd
 for facts those files cannot answer, such as another machine's mounts or
 deployment state.
 Concise experience cases can also preserve reusable repairs, linked to the
-repository evidence. These commands require a source build from `main`;
-published 1.7.1 binaries do not include them.
+repository evidence. These commands require memd 1.8.0 or later.
 For low-latency local use, `memd` keeps the store and indexes hot through a
 private CLI-managed warm worker driven by ordinary CLI commands.
 

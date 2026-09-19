@@ -30,8 +30,7 @@ For a failure that may recur, the [experience workflow](experience-how-to.md)
 records the problem, attempts, explicit checks, and a conditional lesson.
 Search and structured writes capture available caller provenance before warm
 dispatch. A passive reuse observation receives no success credit. The
-experience commands require a source build from `main`; published 1.7.1
-binaries do not include them.
+experience commands require memd 1.8.0 or later.
 
 The installer does not register external client tools or wrap commands.
 The write-quality rules are documented in the
@@ -135,8 +134,8 @@ distinct checked cases to support a skill suggestion. The agent reads
 existing skills before proposing an amendment or a new draft. Inspection does
 not accept pending memory or edit files.
 
-Detailed proposal inspection requires a source build from `main`; the published
-1.7.1 binary does not include it. See [consolidation review](cli-reference.md#consolidation-review)
+Detailed proposal inspection requires memd 1.8.0 or later.
+See [consolidation review](cli-reference.md#consolidation-review)
 for commands and [self-improvement](self-improvement.md) for the limits of
 consolidation evidence.
 
