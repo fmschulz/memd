@@ -82,9 +82,9 @@ list of every physical chunk created by document splitting.
 
 ## Experience
 
-The `experience` commands require a source build from `main`; published 1.7.1
-binaries do not include them. Shared options are `--tenant-id`, `--project-id`,
-`--output PATH`, and `--warm auto|off|required`. Scope follows the normal
+The `experience` commands require memd 1.8.0 or later.
+Shared options are `--tenant-id`, `--project-id`, `--output PATH`, and
+`--warm auto|off|required`. Scope follows the normal
 project configuration rules. See the [worked procedure](experience-how-to.md).
 
 | Command | Input and behavior |

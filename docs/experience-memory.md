@@ -5,8 +5,7 @@ results. A supported lesson states where the repair applies. Cases use
 memd's canonical task-artifact store and give later sessions a concise account
 to inspect. Repository files hold source code, full logs, plans, and handoffs.
 
-The experience commands require a source build from `main`. The published
-1.7.1 release does not contain them. See the
+The experience commands require memd 1.8.0 or later. See the
 [worked procedure](experience-how-to.md) and [CLI reference](cli-reference.md#experience).
 
 ## A case preserves the reasoning trail

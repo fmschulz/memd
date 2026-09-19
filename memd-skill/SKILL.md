@@ -37,10 +37,9 @@ memd warm stop
 The worker is a local CLI acceleration layer over a Unix socket. It is not
 HTTP or an agent-visible integration surface.
 
-Install the prebuilt binary (static musl on Linux) using
-[INSTALL.md](INSTALL.md). The released `1.7.1` binary predates
-`memd experience` and detailed consolidation review; build the current memd
-`main` branch when those commands are needed.
+Install memd 1.8.0 or later using [INSTALL.md](INSTALL.md) for
+`memd experience` and detailed consolidation review. Prebuilt Linux binaries
+use static musl.
 
 Installer:
 

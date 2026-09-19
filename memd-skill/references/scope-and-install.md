@@ -32,9 +32,8 @@ Run `memd init` only when you want the full guardrail suite for a repo.
 
 ## Verify the install
 
-The released `1.7.1` binary supports the existing raw-memory workflow but not
-`memd experience`. Build and install the current memd `main` branch when the
-experience commands are required. See [Experience cases](experience.md).
+Install memd 1.8.0 or later for `memd experience` and detailed consolidation
+review. See [Experience cases](experience.md).
 
 ```bash
 memd doctor

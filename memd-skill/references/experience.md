@@ -9,9 +9,7 @@ evidence references.
 Record the problem, each attempt, and each check as they occur. Add a
 conditional lesson only after a source-stable check passes.
 
-`memd experience` is available on the current memd `main` branch. The released
-`1.7.1` binary does not contain these commands. Build and install from the
-current source tree before using this workflow.
+This workflow requires memd 1.8.0 or later.
 
 Run the commands from a scoped repository, or pass the same explicit
 `--tenant-id` and `--project-id` to every command.
