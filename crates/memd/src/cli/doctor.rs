@@ -5,8 +5,8 @@
 //!
 //! - `memd` binary discoverable + version
 //! - Data directory present (and chunk count if readable)
-//! - Global agent rules wired: Claude Code (`~/.claude/CLAUDE.md`),
-//!   Codex (`~/.codex/AGENTS.md`), Cursor (`~/.cursor/rules/*.mdc`)
+//! - Global agent rules wired: Claude Code (`~/.claude/CLAUDE.md` or a
+//!   `~/.claude/rules/*.md` user rule), Codex (`~/.codex/AGENTS.md`), Cursor (`~/.cursor/rules/*.mdc`)
 //! - Claude Code `SessionStart` hook wired in `~/.claude/settings.json`
 //! - Current project scope (`.memd/project_scope.json`) if cwd is a
 //!   memd-aware repo
@@ -71,7 +71,7 @@ async fn collect_report(project_dir: &Path, resolved_data_dir: Option<&Path>) ->
     let binary = check_binary();
     let data_dir = check_data_dir(resolved_data_dir);
     let warm_worker = check_warm_worker(resolved_data_dir).await;
-    let claude_rules = check_rules_file(home_path(".claude/CLAUDE.md").as_deref());
+    let claude_rules = check_claude_rules(dirs::home_dir().as_deref());
     let codex_rules = check_rules_file(home_path(".codex/AGENTS.md").as_deref());
     let cursor_rules = check_cursor_rules();
     let session_hook = check_session_hook();
@@ -302,6 +302,41 @@ fn check_rules_file(path: Option<&Path>) -> Value {
         "reason": if wired { Value::Null } else { json!("memd-enforcement block missing") },
         "fix": if wired { "" } else { "run: make install-enforcement (or bash memd-skill/install_memd_enforcement.sh)" },
     })
+}
+
+/// Claude Code also loads every `~/.claude/rules/*.md` as a user rule, so a
+/// marker-bearing rule file there wires memd as well as `~/.claude/CLAUDE.md`.
+fn check_claude_rules(home: Option<&Path>) -> Value {
+    let Some(home) = home else {
+        return check_rules_file(None);
+    };
+    let primary = check_rules_file(Some(&home.join(".claude").join("CLAUDE.md")));
+    if primary["ok"] == json!(true) {
+        return primary;
+    }
+    let Ok(entries) = std::fs::read_dir(home.join(".claude").join("rules")) else {
+        return primary;
+    };
+    let mut rules: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("md"))
+        .collect();
+    rules.sort();
+    for path in rules {
+        let wired = std::fs::read_to_string(&path)
+            .map(|text| text.contains(ENFORCEMENT_MARKER))
+            .unwrap_or(false);
+        if wired {
+            return json!({
+                "ok": true,
+                "path": path.display().to_string(),
+                "note": "matched a ~/.claude/rules user rule",
+                "fix": "",
+            });
+        }
+    }
+    primary
 }
 
 fn check_cursor_rules() -> Value {
@@ -820,6 +855,21 @@ mod tests {
                 "global_rules missing key: {key}"
             );
         }
+    }
+
+    #[test]
+    fn claude_rules_accepts_marker_in_user_rule() {
+        let home = tempdir().unwrap();
+        let rules = home.path().join(".claude/rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        assert_eq!(check_claude_rules(Some(home.path()))["ok"], json!(false));
+        std::fs::write(rules.join("AGENTS.md"), "<!-- memd-enforcement:start -->").unwrap();
+        let report = check_claude_rules(Some(home.path()));
+        assert_eq!(report["ok"], json!(true));
+        assert!(report["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("rules/AGENTS.md"));
     }
 
     #[test]
