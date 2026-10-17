@@ -98,7 +98,7 @@ Full walkthrough: [Quick start](https://fmschulz.github.io/memd/quickstart/).
 
 ## Architecture
 
-![Architecture](docs/figures/architecture.png)
+![memd layers: callers, the CLI, retrieval and the store, and the files on disk](docs/figures/architecture-layers.svg)
 
 More: [Architecture](https://fmschulz.github.io/memd/architecture/),
 [Trust boundary](https://fmschulz.github.io/memd/trust-boundary/),

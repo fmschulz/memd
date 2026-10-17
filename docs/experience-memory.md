@@ -16,15 +16,10 @@ the audit path: they let memd run the verifying command itself.
 
 ## A case preserves the reasoning trail
 
-```mermaid
-flowchart LR
-  problem[Problem] --> first[Attempt 1]
-  first --> failed[Failed check]
-  first --> second[Attempt 2]
-  second --> passed[Passing check]
-  passed --> lesson[Conditional lesson]
-  lesson --> correction[Correction]
-```
+<figure class="memd-figure">
+--8<-- "docs/figures/experience-case.svg"
+<figcaption>One case: a problem, the attempts with their checks, the lesson that a passing check supports, and a later correction.</figcaption>
+</figure>
 
 Each attempt names its problem and preceding attempt. A check names the exact
 attempt it tested. A lesson names a supporting check and states its symptom

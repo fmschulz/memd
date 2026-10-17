@@ -55,7 +55,8 @@ markdown_extensions:
       line_spans: __span
       pygments_lang_class: true
   - pymdownx.inlinehilite
-  - pymdownx.snippets
+  - pymdownx.snippets:
+      check_paths: true
   - pymdownx.superfences:
       custom_fences:
         - name: mermaid
@@ -69,6 +70,9 @@ markdown_extensions:
 plugins:
   - search
 
+extra_css:
+  - stylesheets/figures.css
+
 # Session handoffs are local working notes. mkdocs builds every .md under
 # docs/, nav or not, so without this they deploy to the public site and are
 # reachable by URL.
@@ -79,6 +83,7 @@ nav:
   - Home: index.md
   - Quick start: quickstart.md
   - Record a checked repair: experience-how-to.md
+  - "Example: agents reuse fixes": example-agents-reuse-fixes.md
   - Concepts:
       - Architecture: architecture.md
       - Experience memory: experience-memory.md

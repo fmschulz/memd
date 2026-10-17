@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 196" role="img" aria-labelledby="ec-title">
+<title id="ec-title">An experience case: a problem, attempts with their checks, a lesson, and a later correction.</title>
+<style>.ec-bg{fill:var(--fig-bg,#ffffff)}.ec-card{fill:var(--fig-card,#f4f5f7);stroke:var(--fig-line,#c3c8cf);stroke-width:1}.ec-hot{fill:var(--fig-card,#f4f5f7);stroke:var(--fig-accent,#d55e00);stroke-width:2}.ec-dash{fill:none;stroke:var(--fig-wire,#8a929c);stroke-width:1.2;stroke-dasharray:5 4}.ec-h{fill:var(--fig-fg,#1f2328);font:600 16px var(--fig-font,Inter,system-ui,sans-serif)}.ec-b{fill:var(--fig-fg,#1f2328);font:400 14.5px var(--fig-font,Inter,system-ui,sans-serif)}.ec-m{fill:var(--fig-muted,#5b6470);font:400 13.5px var(--fig-font,Inter,system-ui,sans-serif)}.ec-c{fill:var(--fig-fg,#1f2328);font:500 13px var(--fig-mono,'JetBrains Mono',ui-monospace,monospace)}.ec-a{fill:var(--fig-accent,#d55e00)}.ec-ink{fill:var(--fig-fg,#1f2328)}.ec-grey{fill:var(--fig-muted,#5b6470)}.ec-wire{fill:none;stroke:var(--fig-wire,#8a929c);stroke-width:1.5}.ec-path{fill:none;stroke:var(--fig-accent,#d55e00);stroke-width:2.2}.ec-track{stroke:var(--fig-line,#c3c8cf);stroke-width:1.5}.ec-cross{fill:none;stroke:var(--fig-muted,#5b6470);stroke-width:2}.ec-diamond{fill:var(--fig-bg,#ffffff);stroke:var(--fig-accent,#d55e00);stroke-width:2}</style>
+<rect class="ec-bg" width="100%" height="100%"/>
+<defs><marker id="ec-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" class="ec-grey"/></marker><marker id="ec-arrow-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" class="ec-a"/></marker></defs>
+<rect class="ec-card" x="10" y="30" width="120" height="70" rx="10"/>
+<text class="ec-h" x="70.0" y="60" text-anchor="middle">Problem</text>
+<text class="ec-m" x="70.0" y="80" text-anchor="middle">error words</text>
+<rect class="ec-card" x="165" y="30" width="120" height="70" rx="10"/>
+<text class="ec-h" x="225.0" y="60" text-anchor="middle">Attempt 1</text>
+<text class="ec-m" x="225.0" y="80" text-anchor="middle">what was tried</text>
+<rect class="ec-card" x="320" y="30" width="120" height="70" rx="10"/>
+<text class="ec-h" x="380.0" y="60" text-anchor="middle">Attempt 2</text>
+<text class="ec-m" x="380.0" y="80" text-anchor="middle">the fix</text>
+<rect class="ec-hot" x="475" y="30" width="130" height="70" rx="10"/>
+<text class="ec-h" x="540" y="60" text-anchor="middle">Lesson</text>
+<text class="ec-m" x="540" y="80" text-anchor="middle">fix + conditions</text>
+<rect class="ec-dash" x="640" y="30" width="110" height="70" rx="10"/>
+<text class="ec-h" x="695" y="60" text-anchor="middle">Correction</text>
+<text class="ec-m" x="695" y="80" text-anchor="middle">if needed</text>
+<path class="ec-wire" d="M130,65 L159,65" marker-end="url(#ec-arrow)"/>
+<path class="ec-wire" d="M285,65 L314,65" marker-end="url(#ec-arrow)"/>
+<path class="ec-wire" d="M440,65 L469,65" marker-end="url(#ec-arrow)"/>
+<path class="ec-wire" d="M605,65 L634,65" stroke-dasharray="6 5" marker-end="url(#ec-arrow)"/>
+<rect class="ec-card" x="170" y="140" width="110" height="44" rx="10"/>
+<text class="ec-b" x="225" y="167" text-anchor="middle">check failed</text>
+<rect class="ec-card" x="325" y="140" width="110" height="44" rx="10"/>
+<text class="ec-b" x="380" y="167" text-anchor="middle">check passed</text>
+<path class="ec-wire" d="M225,100 L225,134" marker-end="url(#ec-arrow)"/>
+<path class="ec-wire" d="M380,100 L380,134" marker-end="url(#ec-arrow)"/>
+<path class="ec-path" d="M435,162 C470,162 515,150 532,106" marker-end="url(#ec-arrow-a)"/>
+<text class="ec-m" x="492" y="178" text-anchor="middle">supports</text>
+</svg>

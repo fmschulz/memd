@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 478" role="img" aria-labelledby="rs-title">
+<title id="rs-title">Sessions with a memd case solved both problems soon after they found it; three of four sessions without one gave up.</title>
+<style>.rs-bg{fill:var(--fig-bg,#ffffff)}.rs-card{fill:var(--fig-card,#f4f5f7);stroke:var(--fig-line,#c3c8cf);stroke-width:1}.rs-hot{fill:var(--fig-card,#f4f5f7);stroke:var(--fig-accent,#d55e00);stroke-width:2}.rs-dash{fill:none;stroke:var(--fig-wire,#8a929c);stroke-width:1.2;stroke-dasharray:5 4}.rs-h{fill:var(--fig-fg,#1f2328);font:600 16px var(--fig-font,Inter,system-ui,sans-serif)}.rs-b{fill:var(--fig-fg,#1f2328);font:400 14.5px var(--fig-font,Inter,system-ui,sans-serif)}.rs-m{fill:var(--fig-muted,#5b6470);font:400 13.5px var(--fig-font,Inter,system-ui,sans-serif)}.rs-c{fill:var(--fig-fg,#1f2328);font:500 13px var(--fig-mono,'JetBrains Mono',ui-monospace,monospace)}.rs-a{fill:var(--fig-accent,#d55e00)}.rs-ink{fill:var(--fig-fg,#1f2328)}.rs-grey{fill:var(--fig-muted,#5b6470)}.rs-wire{fill:none;stroke:var(--fig-wire,#8a929c);stroke-width:1.5}.rs-path{fill:none;stroke:var(--fig-accent,#d55e00);stroke-width:2.2}.rs-track{stroke:var(--fig-line,#c3c8cf);stroke-width:1.5}.rs-cross{fill:none;stroke:var(--fig-muted,#5b6470);stroke-width:2}.rs-diamond{fill:var(--fig-bg,#ffffff);stroke:var(--fig-accent,#d55e00);stroke-width:2}</style>
+<rect class="rs-bg" width="100%" height="100%"/>
+<defs><marker id="rs-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" class="rs-grey"/></marker><marker id="rs-arrow-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" class="rs-a"/></marker></defs>
+<text class="rs-m" x="240" y="18" text-anchor="start">commands from the first error to a result</text>
+<text class="rs-h" x="10" y="54" text-anchor="start">Test 1 · calibration profile</text>
+<text class="rs-b" x="26" y="82" text-anchor="start">without a memd case</text>
+<text class="rs-m" x="224" y="108" text-anchor="end">Codex, nothing recorded yet</text>
+<line class="rs-track" x1="240" y1="104" x2="492" y2="104"/>
+<circle class="rs-ink" cx="492" cy="104" r="5.5"/>
+<text class="rs-m" x="504" y="108" text-anchor="start">21 · read another project's notes</text>
+<text class="rs-m" x="224" y="132" text-anchor="end">Codex, no memd</text>
+<line class="rs-track" x1="240" y1="128" x2="432" y2="128"/>
+<path class="rs-cross" d="M427.5,123.5 L436.5,132.5 M427.5,132.5 L436.5,123.5"/>
+<text class="rs-m" x="444" y="132" text-anchor="start">16</text>
+<text class="rs-b" x="26" y="158" text-anchor="start">with a memd case</text>
+<text class="rs-m" x="224" y="184" text-anchor="end">Codex, other project</text>
+<line class="rs-track" x1="240" y1="180" x2="360" y2="180"/>
+<path class="rs-diamond" d="M264,174 L270,180 L264,186 L258,180 z"/>
+<circle class="rs-a" cx="360" cy="180" r="5.5"/>
+<text class="rs-m" x="372" y="184" text-anchor="start">10</text>
+<text class="rs-m" x="224" y="208" text-anchor="end">Claude Code, other project</text>
+<line class="rs-track" x1="240" y1="204" x2="300" y2="204"/>
+<path class="rs-diamond" d="M252,198 L258,204 L252,210 L246,204 z"/>
+<circle class="rs-a" cx="300" cy="204" r="5.5"/>
+<text class="rs-m" x="312" y="208" text-anchor="start">5</text>
+<text class="rs-m" x="224" y="232" text-anchor="end">Codex, other machine</text>
+<line class="rs-track" x1="240" y1="228" x2="288" y2="228"/>
+<path class="rs-diamond" d="M252,222 L258,228 L252,234 L246,228 z"/>
+<circle class="rs-a" cx="288" cy="228" r="5.5"/>
+<text class="rs-m" x="300" y="232" text-anchor="start">4</text>
+<text class="rs-h" x="10" y="270" text-anchor="start">Test 2 · site endpoint</text>
+<text class="rs-b" x="26" y="298" text-anchor="start">without a memd case</text>
+<text class="rs-m" x="224" y="324" text-anchor="end">Codex, no memd</text>
+<line class="rs-track" x1="240" y1="320" x2="432" y2="320"/>
+<path class="rs-cross" d="M427.5,315.5 L436.5,324.5 M427.5,324.5 L436.5,315.5"/>
+<text class="rs-m" x="444" y="324" text-anchor="start">16</text>
+<text class="rs-m" x="224" y="348" text-anchor="end">Codex, no memd</text>
+<line class="rs-track" x1="240" y1="344" x2="396" y2="344"/>
+<path class="rs-cross" d="M391.5,339.5 L400.5,348.5 M391.5,348.5 L400.5,339.5"/>
+<text class="rs-m" x="408" y="348" text-anchor="start">13</text>
+<text class="rs-b" x="26" y="374" text-anchor="start">with a memd case</text>
+<text class="rs-m" x="224" y="400" text-anchor="end">Codex, other project</text>
+<line class="rs-track" x1="240" y1="396" x2="372" y2="396"/>
+<path class="rs-diamond" d="M276,390 L282,396 L276,402 L270,396 z"/>
+<circle class="rs-a" cx="372" cy="396" r="5.5"/>
+<text class="rs-m" x="384" y="400" text-anchor="start">11</text>
+<text class="rs-m" x="224" y="424" text-anchor="end">Codex, service blocked</text>
+<line class="rs-track" x1="240" y1="420" x2="396" y2="420"/>
+<path class="rs-diamond" d="M336,414 L342,420 L336,426 L330,420 z"/>
+<circle class="rs-a" cx="396" cy="420" r="5.5"/>
+<text class="rs-m" x="408" y="424" text-anchor="start">13</text>
+<circle class="rs-ink" cx="245" cy="464" r="5.5"/>
+<text class="rs-m" x="256" y="468" text-anchor="start">solved</text>
+<path class="rs-cross" d="M315.5,459.5 L324.5,468.5 M315.5,468.5 L324.5,459.5"/>
+<text class="rs-m" x="331" y="468" text-anchor="start">gave up</text>
+<path class="rs-diamond" d="M405,458 L411,464 L405,470 L399,464 z"/>
+<text class="rs-m" x="416" y="468" text-anchor="start">found the recorded case</text>
+</svg>

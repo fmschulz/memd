@@ -1,0 +1,50 @@
+/* Figures: map the site palette to the variables that the SVG figures read.
+   The figures are included inline, so they follow the light and dark toggle. */
+[data-md-color-scheme] {
+  --fig-fg: var(--md-default-fg-color);
+  --fig-muted: var(--md-default-fg-color--light);
+  --fig-line: var(--md-default-fg-color--lighter);
+  --fig-wire: var(--md-default-fg-color--light);
+  --fig-card: var(--md-code-bg-color);
+  --fig-bg: var(--md-default-bg-color);
+  --fig-accent: #d55e00;
+  --fig-font: var(--md-text-font-family);
+  --fig-mono: var(--md-code-font-family);
+}
+
+[data-md-color-scheme="slate"] {
+  --fig-accent: #e69f00;
+}
+
+.md-typeset .memd-figure {
+  width: 100%;
+  max-width: 47.5rem;
+  margin: 1.6em auto;
+}
+
+.md-typeset .memd-figure svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* On phones, keep the text legible and let the figure scroll sideways. */
+@media screen and (max-width: 44.984375em) {
+  .md-typeset .memd-figure {
+    display: block;
+    overflow-x: auto;
+  }
+
+  .md-typeset .memd-figure svg {
+    min-width: 640px;
+  }
+}
+
+.md-typeset .memd-figure figcaption {
+  max-width: none;
+  margin-top: 0.6em;
+  color: var(--md-default-fg-color--light);
+  font-style: normal;
+  font-size: 0.72rem;
+  text-align: left;
+}

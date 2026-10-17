@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 496" role="img" aria-labelledby="ar-title">
+<title id="ar-title">memd layers: callers, the CLI, retrieval and the store, and the files.</title>
+<style>.ar-bg{fill:var(--fig-bg,#ffffff)}.ar-card{fill:var(--fig-card,#f4f5f7);stroke:var(--fig-line,#c3c8cf);stroke-width:1}.ar-hot{fill:var(--fig-card,#f4f5f7);stroke:var(--fig-accent,#d55e00);stroke-width:2}.ar-dash{fill:none;stroke:var(--fig-wire,#8a929c);stroke-width:1.2;stroke-dasharray:5 4}.ar-h{fill:var(--fig-fg,#1f2328);font:600 16px var(--fig-font,Inter,system-ui,sans-serif)}.ar-b{fill:var(--fig-fg,#1f2328);font:400 14.5px var(--fig-font,Inter,system-ui,sans-serif)}.ar-m{fill:var(--fig-muted,#5b6470);font:400 13.5px var(--fig-font,Inter,system-ui,sans-serif)}.ar-c{fill:var(--fig-fg,#1f2328);font:500 13px var(--fig-mono,'JetBrains Mono',ui-monospace,monospace)}.ar-a{fill:var(--fig-accent,#d55e00)}.ar-ink{fill:var(--fig-fg,#1f2328)}.ar-grey{fill:var(--fig-muted,#5b6470)}.ar-wire{fill:none;stroke:var(--fig-wire,#8a929c);stroke-width:1.5}.ar-path{fill:none;stroke:var(--fig-accent,#d55e00);stroke-width:2.2}.ar-track{stroke:var(--fig-line,#c3c8cf);stroke-width:1.5}.ar-cross{fill:none;stroke:var(--fig-muted,#5b6470);stroke-width:2}.ar-diamond{fill:var(--fig-bg,#ffffff);stroke:var(--fig-accent,#d55e00);stroke-width:2}</style>
+<rect class="ar-bg" width="100%" height="100%"/>
+<defs><marker id="ar-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" class="ar-grey"/></marker><marker id="ar-arrow-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" class="ar-a"/></marker></defs>
+<rect class="ar-card" x="10" y="10" width="740" height="64" rx="10"/>
+<text class="ar-h" x="30" y="38" text-anchor="start">Callers</text>
+<text class="ar-m" x="30" y="58" text-anchor="start">coding agents (Claude Code, Codex)  ·  AI scientists  ·  people, scripts</text>
+<path class="ar-wire" d="M380,74 L380,98" marker-end="url(#ar-arrow)"/>
+<rect class="ar-card" x="10" y="104" width="740" height="96" rx="10"/>
+<text class="ar-h" x="30" y="132" text-anchor="start">memd CLI</text>
+<text class="ar-m" x="126" y="132" text-anchor="start">one binary; a warm worker keeps the indexes loaded</text>
+<text class="ar-c" x="30" y="162" text-anchor="start">search · agent-context</text>
+<text class="ar-c" x="410" y="162" text-anchor="start">add · experience note · find</text>
+<text class="ar-m" x="30" y="186" text-anchor="start">reads open the store read-only; writes go through one writer</text>
+<path class="ar-wire" d="M190,200 L190,236" marker-end="url(#ar-arrow)"/>
+<text class="ar-m" x="200" y="223" text-anchor="start">ranked search</text>
+<path class="ar-wire" d="M570,200 L570,236" marker-end="url(#ar-arrow)"/>
+<text class="ar-m" x="580" y="223" text-anchor="start">records and cases</text>
+<rect class="ar-card" x="10" y="242" width="360" height="132" rx="10"/>
+<text class="ar-h" x="30" y="270" text-anchor="start">Hybrid retrieval</text>
+<text class="ar-b" x="30" y="298" text-anchor="start">BM25 sparse index</text>
+<text class="ar-b" x="30" y="320" text-anchor="start">HNSW dense index, local embeddings</text>
+<text class="ar-b" x="30" y="342" text-anchor="start">fusion, reranking, hot cache</text>
+<rect class="ar-card" x="390" y="242" width="360" height="132" rx="10"/>
+<text class="ar-h" x="410" y="270" text-anchor="start">Store</text>
+<text class="ar-b" x="410" y="298" text-anchor="start">SQLite: metadata, tasks, experience cases</text>
+<text class="ar-b" x="410" y="320" text-anchor="start">append-only segments per tenant</text>
+<text class="ar-b" x="410" y="342" text-anchor="start">write-ahead log per tenant</text>
+<path class="ar-wire" d="M190,374 L190,404" marker-end="url(#ar-arrow)"/>
+<path class="ar-wire" d="M570,374 L570,404" marker-end="url(#ar-arrow)"/>
+<rect class="ar-card" x="10" y="410" width="740" height="76" rx="10"/>
+<text class="ar-h" x="30" y="438" text-anchor="start">On disk</text>
+<text class="ar-c" x="110" y="438" text-anchor="start">~/.memd/data/</text>
+<text class="ar-c" x="30" y="466" text-anchor="start">metadata.db · sparse_index/ · tenants/&lt;id&gt;/{wal.log, segments/, warm_index/}</text>
+</svg>

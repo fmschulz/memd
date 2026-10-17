@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 310" role="img" aria-labelledby="fr-title">
+<title id="fr-title">Agent A records a fix in memd; agents B and C find it and apply it.</title>
+<style>.fr-bg{fill:var(--fig-bg,#ffffff)}.fr-card{fill:var(--fig-card,#f4f5f7);stroke:var(--fig-line,#c3c8cf);stroke-width:1}.fr-hot{fill:var(--fig-card,#f4f5f7);stroke:var(--fig-accent,#d55e00);stroke-width:2}.fr-dash{fill:none;stroke:var(--fig-wire,#8a929c);stroke-width:1.2;stroke-dasharray:5 4}.fr-h{fill:var(--fig-fg,#1f2328);font:600 16px var(--fig-font,Inter,system-ui,sans-serif)}.fr-b{fill:var(--fig-fg,#1f2328);font:400 14.5px var(--fig-font,Inter,system-ui,sans-serif)}.fr-m{fill:var(--fig-muted,#5b6470);font:400 13.5px var(--fig-font,Inter,system-ui,sans-serif)}.fr-c{fill:var(--fig-fg,#1f2328);font:500 13px var(--fig-mono,'JetBrains Mono',ui-monospace,monospace)}.fr-a{fill:var(--fig-accent,#d55e00)}.fr-ink{fill:var(--fig-fg,#1f2328)}.fr-grey{fill:var(--fig-muted,#5b6470)}.fr-wire{fill:none;stroke:var(--fig-wire,#8a929c);stroke-width:1.5}.fr-path{fill:none;stroke:var(--fig-accent,#d55e00);stroke-width:2.2}.fr-track{stroke:var(--fig-line,#c3c8cf);stroke-width:1.5}.fr-cross{fill:none;stroke:var(--fig-muted,#5b6470);stroke-width:2}.fr-diamond{fill:var(--fig-bg,#ffffff);stroke:var(--fig-accent,#d55e00);stroke-width:2}</style>
+<rect class="fr-bg" width="100%" height="100%"/>
+<defs><marker id="fr-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" class="fr-grey"/></marker><marker id="fr-arrow-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" class="fr-a"/></marker></defs>
+<rect class="fr-card" x="10" y="30" width="236" height="250" rx="10"/>
+<text class="fr-h" x="30" y="62" text-anchor="start">Agent A</text>
+<text class="fr-m" x="30" y="82" text-anchor="start">first to hit the error</text>
+<text class="fr-b" x="30" y="122" text-anchor="start">1</text>
+<text class="fr-b" x="50" y="122" text-anchor="start">runs the tool</text>
+<text class="fr-c" x="50" y="142" text-anchor="start">error E-LK17</text>
+<text class="fr-b" x="30" y="182" text-anchor="start">2</text>
+<text class="fr-b" x="50" y="182" text-anchor="start">works out the fix</text>
+<text class="fr-m" x="50" y="200" text-anchor="start">from notes or by trial</text>
+<text class="fr-b" x="30" y="240" text-anchor="start">3</text>
+<text class="fr-b" x="50" y="240" text-anchor="start">records the fix</text>
+<text class="fr-c" x="50" y="260" text-anchor="start">memd experience note</text>
+<rect class="fr-hot" x="300" y="90" width="166" height="150" rx="10"/>
+<text class="fr-h" x="383" y="122" text-anchor="middle">memd case</text>
+<text class="fr-m" x="383" y="148" text-anchor="middle">error words</text>
+<text class="fr-m" x="383" y="167" text-anchor="middle">the fix</text>
+<text class="fr-m" x="383" y="186" text-anchor="middle">how it was checked</text>
+<text class="fr-m" x="383" y="205" text-anchor="middle">where it applies</text>
+<path class="fr-path" d="M246,165 L294,165" marker-end="url(#fr-arrow-a)"/>
+<text class="fr-m" x="270" y="157" text-anchor="middle">note</text>
+<rect class="fr-card" x="520" y="10" width="230" height="136" rx="10"/>
+<text class="fr-h" x="540" y="40" text-anchor="start">Agent B</text>
+<text class="fr-m" x="540" y="60" text-anchor="start">other project, same machine</text>
+<text class="fr-b" x="540" y="90" text-anchor="start">1</text>
+<text class="fr-b" x="560" y="90" text-anchor="start">hits the same error</text>
+<text class="fr-b" x="540" y="112" text-anchor="start">2</text>
+<text class="fr-c" x="560" y="112" text-anchor="start">memd experience find</text>
+<text class="fr-b" x="540" y="134" text-anchor="start">3</text>
+<text class="fr-b" x="560" y="134" text-anchor="start">applies the fix</text>
+<rect class="fr-card" x="520" y="164" width="230" height="136" rx="10"/>
+<text class="fr-h" x="540" y="194" text-anchor="start">Agent C</text>
+<text class="fr-m" x="540" y="214" text-anchor="start">other machine, gets a copy</text>
+<text class="fr-b" x="540" y="244" text-anchor="start">1</text>
+<text class="fr-b" x="560" y="244" text-anchor="start">hits the same error</text>
+<text class="fr-b" x="540" y="266" text-anchor="start">2</text>
+<text class="fr-c" x="560" y="266" text-anchor="start">memd experience find</text>
+<text class="fr-b" x="540" y="288" text-anchor="start">3</text>
+<text class="fr-b" x="560" y="288" text-anchor="start">applies the fix</text>
+<path class="fr-path" d="M466,140 C493,140 493,78 514,78" marker-end="url(#fr-arrow-a)"/>
+<path class="fr-path" d="M466,190 C493,190 493,232 514,232" stroke-dasharray="6 5" marker-end="url(#fr-arrow-a)"/>
+</svg>

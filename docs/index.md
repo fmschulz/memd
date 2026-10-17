@@ -64,6 +64,7 @@ for the contract.
 
 ## Start here
 
+- [Example: agents reuse each other's fixes](example-agents-reuse-fixes.md): one agent records a fix; agents in other projects and on other machines find and apply it.
 - [Record a checked repair](experience-how-to.md): a runnable case with failure, repair, recall, and transfer.
 - [Experience memory](experience-memory.md): provenance, check coverage, applicability, and trust limits.
 - [**Quick start**](quickstart.md) — install, store first memory, retrieve, build agent context.
