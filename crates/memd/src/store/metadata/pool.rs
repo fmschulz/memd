@@ -17,7 +17,9 @@
 //! * Bounded by `max_size` (default 16) to bound memory and fd use.
 //! * Each connection is preconfigured with WAL / `NORMAL` /
 //!   `busy_timeout = 5s` / 64MB cache — same PRAGMAs the old single
-//!   connection used, applied once per connection creation.
+//!   connection used, applied once per connection creation. A read-only
+//!   pool ([`SqliteConnectionPool::open_read_only`]) skips the WAL pragma
+//!   because switching the journal mode is a write.
 //! * Grow-on-demand up to `max_size`; when at cap and all idle
 //!   connections are in use, `get()` blocks on a condition variable.
 //! * `PooledConnection` auto-releases the underlying `Connection`
@@ -71,12 +73,15 @@ impl SqliteConnectionPool {
     /// connection eagerly so the first caller does not pay the
     /// open+PRAGMA cost synchronously.
     pub fn open(db_path: &Path) -> Result<Self> {
-        let max_size = std::env::var("MEMD_SQLITE_POOL_MAX")
+        Self::open_with_max(db_path, Self::max_size_from_env())
+    }
+
+    fn max_size_from_env() -> usize {
+        std::env::var("MEMD_SQLITE_POOL_MAX")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|v| *v > 0)
-            .unwrap_or(DEFAULT_POOL_MAX_SIZE);
-        Self::open_with_max(db_path, max_size)
+            .unwrap_or(DEFAULT_POOL_MAX_SIZE)
     }
 
     /// Open a pool with an explicit cap. Exposed primarily for tests.
@@ -92,6 +97,46 @@ impl SqliteConnectionPool {
             | OpenFlags::SQLITE_OPEN_URI
             | OpenFlags::SQLITE_OPEN_SHARED_CACHE;
         Self::open_with_max_and_flags(Path::new(uri), max_size, Some(flags))
+    }
+
+    /// Open a pool that can only read an existing database.
+    ///
+    /// The database opens with `SQLITE_OPEN_READ_ONLY`, so SQLite refuses
+    /// every write. The journal mode stays as the writer left it and
+    /// nothing creates or migrates tables.
+    ///
+    /// A WAL database also needs its `-shm` file. SQLite (3.22+) reads a WAL
+    /// database from a read-only directory when `-wal` and `-shm` already
+    /// exist, and it sees every committed frame in `-wal`. It cannot do so
+    /// when both files are gone, which is the normal state of a database
+    /// whose last connection closed cleanly. Only then, and only when the
+    /// directory is not writable and `-wal` holds no frames, the pool opens
+    /// the file with `immutable=1`. With no frames in `-wal`, the main file
+    /// already holds every committed page, so no recent write is hidden.
+    /// A directory that is writable never takes this path.
+    ///
+    /// `immutable=1` takes no locks and never re-reads the file. If a writer
+    /// starts while the reader runs (for example in another mount namespace
+    /// that can write the directory), the reader can see a stale snapshot or
+    /// fail with a read error such as a corrupt or torn page. It never writes.
+    ///
+    /// SQLite keeps `-wal` and `-shm` next to the real file, so the path is
+    /// resolved through symlinks first. The sidecar and directory checks then
+    /// look at the files SQLite will use.
+    pub fn open_read_only(db_path: &Path) -> Result<Self> {
+        let max_size = Self::max_size_from_env();
+        // A path that does not resolve opens, and fails, as given.
+        let db_path = &std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
+        let plain = Self::open_with_max_and_flags(db_path, max_size, Some(read_only_flags()));
+        match plain {
+            Ok(pool) => Ok(pool),
+            Err(error) if immutable_open_is_safe(db_path) => {
+                let uri = immutable_uri(db_path);
+                Self::open_with_max_and_flags(Path::new(&uri), max_size, Some(read_only_flags()))
+                    .map_err(|_| error)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn open_with_max_and_flags(
@@ -239,14 +284,29 @@ impl Drop for PooledConnection {
 /// store needs. Kept as a free function so both `open_with_max` and
 /// the grow-on-demand path can call it.
 fn open_configured_connection(path: &Path, flags: Option<OpenFlags>) -> Result<Connection> {
+    let read_only = flags.is_some_and(|flags| flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY));
     let conn = match flags {
         Some(flags) => Connection::open_with_flags(path, flags),
         None => Connection::open(path),
     }
     .map_err(|e| MemdError::StorageError(format!("open sqlite at {}: {}", path.display(), e)))?;
 
-    conn.pragma_update(None, "journal_mode", "WAL")
-        .map_err(|e| MemdError::StorageError(format!("set journal_mode=WAL: {}", e)))?;
+    if read_only {
+        // A sandbox can leave no writable temp directory, and SQLite then fails
+        // a sort or index that spills with "disk I/O error". Keep temporary
+        // tables and sort spills in memory. Pure reads fit.
+        conn.pragma_update(None, "temp_store", "MEMORY")
+            .map_err(|e| MemdError::StorageError(format!("set temp_store=MEMORY: {}", e)))?;
+        // Touch the schema now: for a WAL database this is the first read, and
+        // it is where SQLite reports a missing or unusable `-shm` file.
+        conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+            .map_err(|e| {
+                MemdError::StorageError(format!("read sqlite at {}: {}", path.display(), e))
+            })?;
+    } else {
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(|e| MemdError::StorageError(format!("set journal_mode=WAL: {}", e)))?;
+    }
     conn.pragma_update(None, "synchronous", "NORMAL")
         .map_err(|e| MemdError::StorageError(format!("set synchronous=NORMAL: {}", e)))?;
     conn.pragma_update(None, "busy_timeout", 5000)
@@ -257,6 +317,44 @@ fn open_configured_connection(path: &Path, flags: Option<OpenFlags>) -> Result<C
         .map_err(|e| MemdError::StorageError(format!("enable foreign_keys: {}", e)))?;
 
     Ok(conn)
+}
+
+fn read_only_flags() -> OpenFlags {
+    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX
+}
+
+/// True when `immutable=1` cannot hide committed data: the database
+/// directory is not writable (so SQLite cannot create `-shm`) and `-wal`
+/// is absent or empty. `db_path` is the resolved path of the real file.
+fn immutable_open_is_safe(db_path: &Path) -> bool {
+    let wal = wal_sidecar_path(db_path);
+    let wal_has_frames = std::fs::metadata(&wal).is_ok_and(|metadata| metadata.len() > 0);
+    let directory = db_path.parent().filter(|path| !path.as_os_str().is_empty());
+    let directory_writable =
+        crate::store::path_is_writable(directory.unwrap_or_else(|| Path::new(".")));
+    !wal_has_frames && !directory_writable
+}
+
+fn wal_sidecar_path(db_path: &Path) -> PathBuf {
+    let mut wal = db_path.as_os_str().to_owned();
+    wal.push("-wal");
+    PathBuf::from(wal)
+}
+
+/// `file:` URI for `db_path` with `immutable=1`. Percent-encodes every byte
+/// except unreserved path characters, so SQLite never reads path text as URI
+/// syntax.
+fn immutable_uri(db_path: &Path) -> String {
+    let mut uri = String::from("file:");
+    for &byte in db_path.as_os_str().as_encoded_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-' | b'~') {
+            uri.push(char::from(byte));
+        } else {
+            uri.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    uri.push_str("?immutable=1");
+    uri
 }
 
 #[cfg(test)]
@@ -289,6 +387,200 @@ mod tests {
         drop(c2);
         drop(c3);
         assert_eq!(pool.idle_count(), 3);
+    }
+
+    fn wal_database(path: &Path) -> Connection {
+        let conn = Connection::open(path).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        conn.execute_batch("CREATE TABLE t (x); INSERT INTO t VALUES (1), (2);")
+            .unwrap();
+        conn
+    }
+
+    fn count_rows(pool: &SqliteConnectionPool) -> i64 {
+        pool.get()
+            .query_row("SELECT count(*) FROM t", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn read_only_pool_rejects_writes_and_keeps_journal_mode() {
+        let tmp = tempdir().unwrap();
+        let db = tmp.path().join("ro.db");
+        drop(wal_database(&db));
+
+        let pool = SqliteConnectionPool::open_read_only(&db).unwrap();
+        assert_eq!(count_rows(&pool), 2);
+        let conn = pool.get();
+        assert!(conn.execute("INSERT INTO t VALUES (3)", []).is_err());
+        let mode: String = conn
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
+    }
+
+    #[test]
+    fn read_only_pool_keeps_temporary_storage_in_memory() {
+        // A sandbox may have no writable temp dir; a spilled sort would then
+        // fail with "disk I/O error". 2 is SQLite's MEMORY temp store.
+        let tmp = tempdir().unwrap();
+        let db = tmp.path().join("temp.db");
+        drop(wal_database(&db));
+
+        let pool = SqliteConnectionPool::open_read_only(&db).unwrap();
+        let temp_store: i64 = pool
+            .get()
+            .pragma_query_value(None, "temp_store", |row| row.get(0))
+            .unwrap();
+        assert_eq!(temp_store, 2);
+    }
+
+    #[test]
+    fn read_only_pool_sees_frames_of_a_live_writer() {
+        let tmp = tempdir().unwrap();
+        let db = tmp.path().join("live.db");
+        let writer = wal_database(&db);
+        writer.execute_batch("INSERT INTO t VALUES (3);").unwrap();
+        assert!(std::fs::metadata(wal_sidecar_path(&db)).unwrap().len() > 0);
+
+        let pool = SqliteConnectionPool::open_read_only(&db).unwrap();
+        assert_eq!(count_rows(&pool), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_pool_opens_a_closed_wal_database_in_an_unwritable_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("closed");
+        std::fs::create_dir(&dir).unwrap();
+        let db = dir.join("closed.db");
+        drop(wal_database(&db));
+        assert!(
+            !wal_sidecar_path(&db).exists(),
+            "closing the last connection removes the WAL"
+        );
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let writable = crate::store::path_is_writable(&dir);
+
+        let pool = SqliteConnectionPool::open_read_only(&db);
+        let before = std::fs::read_dir(&dir).unwrap().count();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if writable {
+            return; // root ignores the mode bits; nothing to prove here
+        }
+        assert_eq!(count_rows(&pool.unwrap()), 2);
+        assert_eq!(before, 1, "the read must not create -wal or -shm files");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_pool_does_not_hide_wal_frames_behind_immutable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("framed");
+        std::fs::create_dir(&dir).unwrap();
+        let db = dir.join("framed.db");
+        let writer = wal_database(&db);
+        writer.execute_batch("INSERT INTO t VALUES (3);").unwrap();
+        // Keep -wal and drop -shm: plain read-only SQLite cannot open this in
+        // an unwritable dir, and `immutable=1` would miss the frames.
+        let frames = std::fs::read(wal_sidecar_path(&db)).unwrap();
+        let snapshot = tmp.path().join("snapshot");
+        std::fs::create_dir(&snapshot).unwrap();
+        std::fs::copy(&db, snapshot.join("framed.db")).unwrap();
+        std::fs::write(snapshot.join("framed.db-wal"), frames).unwrap();
+        std::fs::set_permissions(&snapshot, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let writable = crate::store::path_is_writable(&snapshot);
+
+        let result = SqliteConnectionPool::open_read_only(&snapshot.join("framed.db"));
+        std::fs::set_permissions(&snapshot, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if writable {
+            return;
+        }
+        assert!(
+            result.is_err(),
+            "a database with WAL frames must fail loudly, not read stale data"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_pool_follows_a_symlinked_database_to_its_real_sidecars() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let tmp = tempdir().unwrap();
+        let real_dir = tmp.path().join("real");
+        let link_dir = tmp.path().join("link");
+        std::fs::create_dir(&real_dir).unwrap();
+        std::fs::create_dir(&link_dir).unwrap();
+        let real = real_dir.join("real.db");
+        drop(wal_database(&real));
+        assert!(!wal_sidecar_path(&real).exists());
+        let link = link_dir.join("metadata.db");
+        symlink(&real, &link).unwrap();
+        // The real directory cannot take `-shm`; the directory with the link
+        // is writable, and a check that looked only there would say yes.
+        std::fs::set_permissions(&real_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let writable = crate::store::path_is_writable(&real_dir);
+
+        let pool = SqliteConnectionPool::open_read_only(&link);
+        let created = std::fs::read_dir(&link_dir).unwrap().count()
+            + std::fs::read_dir(&real_dir).unwrap().count();
+        std::fs::set_permissions(&real_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if writable {
+            return; // root ignores the mode bits; nothing to prove here
+        }
+        assert_eq!(count_rows(&pool.unwrap()), 2);
+        assert_eq!(created, 2, "the read must create no sidecar files");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_pool_checks_the_real_wal_of_a_symlinked_database() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let tmp = tempdir().unwrap();
+        let real_dir = tmp.path().join("real");
+        let link_dir = tmp.path().join("link");
+        std::fs::create_dir(&real_dir).unwrap();
+        std::fs::create_dir(&link_dir).unwrap();
+        let live = tmp.path().join("live.db");
+        let writer = wal_database(&live);
+        writer.execute_batch("INSERT INTO t VALUES (3);").unwrap();
+        // Real files: database and a `-wal` with frames, no `-shm`.
+        let real = real_dir.join("real.db");
+        std::fs::copy(&live, &real).unwrap();
+        std::fs::copy(wal_sidecar_path(&live), wal_sidecar_path(&real)).unwrap();
+        let link = link_dir.join("metadata.db");
+        symlink(&real, &link).unwrap();
+        // Nothing is next to the link, and neither directory is writable.
+        for dir in [&real_dir, &link_dir] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        let writable = crate::store::path_is_writable(&real_dir);
+
+        let result = SqliteConnectionPool::open_read_only(&link);
+        for dir in [&real_dir, &link_dir] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        if writable {
+            return;
+        }
+        assert!(
+            result.is_err(),
+            "frames in the real `-wal` must fail loudly, not read a stale snapshot"
+        );
+    }
+
+    #[test]
+    fn immutable_uri_escapes_uri_syntax() {
+        assert_eq!(
+            immutable_uri(Path::new("/data/my dir/a?b#c%d.db")),
+            "file:/data/my%20dir/a%3Fb%23c%25d.db?immutable=1"
+        );
     }
 
     #[test]

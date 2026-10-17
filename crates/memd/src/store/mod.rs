@@ -20,6 +20,7 @@ pub mod wal;
 pub mod writer_lock;
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -239,6 +240,27 @@ pub(crate) fn rank_candidate_chunks(
 /// Marker prefix for [`unsupported_store_capability`] errors so callers can
 /// classify optional-capability gaps without matching on free text.
 const UNSUPPORTED_STORE_CAPABILITY_PREFIX: &str = "store capability unsupported";
+
+/// True when this process may create files in `path`, or in its nearest
+/// existing ancestor when `path` does not exist yet. Unlike a probe write,
+/// `access(2)` also reports a read-only mount (EROFS) and leaves no trace.
+pub(crate) fn path_is_writable(path: &Path) -> bool {
+    let existing = path
+        .ancestors()
+        .find(|ancestor| !ancestor.as_os_str().is_empty() && ancestor.exists())
+        .unwrap_or_else(|| Path::new("."));
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        std::ffi::CString::new(existing.as_os_str().as_bytes())
+            // SAFETY: `c_path` is a valid NUL-terminated string for the call.
+            .is_ok_and(|c_path| unsafe { libc::access(c_path.as_ptr(), libc::W_OK) } == 0)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::metadata(existing).is_ok_and(|metadata| !metadata.permissions().readonly())
+    }
+}
 
 fn unsupported_store_capability(capability: &str) -> MemdError {
     MemdError::StorageError(format!(
@@ -491,6 +513,12 @@ pub trait Store: Send + Sync {
     /// `PersistentStore` overrides to `Some(self)`.
     fn as_persistent(&self) -> Option<&crate::store::persistent::PersistentStore> {
         None
+    }
+
+    /// True when the store refuses every write. Read-only commands skip
+    /// bookkeeping writes (retrieval episodes, exposure logs) on such a store.
+    fn is_read_only(&self) -> bool {
+        false
     }
 
     /// Best-effort usage-ledger recording. Never fails; implementations

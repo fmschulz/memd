@@ -1274,7 +1274,13 @@ impl CliCommand {
 
     pub fn store_access(&self) -> StoreAccess {
         match self {
-            CliCommand::Experience { .. } => StoreAccess::Writer,
+            CliCommand::Experience { command, .. } => {
+                if command.reads_only() {
+                    StoreAccess::ReadOnly
+                } else {
+                    StoreAccess::Writer
+                }
+            }
             CliCommand::Add { .. } => StoreAccess::Writer,
             CliCommand::Search { .. } => StoreAccess::ReadOnly,
             CliCommand::AgentContext { .. } => StoreAccess::ReadOnly,
@@ -1296,6 +1302,10 @@ impl CliCommand {
             CliCommand::EvalCounterfactual { .. } => StoreAccess::Writer,
             CliCommand::EvalOutcomeRanking { .. } => StoreAccess::Writer,
             CliCommand::SessionStart { .. } => StoreAccess::ReadOnly,
+            // `experience find|get|export` reach the store as read-only calls.
+            CliCommand::Call { tool, .. } if super::experience::is_read_tool(tool) => {
+                StoreAccess::ReadOnly
+            }
             CliCommand::Call { .. } => StoreAccess::Writer,
             CliCommand::Batch { .. } => StoreAccess::Writer,
             CliCommand::Warm { .. } => StoreAccess::Writer,

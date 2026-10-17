@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use super::{
     lesson_from_event, CheckReceipt, ConditionalLesson, ExperienceEvent, LessonApplicability,
-    SourceFingerprintCoverage, ROLE_ATTEMPT, ROLE_CHECK, ROLE_CORRECTION, ROLE_LESSON,
-    ROLE_PROBLEM,
+    LessonEvidence, ObservedCheck, SourceFingerprintCoverage, OBSERVED_CHECK_STATUS, ROLE_ATTEMPT,
+    ROLE_CHECK, ROLE_CORRECTION, ROLE_LESSON, ROLE_PROBLEM,
 };
 use crate::error::{MemdError, Result};
 use crate::task_memory::{ArtifactKind, TaskArtifact};
@@ -41,6 +41,47 @@ pub(crate) fn validate_applicability(applicability: &LessonApplicability) -> Res
     }
     if applicability.version.is_some() && applicability.tool.is_none() {
         return Err(validation("version applicability requires tool"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_observed_check(check: &ObservedCheck) -> Result<()> {
+    require_text("attempt_id", &check.attempt_id)?;
+    require_text("result", &check.result)?;
+    if let Some(command) = &check.command {
+        require_text("command", command)?;
+    }
+    Ok(())
+}
+
+/// Require that `check` can support `lesson` and that the lesson's evidence
+/// label names how the check was established.
+pub(crate) fn validate_lesson_evidence(
+    check: &TaskArtifact,
+    lesson: &ConditionalLesson,
+) -> Result<()> {
+    let actual = match required_event(check)? {
+        ExperienceEvent::Check(receipt) => {
+            if !receipt.supports_lesson() {
+                return Err(validation(
+                    "supporting check must have exit_code 0, no timeout, complete output hashes, and unchanged source evidence",
+                ));
+            }
+            LessonEvidence::Executed
+        }
+        ExperienceEvent::ObservedCheck(_) => LessonEvidence::Observed,
+        _ => {
+            return Err(validation(format!(
+                "artifact '{}' is not an experience check",
+                check.artifact_id
+            )));
+        }
+    };
+    if lesson.evidence != actual {
+        return Err(validation(format!(
+            "lesson evidence '{:?}' does not match its supporting check, which is '{:?}'",
+            lesson.evidence, actual
+        )));
     }
     Ok(())
 }
@@ -125,7 +166,7 @@ pub(crate) fn problem_id(event: &ExperienceEvent) -> Option<&str> {
         ExperienceEvent::Problem { .. } => None,
         ExperienceEvent::Attempt { problem_id, .. }
         | ExperienceEvent::Correction { problem_id, .. } => Some(problem_id),
-        ExperienceEvent::Check(_) => None,
+        ExperienceEvent::Check(_) | ExperienceEvent::ObservedCheck(_) => None,
         ExperienceEvent::Lesson(lesson) => Some(&lesson.problem_id),
     }
 }
@@ -252,9 +293,19 @@ pub(crate) fn validate_case(artifacts: &[TaskArtifact]) -> Result<()> {
                     ensure_ref(&by_id, previous, "previous attempt", artifact)?;
                 }
             }
-            ExperienceEvent::Check(receipt) => {
-                validate_receipt(receipt)?;
-                let target = ensure_ref(&by_id, &receipt.attempt_id, "attempt", artifact)?;
+            ExperienceEvent::Check(_) | ExperienceEvent::ObservedCheck(_) => {
+                let attempt_id = match required_event(artifact)? {
+                    ExperienceEvent::Check(receipt) => {
+                        validate_receipt(receipt)?;
+                        &receipt.attempt_id
+                    }
+                    ExperienceEvent::ObservedCheck(check) => {
+                        validate_observed_check(check)?;
+                        &check.attempt_id
+                    }
+                    _ => unreachable!("outer arm matched a check"),
+                };
+                let target = ensure_ref(&by_id, attempt_id, "attempt", artifact)?;
                 if !matches!(required_event(target)?, ExperienceEvent::Attempt { .. }) {
                     return Err(validation(format!(
                         "check '{}' targets a non-attempt artifact",
@@ -304,18 +355,21 @@ fn validate_lesson_refs(
         "supporting check",
         artifact,
     )?;
-    let ExperienceEvent::Check(receipt) = required_event(check)? else {
+    if !matches!(
+        required_event(check)?,
+        ExperienceEvent::Check(_) | ExperienceEvent::ObservedCheck(_)
+    ) {
         return Err(validation(format!(
             "lesson '{}' has a non-check supporting reference",
             artifact.artifact_id
         )));
-    };
-    if !receipt.supports_lesson() {
-        return Err(validation(format!(
-            "lesson '{}' is supported by an unsuccessful or incomplete check",
-            artifact.artifact_id
-        )));
     }
+    validate_lesson_evidence(check, lesson).map_err(|error| {
+        validation(format!(
+            "lesson '{}' is not supported by its check: {error}",
+            artifact.artifact_id
+        ))
+    })?;
     for conflict in &lesson.conflicts_with {
         let target = ensure_ref(by_id, conflict, "conflicting lesson", artifact)?;
         if lesson_from_event(required_event(target)?).is_none() {
@@ -382,6 +436,16 @@ pub(crate) fn validate_artifact_shape(artifact: &TaskArtifact) -> Result<()> {
                     Some("checks_attempt"),
                 )
             }
+            ExperienceEvent::ObservedCheck(check) => {
+                validate_observed_check(check)?;
+                (
+                    ArtifactKind::Verification,
+                    ROLE_CHECK,
+                    OBSERVED_CHECK_STATUS,
+                    Some(check.attempt_id.as_str()),
+                    Some("checks_attempt"),
+                )
+            }
             ExperienceEvent::Lesson(lesson) => {
                 validate_embedded_lesson(lesson)?;
                 (
@@ -430,8 +494,11 @@ pub(crate) fn validate_artifact_shape(artifact: &TaskArtifact) -> Result<()> {
             artifact.artifact_id
         )));
     }
-    let expected_verification =
-        matches!(event, ExperienceEvent::Check(_)).then_some("recorded_check");
+    let expected_verification = matches!(
+        event,
+        ExperienceEvent::Check(_) | ExperienceEvent::ObservedCheck(_)
+    )
+    .then_some("recorded_check");
     if artifact.verification_status.as_deref() != expected_verification
         || artifact.supports_claim.is_some()
         || artifact.approval_state.is_some()
@@ -453,6 +520,7 @@ pub(crate) fn validate_artifact_shape(artifact: &TaskArtifact) -> Result<()> {
             ids
         }
         ExperienceEvent::Check(receipt) => vec![receipt.attempt_id.clone()],
+        ExperienceEvent::ObservedCheck(check) => vec![check.attempt_id.clone()],
         ExperienceEvent::Lesson(lesson) => lesson_related_ids(lesson),
         ExperienceEvent::Correction {
             supersedes_id,

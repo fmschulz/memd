@@ -966,7 +966,19 @@ pub async fn try_run_warm_client(config: &WarmProcessConfig, cmd: &CliCommand) -
         return Ok(false);
     }
 
-    if let Err((error, start_error)) = ensure_warm_worker(config).await {
+    // A worker keeps its socket, pid file, and log under the data dir. When the
+    // dir is read-only (a sandbox mount) no worker can start there, so Auto
+    // still uses a worker that is already reachable, and otherwise takes the
+    // cold read path without a start attempt and without a warning.
+    if mode == WarmMode::Auto && !crate::store::path_is_writable(&config.data_dir) {
+        if warm_ping(config).await.is_err() {
+            debug!(
+                data_dir = %config.data_dir.display(),
+                "data dir is not writable; skipping warm worker start"
+            );
+            return Ok(false);
+        }
+    } else if let Err((error, start_error)) = ensure_warm_worker(config).await {
         if mode == WarmMode::Auto {
             warn!(
                 error = %error,
@@ -2025,6 +2037,29 @@ mod tests {
         let plain =
             WarmWireResponse::for_command_error(&MemdError::StorageError("disk full".to_string()));
         assert!(!plain.busy);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_command_skips_the_worker_start_in_an_unwritable_data_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir(&data_dir).unwrap();
+        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let unwritable = !crate::store::path_is_writable(&data_dir);
+        let config = test_warm_config(data_dir.clone());
+
+        let result = try_run_warm_client(&config, &search_command(false, WarmMode::Auto)).await;
+        let created_warm_dir = data_dir.join("warm").exists();
+        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        if unwritable {
+            // Cold fallback, and no start attempt that would create `warm/`.
+            assert!(!result.unwrap());
+            assert!(!created_warm_dir);
+        }
     }
 
     #[cfg(unix)]

@@ -193,7 +193,10 @@ fn enrich_operation_arguments_with_task(
     }
 
     let task_provenance = TASK_PROVENANCE_TOOLS.contains(&tool);
-    let experience_provenance = matches!(tool, "experience.record" | "experience.record_check");
+    let experience_provenance = matches!(
+        tool,
+        "experience.record" | "experience.record_check" | "experience.note"
+    );
     if task_provenance || experience_provenance {
         insert_if_absent(
             &mut arguments,

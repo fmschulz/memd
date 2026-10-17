@@ -8,7 +8,10 @@ Each machine keeps its own store. Complete experience cases can move between
 stores through explicit `experience export` and `experience import` commands.
 These preserve canonical IDs and provenance, reject conflicting content, and
 treat exact replay as a no-op. They do not provide continuous replication or
-automatic merging of divergent case histories. See
+automatic merging of divergent case histories. A case can also travel as a
+small case file through an external exchange that serves many machines and
+sandboxes: `experience note --emit` validates the file, and
+`experience note --shared-id` keeps a local copy tied to the exchange's ID. See
 [Experience memory](experience-memory.md#case-transfer).
 
 ```mermaid
@@ -66,11 +69,35 @@ contention, the typed error is:
 writer lock held by another process ({holder}) at {lock_path}; if a memd warm worker is running, route this write through it (--warm auto, the default) or stop it with `memd warm stop`; otherwise stop the other memd process or retry later (MEMD_WRITER_LOCK_TIMEOUT_MS)
 ```
 
-Reads are lock-free. Read commands open the store in ReadOnly mode, take no
-writer lock, never append WAL records, never write segments, and skip index or
-cache persistence. A ReadOnly open of a missing data directory does not create
-directories or `metadata.db`; mutating operations on a ReadOnly store return a
-typed error.
+Reads are lock-free and change no stored data. Read commands, including
+`search`, `agent-context`, and `experience find|get|export`, open the store in
+ReadOnly mode. A ReadOnly open takes no writer lock and does not create or
+change directories, modes, or `metadata.db`. In a writable directory SQLite
+can still create its `-shm` file and Tantivy its `.tantivy-meta.lock`; in a
+read-only directory they create nothing. It opens SQLite read-only, so it sets no
+journal mode and runs no schema creation. It never appends WAL records, writes
+segments, or persists indexes or caches. It also records no retrieval episode
+(`retrieval_episode_id` is `null`), no `retrieval_exposures.jsonl` line, no
+usage event, and no digest. A ReadOnly open of a missing data directory or
+database reads as an empty store; mutating operations on a ReadOnly store
+return a typed error.
+
+A ReadOnly store works on a read-only mount, such as the data directory inside
+a Codex sandbox. A WAL database is read through its `-wal` and `-shm` files
+when they exist, so a live writer's recent commits stay visible. When both are
+gone and the directory cannot be written, memd opens the main file with
+SQLite's `immutable=1` on the real file (symlinks are resolved first), which is
+exact because no WAL frames exist. `immutable=1` takes no locks: a writer that
+starts during the read can make the reader see a stale snapshot or fail with a
+read error. It never writes. A `-wal` with frames and no `-shm` fails with an
+error instead. The Tantivy sparse index
+opens without its lock file when the lock cannot be created.
+
+`--warm auto` does not try to start a worker when the data directory is not
+writable. It uses a worker that already answers, and otherwise runs the cold
+read path without a warning. A store written by an older memd needs one writer
+command (`memd add`, a warm worker start) before ReadOnly reads, because a
+ReadOnly open does not create newer tables.
 
 The worker probes SQLite `data_version` before each request. If an external
 direct-fallback mutation happened, it schedules a single-flight background HNSW

@@ -30,7 +30,7 @@ if ! grep -Fq "<!-- memd-enforcement:start -->" "${HOME}/.codex/AGENTS.md"; then
   exit 1
 fi
 
-if ! grep -Fq 'could any file in a repo I can read answer this?' "${HOME}/.codex/AGENTS.md"; then
+if ! grep -Fq 'memd experience find' "${HOME}/.codex/AGENTS.md"; then
   echo "missing CLI memd contract in ~/.codex/AGENTS.md" >&2
   exit 1
 fi
@@ -40,7 +40,7 @@ if ! grep -Fq "<!-- memd-enforcement:start -->" "${HOME}/.claude/CLAUDE.md"; the
   exit 1
 fi
 
-if ! grep -Fq 'could any file in a repo I can read answer this?' "${HOME}/.claude/CLAUDE.md"; then
+if ! grep -Fq 'memd experience find' "${HOME}/.claude/CLAUDE.md"; then
   echo "missing CLI memd contract in ~/.claude/CLAUDE.md" >&2
   exit 1
 fi
@@ -50,7 +50,7 @@ if [[ ! -f "${HOME}/.cursor/rules/memd.mdc" ]]; then
   exit 1
 fi
 
-if ! grep -Fq 'could any file in a repo I can read answer this?' "${HOME}/.cursor/rules/memd.mdc"; then
+if ! grep -Fq 'memd experience find' "${HOME}/.cursor/rules/memd.mdc"; then
   echo "missing CLI memd contract in ~/.cursor/rules/memd.mdc" >&2
   exit 1
 fi

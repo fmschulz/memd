@@ -385,6 +385,7 @@ fn causal_reference_ids(event: &ExperienceEvent) -> Vec<&str> {
             refs
         }
         ExperienceEvent::Check(receipt) => vec![receipt.attempt_id.as_str()],
+        ExperienceEvent::ObservedCheck(check) => vec![check.attempt_id.as_str()],
         ExperienceEvent::Lesson(lesson) => vec![
             lesson.problem_id.as_str(),
             lesson.supporting_check_id.as_str(),

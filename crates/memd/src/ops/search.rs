@@ -206,26 +206,28 @@ pub async fn handle_memory_search<S: Store>(
         annotate_chunk_origins(&mut results, &tenant_id, scope_expansion.as_ref());
 
         let (results, budget_info) = shape_memory_results(results, &params);
-        let (retrieval_episode_id, ranking_policy) =
-            if params.suppress_retrieval_episode || params.ranking_time_ms.is_some() {
-                (None, None)
-            } else {
-                let (episode_id, policy) = record_search_retrieval_episode(
-                    store,
-                    &tenant_id,
-                    project_id_filter,
-                    &params.query,
-                    mode,
-                    params.k,
-                    policy_mode,
-                    params.task_id.clone(),
-                    params.thread_id.clone(),
-                    &episode_pool,
-                    &results,
-                )
-                .await?;
-                (Some(episode_id), Some(policy))
-            };
+        let (retrieval_episode_id, ranking_policy) = if params.suppress_retrieval_episode
+            || params.ranking_time_ms.is_some()
+            || store.is_read_only()
+        {
+            (None, None)
+        } else {
+            let (episode_id, policy) = record_search_retrieval_episode(
+                store,
+                &tenant_id,
+                project_id_filter,
+                &params.query,
+                mode,
+                params.k,
+                policy_mode,
+                params.task_id.clone(),
+                params.thread_id.clone(),
+                &episode_pool,
+                &results,
+            )
+            .await?;
+            (Some(episode_id), Some(policy))
+        };
         record_search_usage_event(store, &tenant_id, &params, results.len());
         let scope_status = scope_status_for_search(
             store,
@@ -369,26 +371,28 @@ pub async fn handle_memory_search<S: Store>(
     annotate_chunk_origins(&mut results, &tenant_id, scope_expansion.as_ref());
 
     let (results, budget_info) = shape_memory_results(results, &params);
-    let (retrieval_episode_id, ranking_policy) =
-        if params.suppress_retrieval_episode || params.ranking_time_ms.is_some() {
-            (None, None)
-        } else {
-            let (episode_id, policy) = record_search_retrieval_episode(
-                store,
-                &tenant_id,
-                project_id_filter,
-                &params.query,
-                mode,
-                params.k,
-                policy_mode,
-                params.task_id.clone(),
-                params.thread_id.clone(),
-                &episode_pool,
-                &results,
-            )
-            .await?;
-            (Some(episode_id), Some(policy))
-        };
+    let (retrieval_episode_id, ranking_policy) = if params.suppress_retrieval_episode
+        || params.ranking_time_ms.is_some()
+        || store.is_read_only()
+    {
+        (None, None)
+    } else {
+        let (episode_id, policy) = record_search_retrieval_episode(
+            store,
+            &tenant_id,
+            project_id_filter,
+            &params.query,
+            mode,
+            params.k,
+            policy_mode,
+            params.task_id.clone(),
+            params.thread_id.clone(),
+            &episode_pool,
+            &results,
+        )
+        .await?;
+        (Some(episode_id), Some(policy))
+    };
     record_search_usage_event(store, &tenant_id, &params, results.len());
     let scope_status = scope_status_for_search(
         store,

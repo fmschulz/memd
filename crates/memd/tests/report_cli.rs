@@ -599,22 +599,24 @@ async fn perf_10k_chunk_store_under_bound() {
 fn report_surfaces_per_chunk_serve_counts_from_central_log() {
     // Regression: per-chunk hits were written cwd-relative and `report`
     // never read them, so per_chunk_serve_counts was always "unavailable".
-    // Now search/agent_context write to the central store data_dir and
-    // `report` aggregates that log into per-chunk serve counts.
+    // Now the warm worker (a writer) appends search and agent_context hits to
+    // the central store data_dir and `report` aggregates that log into
+    // per-chunk serve counts. A cold read-only run writes nothing there.
     let tmp = tempdir().unwrap();
     let data_dir = tmp.path().join("memd_data");
     let unique = nonce();
     let token = format!("serve_count_token_{unique}");
+    let (_worker, _pid) = start_worker(&data_dir);
 
     let text = format!(
         "Validation: serve-count chunk {token} records a concrete retrievable outcome.\nAgent action: retrieve this chunk so it appears in serve counts."
     );
-    add_success(&data_dir, "off", &text, "kind:decision,priority:7");
+    add_success(&data_dir, "required", &text, "kind:decision,priority:7");
 
     // A retrieval over a non-empty store returns top-k results, each of
     // which is appended to the central hit log.
     assert_success(
-        agent_context_command(&data_dir, "off", &token)
+        agent_context_command(&data_dir, "required", &token)
             .output()
             .expect("run memd agent-context"),
         "agent-context",
@@ -655,5 +657,26 @@ fn report_surfaces_per_chunk_serve_counts_from_central_log() {
     assert!(
         summary.contains("distinct_chunks="),
         "summary should report real counts, got: {summary}"
+    );
+
+    // A cold run opens the store read-only and appends no hit line.
+    stop_worker(&data_dir);
+    assert_success(
+        agent_context_command(&data_dir, "off", &token)
+            .output()
+            .expect("run cold memd agent-context"),
+        "cold agent-context",
+    );
+    let output = assert_success(
+        report_json(&data_dir, "off", false),
+        "report after cold run",
+    );
+    let after: Value = serde_json::from_slice(&output.stdout).expect("report JSON");
+    assert_eq!(
+        after
+            .pointer("/retrieval_usefulness/total_serves")
+            .and_then(Value::as_u64),
+        Some(total),
+        "a read-only run must not log serves"
     );
 }

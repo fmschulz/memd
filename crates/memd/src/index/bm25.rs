@@ -4,12 +4,16 @@
 //! keyword-based retrieval. Uses CodeTokenizer for code-aware tokenization.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tantivy::collector::TopDocs;
-use tantivy::directory::MmapDirectory;
+use tantivy::directory::error::{DeleteError, LockError, OpenReadError, OpenWriteError};
+use tantivy::directory::{
+    Directory, DirectoryLock, FileHandle, Lock, MmapDirectory, WatchCallback, WatchHandle, WritePtr,
+};
 use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING,
@@ -39,6 +43,62 @@ const SPARSE_CHUNK_OVERFETCH: usize = 8;
 /// above `sparse_k` (200) times the typical sentences-per-turn, so it never
 /// limits the distinct-chunk yield on conversational corpora.
 const SPARSE_FETCH_CEILING: usize = 1024;
+
+/// Directory for a read-only index handle.
+///
+/// Tantivy locks `.tantivy-meta.lock` whenever a reader opens segments, so a
+/// writer's garbage collection cannot delete them mid-open. Creating that file
+/// needs a writable directory. Where the lock file cannot be opened (a read-only
+/// mount or file mode), this wrapper proceeds without the lock instead of
+/// failing the whole index. A reader that races a collection then fails on a
+/// missing segment, and the caller falls back to the other search lanes. A
+/// writable directory keeps the real lock.
+#[derive(Clone, Debug)]
+struct ReadOnlyDirectory(MmapDirectory);
+
+impl Directory for ReadOnlyDirectory {
+    fn get_file_handle(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<Arc<dyn FileHandle>, OpenReadError> {
+        self.0.get_file_handle(path)
+    }
+
+    fn delete(&self, path: &Path) -> std::result::Result<(), DeleteError> {
+        self.0.delete(path)
+    }
+
+    fn exists(&self, path: &Path) -> std::result::Result<bool, OpenReadError> {
+        self.0.exists(path)
+    }
+
+    fn open_write(&self, path: &Path) -> std::result::Result<WritePtr, OpenWriteError> {
+        self.0.open_write(path)
+    }
+
+    fn atomic_read(&self, path: &Path) -> std::result::Result<Vec<u8>, OpenReadError> {
+        self.0.atomic_read(path)
+    }
+
+    fn atomic_write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        self.0.atomic_write(path, data)
+    }
+
+    fn sync_directory(&self) -> io::Result<()> {
+        self.0.sync_directory()
+    }
+
+    fn acquire_lock(&self, lock: &Lock) -> std::result::Result<DirectoryLock, LockError> {
+        match self.0.acquire_lock(lock) {
+            Err(LockError::IoError(_)) => Ok(DirectoryLock::from(Box::new(()))),
+            result => result,
+        }
+    }
+
+    fn watch(&self, watch_callback: WatchCallback) -> tantivy::Result<WatchHandle> {
+        self.0.watch(watch_callback)
+    }
+}
 
 fn escape_query_text(query: &str) -> String {
     const SPECIAL_CHARS: &str = "\\+-&|!(){}[]^\"~*?:/";
@@ -208,7 +268,7 @@ impl Bm25Index {
         let fields = build_schema_fields();
         let directory = MmapDirectory::open(&path)
             .map_err(|e| MemdError::StorageError(format!("open index directory: {}", e)))?;
-        let index = Index::open(directory)
+        let index = Index::open(ReadOnlyDirectory(directory))
             .map_err(|e| MemdError::StorageError(format!("open read-only index: {}", e)))?;
 
         Ok(Some(Self::from_index(index, fields, None)?))
@@ -529,6 +589,44 @@ mod tests {
 
     fn create_test_tenant() -> TenantId {
         TenantId::new("test_tenant").unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_open_searches_an_index_in_an_unwritable_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sparse_index");
+        let tenant = create_test_tenant();
+        let chunk_id = ChunkId::new();
+        {
+            let index = Bm25Index::with_path(Some(path.clone())).unwrap();
+            index
+                .insert(&tenant, &chunk_id, &["readonly mount token".to_string()])
+                .unwrap();
+            index.commit().unwrap();
+        }
+        let _ = std::fs::remove_file(path.join(".tantivy-meta.lock"));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let writable = crate::store::path_is_writable(&path);
+
+        let opened = Bm25Index::with_path_read_only(path.clone());
+        let found = opened
+            .as_ref()
+            .ok()
+            .and_then(|index| index.as_ref())
+            .map(|index| index.search(&tenant, "mount", 5).unwrap());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if writable {
+            return; // root ignores the mode bits; nothing to prove here
+        }
+        let found = found.expect("read-only open must work without a lock file");
+        assert_eq!(found[0].chunk_id, chunk_id);
+        assert!(
+            !path.join(".tantivy-meta.lock").exists(),
+            "the read-only open must not create the lock file"
+        );
     }
 
     #[test]

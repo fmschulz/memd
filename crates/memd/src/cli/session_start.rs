@@ -550,14 +550,43 @@ pub(super) fn maybe_auto_create_scope(
 }
 
 /// Derive a `project_id` from the repo basename via `sanitize_id`.
-/// Pathological inputs (`/`, `.`, missing basename) fall back to
-/// `"project"`.
+/// A linked git worktree uses the basename of its main checkout, so every
+/// worktree of one repo shares one project. Pathological inputs (`/`, `.`,
+/// missing basename) fall back to `"project"`.
 fn derive_project_id(project_dir: &Path) -> String {
-    let raw = project_dir
+    let main_checkout = main_checkout_of_linked_worktree(project_dir);
+    let raw = main_checkout
+        .as_deref()
+        .unwrap_or(project_dir)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("");
     sanitize_id(raw, "project")
+}
+
+/// The main checkout directory when `project_dir` is a linked git worktree.
+///
+/// A linked worktree has a `.git` file holding `gitdir: <admin dir>`. The admin
+/// dir has a `commondir` file that points at the main `.git` directory, whose
+/// parent is the main checkout. This reads files only and never runs `git`.
+/// Plain repos, submodules (no `commondir`), bare-repo worktrees (common dir
+/// not named `.git`), and unreadable files all return `None`.
+fn main_checkout_of_linked_worktree(project_dir: &Path) -> Option<PathBuf> {
+    let dot_git = project_dir.join(".git");
+    if !dot_git.is_file() {
+        return None;
+    }
+    let pointer = std::fs::read_to_string(&dot_git).ok()?;
+    let gitdir = pointer
+        .lines()
+        .find_map(|line| line.strip_prefix("gitdir:"))?;
+    let admin_dir = project_dir.join(gitdir.trim());
+    let commondir = std::fs::read_to_string(admin_dir.join("commondir")).ok()?;
+    let common_dir = admin_dir.join(commondir.trim()).canonicalize().ok()?;
+    if common_dir.file_name()? != ".git" {
+        return None;
+    }
+    common_dir.parent().map(Path::to_path_buf)
 }
 
 /// Sanitise a raw string into an id safe for `TenantId::validate`
@@ -836,6 +865,75 @@ mod tests {
         assert_eq!(derive_project_id(Path::new(".")), "project");
         // Non-ASCII chars are dropped (lossy by design, documented).
         assert_eq!(derive_project_id(Path::new("/tmp/café")), "caf");
+    }
+
+    /// Lay out a main checkout and one linked worktree the way `git worktree
+    /// add` does, without running git. Returns (main checkout, worktree).
+    fn linked_worktree_layout(root: &Path, relative_gitdir: bool) -> (PathBuf, PathBuf) {
+        let main = root.join("My-Repo");
+        let git_dir = main.join(".git");
+        let admin = git_dir.join("worktrees/cc-wt");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(admin.join("commondir"), "../..\n").unwrap();
+        let worktree = main.join(".claude/worktrees/cc-20261017-074438-555a");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            admin.join("gitdir"),
+            format!("{}/.git\n", worktree.display()),
+        )
+        .unwrap();
+        let target = if relative_gitdir {
+            "../../../.git/worktrees/cc-wt".to_string()
+        } else {
+            admin.display().to_string()
+        };
+        std::fs::write(worktree.join(".git"), format!("gitdir: {target}\n")).unwrap();
+        (main, worktree)
+    }
+
+    #[test]
+    fn derive_project_id_resolves_a_linked_worktree_to_its_main_checkout() {
+        for relative in [false, true] {
+            let tmp = tempdir().unwrap();
+            let (main, worktree) = linked_worktree_layout(tmp.path(), relative);
+            assert_eq!(derive_project_id(&main), "my_repo");
+            assert_eq!(
+                derive_project_id(&worktree),
+                "my_repo",
+                "relative={relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn derive_project_id_keeps_the_basename_for_plain_repos_and_submodules() {
+        let tmp = tempdir().unwrap();
+        let plain = tmp.path().join("Plain-Repo");
+        std::fs::create_dir_all(plain.join(".git")).unwrap();
+        assert_eq!(derive_project_id(&plain), "plain_repo");
+
+        let non_git = tmp.path().join("scratch");
+        std::fs::create_dir_all(&non_git).unwrap();
+        assert_eq!(derive_project_id(&non_git), "scratch");
+
+        // A submodule has a `.git` file but no `commondir`: it is its own project.
+        let super_repo = tmp.path().join("super");
+        let module_git = super_repo.join(".git/modules/sub");
+        std::fs::create_dir_all(&module_git).unwrap();
+        let submodule = super_repo.join("Sub-Module");
+        std::fs::create_dir_all(&submodule).unwrap();
+        std::fs::write(
+            submodule.join(".git"),
+            format!("gitdir: {}\n", module_git.display()),
+        )
+        .unwrap();
+        assert_eq!(derive_project_id(&submodule), "sub_module");
+
+        // A dangling or malformed `.git` file falls back to the basename.
+        let broken = tmp.path().join("Broken-Tree");
+        std::fs::create_dir_all(&broken).unwrap();
+        std::fs::write(broken.join(".git"), "gitdir: /does/not/exist\n").unwrap();
+        assert_eq!(derive_project_id(&broken), "broken_tree");
     }
 
     #[test]

@@ -156,7 +156,8 @@ async fn cli_search_payload_inner<S: Store>(
 /// central store hit log (resolved from the persistent store's
 /// `data_dir`), falling back to the cwd-relative log only for an
 /// in-memory store. Best-effort: every IO error inside the hit-stats
-/// writer is swallowed so retrieval never fails for this.
+/// writer is swallowed so retrieval never fails for this. A read-only store
+/// has no telemetry to record, so it logs nothing.
 fn log_search_hits<S: Store>(
     store: &S,
     payload: &Value,
@@ -164,6 +165,9 @@ fn log_search_hits<S: Store>(
     project_id: Option<&str>,
     mode: CliQueryMode,
 ) {
+    if store.is_read_only() {
+        return;
+    }
     let Some(results) = payload.get("results").and_then(Value::as_array) else {
         return;
     };
@@ -663,18 +667,25 @@ pub(super) async fn cli_agent_context_payload<S: Store>(
         detail: Some(json!({"queries": queries.len(), "k": k}).to_string()),
     });
 
-    let episode_id = record_agent_context_episode(
-        store,
-        tenant_id,
-        project_id,
-        task_id,
-        thread_id,
-        queries,
-        k,
-        mode,
-        &merged_results,
-    )
-    .await?;
+    // A read-only store records no episode; `null` says so, as in search.
+    let episode_id = if store.is_read_only() {
+        None
+    } else {
+        Some(
+            record_agent_context_episode(
+                store,
+                tenant_id,
+                project_id,
+                task_id,
+                thread_id,
+                queries,
+                k,
+                mode,
+                &merged_results,
+            )
+            .await?,
+        )
+    };
 
     Ok(json!({
         "tool": "memd.agent_context",

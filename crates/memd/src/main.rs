@@ -188,6 +188,16 @@ async fn main() {
         "memd CLI starting"
     );
 
+    // `experience note --emit` validates a file and needs no scope or store.
+    match memd::cli::emit_case_if_requested(&cmd) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("error: {error}");
+            std::process::exit(1);
+        }
+    }
+
     if let Err(e) = memd::cli::resolve_command_scope(&mut cmd) {
         eprintln!("error: {}", e);
         std::process::exit(1);

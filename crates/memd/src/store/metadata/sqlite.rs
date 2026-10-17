@@ -69,6 +69,15 @@ impl SqliteMetadataStore {
         Ok(store)
     }
 
+    /// Open an existing metadata database for reading only. It sets no
+    /// journal mode and runs no schema creation or migration, so a database
+    /// written by an older binary must be opened once by a writer first.
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        Ok(Self {
+            pool: SqliteConnectionPool::open_read_only(path)?,
+        })
+    }
+
     /// Open a shared-cache in-memory metadata store and run normal migrations.
     pub fn open_in_memory() -> Result<Self> {
         static NEXT_IN_MEMORY_ID: AtomicU64 = AtomicU64::new(0);

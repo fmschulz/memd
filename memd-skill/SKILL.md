@@ -23,7 +23,9 @@ a success verdict and never gives ranking credit. No memory call is required
 for routine work.
 
 Use shell commands and files directly: `memd agent-context`, `memd search`,
-`memd add`, and `memd experience`.
+`memd add`, and `memd experience`. `memd search`, `memd agent-context`, and
+`memd experience find|get|export` only read, so they also work where the data
+directory is read-only, such as a sandbox mount.
 
 Repeated CLI calls in the same data directory are accelerated by a private warm
 worker that starts on demand (`--warm auto` is the default). Manual control:
@@ -77,8 +79,8 @@ logs.
 
 memd is not mandatory, and no memd call is required to answer. For raw facts,
 ask: **could any file in a repo you can read answer this?** If yes, that file is
-the home (`tasks/todo.md`, `tasks/METHODS.md`, `tasks/lessons.md`,
-`docs/handoffs/`, git). If no, record the concise cross-repo or cross-machine
+the home (the project's plans, progress notes, methods, lessons, and
+handoffs, or git). If no, record the concise cross-repo or cross-machine
 fact in memd. Separately, use an experience case when a nontrivial failure,
 attempted repair, and check result need a causal record across sessions.
 
@@ -91,8 +93,9 @@ When you do use it:
    state; or a number contradicts one recorded earlier.
 3. Use a stable `tenant_id` for the trust domain and `project_id` for narrower
    project scope.
-4. Write raw facts only when no readable repository file can own them. Record
-   experience problems, attempts, and checks as observed. Add a conditional
+4. Write raw facts only when no readable repository file can own them. After
+   you solve a nontrivial problem, record it with `memd experience note
+   case.json`. For a step-by-step record that memd verifies, add a conditional
    lesson only after a client-run, source-stable check passes.
 5. Attribute only independently verified task outcomes to memories that were
    actually used or harmful; do not train ranking from agent self-reports.
@@ -107,8 +110,10 @@ this repo's code or data, inspect the repository files.
 
 - Search when an observable event calls for it (see the CLI Contract), not as a
   routine step before every task.
-- Use `memd experience find` only with the target machine, tool, and version
-  stated explicitly. Then run `memd experience get` before applying a lesson.
+- Run `memd experience find "<error words>"` before you try a fix for an
+  unexpected failure. Name the target tool and version when the work depends
+  on them. Read each lesson's `evidence` label, then run `memd experience get`
+  before applying a lesson.
 - Do not repeat known failed approaches unless you have a reason.
 - Store conclusions with enough context for a later agent to trust or challenge
   them.

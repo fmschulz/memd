@@ -58,7 +58,7 @@ use eval_counterfactual::{run_eval_counterfactual, EvalCounterfactualOptions};
 use eval_outcome_ranking::{run_eval_outcome_ranking, EvalOutcomeRankingOptions};
 use eval_retrieval::{run_eval_retrieval, EvalRetrievalOptions};
 use eval_write_quality::{run_eval_write_quality, EvalWriteQualityOptions};
-pub use experience::{prepare_experience_command, ExperienceCommand};
+pub use experience::{emit_case_if_requested, prepare_experience_command, ExperienceCommand};
 use memory_md::{
     refresh_memory_md_with_health, run_memory_md_eval, MemoryMdEvalOptions, MemoryMdOptions,
 };

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     lesson_from_event, problem_id, required_event, resolve_case, validation, ConditionalLesson,
-    LessonVisibility, ROLE_CORRECTION, ROLE_LESSON,
+    LessonEvidence, LessonVisibility, ROLE_CORRECTION, ROLE_LESSON,
 };
 use crate::error::Result;
 use crate::store::Store;
@@ -35,6 +35,8 @@ pub struct LessonQuery {
 pub struct ApplicableLesson {
     pub artifact: TaskArtifact,
     pub lexical_score: usize,
+    /// Whether memd ran the supporting check or the agent only observed it.
+    pub evidence: LessonEvidence,
 }
 
 /// Structured reason why recall deliberately returned no lesson.
@@ -112,6 +114,7 @@ pub async fn retrieve_lessons<S: Store + ?Sized>(
             ConditionMatch::Eligible => matches.push(ApplicableLesson {
                 artifact: artifact.clone(),
                 lexical_score: score,
+                evidence: lesson.evidence,
             }),
             ConditionMatch::Unknown(fields) => unknown_fields.extend(fields),
             ConditionMatch::Mismatch => {}
@@ -307,4 +310,4 @@ const fn default_limit() -> usize {
 // Fits in SQLite's signed LIMIT parameter on 64-bit targets while remaining
 // exhaustive for every realistic local store. The API never silently caps to
 // a small candidate window.
-const EXHAUSTIVE_LIMIT: usize = usize::MAX / 2;
+pub(super) const EXHAUSTIVE_LIMIT: usize = usize::MAX / 2;

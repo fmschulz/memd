@@ -875,6 +875,94 @@ async fn memory_store_rejects_direct_experience_overwrite() {
     );
 }
 
+#[tokio::test]
+async fn shared_view_keeps_only_shared_lessons_and_checks_that_support_them() {
+    let store = MemoryStore::new();
+    let problem = record_problem(&store, "project_a", START_MS).await;
+    let first = record_attempt(&store, &problem, None, START_MS + 1).await;
+    let shared_check = record_check(
+        &store,
+        context("project_a", START_MS + 2),
+        successful_receipt(&first.artifact_id, START_MS + 2),
+    )
+    .await
+    .unwrap();
+    let second = record_attempt(
+        &store,
+        &problem,
+        Some(first.artifact_id.clone()),
+        START_MS + 3,
+    )
+    .await;
+    let private_check = record_check(
+        &store,
+        context("project_a", START_MS + 4),
+        successful_receipt(&second.artifact_id, START_MS + 4),
+    )
+    .await
+    .unwrap();
+    let shared = record(
+        &store,
+        context("project_a", START_MS + 5),
+        RecordEvent::Lesson(lesson(
+            &problem,
+            &shared_check,
+            "Shared guidance for every project",
+            LessonVisibility::Shared,
+        )),
+    )
+    .await
+    .unwrap();
+    let private = record(
+        &store,
+        context("project_a", START_MS + 6),
+        RecordEvent::Lesson(lesson(
+            &problem,
+            &private_check,
+            "PRIVATE guidance for project A only",
+            LessonVisibility::Project,
+        )),
+    )
+    .await
+    .unwrap();
+
+    let case = resolve_case(&store, &problem.tenant_id, &problem.artifact_id)
+        .await
+        .unwrap();
+    assert_eq!(case.current_lessons.len(), 2);
+    assert!(case.is_shared());
+
+    let view = case.clone().shared_view();
+    let text = serde_json::to_string(&view).unwrap();
+    assert!(text.contains("Shared guidance for every project"));
+    assert!(
+        !text.contains("PRIVATE guidance"),
+        "the view must not carry project-only guidance"
+    );
+    assert_eq!(view.current_lessons.len(), 1);
+    assert_eq!(view.current_lessons[0].artifact_id, shared.artifact_id);
+    assert_eq!(view.resolution_state, ExperienceResolutionState::Resolved);
+    let kept = view
+        .events
+        .iter()
+        .map(|event| event.artifact_id.as_str())
+        .collect::<Vec<_>>();
+    for id in [
+        &problem.artifact_id,
+        &first.artifact_id,
+        &second.artifact_id,
+        &shared_check.artifact_id,
+        &shared.artifact_id,
+    ] {
+        assert!(kept.contains(&id.as_str()), "{id} must stay");
+    }
+    for id in [&private_check.artifact_id, &private.artifact_id] {
+        assert!(!kept.contains(&id.as_str()), "{id} must go");
+    }
+    // The full case is untouched.
+    assert_eq!(case.events.len(), 7);
+}
+
 async fn record_problem<S: Store>(store: &S, project: &str, time: i64) -> TaskArtifact {
     record(
         store,
@@ -924,7 +1012,7 @@ fn lesson(
             version: Some("1.98.0".to_string()),
         },
         visibility,
-        conflicts_with: Vec::new(),
+        ..Default::default()
     }
 }
 

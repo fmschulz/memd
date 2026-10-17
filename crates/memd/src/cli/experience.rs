@@ -1,5 +1,6 @@
 //! Client-side experience commands. Verification commands never run in the worker.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
@@ -8,7 +9,9 @@ use serde_json::{json, Value};
 
 use super::CliCommand;
 use crate::error::{MemdError, Result};
-use crate::experience::{self, CheckReceipt, ExperienceBundleV1, ExperienceContext, RecordEvent};
+use crate::experience::{
+    self, CaseFile, CheckReceipt, ExperienceBundleV1, ExperienceContext, RecordEvent,
+};
 use crate::store::Store;
 use crate::types::{ProjectId, TenantId};
 
@@ -24,9 +27,28 @@ pub enum ExperienceCommand {
         #[arg(long)]
         input: Option<PathBuf>,
     },
+    /// Record a solved problem from a case file: problem, attempts, check, lesson.
+    ///
+    /// The file holds the case JSON, or `-` for stdin. A check the agent only
+    /// observed is stored as such and the lesson reads `evidence: observed`.
+    Note {
+        file: PathBuf,
+        /// Validate the file and print the canonical case JSON. Opens no store
+        /// and needs no tenant or project.
+        #[arg(long)]
+        emit: bool,
+        /// ID of the same case in an external exchange. Stored as provenance;
+        /// a second note with the same ID returns the stored case.
+        #[arg(long)]
+        shared_id: Option<String>,
+    },
     /// Read a problem and its attempts, checks, and current lessons.
+    ///
+    /// A case from another project is readable when it has a shared lesson.
     Get { problem_id: String },
     /// Find current lessons whose conditions match the target environment.
+    ///
+    /// Lessons that other projects share are included unless `--project-only`.
     Find {
         query: String,
         /// Target machine; defaults to the calling machine.
@@ -36,9 +58,9 @@ pub enum ExperienceCommand {
         tool: Option<String>,
         #[arg(long)]
         version: Option<String>,
-        /// Also consider lessons explicitly shared with other projects.
+        /// Consider only lessons recorded in this project.
         #[arg(long)]
-        include_shared: bool,
+        project_only: bool,
         #[arg(short, long, default_value_t = 5)]
         limit: usize,
     },
@@ -62,6 +84,64 @@ pub enum ExperienceCommand {
     },
     /// Import a canonical experience bundle without executing its commands.
     Import { input: PathBuf },
+}
+
+impl ExperienceCommand {
+    /// True for commands that only read the store.
+    pub(super) fn reads_only(&self) -> bool {
+        matches!(
+            self,
+            Self::Get { .. } | Self::Find { .. } | Self::Export { .. }
+        )
+    }
+}
+
+/// Operation names of the read-only experience commands.
+pub(super) fn is_read_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "experience.get" | "experience.find" | "experience.export"
+    )
+}
+
+/// Handle `experience note --emit`: print the canonical case and report
+/// whether the command is finished. This runs before tenant, project, and
+/// store resolution because validating a file needs none of them.
+pub fn emit_case_if_requested(cmd: &CliCommand) -> Result<bool> {
+    let CliCommand::Experience {
+        command: ExperienceCommand::Note {
+            file, emit: true, ..
+        },
+        output,
+        ..
+    } = cmd
+    else {
+        return Ok(false);
+    };
+    let case = read_case(file)?;
+    super::render::write_rendered(
+        output.as_deref(),
+        &(serde_json::to_string_pretty(&case)? + "\n"),
+    )?;
+    Ok(true)
+}
+
+/// Read and validate a case file. `-` reads stdin. Reading stops one byte past
+/// the limit, so an oversized file is rejected without loading all of it.
+fn read_case(file: &Path) -> Result<CaseFile> {
+    let limit = experience::MAX_CASE_BYTES as u64 + 1;
+    let mut bytes = Vec::new();
+    if file == Path::new("-") {
+        std::io::stdin()
+            .lock()
+            .take(limit)
+            .read_to_end(&mut bytes)?;
+    } else {
+        std::fs::File::open(file)?
+            .take(limit)
+            .read_to_end(&mut bytes)?;
+    }
+    CaseFile::parse(&bytes)
 }
 
 /// Convert experience commands to the existing local operation transport.
@@ -88,6 +168,14 @@ pub async fn prepare_experience_command(
             "experience.record",
             super::call::parse_call_arguments(json.as_deref(), input.as_deref())?,
         ),
+        ExperienceCommand::Note {
+            file,
+            emit: _,
+            shared_id,
+        } => (
+            "experience.note",
+            json!({"case": read_case(&file)?, "shared_id": shared_id}),
+        ),
         ExperienceCommand::Get { problem_id } => {
             ("experience.get", json!({"problem_id": problem_id}))
         }
@@ -96,7 +184,7 @@ pub async fn prepare_experience_command(
             machine,
             tool,
             version,
-            include_shared,
+            project_only,
             limit,
         } => {
             let context = super::capture_execution_context(&std::env::current_dir()?);
@@ -107,7 +195,7 @@ pub async fn prepare_experience_command(
                     "machine": machine.or(context.origin_host),
                     "tool": tool,
                     "version": version,
-                    "include_shared": include_shared,
+                    "include_shared": !project_only,
                     "limit": limit,
                 }),
             )
@@ -165,6 +253,15 @@ struct RecordRequest {
 }
 
 #[derive(Deserialize)]
+struct NoteRequest {
+    #[serde(flatten)]
+    context: ExperienceContext,
+    case: CaseFile,
+    #[serde(default)]
+    shared_id: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct CheckRequest {
     #[serde(flatten)]
     context: ExperienceContext,
@@ -207,11 +304,33 @@ pub(super) async fn call<S: Store>(store: &S, tool: &str, arguments: Value) -> R
                 experience::record_check(store, request.context, request.receipt).await?,
             )?
         }
+        "experience.note" => {
+            let request: NoteRequest = serde_json::from_value(arguments)?;
+            serde_json::to_value(
+                experience::record_case(
+                    store,
+                    request.context,
+                    request.case,
+                    request.shared_id.as_deref(),
+                )
+                .await?,
+            )?
+        }
         "experience.get" => {
             let request: CaseRequest = serde_json::from_value(arguments)?;
             let case =
                 experience::resolve_case(store, &request.tenant_id, &request.problem_id).await?;
-            require_project(&request.project_id, &case.problem.project_id)?;
+            // Another project reads a case only through its shared lessons.
+            let other_project = request.project_id.as_option().is_some()
+                && request.project_id != case.problem.project_id;
+            let case = if other_project {
+                if !case.is_shared() {
+                    require_project(&request.project_id, &case.problem.project_id)?;
+                }
+                case.shared_view()
+            } else {
+                case
+            };
             serde_json::to_value(case)?
         }
         "experience.find" => serde_json::to_value(
@@ -251,4 +370,79 @@ fn require_project(requested: &ProjectId, actual: &ProjectId) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::{StoreAccess, WarmMode};
+
+    fn experience(command: ExperienceCommand) -> CliCommand {
+        CliCommand::Experience {
+            tenant_id: Some("tenant".to_string()),
+            project_id: Some("project".to_string()),
+            command,
+            output: None,
+            warm: WarmMode::Off,
+        }
+    }
+
+    fn find() -> ExperienceCommand {
+        ExperienceCommand::Find {
+            query: "error words".to_string(),
+            machine: None,
+            tool: None,
+            version: None,
+            project_only: false,
+            limit: 5,
+        }
+    }
+
+    #[tokio::test]
+    async fn only_find_get_and_export_open_the_store_read_only() {
+        let reads = [
+            find(),
+            ExperienceCommand::Get {
+                problem_id: "p".to_string(),
+            },
+            ExperienceCommand::Export {
+                problem_ids: vec!["p".to_string()],
+            },
+        ];
+        let writes = [
+            ExperienceCommand::Record {
+                json: Some("{}".to_string()),
+                input: None,
+            },
+            ExperienceCommand::Import {
+                input: PathBuf::from("bundle.json"),
+            },
+            ExperienceCommand::Note {
+                file: PathBuf::from("case.json"),
+                emit: false,
+                shared_id: None,
+            },
+        ];
+        for command in reads {
+            let cmd = experience(command);
+            assert_eq!(cmd.store_access(), StoreAccess::ReadOnly);
+            // The rewrite into a structured call must keep the access level.
+            let call = prepare_experience_command(cmd, Path::new("unused"), true)
+                .await
+                .unwrap();
+            assert!(matches!(call, CliCommand::Call { .. }));
+            assert_eq!(call.store_access(), StoreAccess::ReadOnly);
+        }
+        for command in writes {
+            assert_eq!(experience(command).store_access(), StoreAccess::Writer);
+        }
+        let write_call = CliCommand::Call {
+            tool: "experience.record".to_string(),
+            json: None,
+            input: None,
+            output: None,
+            warm: WarmMode::Off,
+        };
+        assert_eq!(write_call.store_access(), StoreAccess::Writer);
+    }
 }

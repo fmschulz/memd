@@ -68,6 +68,9 @@ list of every physical chunk created by document splitting.
   Existing report paths are never overwritten. Its served baseline is the
   current production order, including any exact-query relevance feedback in
   the store; the shadow order adds outcome-attributed priors.
+- A cold `search` or `agent-context` run opens the store read-only and
+  records no episode and no exposure line: `retrieval_episode_id` is `null`.
+  A search the warm worker serves records its episode as described below.
 - `search` episodes retain the expanded candidate pool and counterfactual
   shadow ranks. Multi-query `agent-context` episodes retain only the final
   merged result set and use ranking mode `off`; they support later outcome
@@ -89,11 +92,12 @@ project configuration rules. See the [worked procedure](experience-how-to.md).
 
 | Command | Input and behavior |
 | --- | --- |
+| `experience note FILE` | Records a solved problem from a case file (`-` reads stdin): a problem, an attempt for each `failed` item and for the `fix`, a check, and a lesson. `--emit` validates the file and prints the canonical JSON without opening a store or needing a scope. `--shared-id ID` stores `agentdash:ID` in provenance. A repeat call returns the stored case (`replay`) only for the same ID, or, without an ID, the same problem, symptoms, fix, check, and `applies_when`. Prints `problem_id`, `attempt_ids`, `check_id`, `lesson_id`, `evidence`, and `replay`. The format is in [Experience memory](experience-memory.md#a-case-file-records-a-solved-problem-in-one-call). |
 | `experience record --json JSON` | Accepts `event`, optional `observed_at_ms`, and optional `provenance` with evidence fields such as `path`, `uri`, `repo`, and `commit`. `--input FILE` reads the same object from a file. |
-| `experience get PROBLEM_ID` | Returns the problem, events, current lessons, conflicts, and `resolution_state`. |
+| `experience get PROBLEM_ID` | Returns the problem, events, current lessons, conflicts, and `resolution_state`. Reads a case from another project when it has a current shared lesson, and then returns only its shared lessons and their checks. Read-only. |
 | `experience check ATTEMPT_ID -- PROGRAM ARGS` | Runs the explicit program locally and records a receipt for that attempt. Repeated `--evidence PATH` selects source files. `--timeout-seconds` defaults to 60 and accepts 1–3600. |
-| `experience find QUERY` | Returns applicable current lessons or abstains. Options: `--machine`, `--tool`, `--version`, `--include-shared`, and `--limit` (default 5). |
-| `experience export PROBLEM_ID...` | Writes a `memd-experience` version 1 JSON bundle to stdout. |
+| `experience find QUERY` | Returns applicable current lessons or abstains. Each lesson carries `evidence` (`executed` or `observed`). Includes lessons that other projects share; options: `--machine`, `--tool`, `--version`, `--project-only` (exclude shared lessons from other projects), and `--limit` (default 5). Read-only. |
+| `experience export PROBLEM_ID...` | Writes a `memd-experience` version 1 JSON bundle to stdout. Read-only. |
 | `experience import FILE` | Validates and imports a bundle; returns inserted and replayed artifact IDs. Exact replay inserts nothing. |
 
 Record event fields:
@@ -107,7 +111,10 @@ Record event fields:
 
 `applicability` contains optional exact-match `machine`, `tool`, and `version`
 strings. `visibility` defaults to `project`; `shared` also permits recall by
-other projects in the same tenant when they request `--include-shared`.
+other projects in the same tenant, and `experience find` includes such lessons
+unless `--project-only` is given. A lesson also takes `evidence` (`executed`,
+the default, or `observed`), which must match its supporting check, plus
+optional `context` and `links`.
 
 Check statuses are `passed`, `failed`, `timed_out`, and `source_unverified`.
 The last means the program succeeded but source fingerprints were missing or
@@ -115,9 +122,9 @@ changed. Only `passed` supports a lesson. A successful memd exit means that
 the receipt was stored; inspect `status` to determine the verifier's result.
 Interrupted checks return an error when no complete receipt is available.
 
-The corresponding structured operations are `experience.record`,
-`experience.record_check`, `experience.get`, `experience.find`,
-`experience.export`, and `experience.import`. They accept tenant/project scope
+The corresponding structured operations are `experience.note`,
+`experience.record`, `experience.record_check`, `experience.get`,
+`experience.find`, `experience.export`, and `experience.import`. They accept tenant/project scope
 in their arguments. `experience.record_check` accepts a caller-reported receipt
 and does not execute a command. The CLI `experience check` is the execution
 entry point. See [Trust boundary](trust-boundary.md#experience-checks).

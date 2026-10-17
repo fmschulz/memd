@@ -677,6 +677,16 @@ impl PersistentStore {
         self.config.read_only
     }
 
+    /// Reject a metadata write on a read-only store without counting it as a
+    /// store mutation (see [`Self::ensure_writable`] for the write epoch).
+    fn reject_if_read_only(&self, op: &'static str) -> Result<()> {
+        if self.config.read_only {
+            Err(MemdError::ReadOnlyStore { op: op.to_string() })
+        } else {
+            Ok(())
+        }
+    }
+
     /// Open a short-lived writer used by read-only session-start commands to
     /// reconcile stale consolidation journals. Search/index construction is
     /// disabled: promoted rows remain index-pending for the normal writer,
@@ -697,7 +707,8 @@ impl PersistentStore {
     /// Open or create persistent store
     pub fn open(config: PersistentStoreConfig) -> Result<Self> {
         let read_only_missing_data_dir = config.read_only && !config.data_dir.exists();
-        if !read_only_missing_data_dir {
+        // A read-only store changes nothing on disk, not even the dir mode.
+        if !config.read_only {
             std::fs::create_dir_all(&config.data_dir)?;
             // The store holds every tenant's memory in plaintext (metadata.db,
             // WAL, segments). Restrict the data dir to the owner so another
@@ -722,10 +733,15 @@ impl PersistentStore {
             )?)
         };
 
-        // Open global metadata database
+        // Open global metadata database. A read-only store never creates or
+        // migrates it: a missing database reads as empty.
         let metadata_path = config.data_dir.join("metadata.db");
-        let metadata = if read_only_missing_data_dir {
-            Arc::new(SqliteMetadataStore::open_in_memory()?)
+        let metadata = if config.read_only {
+            if metadata_path.exists() {
+                Arc::new(SqliteMetadataStore::open_read_only(&metadata_path)?)
+            } else {
+                Arc::new(SqliteMetadataStore::open_in_memory()?)
+            }
         } else {
             Arc::new(SqliteMetadataStore::open(&metadata_path)?)
         };
@@ -1960,6 +1976,7 @@ impl Store for PersistentStore {
         episode: RetrievalEpisode,
         items: Vec<RetrievalEpisodeItem>,
     ) -> Result<()> {
+        self.reject_if_read_only("record_retrieval_episode")?;
         self.metadata.insert_retrieval_episode(&episode, &items)
     }
 
@@ -1977,6 +1994,7 @@ impl Store for PersistentStore {
         episode_id: &RetrievalEpisodeId,
         rendered_chunk_ids: &[ChunkId],
     ) -> Result<()> {
+        self.reject_if_read_only("finalize_retrieval_episode")?;
         self.metadata
             .finalize_retrieval_episode(tenant_id, episode_id, rendered_chunk_ids)
     }
@@ -2031,6 +2049,10 @@ impl Store for PersistentStore {
 
     fn as_persistent(&self) -> Option<&PersistentStore> {
         Some(self)
+    }
+
+    fn is_read_only(&self) -> bool {
+        self.config.read_only
     }
 
     async fn probe_external_mutation(&self) -> ExternalMutationOutcome {

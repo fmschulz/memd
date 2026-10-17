@@ -6,6 +6,20 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Added
+
+- `memd experience note FILE` records a solved problem from one case file: a problem, an attempt for each failed approach and for the fix, a check, and a lesson. `-` reads stdin. `--emit` validates the file and prints the canonical case without opening a store. `--shared-id ID` stores the ID in provenance. A call is a replay, and returns the stored case, only when it repeats a submission: the same ID, or without an ID the same problem, symptoms, fix, check, and `applies_when`. An explicit `null` for an optional field is an error.
+- A check the agent only observed is stored as an observed check, and its lesson reads `evidence: "observed"`. A lesson built on a memd-run receipt reads `evidence: "executed"`. `find` and `get` show the label.
+- Lessons take optional `context` (non-matching `applies_when` facts) and `links` (evidence paths or URLs).
+
+### Changed
+
+- `memd search`, `memd agent-context`, and `memd experience find|get|export` open SQLite read-only and change no stored data: no journal mode, no schema creation, no data-directory mode change, no retrieval episode (`retrieval_episode_id` is `null`), no exposure line, and no digest. In a writable directory SQLite or Tantivy can still create their own sidecar or lock files (`-shm`, `.tantivy-meta.lock`); in a read-only directory they create nothing. These commands work when the data directory is read-only, such as a Codex sandbox mount, and they see a live writer's recent commits. A cold run no longer logs serve counts; the warm worker still does.
+- `--warm auto` does not start a worker when the data directory is not writable, and falls back to the cold read path without a warning.
+- `memd experience find` includes lessons that other projects share. `--project-only` replaces `--include-shared` and restricts recall to the current project. `memd experience get` reads a case from another project when the case has a current shared lesson, and then returns only the shared lessons and corrections and the checks that support them.
+- A linked git worktree gets the project ID of its main checkout. A store written by an older memd needs one writer command before read-only reads.
+- The Tantivy sparse index opens without its lock file when the lock cannot be created.
+
 ## [1.8.0] - 2026-09-19
 
 ### Added

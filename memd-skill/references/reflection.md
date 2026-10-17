@@ -73,7 +73,7 @@ source.
 | What changed | Destination |
 | --- | --- |
 | How an existing skill should perform its task | That skill's source instruction or reference |
-| A project-specific correction or task result | Repository records, normally tasks/lessons.md or the owning source/document |
+| A project-specific correction or task result | Repository records, normally the project's lessons file or the owning source/document |
 | An explicit general user rule | The canonical instruction source, such as .agents/AGENTS.md |
 | An operational fact absent from readable repositories | A concise scoped memd fact |
 | A reusable technical failure, attempted repair and check | An experience case linked to repository evidence |

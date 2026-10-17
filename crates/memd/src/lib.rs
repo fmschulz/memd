@@ -42,7 +42,7 @@ pub use experience::{
     export_bundle as export_experience_bundle, get as get_experience,
     import_bundle as import_experience_bundle, record as record_experience, record_check,
     resolve_case as resolve_experience_case, retrieve_lessons, validate_check_target,
-    ApplicableLesson, CheckReceipt, CheckTarget, ConditionalLesson, ExperienceBundleV1,
+    ApplicableLesson, CaseFile, CheckReceipt, CheckTarget, ConditionalLesson, ExperienceBundleV1,
     ExperienceCase, ExperienceContext, ExperienceEvent, ExperienceResolutionState, ImportReport,
     LessonApplicability, LessonQuery, LessonRecall, LessonVisibility, RecallAbstention,
     RecordEvent, SourceFingerprint, SourceFingerprintCoverage,

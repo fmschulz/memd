@@ -2799,6 +2799,15 @@ async fn persist_digest_artifact<S: Store>(
             return Ok(existing);
         }
     }
+    if store.is_read_only() {
+        // Searches rebuild digests on the fly. A read-only store cannot save
+        // the fresh one, so the caller keeps the stored (possibly older) digest.
+        debug!(
+            artifact_id = %artifact.artifact_id,
+            "skipping digest persistence on a read-only store"
+        );
+        return Ok(artifact);
+    }
     let projections = build_task_projections(&artifact);
     store
         .add_task_artifact(artifact.clone(), projections)

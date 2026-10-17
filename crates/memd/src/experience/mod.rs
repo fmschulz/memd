@@ -1,10 +1,11 @@
 //! Typed, causal experience records stored in canonical task artifacts.
 
 mod bundle;
+mod note;
 mod recall;
 mod validation;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -17,6 +18,7 @@ use crate::task_memory::{
 use crate::types::{ProjectId, PromotionState, TenantId};
 
 pub use bundle::{export_bundle, import_bundle, ExperienceBundleV1, ImportReport};
+pub use note::{record_case, CaseCheck, CaseFile, CheckMethod, NoteOutcome, MAX_CASE_BYTES};
 pub use recall::{retrieve_lessons, ApplicableLesson, LessonQuery, LessonRecall, RecallAbstention};
 pub(crate) use validation::{
     attempt_ordinal, current_attempt, current_lesson_heads, event_time, problem_id, required_event,
@@ -31,6 +33,7 @@ const ROLE_ATTEMPT: &str = "experience_attempt";
 const ROLE_CHECK: &str = "experience_check";
 const ROLE_LESSON: &str = "experience_lesson";
 const ROLE_CORRECTION: &str = "experience_correction";
+const OBSERVED_CHECK_STATUS: &str = "observed";
 
 /// Context captured by the caller that records an experience event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -90,12 +93,38 @@ pub enum ExperienceEvent {
         action: String,
     },
     Check(Box<CheckReceipt>),
+    /// A check the agent saw succeed but memd did not run.
+    ObservedCheck(ObservedCheck),
     Lesson(ConditionalLesson),
     Correction {
         problem_id: String,
         supersedes_id: String,
         replacement: ConditionalLesson,
     },
+}
+
+/// How a lesson's supporting check was established.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LessonEvidence {
+    /// A [`CheckReceipt`] that memd produced by running the command.
+    #[default]
+    Executed,
+    /// An [`ObservedCheck`]: the agent reports the result, memd did not run it.
+    Observed,
+}
+
+/// Agent-reported outcome of verifying one attempt.
+///
+/// It carries no hashes and no exit code, so it is weaker than a
+/// [`CheckReceipt`]. A lesson built on it is labelled
+/// [`LessonEvidence::Observed`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedCheck {
+    pub attempt_id: String,
+    pub result: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub command: Option<String>,
 }
 
 /// Scope in which a lesson may be recalled.
@@ -119,7 +148,7 @@ pub struct LessonApplicability {
 }
 
 /// Guidance supported by one successful recorded check.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConditionalLesson {
     pub problem_id: String,
     pub supporting_check_id: String,
@@ -129,6 +158,17 @@ pub struct ConditionalLesson {
     pub applicability: LessonApplicability,
     #[serde(default)]
     pub visibility: LessonVisibility,
+    /// Must match the supporting check: a receipt is `executed`, an observed
+    /// check is `observed`.
+    #[serde(default)]
+    pub evidence: LessonEvidence,
+    /// Further `applies_when` facts (`os`, `sandbox`, ...). Recall shows them
+    /// and does not filter on them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub context: BTreeMap<String, String>,
+    /// Paths or URLs that hold the details. Links only, never copies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflicts_with: Vec<String>,
 }
@@ -224,6 +264,58 @@ pub struct ExperienceCase {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lesson_conflicts: Vec<Vec<String>>,
     pub resolution_state: ExperienceResolutionState,
+}
+
+impl ExperienceCase {
+    /// True when a current lesson is shared with other projects.
+    pub fn is_shared(&self) -> bool {
+        self.current_lessons
+            .iter()
+            .filter_map(|artifact| artifact.experience.as_ref())
+            .filter_map(lesson_from_event)
+            .any(|lesson| lesson.visibility == LessonVisibility::Shared)
+    }
+
+    /// The part of the case another project may read.
+    ///
+    /// Lessons and corrections with project visibility are dropped from both
+    /// `events` and `current_lessons`, and so is a check that supported only
+    /// such lessons. The problem, attempts, and the rest stay, because a shared
+    /// lesson refers to them. Conflict groups and the resolution state follow
+    /// what is left.
+    pub fn shared_view(mut self) -> Self {
+        let mut hidden = HashSet::new();
+        let mut hidden_checks = HashSet::new();
+        let mut kept_checks = HashSet::new();
+        for artifact in &self.events {
+            let Some(lesson) = artifact.experience.as_ref().and_then(lesson_from_event) else {
+                continue;
+            };
+            if lesson.visibility == LessonVisibility::Shared {
+                kept_checks.insert(lesson.supporting_check_id.clone());
+            } else {
+                hidden.insert(artifact.artifact_id.clone());
+                hidden_checks.insert(lesson.supporting_check_id.clone());
+            }
+        }
+        hidden.extend(hidden_checks.difference(&kept_checks).cloned());
+        self.events
+            .retain(|artifact| !hidden.contains(&artifact.artifact_id));
+        self.current_lessons
+            .retain(|artifact| !hidden.contains(&artifact.artifact_id));
+        for group in &mut self.lesson_conflicts {
+            group.retain(|id| !hidden.contains(id));
+        }
+        self.lesson_conflicts.retain(|group| group.len() > 1);
+        self.resolution_state = if !self.lesson_conflicts.is_empty() {
+            ExperienceResolutionState::Conflicted
+        } else if self.current_lessons.is_empty() {
+            ExperienceResolutionState::Open
+        } else {
+            ExperienceResolutionState::Resolved
+        };
+        self
+    }
 }
 
 /// Derived state of a problem's current lesson heads.
@@ -373,6 +465,42 @@ async fn record_check_unlocked<S: Store + ?Sized>(
     artifact.verification_status = Some("recorded_check".to_string());
     artifact.related_artifact_ids = vec![receipt.attempt_id.clone()];
     artifact.experience = Some(ExperienceEvent::Check(Box::new(receipt)));
+    write_artifact(store, artifact).await
+}
+
+/// Store an agent-reported check for the current attempt of a problem.
+async fn record_observed_check_unlocked<S: Store + ?Sized>(
+    store: &S,
+    context: ExperienceContext,
+    check: ObservedCheck,
+) -> Result<TaskArtifact> {
+    validation::validate_observed_check(&check)?;
+    let (target, attempt) = load_check_target(
+        store,
+        &context.tenant_id,
+        &context.project_id,
+        &check.attempt_id,
+    )
+    .await?;
+    ensure_causal_time(context.observed_at_ms, &attempt, "check")?;
+
+    let mut artifact = TaskArtifact::new(
+        ArtifactKind::Verification,
+        context.tenant_id.clone(),
+        target.task_id,
+    );
+    apply_context(&mut artifact, &context);
+    artifact.status = Some(OBSERVED_CHECK_STATUS.to_string());
+    artifact.artifact_role = Some(ROLE_CHECK.to_string());
+    artifact.reply_to_artifact_id = Some(check.attempt_id.clone());
+    artifact.relation_kind = Some("checks_attempt".to_string());
+    artifact.summary = Some(format!(
+        "Observed check for attempt {}: {}",
+        check.attempt_id, check.result
+    ));
+    artifact.verification_status = Some("recorded_check".to_string());
+    artifact.related_artifact_ids = vec![check.attempt_id.clone()];
+    artifact.experience = Some(ExperienceEvent::ObservedCheck(check));
     write_artifact(store, artifact).await
 }
 
@@ -698,20 +826,10 @@ async fn validate_lesson<S: Store + ?Sized>(
                 lesson.supporting_check_id
             ))
         })?;
-    let ExperienceEvent::Check(receipt) = required_event(&check)? else {
-        return Err(validation(format!(
-            "artifact '{}' is not an experience check",
-            lesson.supporting_check_id
-        )));
-    };
     if check.task_id != problem.task_id || check.project_id != problem.project_id {
         return Err(validation("supporting check is outside the problem scope"));
     }
-    if !receipt.supports_lesson() {
-        return Err(validation(
-            "supporting check must have exit_code 0, no timeout, complete output hashes, and unchanged source evidence",
-        ));
-    }
+    validation::validate_lesson_evidence(&check, lesson)?;
     ensure_causal_time(context.observed_at_ms, &check, "lesson")?;
     Ok(problem)
 }

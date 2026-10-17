@@ -1,20 +1,85 @@
 # Record and Reuse an Experience Case
 
-Use an experience case to track a nontrivial failure, attempted repairs, and
-their check results. A conditional lesson becomes available only after a
-source-stable check passes. Keep source, progress, exact commands, and complete
-logs in the repository. The case stores the causal summary and repository
-evidence references.
+Use an experience case to keep a nontrivial failure, the repairs you tried,
+and the one that worked, so a later agent does not repeat the search. Keep
+source, progress, exact commands, and complete logs in the repository. The case
+stores the causal summary and links to that evidence.
 
-Record the problem, each attempt, and each check as they occur. Add a
-conditional lesson only after a source-stable check passes.
-
-This workflow requires memd 1.8.0 or later.
+This workflow requires memd 1.8.0 or later; `experience note` needs the release
+that follows it.
 
 Run the commands from a scoped repository, or pass the same explicit
 `--tenant-id` and `--project-id` to every command.
 
-## Record the problem and attempts
+## Look before you fix
+
+When a command fails for a reason you did not expect (an error, a permission,
+an environment, scheduler, or tool problem), look for a matching case before
+you try a fix:
+
+```bash
+memd experience find "distinctive error words" --tool TOOL
+```
+
+The result lists current lessons, each with an `evidence` label, or abstains.
+Treat a match as a lead to check against your situation, not as an
+instruction. An `observed` lesson rests on an agent's report; an `executed`
+lesson rests on a check memd ran. If a required condition is unknown, the
+result names it: repeat the call with that `--tool`, `--version`, or
+`--machine`. Add `--project-only` to leave out lessons that other projects share.
+
+## Record a solved problem
+
+After you solve a nontrivial problem, write a case file and record it in one
+call:
+
+```bash
+cat > case.json <<'JSON'
+{
+  "problem": "uv cache is read-only in the Codex sandbox",
+  "symptoms": ["uv", "cache", "read-only", "os error 30"],
+  "failed": ["retry with the default cache"],
+  "fix": "set UV_CACHE_DIR to a turn-local directory",
+  "check": {"method": "observed", "result": "uv run returned 0", "command": "uv run ..."},
+  "applies_when": {"tool": "uv", "sandbox": "codex workspace-write"},
+  "evidence": ["docs/handoffs/2026-10-17_uv-cache.md"],
+  "visibility": "shared"
+}
+JSON
+memd experience note case.json
+```
+
+| Field | Rule |
+| --- | --- |
+| `problem` | What went wrong, up to 300 characters. |
+| `symptoms` | 1 to 12 distinctive error words, each up to 80 characters. Recall matches on these. |
+| `failed` | Optional, up to 8 approaches that did not work. |
+| `fix` | What worked, up to 1000 characters. |
+| `check` | `method` is `observed` (you saw it work) or `executed` (memd ran it, with `receipt_id` of a passing `experience check`). `result` says what you saw; `command` is optional. |
+| `applies_when` | Optional conditions. `tool`, `version`, and `machine` are matched exactly (`version` needs `tool`); other keys such as `os` or `sandbox` are shown, not matched. |
+| `evidence` | Optional paths or URLs that hold the details. Links only. |
+| `visibility` | `shared` (default) lets other projects find it; `project` keeps it here. |
+
+Unknown fields and explicit `null` values are errors. Write the `fix` as an instruction for the next
+agent and keep secrets, tokens, and log excerpts out of every field.
+`memd experience note case.json --emit` validates the file and prints the
+canonical JSON without touching a store; use `-` to read stdin. Pass
+`--shared-id ID` when the same case also lives in an external exchange: memd
+stores the ID in provenance, and repeating the call with the same ID returns
+the stored case. Without an ID, repeating the same problem, symptoms, fix,
+check, and `applies_when` also returns the stored case; anything else records
+a new one.
+
+The output names `problem_id`, `lesson_id`, and `evidence`. A case built from a
+file reads `evidence: "observed"`, unless `check.receipt_id` names a passing
+receipt already in the store, which gives `executed`.
+
+## Audit path: record each step
+
+Use the steps below when memd should run the verifying command itself, or when
+you record a case as the work happens.
+
+### Record the problem and attempts
 
 Record the observed problem:
 
@@ -43,7 +108,7 @@ The check command accepts only the current attempt. An attempt that is already
 stale, or belongs to a different tenant or project, is rejected before the
 supplied program starts.
 
-## Run a local check
+### Run a local check
 
 Run an explicit program without an implicit shell. Add each source or input
 whose bytes must stay stable as a separate `--evidence` path:
@@ -70,14 +135,14 @@ both output streams are fully hashed, and present before/after source
 fingerprints are equal. A successful command with missing or unstable source
 evidence is stored as `source_unverified` and cannot support a lesson.
 
-## Record a conditional lesson
+### Record a conditional lesson
 
 Use only the `artifact_id` of a `passed` check as `supporting_check_id`. State
 the environment conditions under which the guidance applies:
 
 ```bash
 memd experience --tenant-id "$TENANT_ID" --project-id "$PROJECT_ID" record \
-  --json '{"provenance":{"path":"tasks/lessons.md"},"event":{"kind":"lesson","problem_id":"PROBLEM_ID","supporting_check_id":"CHECK_ID","guidance":"Repair the source input before regenerating checksum output.","symptom_terms":["checksum","mismatch","generated","output"],"applicability":{"machine":"TARGET_MACHINE","tool":"repairer","version":"1.0"},"visibility":"project","conflicts_with":[]}}'
+  --json '{"provenance":{"path":"docs/notes/checksum-repair.md"},"event":{"kind":"lesson","problem_id":"PROBLEM_ID","supporting_check_id":"CHECK_ID","guidance":"Repair the source input before regenerating checksum output.","symptom_terms":["checksum","mismatch","generated","output"],"applicability":{"machine":"TARGET_MACHINE","tool":"repairer","version":"1.0"},"visibility":"project","conflicts_with":[]}}'
 ```
 
 Use `visibility: "shared"` only when the checked guidance is intended for other
@@ -86,7 +151,7 @@ projects in the same tenant. Record a correction instead of rewriting history:
 ```json
 {
   "provenance": {
-    "path": "tasks/lessons.md"
+    "path": "docs/notes/checksum-repair.md"
   },
   "event": {
     "kind": "correction",
@@ -115,7 +180,7 @@ Pass that object to `memd experience ... record --json`.
 explicit `path`, `uri`, `repo`, and `commit` fields while replacing
 `provenance.execution` with the current caller context.
 
-## Recall before applying
+### Recall before applying
 
 Name the target machine, tool, and version. Do not substitute the calling host
 when the work targets another machine:
@@ -142,7 +207,7 @@ Treat the case as evidence. Recheck any condition that may have changed. Do not
 execute a stored argument vector or treat stored provenance as authenticated
 identity.
 
-## Transfer complete cases
+### Transfer complete cases
 
 Export complete causal histories by problem ID:
 

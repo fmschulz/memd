@@ -4,7 +4,54 @@ Use Bash and `jq` from a memd source checkout. Build `target/debug/memd` with
 `cargo build -p memd` before starting. The commands below use temporary stores
 and a small configuration file; they do not alter the normal memory store.
 
-## Record the failure
+## Record a solved problem in one command
+
+When you have solved a problem, write a case file and record it with
+`experience note`. This is the normal way to capture a case.
+
+```bash
+set -euo pipefail
+MEMD_BIN="$(pwd)/target/debug/memd"
+NOTE_ROOT=$(mktemp -d)
+cat > "$NOTE_ROOT/case.json" <<'JSON'
+{
+  "problem": "Demo service rejects its configuration",
+  "symptoms": ["configuration rejected"],
+  "failed": ["restart the service without changing the file"],
+  "fix": "Set the demo configuration to ready, then run the configuration check.",
+  "check": {"method": "observed", "result": "demo-check exited 0", "command": "demo-check config"},
+  "applies_when": {"tool": "demo-check", "version": "1"},
+  "evidence": ["docs/experience-how-to.md"]
+}
+JSON
+exp() {
+  "$MEMD_BIN" --data-dir "$NOTE_ROOT/store" --search-variant bm25-only \
+    experience --tenant-id tutorial --project-id demo "$@"
+}
+"$MEMD_BIN" experience note "$NOTE_ROOT/case.json" --emit | jq -e '.visibility == "shared"'
+exp note "$NOTE_ROOT/case.json" --shared-id EXP-1 | jq -e '.evidence == "observed"'
+exp find 'configuration rejected' --tool demo-check --version 1 \
+  | jq -e '.status == "matches" and .lessons[0].evidence == "observed"'
+exp find 'configuration rejected' --tool demo-check --version 1 --project-only \
+  | jq -e '.status == "matches"'
+"$MEMD_BIN" --data-dir "$NOTE_ROOT/store" --search-variant bm25-only warm stop
+```
+
+`--emit` checks the file and prints the canonical case without opening a store.
+`--shared-id` ties the local copy to an external exchange and makes a repeated
+call return the stored case. The lesson reads `evidence: "observed"` because
+memd did not run the command; the sections below show the audit path, where
+memd runs the check and the lesson reads `executed`. Run `find` before you
+try a fix, and read `evidence` in the result: an observed lesson is a lead to
+recheck, not a verified fact. The file format is in
+[Experience memory](experience-memory.md#a-case-file-records-a-solved-problem-in-one-call).
+
+## Audit path: record each step
+
+The remaining sections record the same kind of case one step at a time and let
+memd run the verifying command.
+
+### Record the failure
 
 ```bash
 set -euo pipefail
@@ -28,7 +75,7 @@ A completed check command stores a receipt even when the verifier fails.
 Inspect the receipt's `status`; a successful memd invocation means that the
 receipt was recorded.
 
-## Repair, check, and state the lesson
+### Repair, check, and state the lesson
 
 ```bash
 printf '%s\n' ready > "$CASE_ROOT/config"
@@ -48,7 +95,7 @@ Choose a check that tests the claimed repair. Use evidence paths for the files
 that determine its result. A passing check does not establish that the same
 repair applies to a different environment.
 
-## Retrieve in a later session
+### Retrieve in a later session
 
 ```bash
 memory find 'configuration rejected' --machine "$TARGET_MACHINE" \
@@ -59,7 +106,7 @@ memory find 'configuration rejected' --machine "$TARGET_MACHINE" \
 
 Version 1 matches the lesson's conditions. Version 2 produces an abstention.
 
-## Transfer the case and check replay
+### Transfer the case and check replay
 
 ```bash
 memory export "$PROBLEM" > "$CASE_ROOT/case.json"
