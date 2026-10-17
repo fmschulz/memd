@@ -1,4 +1,7 @@
 #![recursion_limit = "256"]
+// async_trait adds a bare #[must_use] to every boxed-future method it generates;
+// clippy 1.99 reports that as double_must_use on code we cannot change.
+#![allow(clippy::double_must_use)]
 
 pub mod auto_priority;
 pub mod chunking;
