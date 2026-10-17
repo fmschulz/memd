@@ -6,7 +6,7 @@ memd's canonical task-artifact store and give later sessions a concise account
 to inspect. Repository files hold source code, full logs, plans, and handoffs.
 
 The experience commands require memd 1.8.0 or later. `experience note` needs
-the release that follows 1.8.0. See the [worked procedure](experience-how-to.md)
+memd 1.9.0 or later. See the [worked procedure](experience-how-to.md)
 and [CLI reference](cli-reference.md#experience).
 
 There are two ways to record a case. `experience note FILE` turns one case file

@@ -1,6 +1,6 @@
 """memd-wiki: deterministic compiled markdown surface over memd."""
 
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
 __all__ = ["__version__", "build_wiki"]
 

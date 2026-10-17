@@ -5,8 +5,8 @@ and the one that worked, so a later agent does not repeat the search. Keep
 source, progress, exact commands, and complete logs in the repository. The case
 stores the causal summary and links to that evidence.
 
-This workflow requires memd 1.8.0 or later; `experience note` needs the release
-that follows it.
+This workflow requires memd 1.8.0 or later; `experience note` needs memd 1.9.0
+or later.
 
 Run the commands from a scoped repository, or pass the same explicit
 `--tenant-id` and `--project-id` to every command.

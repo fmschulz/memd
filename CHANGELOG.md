@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-10-17
+
 ### Added
 
 - `memd experience note FILE` records a solved problem from one case file: a problem, an attempt for each failed approach and for the fix, a check, and a lesson. `-` reads stdin. `--emit` validates the file and prints the canonical case without opening a store. `--shared-id ID` stores the ID in provenance. A call is a replay, and returns the stored case, only when it repeats a submission: the same ID, or without an ID the same problem, symptoms, fix, check, and `applies_when`. An explicit `null` for an optional field is an error.
