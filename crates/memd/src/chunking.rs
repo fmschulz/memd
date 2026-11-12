@@ -31,12 +31,36 @@ impl Default for ChunkingConfig {
 pub struct Chunk {
     /// The chunk text
     pub text: String,
-    /// Character offset in original document
+    /// Byte offset in the original document
     pub start_char: usize,
-    /// Character offset (exclusive) in original document
+    /// Byte offset (exclusive) in the original document
     pub end_char: usize,
     /// Index of this chunk (0-based)
     pub chunk_index: usize,
+}
+
+/// Text of a chunk that covers `sentences`: the source from `start` (the
+/// first sentence's offset) up to `end` (the next sentence's offset, or the
+/// end of the document), without trailing whitespace.
+///
+/// Sentences are stored trimmed, so joining them would drop the spaces and
+/// line breaks between them and fuse words across sentence boundaries. Both
+/// offsets are sentence starts in `text`, so they are char boundaries; if
+/// they ever are not, the sentences are joined with a space instead.
+fn chunk_text_from_source(
+    text: &str,
+    sentences: &[crate::text::Sentence],
+    start: usize,
+    end: usize,
+) -> String {
+    match text.get(start..end) {
+        Some(span) if !span.trim().is_empty() => span.trim_end().to_string(),
+        _ => sentences
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
 }
 
 /// Split text into overlapping chunks using sentence boundaries
@@ -88,16 +112,18 @@ pub fn chunk_text(text: &str, config: &ChunkingConfig) -> Vec<Chunk> {
         if sentence_len > config.chunk_size {
             // Finalize any current chunk first
             if current_length > 0 {
-                let chunk_text: String = current_chunk_sentences
-                    .iter()
-                    .map(|s: &crate::text::Sentence| s.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join("");
+                let chunk_text = chunk_text_from_source(
+                    text,
+                    &current_chunk_sentences,
+                    chunk_start,
+                    sentence.offset,
+                );
+                let end_char = chunk_start + chunk_text.len();
 
                 chunks.push(Chunk {
                     text: chunk_text,
                     start_char: chunk_start,
-                    end_char: chunk_start + current_length,
+                    end_char,
                     chunk_index,
                 });
                 chunk_index += 1;
@@ -157,16 +183,18 @@ pub fn chunk_text(text: &str, config: &ChunkingConfig) -> Vec<Chunk> {
         // If adding this sentence would exceed chunk_size, finalize current chunk
         if current_length > 0 && current_length + sentence_len > config.chunk_size {
             // Create chunk from accumulated sentences
-            let chunk_text: String = current_chunk_sentences
-                .iter()
-                .map(|s: &crate::text::Sentence| s.text.as_str())
-                .collect::<Vec<_>>()
-                .join("");
+            let chunk_text = chunk_text_from_source(
+                text,
+                &current_chunk_sentences,
+                chunk_start,
+                sentence.offset,
+            );
+            let end_char = chunk_start + chunk_text.len();
 
             chunks.push(Chunk {
                 text: chunk_text,
                 start_char: chunk_start,
-                end_char: chunk_start + current_length,
+                end_char,
                 chunk_index,
             });
             chunk_index += 1;
@@ -206,18 +234,9 @@ pub fn chunk_text(text: &str, config: &ChunkingConfig) -> Vec<Chunk> {
 
     // Add final chunk if it meets minimum size or is the only chunk
     if current_length > 0 && (current_length >= config.min_chunk_size || chunks.is_empty()) {
-        let chunk_text: String = current_chunk_sentences
-            .iter()
-            .map(|s| s.text.as_str())
-            .collect::<Vec<_>>()
-            .join("");
-
-        // Calculate actual end position based on last sentence
-        let end_char = if let Some(last_sent) = current_chunk_sentences.last() {
-            last_sent.offset + last_sent.text.len()
-        } else {
-            chunk_start + current_length
-        };
+        let chunk_text =
+            chunk_text_from_source(text, &current_chunk_sentences, chunk_start, text.len());
+        let end_char = chunk_start + chunk_text.len();
 
         chunks.push(Chunk {
             text: chunk_text,
@@ -244,19 +263,24 @@ pub fn chunk_text(text: &str, config: &ChunkingConfig) -> Vec<Chunk> {
                 .filter(|s| s.offset >= last_chunk.end_char)
                 .collect();
 
-            let additional_text: String = new_sentences
-                .iter()
-                .map(|s| s.text.as_str())
-                .collect::<Vec<_>>()
-                .join("");
+            if !new_sentences.is_empty() {
+                // Append the source that follows the previous chunk, with the
+                // whitespace that separates it from that chunk.
+                let additional_text = match text.get(last_chunk.end_char..) {
+                    Some(rest) if !rest.trim().is_empty() => rest.trim_end().to_string(),
+                    _ => {
+                        let joined = new_sentences
+                            .iter()
+                            .map(|s| s.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        format!(" {joined}")
+                    }
+                };
 
-            let new_end = new_sentences
-                .last()
-                .map(|s| s.offset + s.text.len())
-                .unwrap_or(last_chunk.end_char);
-
-            last_chunk.text.push_str(&additional_text);
-            last_chunk.end_char = last_chunk.end_char.max(new_end);
+                last_chunk.end_char += additional_text.len();
+                last_chunk.text.push_str(&additional_text);
+            }
         }
     }
 
@@ -297,22 +321,81 @@ mod tests {
         let config = ChunkingConfig::default();
         let chunks = chunk_text(&text, &config);
 
-        eprintln!("Repeated 'A' test:");
-        eprintln!("  Text length: {}", text.len());
-        eprintln!("  Chunk size: {}", config.chunk_size);
-        eprintln!("  Number of chunks: {}", chunks.len());
-        for (i, chunk) in chunks.iter().enumerate() {
-            eprintln!("    Chunk {}: {} chars", i, chunk.text.len());
-        }
-
-        // With 1500 chars and chunk_size 1200, we expect it to be split
-        // But without sentence boundaries, it might not split correctly
-        // This test will reveal the bug
+        // 1500 chars with chunk_size 1200 and no sentence boundary must
+        // still be split.
         assert!(
             chunks.len() > 1,
             "Expected multiple chunks for 1500 char text (chunk_size=1200), got {} chunk(s)",
             chunks.len()
         );
+    }
+
+    /// Every chunk must be the exact source slice its offsets name: the
+    /// spaces and line breaks between sentences are part of the memory.
+    #[test]
+    fn test_chunks_keep_whitespace_between_sentences() {
+        let mut text = String::new();
+        for i in 1..=14 {
+            text.push_str(&format!(
+                "Step {i}: the scheduler on node alpha{i} rejects jobs above the quota.\n\
+                 The second line of step {i} explains the workaround; use the debug queue.\n\n\
+                 - bullet one for step {i}\n- bullet two for step {i}\n\n"
+            ));
+        }
+        let config = ChunkingConfig {
+            chunk_size: 400,
+            overlap: 80,
+            min_chunk_size: 100,
+        };
+
+        let chunks = chunk_text(&text, &config);
+        assert!(
+            chunks.len() > 3,
+            "expected several chunks, got {}",
+            chunks.len()
+        );
+
+        for chunk in &chunks {
+            assert_eq!(
+                chunk.text,
+                &text[chunk.start_char..chunk.end_char],
+                "chunk {} is not the source slice at its offsets",
+                chunk.chunk_index
+            );
+            assert!(
+                !chunk.text.contains("quota.The") && !chunk.text.contains("queue.-"),
+                "chunk {} fused two sentences: {:?}",
+                chunk.chunk_index,
+                chunk.text
+            );
+        }
+        assert!(chunks
+            .iter()
+            .any(|c| c.text.contains("quota.\nThe second line")));
+        assert!(chunks.iter().any(|c| c.text.contains("\n- bullet two")));
+        assert_eq!(chunks.last().unwrap().end_char, text.trim_end().len());
+    }
+
+    /// A tail too small to stand alone is merged into the previous chunk
+    /// together with the whitespace that separates it.
+    #[test]
+    fn test_merged_tail_keeps_separator() {
+        let body = ["Sentence about the scheduler quota."; 30].join(" ");
+        let text = format!("{body}\n\nShort tail.");
+        let config = ChunkingConfig {
+            chunk_size: 300,
+            overlap: 0,
+            min_chunk_size: 100,
+        };
+
+        let chunks = chunk_text(&text, &config);
+        let last = chunks.last().unwrap();
+        assert!(
+            last.text.ends_with("quota.\n\nShort tail."),
+            "tail was: {:?}",
+            last.text
+        );
+        assert_eq!(last.text, &text[last.start_char..last.end_char]);
     }
 
     #[test]
