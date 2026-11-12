@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use super::dense::DenseSearcher;
+use super::embedding_revision;
 use super::hybrid::{
     ChunkMetaForRerank, HybridConfig, HybridSearchResult, HybridSearcher, SearchContext,
 };
@@ -287,6 +288,9 @@ pub struct PersistentStore {
     async_indexer: Option<AsyncIndexerHandle>,
     /// Monotonic counter bumped before each PersistentStore-owned write.
     write_epoch: Arc<AtomicU64>,
+    /// The dense indexes were built by another embedder revision and are
+    /// being re-embedded; cleared when the rebuild has finished.
+    embedding_rebuild_pending: Arc<AtomicBool>,
     /// Warn-only detector for metadata.db changes not attributable to this store.
     external_mutation_probe: Option<ExternalMutationProbe>,
     /// Shared single-flight state + telemetry for store-owned HNSW repairs.
@@ -351,6 +355,9 @@ pub struct BackfillStats {
     /// Chunks encountered but not indexed (missing text, load error, or
     /// a per-batch index error).
     pub chunks_skipped: usize,
+    /// Batches whose embedding or index write failed. Their chunks are
+    /// retried by the next pass.
+    pub batches_failed: usize,
 }
 
 /// Result of a canonical_text backfill pass over legacy NULL rows.
@@ -780,6 +787,7 @@ impl PersistentStore {
         let write_epoch = Arc::new(AtomicU64::new(0));
 
         // Initialize dense searcher if enabled
+        let mut embedding_rebuild_pending = false;
         let dense_searcher = if config.enable_dense_search {
             use super::dense::DenseSearchConfig;
 
@@ -795,6 +803,17 @@ impl PersistentStore {
             }
             match DenseSearcher::new(dense_config) {
                 Ok(searcher) => {
+                    // Before any tenant index loads: vectors from another
+                    // embedder revision are discarded and rebuilt below.
+                    if !config.read_only {
+                        match embedding_revision::prepare(&config.data_dir) {
+                            Ok(pending) => embedding_rebuild_pending = pending,
+                            Err(error) => warn!(
+                                error = %error,
+                                "could not check the embedding revision of the dense indexes"
+                            ),
+                        }
+                    }
                     let searcher = searcher
                         .with_base_path(config.data_dir.clone())
                         .with_read_only(config.read_only);
@@ -904,6 +923,7 @@ impl PersistentStore {
             async_indexer: None,
             write_epoch,
             external_mutation_probe: None,
+            embedding_rebuild_pending: Arc::new(AtomicBool::new(embedding_rebuild_pending)),
             repair_state: Arc::new(HnswRepairState::default()),
             repair_task: Mutex::new(None),
             usage_sweep_last_ms: AtomicI64::new(usage_sweep_initial_ms),
@@ -936,7 +956,10 @@ impl PersistentStore {
         let async_indexer = store.start_async_indexer_if_enabled();
         store.async_indexer = async_indexer;
 
-        if !store.config.read_only && store.config.backfill_hnsw_on_startup {
+        if !store.config.read_only
+            && (store.config.backfill_hnsw_on_startup
+                || store.embedding_rebuild_pending.load(Ordering::Acquire))
+        {
             store.spawn_startup_hnsw_backfill();
         }
         if !store.config.read_only && store.config.backfill_canonical_text_on_startup {
@@ -1003,6 +1026,8 @@ impl PersistentStore {
         let hybrid_searcher = self.hybrid_searcher.clone();
         let metadata = Arc::clone(&self.metadata);
         let tenants = Arc::clone(&self.tenants);
+        let embedding_rebuild_pending = Arc::clone(&self.embedding_rebuild_pending);
+        let data_dir = self.config.data_dir.clone();
         let (tx, rx) = oneshot::channel::<bool>();
 
         let task = runtime.spawn(async move {
@@ -1011,6 +1036,7 @@ impl PersistentStore {
                                    // that arrives after one pass's snapshot is picked up by the next.
                                    // The loop yields the final pass's outcome.
             let final_ok = loop {
+                let mut every_batch_indexed = false;
                 let ok = match run_hnsw_backfill(
                     dense_searcher.as_ref(),
                     hybrid_searcher.as_ref(),
@@ -1020,6 +1046,7 @@ impl PersistentStore {
                 .await
                 {
                     Ok(stats) => {
+                        every_batch_indexed = stats.batches_failed == 0;
                         // Count only probe-triggered repairs; a startup backfill
                         // is not a "repair" for telemetry purposes.
                         if kind == RepairKind::Probe {
@@ -1041,6 +1068,18 @@ impl PersistentStore {
                         false
                     }
                 };
+                // A pass without a failed batch re-embedded every chunk that
+                // had no vector, so a rebuild forced by an embedder revision
+                // change is done. Finish it before the single-flight slot is
+                // released: `shutdown` waits on that slot, so it cannot save
+                // the same index files at the same time.
+                if every_batch_indexed && embedding_rebuild_pending.load(Ordering::Acquire) {
+                    finish_embedding_rebuild(
+                        dense_searcher.as_deref(),
+                        &data_dir,
+                        &embedding_rebuild_pending,
+                    );
+                }
                 if !state.finish_or_continue() {
                     break ok;
                 }
@@ -1817,6 +1856,25 @@ impl PersistentStore {
         // next start.
         let repair_task = self.repair_task.lock().take();
         if let Some(task) = repair_task {
+            // A rebuild after an embedder revision change only advances while
+            // a writer is alive. Let it finish within a bounded grace period,
+            // so a short-lived command completes a small store's rebuild and
+            // always gets at least one batch done on a large one. Whatever is
+            // indexed by the deadline is saved below and the next writer
+            // resumes from there.
+            if self.embedding_rebuild_pending.load(Ordering::Acquire)
+                && self.repair_state.repair_in_progress()
+                && runtime_runs_tasks_while_blocked()
+            {
+                info!(
+                    grace_secs = EMBEDDING_REBUILD_SHUTDOWN_GRACE.as_secs(),
+                    "waiting for the dense index rebuild before shutdown"
+                );
+                let deadline = Instant::now() + EMBEDDING_REBUILD_SHUTDOWN_GRACE;
+                while self.repair_state.repair_in_progress() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
             task.abort();
             let deadline = Instant::now() + Duration::from_millis(500);
             while self.repair_state.repair_in_progress() && Instant::now() < deadline {
@@ -1847,6 +1905,46 @@ impl PersistentStore {
             }
         }
         Ok(())
+    }
+}
+
+/// How long `shutdown` lets an in-flight dense index rebuild run before it
+/// stops the rebuild and saves what has been indexed so far.
+const EMBEDDING_REBUILD_SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+
+/// Whether spawned tasks keep running while the current thread blocks. On a
+/// current-thread runtime (or outside one) a blocking wait cannot make the
+/// repair task advance, so waiting for it would only stall.
+fn runtime_runs_tasks_while_blocked() -> bool {
+    tokio::runtime::Handle::try_current()
+        .map(|handle| {
+            matches!(
+                handle.runtime_flavor(),
+                tokio::runtime::RuntimeFlavor::MultiThread
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Persist the re-embedded dense indexes, then record the embedder revision.
+///
+/// Readers in other processes load the dense index from disk, and a warm
+/// worker may not exit for a long time, so the indexes are saved here instead
+/// of at shutdown. The marker is written last: a store marked current always
+/// has its rebuilt indexes on disk.
+fn finish_embedding_rebuild(dense: Option<&DenseSearcher>, data_dir: &Path, pending: &AtomicBool) {
+    if let Some(dense) = dense {
+        if let Err(error) = dense.save_all() {
+            warn!(error = %error, "could not save the rebuilt dense indexes");
+            return;
+        }
+    }
+    match embedding_revision::mark_current(data_dir) {
+        Ok(()) => {
+            pending.store(false, Ordering::Release);
+            info!("dense indexes rebuilt for the current embedder revision");
+        }
+        Err(error) => warn!(error = %error, "could not record the embedder revision"),
     }
 }
 

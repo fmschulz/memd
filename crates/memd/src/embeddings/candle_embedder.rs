@@ -344,9 +344,20 @@ impl CandleEmbedder {
             })?;
 
             // Run model inference
+            // `BertModel::forward(input_ids, token_type_ids, attention_mask)`:
+            // single-segment input has token type 0 everywhere, and the mask
+            // keeps padding out of self-attention so a text's vector does not
+            // depend on the other texts in its batch. See `EMBEDDING_REVISION`.
+            let token_type_ids = token_ids_tensor.zeros_like().map_err(|e| {
+                MemdError::EmbeddingError(format!("Failed to create token type tensor: {}", e))
+            })?;
             let model = model.lock();
             let outputs = model
-                .forward(&token_ids_tensor, &attention_mask_tensor, None)
+                .forward(
+                    &token_ids_tensor,
+                    &token_type_ids,
+                    Some(&attention_mask_tensor),
+                )
                 .map_err(|e| MemdError::EmbeddingError(format!("Model forward failed: {}", e)))?;
 
             // Apply pooling strategy
@@ -491,6 +502,29 @@ mod tests {
         assert!((norm - 1.0).abs() < 0.01, "embedding should be normalized");
     }
 
+    /// A text's vector must not depend on the texts it was batched with.
+    /// Padding to the longest text in the batch used to leak into
+    /// self-attention (see `EMBEDDING_REVISION`).
+    #[tokio::test]
+    #[ignore = "requires model download and network access"]
+    async fn test_embedding_is_independent_of_batch_neighbours() {
+        let embedder = CandleEmbedder::new().unwrap();
+        let short = "scheduler quota exceeded";
+        let long = "The second login node rejects every job above the group quota, \
+                    so submit to the debug queue first and check the account limits \
+                    before starting a long array job on the shared partition."
+            .repeat(3);
+
+        let alone = embedder.embed_texts(&[short]).await.unwrap();
+        let batched = embedder.embed_texts(&[short, long.as_str()]).await.unwrap();
+
+        let cosine: f32 = alone[0].iter().zip(&batched[0]).map(|(a, b)| a * b).sum();
+        assert!(
+            cosine > 0.9999,
+            "the same text embedded alone and in a batch must match; cosine was {cosine}"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires model download and network access"]
     async fn test_embed_batch() {
@@ -530,21 +564,28 @@ mod tests {
     async fn test_semantic_similarity() {
         let embedder = CandleEmbedder::new().unwrap();
 
-        let texts = vec!["the cat sat on the mat", "a feline rested on a rug"];
+        let texts = vec![
+            "the cat sat on the mat",
+            "a feline rested on a rug",
+            "quarterly tax filings are due in april",
+        ];
         let embeddings = embedder.embed_texts(&texts).await.unwrap();
+        let cosine = |a: &[f32], b: &[f32]| -> f32 { a.iter().zip(b).map(|(x, y)| x * y).sum() };
+        let similar = cosine(&embeddings[0], &embeddings[1]);
+        let unrelated = cosine(&embeddings[0], &embeddings[2]);
 
-        // Compute cosine similarity
-        let dot_product: f32 = embeddings[0]
-            .iter()
-            .zip(&embeddings[1])
-            .map(|(a, b)| a * b)
-            .sum();
-
-        // Similar sentences should have high similarity
+        // Reference values for the pinned all-MiniLM-L6-v2 weights, from an
+        // independent implementation of the model (token type 0, padding
+        // masked out of attention, mean pooling): 0.5612 and -0.0300. The
+        // revision 1 inputs scored the paraphrase 0.60 to 0.62 depending on
+        // the batch, which is what the old `> 0.6` bound was fitted to.
         assert!(
-            dot_product > 0.6,
-            "similar sentences should have high similarity, got {}",
-            dot_product
+            (similar - 0.5612).abs() < 0.01,
+            "paraphrase similarity should match the reference model, got {similar}"
+        );
+        assert!(
+            (unrelated + 0.0300).abs() < 0.01,
+            "unrelated similarity should match the reference model, got {unrelated}"
         );
     }
 }

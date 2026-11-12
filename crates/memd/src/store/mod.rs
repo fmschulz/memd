@@ -4,6 +4,7 @@
 //! The in-memory store is used as a baseline before persistent storage.
 
 pub mod dense;
+mod embedding_revision;
 pub mod feedback;
 pub mod hybrid;
 pub mod memory;

@@ -5,6 +5,7 @@ Persistent mode writes to:
 ```
 ~/.memd/data/
 ├── .writer.lock                      # Exclusive writer flock
+├── embedding_revision                # Embedder revision of the dense vectors
 ├── metadata.db                       # SQLite metadata (WAL mode, pooled)
 ├── sparse_index/                     # tantivy BM25 index (open_or_create)
 ├── warm/<hash>/                      # 0700 runtime dir for warm worker socket
@@ -22,6 +23,15 @@ Persistent mode writes to:
 ```
 
 Default data dir: `~/.memd/data`. Override with `--data-dir`.
+
+`embedding_revision` records which revision of the embedder produced the
+vectors under `warm_index/`. When a release changes how vectors are computed,
+the first writable open discards the dense indexes and re-embeds every chunk
+from its segments in the background; the file reads `<revision> rebuilding`
+until that pass has finished and the rebuilt indexes are saved. A command that
+exits during the rebuild waits up to 10 seconds for it, saves what has been
+indexed, and the next writer continues from there. Until then, chunks that are
+not yet re-embedded are found through the sparse index only.
 
 Retrieval/list scans are tolerant of stale metadata rows with unreadable segment
 payloads: unreadable chunks are logged and skipped. Direct

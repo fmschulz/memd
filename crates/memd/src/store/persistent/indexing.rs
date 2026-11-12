@@ -262,6 +262,24 @@ pub(super) async fn run_hnsw_backfill(
 
             let batch_len = index_rows.len();
             let result = if let Some(hybrid) = hybrid_searcher {
+                // `index_batch` writes both index sides, and these chunks
+                // usually are in the sparse index already (only their vectors
+                // are missing). Drop their sparse documents first so the
+                // repair does not index every sentence a second time.
+                if !sparse_cold {
+                    if let Some(sparse) = hybrid.sparse_index() {
+                        for (chunk_id, _) in &index_rows {
+                            if let Err(e) = sparse.delete(&tenant_id, chunk_id) {
+                                warn!(
+                                    tenant_id = %tenant_id,
+                                    chunk_id = %chunk_id,
+                                    error = %e,
+                                    "HNSW backfill: could not clear sparse documents before re-indexing"
+                                );
+                            }
+                        }
+                    }
+                }
                 hybrid.index_batch(&tenant_id, &index_rows).await
             } else {
                 dense.index_batch(&tenant_id, &index_rows).await
@@ -283,6 +301,7 @@ pub(super) async fn run_hnsw_backfill(
                         "HNSW backfill batch failed; continuing with next batch"
                     );
                     stats.chunks_skipped += batch_len;
+                    stats.batches_failed += 1;
                     tenant_had_batch_failure = true;
                 }
             }

@@ -2310,3 +2310,122 @@ async fn sparse_backfill_rebuilds_empty_index_for_active_tenant() {
         "rebuilt sparse index must serve lexical hits"
     );
 }
+
+/// Embedder that takes a moment per batch, so a repair is still embedding
+/// when the store shuts down.
+struct SlowEmbedder {
+    inner: MockEmbedder,
+    delay: Duration,
+}
+
+#[async_trait::async_trait]
+impl crate::embeddings::Embedder for SlowEmbedder {
+    async fn embed_texts(&self, texts: &[&str]) -> Result<Vec<crate::embeddings::EmbeddingResult>> {
+        tokio::time::sleep(self.delay).await;
+        self.inner.embed_texts(texts).await
+    }
+
+    async fn embed_query(&self, query: &str) -> Result<crate::embeddings::EmbeddingResult> {
+        self.inner.embed_query(query).await
+    }
+
+    fn dimension(&self) -> usize {
+        self.inner.dimension()
+    }
+
+    fn config(&self) -> &crate::embeddings::EmbeddingConfig {
+        self.inner.config()
+    }
+}
+
+/// The state a writable open leaves after it discarded dense indexes of
+/// another embedder revision: chunks on disk, no vectors, the marker reading
+/// `<revision> rebuilding`, and the rebuild flag set.
+async fn store_awaiting_embedding_rebuild(
+    embedder: Arc<dyn crate::embeddings::Embedder>,
+) -> (PersistentStore, tempfile::TempDir, TenantId) {
+    let (mut store, dir) = make_test_store();
+    let tenant = make_tenant();
+    for text in [
+        "alpha scheduler quota",
+        "bravo wal replay",
+        "charlie cache eviction",
+    ] {
+        Store::add(&store, make_chunk(&tenant, text)).await.unwrap();
+    }
+    store.dense_searcher = Some(Arc::new(
+        DenseSearcher::with_embedder(embedder, DenseSearchConfig::default())
+            .with_base_path(dir.path().to_path_buf()),
+    ));
+    fs::write(
+        dir.path().join("embedding_revision"),
+        format!("{} rebuilding\n", crate::embeddings::EMBEDDING_REVISION),
+    )
+    .unwrap();
+    store
+        .embedding_rebuild_pending
+        .store(true, Ordering::Release);
+    (store, dir, tenant)
+}
+
+fn embedding_revision_marker(data_dir: &Path) -> String {
+    fs::read_to_string(data_dir.join("embedding_revision"))
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
+#[tokio::test]
+async fn repair_finishes_a_pending_embedding_rebuild() {
+    let (store, dir, tenant) =
+        store_awaiting_embedding_rebuild(Arc::new(MockEmbedder::new())).await;
+
+    let RepairSchedule::Scheduled(done) = store.schedule_hnsw_repair(RepairKind::Startup) else {
+        panic!("the repair must be scheduled");
+    };
+    assert!(done.await.unwrap(), "the repair pass must succeed");
+
+    assert!(!store.embedding_rebuild_pending.load(Ordering::Acquire));
+    assert_eq!(
+        embedding_revision_marker(dir.path()),
+        crate::embeddings::EMBEDDING_REVISION.to_string()
+    );
+    assert_eq!(store.dense_searcher.as_ref().unwrap().index_len(&tenant), 3);
+    // Other processes load the dense index from disk, so it must be there by
+    // the time the marker says the rebuild is done, not only at shutdown.
+    let index_dir = dir
+        .path()
+        .join("tenants")
+        .join(tenant.to_string())
+        .join("warm_index");
+    let saved = fs::read_dir(&index_dir)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    assert!(
+        saved,
+        "the rebuilt dense index must be saved with the marker"
+    );
+}
+
+/// A short-lived command exits while the rebuild is still embedding. Without
+/// a grace period the repair is aborted on every exit and never completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_lets_a_pending_embedding_rebuild_finish() {
+    let embedder = Arc::new(SlowEmbedder {
+        inner: MockEmbedder::new(),
+        delay: Duration::from_millis(300),
+    });
+    let (store, dir, _tenant) = store_awaiting_embedding_rebuild(embedder).await;
+
+    let RepairSchedule::Scheduled(_done) = store.schedule_hnsw_repair(RepairKind::Startup) else {
+        panic!("the repair must be scheduled");
+    };
+    store.shutdown().unwrap();
+
+    assert_eq!(
+        embedding_revision_marker(dir.path()),
+        crate::embeddings::EMBEDDING_REVISION.to_string(),
+        "shutdown must wait for the rebuild instead of aborting it"
+    );
+    assert!(!store.embedding_rebuild_pending.load(Ordering::Acquire));
+}
