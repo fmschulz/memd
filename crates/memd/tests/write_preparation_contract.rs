@@ -124,12 +124,24 @@ async fn equivalent_cli_and_call_writes_share_retention_and_tags() {
         .unwrap()
         .lifecycle;
     assert_eq!(cli_lifecycle.tier, call_lifecycle.tier);
+    // The retention deadline is stamped when the write is prepared and
+    // `timestamp_created` when the chunk is stored, so each path's window
+    // includes however long the store took in between. Retention windows
+    // differ by days between policies; a few seconds of slack keeps the
+    // comparison meaningful on a slow or loaded filesystem.
+    const WINDOW_TOLERANCE_MS: i64 = 5_000;
     let cli_expiry_delta = cli_lifecycle.expires_at_ms.unwrap() - cli_chunk.timestamp_created;
     let call_expiry_delta = call_lifecycle.expires_at_ms.unwrap() - call_chunk.timestamp_created;
-    assert!((cli_expiry_delta - call_expiry_delta).abs() <= 100);
+    assert!(
+        (cli_expiry_delta - call_expiry_delta).abs() <= WINDOW_TOLERANCE_MS,
+        "expiry windows differ: cli={cli_expiry_delta}ms call={call_expiry_delta}ms"
+    );
     let cli_review_delta = cli_lifecycle.review_after_ms.unwrap() - cli_chunk.timestamp_created;
     let call_review_delta = call_lifecycle.review_after_ms.unwrap() - call_chunk.timestamp_created;
-    assert!((cli_review_delta - call_review_delta).abs() <= 100);
+    assert!(
+        (cli_review_delta - call_review_delta).abs() <= WINDOW_TOLERANCE_MS,
+        "review windows differ: cli={cli_review_delta}ms call={call_review_delta}ms"
+    );
 }
 
 #[tokio::test]

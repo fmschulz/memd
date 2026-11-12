@@ -523,8 +523,6 @@ mod cli_reads {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().join("store");
         let problem_id = populated_store(&data_dir).await;
-        let _ = std::process::Command::new("cp").arg("-r").arg(&data_dir).arg("/tmp/claude-1000/-home-fschulz-dev-memd/be18d679-e126-4ba4-984f-cb316871239a/scratchpad/dbg").status();
-        eprintln!("PROBLEM {problem_id}");
         assert_reads_leave_store_untouched(&data_dir, &problem_id);
     }
 
