@@ -10,6 +10,10 @@ structured tracing logs, and the per-search exposure log
 The `usage_events` table lives inside `metadata.db`. It records operational
 events for self-diagnosis and report generation.
 
+Successful CLI adds and `memory.add` writes record their add event after storage succeeds.
+Reused exact duplicates and failed storage writes do not add to growth.
+Quality-gate rejections record zero chunks.
+
 | Recorded ops | Notes |
 | --- | --- |
 | `add`, `search`, `agent_context`, `get`, `delete`, `purge`, `consolidate`, `import_omf`, `report` | Written by the ops layer for growth, retrieval, and learning-digest analytics. |

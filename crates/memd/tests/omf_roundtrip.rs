@@ -23,6 +23,350 @@ use memd::types::{ChunkType, MemoryChunk, ProjectId};
 use serde_json::json;
 
 #[tokio::test]
+async fn ops_regression_omf_prevalidates_all_lifecycles() {
+    let (server, _tmp) = test_server().await;
+    let store = server.store().as_persistent().unwrap();
+    let doc = trusted_doc_with(vec![
+        trusted_item_with("valid first memory", json!({"v": 1})),
+        trusted_item_with(
+            "invalid second memory",
+            json!({"v": 1, "lifecycle": {"tier": "invalid"}}),
+        ),
+    ]);
+    assert!(
+        import_omf(store, &tenant("atomic"), &doc, ImportOptions::default())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store.stats(&tenant("atomic")).await.unwrap().total_chunks,
+        0
+    );
+}
+
+#[tokio::test]
+async fn ops_regression_omf_storage_error_rolls_back_and_stays_rolled_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = PersistentStoreConfig {
+        data_dir: tmp.path().into(),
+        enable_dense_search: false,
+        enable_hybrid_search: false,
+        ..Default::default()
+    };
+    let store = PersistentStore::open(config.clone()).unwrap();
+    let conn = rusqlite::Connection::open(tmp.path().join("metadata.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER reject_import BEFORE INSERT ON chunks
+        WHEN NEW.canonical_text = 'reject second memory'
+        BEGIN SELECT RAISE(ABORT, 'injected import failure'); END;",
+    )
+    .unwrap();
+    let doc = trusted_doc_with(vec![
+        trusted_item_with("valid first memory", json!({"v": 1})),
+        trusted_item_with("reject second memory", json!({"v": 1})),
+    ]);
+    let error = import_omf(&store, &tenant("atomic"), &doc, ImportOptions::default())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("injected import failure"));
+    assert_eq!(
+        store.stats(&tenant("atomic")).await.unwrap().total_chunks,
+        0
+    );
+    conn.execute_batch("DROP TRIGGER reject_import").unwrap();
+    drop(conn);
+    drop(store);
+    let reopened = PersistentStore::open(config).unwrap();
+    assert_eq!(
+        reopened
+            .stats(&tenant("atomic"))
+            .await
+            .unwrap()
+            .total_chunks,
+        0
+    );
+}
+
+#[tokio::test]
+async fn ops_regression_omf_edge_error_preserves_existing_rows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = PersistentStoreConfig {
+        data_dir: tmp.path().into(),
+        enable_dense_search: false,
+        enable_hybrid_search: false,
+        ..Default::default()
+    };
+    let store = PersistentStore::open(config.clone()).unwrap();
+    let scope = tenant("edge_atomic");
+    let existing = store
+        .add(MemoryChunk::new(
+            scope.clone(),
+            "original memory",
+            ChunkType::Doc,
+        ))
+        .await
+        .unwrap();
+    let conn = rusqlite::Connection::open(tmp.path().join("metadata.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER reject_edge BEFORE UPDATE OF superseded_by ON chunks
+        BEGIN SELECT RAISE(ABORT, 'injected edge failure'); END;",
+    )
+    .unwrap();
+    let old = memd::types::ChunkId::new();
+    let new = memd::types::ChunkId::new();
+    let doc = trusted_doc_with(vec![
+        trusted_item_with(
+            "original memory",
+            json!({"v": 1, "chunk_id": old.to_string(),
+            "lifecycle": {"status": "superseded", "superseded_by": new.to_string()}}),
+        ),
+        trusted_item_with(
+            "replacement memory",
+            json!({"v": 1, "chunk_id": new.to_string(),
+            "lifecycle": {"supersedes": old.to_string()}}),
+        ),
+    ]);
+    let error = import_omf(&store, &scope, &doc, ImportOptions::default())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("injected edge failure"));
+    let meta = store.metadata().get(&scope, &existing).unwrap().unwrap();
+    assert_eq!(meta.status, memd::types::ChunkStatus::Final);
+    assert!(meta.lifecycle.superseded_by.is_none());
+    assert_eq!(store.stats(&scope).await.unwrap().total_chunks, 1);
+    conn.execute_batch("DROP TRIGGER reject_edge").unwrap();
+    drop(conn);
+    drop(store);
+    let reopened = PersistentStore::open(config).unwrap();
+    assert_eq!(reopened.stats(&scope).await.unwrap().total_chunks, 1);
+    assert_eq!(
+        reopened
+            .metadata()
+            .get(&scope, &existing)
+            .unwrap()
+            .unwrap()
+            .status,
+        memd::types::ChunkStatus::Final
+    );
+}
+
+#[tokio::test]
+async fn ops_regression_omf_maps_existing_duplicates_into_edges() {
+    let (server, _tmp) = test_server().await;
+    let store = server.store().as_persistent().unwrap();
+    let scope = tenant("merge");
+    let existing = store
+        .add(MemoryChunk::new(
+            scope.clone(),
+            "original memory",
+            ChunkType::Doc,
+        ))
+        .await
+        .unwrap();
+    let old = memd::types::ChunkId::new();
+    let new = memd::types::ChunkId::new();
+    let doc = trusted_doc_with(vec![
+        trusted_item_with(
+            "original memory",
+            json!({"v": 1, "chunk_id": old.to_string(),
+            "lifecycle": {"status": "superseded", "superseded_by": new.to_string()}}),
+        ),
+        trusted_item_with(
+            "replacement memory",
+            json!({"v": 1, "chunk_id": new.to_string(),
+            "lifecycle": {"supersedes": old.to_string()}}),
+        ),
+    ]);
+    let result = import_omf(store, &scope, &doc, ImportOptions::default())
+        .await
+        .unwrap();
+    assert_eq!((result.imported, result.duplicates), (1, 1));
+    let meta = store.metadata().get(&scope, &existing).unwrap().unwrap();
+    assert_eq!(meta.status, memd::types::ChunkStatus::Superseded);
+    let successor = meta.lifecycle.superseded_by.unwrap();
+    assert_eq!(
+        store
+            .metadata()
+            .get(&scope, &successor)
+            .unwrap()
+            .unwrap()
+            .lifecycle
+            .supersedes,
+        Some(existing)
+    );
+    let rerun = import_omf(store, &scope, &doc, ImportOptions::default())
+        .await
+        .unwrap();
+    assert_eq!((rerun.imported, rerun.duplicates), (0, 2));
+}
+
+#[tokio::test]
+async fn ops_regression_omf_restores_deleted_content() {
+    let (server, _tmp) = test_server().await;
+    let store = server.store().as_persistent().unwrap();
+    let scope = tenant("restore");
+    let id = store
+        .add(MemoryChunk::new(
+            scope.clone(),
+            "recover this memory",
+            ChunkType::Doc,
+        ))
+        .await
+        .unwrap();
+    store.delete(&scope, &id).await.unwrap();
+    let doc = trusted_doc_with(vec![trusted_item_with(
+        "recover this memory",
+        json!({"v": 1}),
+    )]);
+    let preview = preview_omf_import(store, &scope, &doc, ImportOptions::default())
+        .await
+        .unwrap();
+    assert_eq!((preview.to_import, preview.duplicates), (1, 0));
+    let result = import_omf(store, &scope, &doc, ImportOptions::default())
+        .await
+        .unwrap();
+    assert_eq!((result.imported, result.duplicates), (1, 0));
+}
+
+#[tokio::test]
+async fn ops_regression_omf_preserves_explicit_null_retention() {
+    let (server, _tmp) = test_server().await;
+    let store = server.store().as_persistent().unwrap();
+    let scope = tenant("null_retention");
+    let doc = trusted_doc_with(vec![trusted_item_with(
+        "Trace: cargo test returned zero after cache key repair.",
+        json!({"v": 1, "chunk_type": "trace", "ingestion_mode": "conversation",
+            "lifecycle": {"expires_at_ms": null, "review_after_ms": null}}),
+    )]);
+    let result = import_omf(store, &scope, &doc, ImportOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(result.imported, 1);
+    let rows = store.metadata().list(&scope, 10, 0).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].lifecycle.expires_at_ms, None);
+    assert_eq!(rows[0].lifecycle.review_after_ms, None);
+}
+
+#[tokio::test]
+async fn ops_regression_omf_hidden_versions_reimport_idempotently() {
+    let (server, _tmp) = test_server().await;
+    let store = server.store().as_persistent().unwrap();
+    let scope = tenant("history_reimport");
+    let doc = trusted_doc_with(vec![
+        trusted_item_with(
+            "history memory",
+            json!({"v": 1, "lifecycle": {"tier": "history"}}),
+        ),
+        trusted_item_with(
+            "expired memory",
+            json!({"v": 1, "lifecycle": {"expires_at_ms": 1}}),
+        ),
+    ]);
+    assert_eq!(
+        import_omf(store, &scope, &doc, ImportOptions::default())
+            .await
+            .unwrap()
+            .imported,
+        2
+    );
+    let second = import_omf(store, &scope, &doc, ImportOptions::default())
+        .await
+        .unwrap();
+    assert_eq!((second.imported, second.duplicates), (0, 2));
+}
+
+#[tokio::test]
+async fn ops_regression_omf_does_not_overwrite_existing_predecessor() {
+    let (server, _tmp) = test_server().await;
+    let store = server.store().as_persistent().unwrap();
+    let scope = tenant("edge_conflict");
+    let old = store
+        .add(MemoryChunk::new(
+            scope.clone(),
+            "original version",
+            ChunkType::Doc,
+        ))
+        .await
+        .unwrap();
+    let current = store
+        .supersede_chunk_with_lifecycle(
+            &scope,
+            &old,
+            MemoryChunk::new(scope.clone(), "current version", ChunkType::Doc),
+            LifecycleDelta::default(),
+        )
+        .await
+        .unwrap();
+    let imported_old = memd::types::ChunkId::new();
+    let imported_new = memd::types::ChunkId::new();
+    let doc = trusted_doc_with(vec![
+        trusted_item_with(
+            "a conflicting original",
+            json!({"v": 1, "chunk_id": imported_old.to_string()}),
+        ),
+        trusted_item_with(
+            "current version",
+            json!({"v": 1, "chunk_id": imported_new.to_string(),
+            "lifecycle": {"supersedes": imported_old.to_string()}}),
+        ),
+    ]);
+    assert!(import_omf(store, &scope, &doc, ImportOptions::default())
+        .await
+        .is_err());
+    assert_eq!(store.stats(&scope).await.unwrap().total_chunks, 2);
+    assert_eq!(
+        store
+            .metadata()
+            .get(&scope, &current)
+            .unwrap()
+            .unwrap()
+            .lifecycle
+            .supersedes,
+        Some(old)
+    );
+}
+
+#[tokio::test]
+async fn ops_regression_omf_preserves_same_content_successors_and_reverse_edges() {
+    let (server, _tmp) = test_server().await;
+    let store = server.store().as_persistent().unwrap();
+    let scope = tenant("chain");
+    let old = memd::types::ChunkId::new();
+    let new = memd::types::ChunkId::new();
+    let doc = trusted_doc_with(vec![
+        trusted_item_with(
+            "Same content",
+            json!({"v": 1, "chunk_id": old.to_string(),
+            "lifecycle": {"status": "superseded", "superseded_by": new.to_string()}}),
+        ),
+        trusted_item_with("same content", json!({"v": 1, "chunk_id": new.to_string()})),
+    ]);
+    let result = import_omf(store, &scope, &doc, ImportOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(result.imported, 2);
+    let rows = store.metadata().list(&scope, 10, 0).unwrap();
+    assert_eq!(rows.len(), 2);
+    let previous = rows
+        .iter()
+        .find(|m| m.status == memd::types::ChunkStatus::Superseded)
+        .unwrap();
+    let current = rows
+        .iter()
+        .find(|m| m.status == memd::types::ChunkStatus::Final)
+        .unwrap();
+    assert_eq!(
+        previous.lifecycle.superseded_by.as_ref(),
+        Some(&current.chunk_id)
+    );
+    assert_eq!(
+        current.lifecycle.supersedes.as_ref(),
+        Some(&previous.chunk_id)
+    );
+}
+
+#[tokio::test]
 async fn export_omf_emits_memd_namespace_versioned() {
     let (server, _tmp) = test_server().await;
 
@@ -2278,13 +2622,8 @@ async fn preview_and_import_agree_when_filter_short_circuits_strict_parse() {
 }
 
 #[tokio::test]
-async fn preview_and_import_agree_when_exact_dedup_short_circuits_strict_parse() {
-    // Pre-seed a chunk whose canonical text matches the incoming OMF
-    // item. Both preview and import must short-circuit via the exact-
-    // dedup check (is_exact_duplicate) BEFORE the strict-lifecycle
-    // parser would otherwise reject the item's malformed `tier`. This
-    // pins dedup-before-parse ordering; reversing would surface errors
-    // in one path but not the other. Codex round-2 parity LOW.
+async fn preview_and_import_reject_malformed_lifecycle_even_for_duplicates() {
+    // Duplicate content does not excuse malformed trusted lifecycle fields.
     let (dst_server, _dst_tmp) = test_server().await;
     let dst_ps = dst_server.store().as_persistent().unwrap();
     let dst_tenant = tenant("dst");
@@ -2310,16 +2649,11 @@ async fn preview_and_import_agree_when_exact_dedup_short_circuits_strict_parse()
         }),
     )]);
     let opts = ImportOptions::default();
-    let preview = preview_omf_import(dst_ps, &dst_tenant, &doc, opts.clone())
+    assert!(preview_omf_import(dst_ps, &dst_tenant, &doc, opts.clone())
         .await
-        .expect("preview should dedupe before strict parse");
-    let import = import_omf(dst_ps, &dst_tenant, &doc, opts)
-        .await
-        .expect("import should dedupe before strict parse");
-    assert_eq!(preview.duplicates, 1);
-    assert_eq!(preview.to_import, 0);
-    assert_eq!(import.duplicates, 1);
-    assert_eq!(import.imported, 0);
+        .is_err());
+    assert!(import_omf(dst_ps, &dst_tenant, &doc, opts).await.is_err());
+    assert_eq!(dst_ps.stats(&dst_tenant).await.unwrap().active_chunks, 1);
 }
 
 // Positive-case parity: for a trusted VALID document, preview's

@@ -1126,11 +1126,12 @@ pub async fn run_warm_admin(config: &WarmProcessConfig, command: WarmCommand) ->
                 "socket": warm_socket_path(config),
                 "result": result,
             }),
-            Err(error) => json!({
+            Err(error) if warm_endpoint_absent(&error) => json!({
                 "status": "stopped",
                 "socket": warm_socket_path(config),
                 "error": error.to_string(),
             }),
+            Err(error) => return Err(error),
         },
         WarmCommand::Stop => {
             match warm_request(&warm_socket_path(config), &WarmWireRequest::Shutdown).await {
@@ -1157,11 +1158,12 @@ pub async fn run_warm_admin(config: &WarmProcessConfig, command: WarmCommand) ->
                             .unwrap_or_else(|| "warm worker stop failed".to_string()),
                     ));
                 }
-                Err(error) => json!({
+                Err(error) if warm_endpoint_absent(&error) => json!({
                     "status": "not_running",
                     "socket": warm_socket_path(config),
                     "error": error.to_string(),
                 }),
+                Err(error) => return Err(error),
             }
         }
     };
@@ -1182,6 +1184,11 @@ pub async fn run_warm_admin(config: &WarmProcessConfig, command: WarmCommand) ->
     }
     println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
+}
+
+fn warm_endpoint_absent(error: &MemdError) -> bool {
+    matches!(error, MemdError::IoError(error) if matches!(error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused))
 }
 
 async fn wait_for_warm_pid_exit(pid: Option<u32>, timeout: Duration) -> bool {
@@ -1206,11 +1213,20 @@ fn warm_pid_from_file(config: &WarmProcessConfig) -> Option<u32> {
 }
 
 fn warm_pid_is_running(pid: u32) -> bool {
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
-        Path::new("/proc").join(pid.to_string()).exists()
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return false;
+        };
+        if pid <= 0 {
+            return false;
+        }
+        // Signal zero checks existence without sending a signal. EPERM still
+        // means the process exists, even when this user cannot signal it.
+        (unsafe { libc::kill(pid, 0) == 0 })
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     {
         let _ = pid;
         false
@@ -1719,10 +1735,8 @@ fn count_live_workers_under(root: &Path) -> usize {
         .count()
 }
 
-/// Stricter than `warm_pid_is_running` (bare `/proc/<pid>` existence): confirm
-/// the pid is a live `memd` process, so a leaked pid file whose number was
-/// recycled by an unrelated program doesn't inflate the worker count and trip
-/// the cap prematurely.
+/// Linux also checks the process name to exclude recycled unrelated PIDs.
+/// Other platforms use liveness, so a live worker still counts toward the cap.
 fn warm_pid_is_live_memd(pid: u32) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -1732,8 +1746,7 @@ fn warm_pid_is_live_memd(pid: u32) -> bool {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = pid;
-        false
+        warm_pid_is_running(pid)
     }
 }
 
@@ -1982,6 +1995,44 @@ mod tests {
     use super::*;
     use crate::cli::SearchReranker;
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn ops_regression_pid_liveness_is_portable() {
+        assert!(warm_pid_is_running(std::process::id()));
+        assert!(warm_pid_is_live_memd(std::process::id()));
+        assert!(!warm_pid_is_running(0));
+        assert!(!warm_pid_is_running(u32::MAX));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ops_regression_warm_admin_propagates_protocol_errors() {
+        use tokio::io::AsyncWriteExt;
+        let dir = tempdir().unwrap();
+        let config = WarmProcessConfig {
+            data_dir: dir.path().into(),
+            config_path: None,
+            embedding_model: "minilm".into(),
+            search_variant: "hybrid".into(),
+        };
+        let socket = warm_socket_path(&config);
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        for command in [WarmCommand::Status, WarmCommand::Stop] {
+            let request = run_warm_admin(&config, command);
+            let server = async {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                stream.write_all(b"invalid response").await.unwrap();
+                stream.shutdown().await.unwrap();
+            };
+            let (result, _) = tokio::join!(request, server);
+            assert!(
+                result.is_err(),
+                "a protocol failure must not claim the worker stopped"
+            );
+        }
+    }
 
     static WARM_TIMEOUT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 

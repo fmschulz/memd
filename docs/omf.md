@@ -100,7 +100,7 @@ The `lifecycle` object carries:
 | `status` | string | yes | yes — `final` / `superseded` / `expired` / `draft` / `error` / `deleted` |
 | `tier` | string | yes | yes — `working` / `long_term` / `history` |
 | `supersedes` | string or null | yes | yes — reconstructed via source→target ID translation (see note) |
-| `superseded_by` | string or null | yes | derived from the sibling item's `supersedes` (see note) |
+| `superseded_by` | string or null | yes | yes — normalized with `supersedes` (see note) |
 | `expires_at_ms` | integer or null | yes | yes |
 | `review_after_ms` | integer or null | yes | yes |
 | `lifecycle_updated_at_ms` | integer | yes | yes |
@@ -108,12 +108,15 @@ The `lifecycle` object carries:
 **Supersession edges round-trip (Item 5).** `supersedes` and
 `superseded_by` carry the *source server's* `chunk_id` values, and the
 item's own `extensions.memd.chunk_id` carries its own source-side id.
-`import_omf` writes each chunk first (pass 1) to assign fresh
-target-side ids, then replays each `supersedes` edge via a
-`source_chunk_id → target_chunk_id` map through
-`MetadataStore::atomic_supersede` (pass 2). Only the `supersedes`
-side is replayed; the symmetric `superseded_by` pointer is written by
-`atomic_supersede` as part of the same transaction.
+`import_omf` assigns target-side IDs in a read-only plan and maps duplicate
+items to their existing rows. Both edge directions are normalized into one
+graph; conflicting edges, forks and cycles are rejected. Distinct versions
+in a chain remain distinct even when their canonical text matches.
+
+Payload segments are finalized before all rows, lifecycle fields and edges
+are committed in one SQLite transaction. A validation or storage failure
+leaves the import unapplied, including after restart. Index refresh follows
+the commit; a refresh failure is logged without rolling back stored memory.
 
 An edge whose other side is NOT in the document (partial export — for
 example `include_superseded=false` drops the older side; or a chain
@@ -146,9 +149,11 @@ When both trust predicates pass, the lifecycle block is parsed strictly:
 - Non-integer `*_ms` fields → `ValidationError`.
 - Non-object `lifecycle` → `ValidationError`.
 
-Missing fields and explicit `null`s are equivalent to "unset" and are
-not errors — this lets `memd` round-trip its own exports, which emit
-`null` for optional lifecycle fields.
+Missing fields leave their values unset. Explicit `null` for `expires_at_ms`
+or `review_after_ms` preserves an absent deadline and suppresses write-admission
+defaults. Other nullable lifecycle fields treat `null` as unset.
+
+All included trusted items are parsed before writing, including duplicates.
 
 ## Export semantics
 
@@ -172,7 +177,7 @@ without erroring out.
 ## Import semantics
 
 `memory.import_omf(tenant_id, document, include_archived=true,
-fuzzy_threshold=None)` iterates `document.memories` once and lands each
+fuzzy_threshold=None)` plans the whole document and lands each
 item in exactly one of:
 
 | Bucket | Cause |
@@ -183,6 +188,9 @@ item in exactly one of:
 
 Scopes on dedup:
 
+- Soft-deleted rows never count as duplicates. A live import also ignores
+  superseded, expired and history-tier rows. Non-live imported versions can
+  match non-deleted history rows so re-importing a chain stays idempotent.
 - When the resolved `project_id` is `Some`, dedup compares against
   rows in that project only.
 - When `project_id` is `None`, dedup compares against

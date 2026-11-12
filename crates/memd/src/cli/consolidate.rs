@@ -368,6 +368,9 @@ async fn consolidate_core<S: Store>(
 
     let state_path = consolidate_state_path(&project_dir);
     let since_ms = read_last_consolidation_ms(&state_path);
+    // Leave writes made during selection or the model call eligible next time.
+    // Subtract one millisecond because region selection uses a strict `>`.
+    let selection_watermark_ms = now_ms().saturating_sub(1);
 
     let region = collect_region(
         store,
@@ -443,9 +446,7 @@ async fn consolidate_core<S: Store>(
     } else {
         0
     };
-    let now = now_ms();
-
-    write_last_consolidation_ms(&state_path, now)?;
+    write_last_consolidation_ms(&state_path, selection_watermark_ms)?;
 
     // Tenant-wide runs persist lessons with no project_id; flag that
     // project-scoped searches will not surface them.
@@ -1253,6 +1254,74 @@ mod tests {
             ..Default::default()
         };
         PersistentStore::open(cfg).expect("open store")
+    }
+
+    #[tokio::test]
+    async fn ops_regression_consolidation_keeps_writes_during_model_call() {
+        use std::time::Duration;
+        struct WritingConsolidator<'a>(&'a PersistentStore, ChunkId);
+        #[async_trait::async_trait]
+        impl Consolidator for WritingConsolidator<'_> {
+            async fn consolidate(&self, _prompt: &str) -> Result<String> {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                self.0
+                    .add(
+                        MemoryChunk::new(
+                            TenantId::new("t").unwrap(),
+                            "arrived during the model call",
+                            ChunkType::Summary,
+                        )
+                        .with_project(ProjectId::from("p")),
+                    )
+                    .await?;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                Ok(json!([{
+                    "text": "Original source lesson remains useful.",
+                    "agent_action": "Reuse the original source lesson before repeating this work.",
+                    "evidence": [self.1.to_string()], "supersedes": [self.1.to_string()],
+                    "confidence": 0.9, "priority": 8
+                }])
+                .to_string())
+            }
+            fn name(&self) -> &'static str {
+                "test-writing"
+            }
+        }
+        let dir = tempdir().unwrap();
+        let store = persistent_store(&dir.path().join("store"));
+        let tenant = TenantId::new("t").unwrap();
+        let source_id = store
+            .add(
+                MemoryChunk::new(tenant.clone(), "original source lesson", ChunkType::Summary)
+                    .with_project(ProjectId::from("p")),
+            )
+            .await
+            .unwrap();
+        let result = consolidate_core(
+            &store,
+            ConsolidateOptions {
+                tenant_id: Some("t".into()),
+                project_id: Some("p".into()),
+                project_dir: dir.path().into(),
+                max_region: 50,
+                dry_run: false,
+                background: false,
+                force: true,
+                promote: false,
+                legacy_immediate: false,
+            },
+            &WritingConsolidator(&store, source_id),
+        )
+        .await
+        .unwrap();
+        assert!(result.get("skipped").is_none());
+        let watermark = read_last_consolidation_ms(&consolidate_state_path(dir.path()));
+        let remaining = collect_region(&store, &tenant, Some("p"), watermark, dir.path(), 50)
+            .await
+            .unwrap();
+        assert!(remaining
+            .iter()
+            .any(|c| c.text == "arrived during the model call"));
     }
 
     fn region_chunk(id: &str, ctx: &[&str]) -> RegionChunk {

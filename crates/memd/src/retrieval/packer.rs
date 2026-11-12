@@ -293,8 +293,8 @@ impl ContextPacker {
             let chunk_tokens = chunk_chars.div_ceil(self.config.chars_per_token);
 
             if total_chars + chunk_chars > max_chars {
-                // Would exceed budget - stop here
-                break;
+                // A later, smaller chunk can still fit the remaining budget.
+                continue;
             }
 
             total_chars += chunk_chars;
@@ -339,6 +339,31 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ops_regression_packer_skips_oversized_chunks() {
+        let packer = ContextPacker::new(PackerConfig {
+            max_tokens: 4,
+            chars_per_token: 1,
+            mmr_lambda: 1.0,
+            ..Default::default()
+        });
+        let result = packer.pack(vec![
+            make_chunk("", "oversized", ChunkType::Doc, 3.0, "a"),
+            make_chunk("", "ok", ChunkType::Doc, 2.0, "b"),
+            make_chunk("", "big", ChunkType::Doc, 1.0, "c"),
+            make_chunk("", "hi", ChunkType::Doc, 0.0, "d"),
+        ]);
+        assert_eq!(
+            result
+                .chunks
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>(),
+            ["ok", "hi"]
+        );
+        assert_eq!(result.total_tokens, 4);
+    }
 
     fn make_chunk(
         id: &str,

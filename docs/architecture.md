@@ -43,8 +43,9 @@ Two surfaces, one shared dispatcher.
   agent-rule and hook installation).
 - **Retrieval observability.** `memd search` and `memd agent-context` attach a
   `scope_status` block to every result payload: the effective tenant/project,
-  the `retrieval_mode` (`hybrid` vs `text_fallback` when the embedder is
-  unavailable), a warning when the requested tenant has no stored memory, and
+  the `retrieval_mode` (`hybrid` for fused or BM25-only retrieval, `dense` for
+  dense-only retrieval, or `text_fallback` when neither index is available),
+  a warning when the requested tenant has no stored memory, and
   a `wider_scope_hits` hint when a project-scoped query comes up short but the
   tenant holds matching memory one scope wider. This keeps "no memory exists"
   distinguishable from "scoped past it" and surfaces degraded retrieval
@@ -69,6 +70,10 @@ scores pass through directly. The built-in feature reranker handles ordinary
 agent traffic. See
 [Optional rerankers](reranking.md) for the cross-encoder and MemReranker-4B
 paths.
+
+When dense initialization fails, an available BM25 index serves queries
+across the indexed corpus. Context packing skips candidates that exceed the
+remaining token budget and continues with smaller candidates.
 
 ### Persistent store
 

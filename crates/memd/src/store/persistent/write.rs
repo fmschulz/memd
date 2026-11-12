@@ -7,6 +7,102 @@ pub(super) struct AddChunksOutcome {
 }
 
 impl PersistentStore {
+    /// Finalize payloads before atomically publishing an OMF import. No Add
+    /// records enter the WAL: a failed metadata transaction must stay absent
+    /// after recovery as well as in this process.
+    pub(crate) async fn import_prepared_chunks(
+        &self,
+        tenant_id: &TenantId,
+        chunks: Vec<(MemoryChunk, LifecycleDelta)>,
+        edges: &[(ChunkId, ChunkId)],
+    ) -> Result<()> {
+        self.ensure_writable("import_omf")?;
+        let edges = edges
+            .iter()
+            .map(|(old, new)| (tenant_id.clone(), old.clone(), new.clone()))
+            .collect::<Vec<_>>();
+        if chunks.is_empty() {
+            return self.metadata.insert_with_supersession(&[], true, &edges);
+        }
+        let tenant = self.get_or_create_tenant(tenant_id.as_str())?;
+        let mut metadata_rows = Vec::new();
+        {
+            // Serialize segment allocation with the ordinary add path.
+            let _active = tenant.active_segment.lock();
+            let segment_id = tenant.next_segment_id();
+            let segments_dir = tenant.base_dir.join("segments");
+            let segment_dir = segments_dir.join(format!("seg_{segment_id:06}"));
+            let persist = (|| -> Result<()> {
+                let mut writer = SegmentWriter::create(&segments_dir, segment_id)?;
+                for (chunk, mut initial) in chunks {
+                    if initial.lifecycle_updated_at_ms.is_none() {
+                        initial.lifecycle_updated_at_ms = Some(current_time_ms());
+                    }
+                    let primary_id = chunk.chunk_id.clone();
+                    for (i, mut part) in super::super::split_for_add(chunk).into_iter().enumerate()
+                    {
+                        part.chunk_id = if i == 0 {
+                            primary_id.clone()
+                        } else {
+                            ChunkId::new()
+                        };
+                        let row = self.prepare_pending_chunks(vec![part], true)?.remove(0);
+                        let ordinal = writer.append_chunk(&row.payload)?;
+                        metadata_rows.push(ChunkMetadata {
+                            chunk_id: row.chunk_id,
+                            tenant_id: tenant_id.clone(),
+                            project_id: row.chunk.project_id.as_option().map(str::to_owned),
+                            segment_id,
+                            ordinal,
+                            chunk_type: row.chunk.chunk_type,
+                            status: initial.status.unwrap_or(row.chunk.status),
+                            timestamp_created: row.chunk.timestamp_created,
+                            hash: row.chunk.hash,
+                            source_uri: row.chunk.source.uri,
+                            lifecycle: crate::types::LifecycleMetadata::default().apply(&initial),
+                            canonical_text: Some(
+                                crate::store::supersession::canonicalize_for_type(
+                                    &row.chunk.text,
+                                    row.chunk.chunk_type,
+                                ),
+                            ),
+                            ingestion_mode: row.chunk.ingestion_mode,
+                        });
+                    }
+                }
+                writer.finalize()?;
+                std::fs::File::open(&segments_dir)?.sync_all()?;
+                // Install the reader before metadata becomes visible to other
+                // requests. On transaction failure remove only our new segment.
+                let reader = SegmentReader::open(segment_dir.clone())?;
+                tenant.segments.write().insert(segment_id, reader);
+                self.metadata
+                    .insert_with_supersession(&metadata_rows, true, &edges)
+            })();
+            if let Err(error) = persist {
+                tenant.segments.write().remove(&segment_id);
+                if let Err(cleanup) = std::fs::remove_dir_all(&segment_dir) {
+                    warn!(%cleanup, "failed to remove an uncommitted import segment");
+                }
+                return Err(error);
+            }
+        }
+        let live_ids = metadata_rows
+            .iter()
+            .filter(|row| {
+                row.status == ChunkStatus::Final
+                    && !edges.iter().any(|(_, old, _)| old == &row.chunk_id)
+            })
+            .map(|row| row.chunk_id.clone())
+            .collect::<Vec<_>>();
+        // Indexing is recoverable derived state. A failure leaves committed
+        // rows pending and must not turn a successful import into an error.
+        if let Err(error) = self.refresh_promoted_chunks(tenant_id, &live_ids).await {
+            warn!(%error, "import committed; index refresh will retry");
+        }
+        Ok(())
+    }
+
     pub(super) fn expand_chunks_for_add(
         &self,
         chunks: Vec<MemoryChunk>,

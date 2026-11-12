@@ -68,6 +68,18 @@ impl SqliteMetadataStore {
         let mut conn = self.pool.get();
         let tx = conn.transaction()?;
 
+        Self::supersede_on_connection(&tx, tenant_id, old_id, new_id, now_ms)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(super) fn supersede_on_connection(
+        conn: &Connection,
+        tenant_id: &TenantId,
+        old_id: &ChunkId,
+        new_id: &ChunkId,
+        now_ms: i64,
+    ) -> Result<()> {
         // Both UPDATEs must touch exactly one row; otherwise one side of
         // the supersession edge would dangle. Returning an error here
         // drops the `Transaction` without commit, which rolls the
@@ -79,7 +91,7 @@ impl SqliteMetadataStore {
         // and the transaction rolls back. Without this, a double-
         // supersede on the same old chunk would silently overwrite
         // `superseded_by` and fork the graph.
-        let old_rows = tx.execute(
+        let old_rows = conn.execute(
             "UPDATE chunks SET status = 'superseded', superseded_by = :new,
                 lifecycle_updated_at_ms = :now
              WHERE tenant_id = :tenant AND chunk_id = :old
@@ -97,7 +109,7 @@ impl SqliteMetadataStore {
             )));
         }
 
-        let new_rows = tx.execute(
+        let new_rows = conn.execute(
             "UPDATE chunks SET supersedes = :old, lifecycle_updated_at_ms = :now
              WHERE tenant_id = :tenant AND chunk_id = :new",
             rusqlite::named_params! {
@@ -113,7 +125,6 @@ impl SqliteMetadataStore {
             )));
         }
 
-        tx.commit()?;
         Ok(())
     }
 

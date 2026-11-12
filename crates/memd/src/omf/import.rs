@@ -18,10 +18,9 @@
 //! - **Supersession round-trip.** A trusted memd export carries a
 //!   per-item `extensions.memd.chunk_id` (SOURCE-side id) and the
 //!   lifecycle `supersedes` / `superseded_by` edges. `import_omf`
-//!   writes the chunks first (pass 1) to assign fresh DEST-side
-//!   chunk ids, then replays each `supersedes` edge through
-//!   `MetadataStore::atomic_supersede` (pass 2) using a
-//!   source-to-target translation map. Edges whose other side is not
+//!   assigns destination IDs in a read-only plan, including duplicate
+//!   targets, then publishes chunks and both edge directions in one
+//!   metadata transaction after finalizing the payloads. Edges whose other side is not
 //!   in the document (partial export, e.g. `include_superseded=false`)
 //!   are silently dropped — memd never writes a pointer to a chunk
 //!   it didn't import.
@@ -109,99 +108,138 @@ pub struct PreviewResult {
     pub by_project: BTreeMap<String, usize>,
 }
 
-/// Import an OMF 1.0 document into a tenant.
+/// Import an OMF document. Planning is read-only; the store publishes all
+/// eligible payloads, lifecycle overlays and translated edges together.
 pub async fn import_omf(
     store: &PersistentStore,
     tenant_id: &TenantId,
     doc: &OmfDocument,
     opts: ImportOptions,
 ) -> Result<ImportResult> {
+    let plan = plan_import(store, tenant_id, doc, &opts)?;
+    store
+        .import_prepared_chunks(tenant_id, plan.chunks, &plan.edges)
+        .await?;
+    Ok(plan.result)
+}
+
+struct ImportPlan {
+    result: ImportResult,
+    preview: PreviewResult,
+    chunks: Vec<(MemoryChunk, LifecycleDelta)>,
+    edges: Vec<(ChunkId, ChunkId)>,
+}
+
+fn plan_import(
+    store: &PersistentStore,
+    tenant_id: &TenantId,
+    doc: &OmfDocument,
+    opts: &ImportOptions,
+) -> Result<ImportPlan> {
     validate_omf(doc)?;
-    let trusted = is_trusted(doc);
-
-    // Codex Item 5 round-1 MEDIUM: pre-validate trusted supersession
-    // invariants BEFORE any chunk write, so a malformed doc with
-    // duplicate source chunk_ids or a forked `supersedes` graph
-    // fails-closed before we produce a half-applied import. Legal
-    // memd exports cannot violate these invariants (atomic_supersede
-    // enforces head-only on the write side), so this is purely a
-    // hardening pass for hand-rolled / corrupted trusted documents.
-    if trusted {
-        validate_trusted_supersession_invariants(doc)?;
-    }
-
-    let mut result = ImportResult {
-        total: doc.memories.len(),
-        imported: 0,
-        duplicates: 0,
-        skipped: 0,
+    let TrustedGraph {
+        source_ids,
+        edges: source_edges,
+    } = trusted_graph(doc)?;
+    let graph_ids = source_edges
+        .iter()
+        .flat_map(|(old, new)| [old.clone(), new.clone()])
+        .collect::<std::collections::HashSet<_>>();
+    let mut assigned_graph_targets = std::collections::HashSet::new();
+    let mut source_to_target = HashMap::new();
+    let mut staged: Vec<crate::store::metadata::ChunkMetadata> = Vec::new();
+    let mut plan = ImportPlan {
+        result: ImportResult {
+            total: doc.memories.len(),
+            imported: 0,
+            duplicates: 0,
+            skipped: 0,
+        },
+        preview: PreviewResult {
+            total: doc.memories.len(),
+            ..Default::default()
+        },
+        chunks: Vec::new(),
+        edges: Vec::new(),
     };
-
-    // Item 5 — supersession round-trip. Writers in `export_omf` emit
-    // per-item `extensions.memd.chunk_id` plus the lifecycle
-    // `supersedes` / `superseded_by` edges. We preserve the graph only
-    // when the document passes the F3 trust gate (source.app == "memd"
-    // AND extensions.memd.v == MEMD_EXT_VERSION); otherwise the
-    // imported rows keep default lifecycle with no edges — an
-    // untrusted doc cannot ask memd to fabricate supersession state.
-    //
-    // Strategy: two passes.
-    //   1. Write each chunk (status carried over by
-    //      `extract_lifecycle_strict`, but supersedes/superseded_by
-    //      always None in the first write so we don't dangle).
-    //      Record `source_chunk_id → target_chunk_id` in a map.
-    //   2. For each trusted item that names a `supersedes` edge,
-    //      translate both sides via the map and call
-    //      `MetadataStore::atomic_supersede` on the dest store. Edges
-    //      whose other side is missing from the doc (partial export)
-    //      are silently dropped — we never write a pointer to a chunk
-    //      that wasn't imported.
-    let mut source_to_target: HashMap<ChunkId, ChunkId> = HashMap::new();
-    let mut pending_edges: Vec<PendingSupersede> = Vec::new();
-
-    for item in &doc.memories {
+    for (item, source_id) in doc.memories.iter().zip(&source_ids) {
         if !opts.include_archived
             && matches!(item.status.as_deref(), Some("archived") | Some("expired"))
         {
-            result.skipped += 1;
+            plan.result.skipped += 1;
+            plan.preview.filtered += 1;
             continue;
         }
-
+        // Parse even duplicate items before any writes, so malformed trusted
+        // metadata cannot turn a retried partial document into silent success.
+        let mut initial = if source_id.is_some() {
+            extract_lifecycle_strict(&item.extensions)?
+        } else {
+            LifecycleDelta::default()
+        };
         let mut project_id = extract_project_id(&item.extensions).or_else(|| item.category.clone());
-        // Validate the imported project id at this boundary (it comes from
-        // untrusted OMF). A malformed value (newlines, markdown control bytes,
-        // path separators) drops the scope rather than carrying injectable
-        // content into stored chunks.
         if ProjectId::validate_opt(project_id.as_deref()).is_err() {
             project_id = None;
         }
         let chunk_type = extract_chunk_type(&item.extensions).unwrap_or(ChunkType::Doc);
         let canonical = canonicalize_for_type(&item.content, chunk_type);
-
-        if is_exact_duplicate(store, tenant_id, project_id.as_deref(), &canonical)? {
-            result.duplicates += 1;
+        let status = initial.status.unwrap_or(ChunkStatus::Final);
+        let incoming_visible = crate::types::VisibilityPolicy::default().is_visible_at(
+            status,
+            &crate::types::LifecycleMetadata::default().apply(&initial),
+            now_utc_ms(),
+        );
+        let graph_item = source_id.as_ref().is_some_and(|id| graph_ids.contains(id));
+        let mut candidates = store.metadata().list_by_canonical_text(
+            tenant_id,
+            project_id.as_deref(),
+            &canonical,
+        )?;
+        if opts.fuzzy_threshold.is_some() {
+            candidates.extend(match project_id.as_deref() {
+                Some(project) => store.metadata().list_recent_for_project(
+                    tenant_id,
+                    Some(project),
+                    FUZZY_RECENT_POOL_SIZE,
+                )?,
+                None => store
+                    .metadata()
+                    .list_recent_with_null_project(tenant_id, FUZZY_RECENT_POOL_SIZE)?,
+            });
+        }
+        candidates.extend(staged.iter().cloned());
+        // Prefer the same lifecycle state, and preserve source order when a
+        // chain contains multiple versions of the same canonical content.
+        candidates.sort_by_key(|row| (row.status != status, row.timestamp_created));
+        let duplicate = candidates.iter().find(|row| {
+            row.project_id == project_id
+                && row.status != ChunkStatus::Deleted
+                && (!graph_item || !assigned_graph_targets.contains(&row.chunk_id))
+                && (!incoming_visible
+                    || (row.lifecycle.superseded_by.is_none()
+                        && crate::types::VisibilityPolicy::default().is_visible_at(
+                            row.status,
+                            &row.lifecycle,
+                            now_utc_ms(),
+                        )))
+                && row.canonical_text.as_deref().is_some_and(|existing| {
+                    existing == canonical
+                        || opts.fuzzy_threshold.is_some_and(|threshold| {
+                            is_near_duplicate(&canonical, existing, threshold)
+                        })
+                })
+        });
+        if let Some(row) = duplicate {
+            plan.result.duplicates += 1;
+            plan.preview.duplicates += 1;
+            if let Some(source_id) = source_id {
+                source_to_target.insert(source_id.clone(), row.chunk_id.clone());
+                if graph_item {
+                    assigned_graph_targets.insert(row.chunk_id.clone());
+                }
+            }
             continue;
         }
-
-        if let Some(thr) = opts.fuzzy_threshold {
-            if is_fuzzy_duplicate(store, tenant_id, project_id.as_deref(), &canonical, thr)? {
-                result.duplicates += 1;
-                continue;
-            }
-        }
-
-        let trusted_item = trusted && ext_version_supported(&item.extensions);
-        let mut initial = if trusted_item {
-            extract_lifecycle_strict(&item.extensions)?
-        } else {
-            LifecycleDelta::default()
-        };
-
-        // Apply the same write-admission gate as memory.add. OMF import
-        // previously called the store directly, so content the gate rejects
-        // (empty text, generated-digest wrappers) entered verbatim, and
-        // high-priority writes skipped the Agent-action downgrade and the
-        // auto-priority stamp. Run the gate here so import and add agree.
         let ingestion_mode =
             extract_ingestion_mode(&item.extensions).unwrap_or(IngestionMode::Document);
         let prepared =
@@ -214,303 +252,144 @@ pub async fn import_omf(
                 review_after_ms: initial.review_after_ms.flatten(),
             });
         if prepared.is_rejected() {
-            result.skipped += 1;
+            plan.result.skipped += 1;
+            plan.preview.filtered += 1;
             continue;
         }
-        let prepared_lifecycle = prepared.lifecycle_delta();
+        let defaults = prepared.lifecycle_delta();
         if initial.tier.is_none() {
-            initial.tier = prepared_lifecycle.tier;
+            initial.tier = defaults.tier;
         }
         if initial.expires_at_ms.is_none() {
-            initial.expires_at_ms = prepared_lifecycle.expires_at_ms;
+            initial.expires_at_ms = defaults.expires_at_ms;
         }
         if initial.review_after_ms.is_none() {
-            initial.review_after_ms = prepared_lifecycle.review_after_ms;
+            initial.review_after_ms = defaults.review_after_ms;
         }
-
         let mut chunk = MemoryChunk::new(tenant_id.clone(), item.content.clone(), chunk_type)
             .with_ingestion_mode(ingestion_mode);
-        if let Some(ref p) = project_id {
-            chunk = chunk.with_project(ProjectId::new(Some(p.clone())));
+        if let Some(project) = &project_id {
+            chunk = chunk.with_project(ProjectId::new(Some(project.clone())));
         }
         chunk = prepared.apply_to_chunk(chunk);
-
-        let chunk_id = store.add_chunk_with_lifecycle(chunk, initial).await?;
-
-        if trusted_item {
-            if let Some(src_id) = extract_source_chunk_id(&item.extensions)? {
-                source_to_target.insert(src_id, chunk_id.clone());
+        if let Some(source_id) = source_id {
+            source_to_target.insert(source_id.clone(), chunk.chunk_id.clone());
+            if graph_item {
+                assigned_graph_targets.insert(chunk.chunk_id.clone());
             }
-            if let Some(supersedes_src) = extract_supersession_ref(&item.extensions, "supersedes")?
+        }
+        staged.push(crate::store::metadata::ChunkMetadata {
+            chunk_id: chunk.chunk_id.clone(),
+            tenant_id: tenant_id.clone(),
+            project_id: project_id.clone(),
+            segment_id: 0,
+            ordinal: 0,
+            chunk_type,
+            status,
+            timestamp_created: chunk.timestamp_created,
+            hash: chunk.hash.clone(),
+            source_uri: chunk.source.uri.clone(),
+            lifecycle: crate::types::LifecycleMetadata::default().apply(&initial),
+            canonical_text: Some(canonical),
+            ingestion_mode,
+        });
+        plan.chunks.push((chunk, initial));
+        plan.result.imported += 1;
+        plan.preview.to_import += 1;
+        match project_id {
+            Some(project) => *plan.preview.by_project.entry(project).or_default() += 1,
+            None => plan.preview.unscoped += 1,
+        }
+    }
+    for (old, new) in source_edges {
+        if let (Some(old), Some(new)) = (source_to_target.get(&old), source_to_target.get(&new)) {
+            plan.edges.push((old.clone(), new.clone()));
+        } else {
+            debug!("import_omf: dropping an edge whose other side was not imported");
+        }
+    }
+    Ok(plan)
+}
+
+/// Normalize both edge directions and reject forks, joins and cycles before
+/// writing. Missing source IDs get local keys so a one-sided edge still works.
+struct TrustedGraph {
+    source_ids: Vec<Option<ChunkId>>,
+    edges: Vec<(ChunkId, ChunkId)>,
+}
+
+fn trusted_graph(doc: &OmfDocument) -> Result<TrustedGraph> {
+    let mut ids = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut next = HashMap::new();
+    let mut previous = HashMap::new();
+    for item in &doc.memories {
+        if !is_trusted(doc) || !ext_version_supported(&item.extensions) {
+            ids.push(None);
+            continue;
+        }
+        let id = extract_source_chunk_id(&item.extensions)?.unwrap_or_else(ChunkId::new);
+        if !seen.insert(id.clone()) {
+            return Err(MemdError::ValidationError(format!(
+                "source chunk_id duplicates an earlier item: {id}"
+            )));
+        }
+        let edges = [
+            extract_supersession_ref(&item.extensions, "supersedes")?.map(|old| (old, id.clone())),
+            extract_supersession_ref(&item.extensions, "superseded_by")?
+                .map(|new| (id.clone(), new)),
+        ];
+        for (old, new) in edges.into_iter().flatten() {
+            if old == new
+                || next.get(&old).is_some_and(|existing| existing != &new)
+                || previous.get(&new).is_some_and(|existing| existing != &old)
             {
-                pending_edges.push(PendingSupersede {
-                    old_source_id: supersedes_src,
-                    new_target_id: chunk_id.clone(),
-                });
+                return Err(MemdError::ValidationError(
+                    "supersession graph forks or has conflicting edges".into(),
+                ));
             }
+            next.insert(old.clone(), new.clone());
+            previous.insert(new, old);
         }
-
-        result.imported += 1;
+        ids.push(Some(id));
     }
-
-    replay_supersession_edges(store, tenant_id, &source_to_target, &pending_edges)?;
-
-    Ok(result)
-}
-
-/// A pending `old → new` supersession edge discovered during pass 1.
-///
-/// `old_source_id` is the SOURCE-side chunk id read from the OMF item's
-/// `extensions.memd.lifecycle.supersedes` field; it must still be
-/// translated to a dest-side id via `source_to_target` before being
-/// written. `new_target_id` is already the dest-side id returned by
-/// `add_chunk_with_lifecycle` for the superseding chunk.
-#[derive(Debug)]
-struct PendingSupersede {
-    old_source_id: ChunkId,
-    new_target_id: ChunkId,
-}
-
-/// Pre-flight check on a trusted OMF document's supersession graph.
-///
-/// Enforces two invariants that a legal `export_omf` output satisfies
-/// by construction, but a hand-rolled or corrupted trusted doc might
-/// violate:
-///
-/// - **Unique source chunk_ids.** Two items cannot share the same
-///   `extensions.memd.chunk_id`. Violation would make the source→target
-///   map's `last-write-wins` behaviour silently pick one of two
-///   identically-addressed chunks, dropping the other's edges.
-/// - **Fork-free `supersedes` graph.** Two items cannot both declare
-///   `supersedes = X` on the same source id. memd's own writer enforces
-///   head-only semantics in `atomic_supersede` (rolls back if the old
-///   row already has a successor), so an import that allowed two
-///   successors would half-apply: the first edge would commit, the
-///   second would hit the head-only guard and ValidationError, leaving
-///   the dest tenant in a split state.
-///
-/// Also runs the fail-closed parsers on `extensions.memd.chunk_id`,
-/// `lifecycle.supersedes`, and `lifecycle.superseded_by` so malformed
-/// fields surface here rather than mid-pass-1 (after some writes).
-///
-/// Untrusted items are ignored — the caller has already decided not to
-/// honour their extension metadata.
-fn validate_trusted_supersession_invariants(doc: &OmfDocument) -> Result<()> {
-    use std::collections::HashSet;
-    let mut seen_source_ids: HashSet<ChunkId> = HashSet::new();
-    let mut seen_supersedes: HashSet<ChunkId> = HashSet::new();
-    for (i, item) in doc.memories.iter().enumerate() {
-        if !ext_version_supported(&item.extensions) {
-            continue;
-        }
-        if let Some(src_id) = extract_source_chunk_id(&item.extensions)? {
-            if !seen_source_ids.insert(src_id.clone()) {
-                return Err(MemdError::ValidationError(format!(
-                    "memories[{i}].extensions.memd.chunk_id duplicates an earlier item: {src_id}"
-                )));
+    let mut visited = std::collections::HashSet::new();
+    for start in next.keys() {
+        let mut path = std::collections::HashSet::new();
+        let mut cursor = start;
+        while !visited.contains(cursor) {
+            if !path.insert(cursor.clone()) {
+                return Err(MemdError::ValidationError(
+                    "supersession graph contains a cycle".into(),
+                ));
             }
+            let Some(successor) = next.get(cursor) else {
+                break;
+            };
+            cursor = successor;
         }
-        if let Some(old_src) = extract_supersession_ref(&item.extensions, "supersedes")? {
-            if !seen_supersedes.insert(old_src.clone()) {
-                return Err(MemdError::ValidationError(format!(
-                    "memories[{i}].extensions.memd.lifecycle.supersedes forks: {old_src} is named by multiple successors"
-                )));
-            }
-        }
-        // Run parse for fail-closed behaviour — any malformed edge
-        // reference surfaces here rather than mid-import.
-        let _ = extract_supersession_ref(&item.extensions, "superseded_by")?;
+        visited.extend(path);
     }
-    Ok(())
+    Ok(TrustedGraph {
+        source_ids: ids,
+        edges: next.into_iter().collect(),
+    })
 }
 
-/// Walk pending supersession edges and apply them via
-/// `MetadataStore::atomic_supersede`.
-///
-/// Edges whose `old_source_id` isn't in `source_to_target` are silently
-/// dropped (logged at debug) — the sibling chunk wasn't imported, so
-/// the edge has no valid dest-side counterpart. This keeps partial
-/// exports round-tripping safely.
-fn replay_supersession_edges(
-    store: &PersistentStore,
-    tenant_id: &TenantId,
-    source_to_target: &HashMap<ChunkId, ChunkId>,
-    pending: &[PendingSupersede],
-) -> Result<()> {
-    if pending.is_empty() {
-        return Ok(());
-    }
-    let now_ms = now_utc_ms();
-    for edge in pending {
-        let Some(old_target) = source_to_target.get(&edge.old_source_id) else {
-            debug!(
-                tenant_id = %tenant_id,
-                old_source_id = %edge.old_source_id,
-                new_target_id = %edge.new_target_id,
-                "import_omf: supersession edge dropped — sibling chunk not in document"
-            );
-            continue;
-        };
-        store
-            .metadata()
-            .atomic_supersede(tenant_id, old_target, &edge.new_target_id, now_ms)?;
-    }
-    Ok(())
-}
-
-/// Dry-run `import_omf`: walk the same dedup + filter path, count what
-/// would happen, and return without writing or calling `add_chunk_with_lifecycle`.
-///
-/// Shares the dedup helpers with `import_omf` so the preview cannot
-/// diverge from what the real import would do.
+/// Preview uses the same read-only plan as the real import.
 pub async fn preview_omf_import(
     store: &PersistentStore,
     tenant_id: &TenantId,
     doc: &OmfDocument,
     opts: ImportOptions,
 ) -> Result<PreviewResult> {
-    validate_omf(doc)?;
-
-    // Mirror import_omf: fail-closed on bad trusted
-    // supersession invariants BEFORE counting, so the preview's
-    // "to_import" can't claim success for a doc that the real import
-    // will reject. Codex Item 5 round-1 MEDIUM (preview parity).
-    if is_trusted(doc) {
-        validate_trusted_supersession_invariants(doc)?;
-    }
-
-    let mut result = PreviewResult {
-        total: doc.memories.len(),
-        ..Default::default()
-    };
-
-    for item in &doc.memories {
-        if !opts.include_archived
-            && matches!(item.status.as_deref(), Some("archived") | Some("expired"))
-        {
-            result.filtered += 1;
-            continue;
-        }
-
-        let mut project_id = extract_project_id(&item.extensions).or_else(|| item.category.clone());
-        // Validate the imported project id at this boundary (it comes from
-        // untrusted OMF). A malformed value (newlines, markdown control bytes,
-        // path separators) drops the scope rather than carrying injectable
-        // content into stored chunks.
-        if ProjectId::validate_opt(project_id.as_deref()).is_err() {
-            project_id = None;
-        }
-        let chunk_type = extract_chunk_type(&item.extensions).unwrap_or(ChunkType::Doc);
-        let canonical = canonicalize_for_type(&item.content, chunk_type);
-
-        if is_exact_duplicate(store, tenant_id, project_id.as_deref(), &canonical)? {
-            result.duplicates += 1;
-            continue;
-        }
-
-        if let Some(thr) = opts.fuzzy_threshold {
-            if is_fuzzy_duplicate(store, tenant_id, project_id.as_deref(), &canonical, thr)? {
-                result.duplicates += 1;
-                continue;
-            }
-        }
-
-        // Trust gate: if the preview would fail-closed on a malformed
-        // trusted lifecycle, surface that here too. Callers expect the
-        // preview to predict import success/failure, not paper over a
-        // parse error that would block the subsequent real import.
-        let trusted = is_trusted(doc) && ext_version_supported(&item.extensions);
-        let initial = if trusted {
-            extract_lifecycle_strict(&item.extensions)?
-        } else {
-            LifecycleDelta::default()
-        };
-        let ingestion_mode =
-            extract_ingestion_mode(&item.extensions).unwrap_or(IngestionMode::Document);
-        let prepared =
-            crate::write_service::prepare_write(crate::write_service::PrepareWriteRequest {
-                chunk_type,
-                text: &item.content,
-                tags: &item.tags,
-                ingestion_mode,
-                expires_at_ms: initial.expires_at_ms.flatten(),
-                review_after_ms: initial.review_after_ms.flatten(),
-            });
-        if prepared.is_rejected() {
-            result.filtered += 1;
-            continue;
-        }
-
-        result.to_import += 1;
-        match project_id {
-            Some(p) => *result.by_project.entry(p).or_default() += 1,
-            None => result.unscoped += 1,
-        }
-    }
-
-    Ok(result)
+    Ok(plan_import(store, tenant_id, doc, &opts)?.preview)
 }
 
 fn is_trusted(doc: &OmfDocument) -> bool {
     doc.source
         .as_ref()
-        .is_some_and(|s| s.app == MEMD_SOURCE_APP)
-}
-
-fn is_exact_duplicate(
-    store: &PersistentStore,
-    tenant_id: &TenantId,
-    project_id: Option<&str>,
-    canonical: &str,
-) -> Result<bool> {
-    // `list_by_canonical_text` widens to every project when project_id
-    // is None (SQL `:project IS NULL OR project_id = :project`), so an
-    // unscoped OMF item would otherwise be falsely deduped against any
-    // scoped row carrying the same canonical text. D3 hit the same trap
-    // and solved it with a NULL-only helper — for exact dedup we just
-    // post-filter to rows whose metadata.project_id is also None.
-    let matches = store
-        .metadata()
-        .list_by_canonical_text(tenant_id, project_id, canonical)?;
-    let hit = match project_id {
-        Some(_) => !matches.is_empty(),
-        None => matches.iter().any(|m| m.project_id.is_none()),
-    };
-    Ok(hit)
-}
-
-fn is_fuzzy_duplicate(
-    store: &PersistentStore,
-    tenant_id: &TenantId,
-    project_id: Option<&str>,
-    canonical: &str,
-    threshold: f32,
-) -> Result<bool> {
-    // Compare canonical-to-canonical: existing rows have `canonical_text`
-    // populated at INSERT time (Track D2), and `canonical` above is
-    // canonicalized for the probe item. Comparing the raw `text` column
-    // would re-introduce the case/whitespace sensitivity D1 fixed.
-    //
-    // NULL-project scope: `list_recent_for_project(tenant, None, limit)`
-    // widens to "any project, then LIMIT" which can evict valid older
-    // NULL-project candidates under recent scoped traffic. For
-    // project_id=None we use `list_recent_with_null_project` which
-    // filters BEFORE LIMIT — same reasoning as D3/D4.
-    let recent = match project_id {
-        Some(p) => {
-            store
-                .metadata()
-                .list_recent_for_project(tenant_id, Some(p), FUZZY_RECENT_POOL_SIZE)?
-        }
-        None => store
-            .metadata()
-            .list_recent_with_null_project(tenant_id, FUZZY_RECENT_POOL_SIZE)?,
-    };
-    Ok(recent.iter().any(|m| {
-        m.canonical_text
-            .as_deref()
-            .is_some_and(|existing_canon| is_near_duplicate(canonical, existing_canon, threshold))
-    }))
+        .is_some_and(|source| source.app == MEMD_SOURCE_APP)
 }
 
 fn extract_project_id(ext: &Value) -> Option<String> {
@@ -613,9 +492,9 @@ fn extract_lifecycle_strict(ext: &Value) -> Result<LifecycleDelta> {
         ));
     }
     let tier = parse_optional_string_field(lc, "tier", MemoryTier::from_str)?;
-    let review_after_ms = parse_optional_i64_field(lc, "review_after_ms")?.map(Some);
+    let review_after_ms = parse_retention_field(lc, "review_after_ms")?;
     let lifecycle_updated_at_ms = parse_optional_i64_field(lc, "lifecycle_updated_at_ms")?;
-    let expires_at_ms = parse_optional_i64_field(lc, "expires_at_ms")?.map(Some);
+    let expires_at_ms = parse_retention_field(lc, "expires_at_ms")?;
 
     Ok(LifecycleDelta {
         status,
@@ -653,6 +532,16 @@ fn parse_optional_i64_field(obj: &Value, key: &str) -> Result<Option<i64>> {
                 "extensions.memd.lifecycle.{key} must be an integer"
             ))
         }),
+    }
+}
+
+/// A trusted explicit null means retain no deadline, rather than admit the
+/// write service's default deadline. Missing fields still use those defaults.
+fn parse_retention_field(obj: &Value, key: &str) -> Result<Option<Option<i64>>> {
+    if matches!(obj.get(key), Some(Value::Null)) {
+        Ok(Some(None))
+    } else {
+        Ok(parse_optional_i64_field(obj, key)?.map(Some))
     }
 }
 

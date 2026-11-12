@@ -412,7 +412,17 @@ impl SqliteMetadataStore {
         metadata: &[ChunkMetadata],
         pending: bool,
     ) -> Result<()> {
-        if metadata.is_empty() {
+        self.insert_with_supersession(metadata, pending, &[])
+    }
+
+    /// Commit an import's metadata, pending index state and graph together.
+    pub(crate) fn insert_with_supersession(
+        &self,
+        metadata: &[ChunkMetadata],
+        pending: bool,
+        edges: &[(TenantId, ChunkId, ChunkId)],
+    ) -> Result<()> {
+        if metadata.is_empty() && edges.is_empty() {
             return Ok(());
         }
 
@@ -453,6 +463,37 @@ impl SqliteMetadataStore {
             }
         }
 
+        for (tenant, old_id, new_id) in edges {
+            let conflicts: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM chunks WHERE tenant_id = ?1 AND chunk_id = ?2
+                    AND supersedes IS NOT NULL AND supersedes != ?3)",
+                rusqlite::params![tenant.as_str(), new_id.to_string(), old_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if conflicts {
+                return Err(MemdError::ValidationError(format!(
+                    "import target {new_id} already supersedes a different chunk"
+                )));
+            }
+            // Exact replay of an already imported edge is a no-op. A different
+            // successor still goes through the head-only guard and rolls back.
+            let linked: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM chunks old JOIN chunks new
+                    ON new.tenant_id = old.tenant_id
+                    WHERE old.tenant_id = ?1 AND old.chunk_id = ?2 AND new.chunk_id = ?3
+                    AND old.superseded_by = ?3 AND new.supersedes = ?2
+                    AND old.status != 'deleted' AND new.status != 'deleted')",
+                rusqlite::params![tenant.as_str(), old_id.to_string(), new_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if !linked {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+                Self::supersede_on_connection(&tx, tenant, old_id, new_id, now_ms)?;
+            }
+        }
         tx.commit()?;
         Ok(())
     }

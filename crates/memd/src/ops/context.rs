@@ -246,6 +246,17 @@ pub async fn handle_context_find_relevant_context<S: Store>(
             has_exact_tag(&chunk.tags, TAG_CTX_TIER_HOT)
                 && chunk_matches_any_subsystem(chunk, &subsystem_keys)
         });
+        let hot_cap = hot_chunks.len();
+        hot_chunks = apply_visibility_filter(
+            store,
+            hot_chunks.into_iter().map(|chunk| (chunk, 1.0)).collect(),
+            &VisibilityPolicy::default(),
+            hot_cap,
+        )
+        .await
+        .into_iter()
+        .map(|(chunk, _)| chunk)
+        .collect();
         hot_chunks.sort_by_key(|chunk| std::cmp::Reverse(chunk.timestamp_created));
 
         for chunk in hot_chunks.into_iter().take(params.k.min(5)) {

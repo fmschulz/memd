@@ -766,7 +766,9 @@ pub fn build_project_brief_view(
         source_task_ids.push(view.task.task_id.clone());
         source_artifact_ids.extend(view.source_artifact_ids.clone());
         updated_at_ms = updated_at_ms.max(view.task.updated_at_ms);
-        if matches!(view.task.status.as_deref(), Some("completed" | "success")) {
+        if view.task.finished_at_ms.is_some()
+            || matches!(view.task.status.as_deref(), Some("completed" | "success"))
+        {
             recent_completed_tasks.push(view);
         } else {
             active_tasks.push(view);
@@ -803,6 +805,45 @@ pub fn build_project_brief_view(
         promotion_state: PromotionState::Summarized,
         updated_at_ms,
     }
+}
+
+#[test]
+fn ops_regression_project_brief_counts_finished_tasks_as_completed() {
+    let tenant = TenantId::new("brief").unwrap();
+    let views = [
+        "finished",
+        "failed",
+        "cancelled",
+        "completed",
+        "success",
+        "in_progress",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, status)| {
+        let task = TaskRecord {
+            task_id: format!("task-{i}"),
+            tenant_id: tenant.clone(),
+            project_id: crate::types::ProjectId::from("p"),
+            status: Some(status.into()),
+            goal: None,
+            scientific_question: None,
+            hypothesis: None,
+            last_artifact_id: String::new(),
+            started_at_ms: Some(1),
+            finished_at_ms: (status != "in_progress").then_some(2),
+            updated_at_ms: 2,
+        };
+        build_task_resume_view(task, &[])
+    })
+    .collect();
+    let brief = build_project_brief_view(&tenant, "p", views, vec![], vec![], vec![], vec![]);
+    assert_eq!(brief.active_tasks.len(), 1);
+    assert_eq!(
+        brief.active_tasks[0].task.status.as_deref(),
+        Some("in_progress")
+    );
+    assert_eq!(brief.recent_completed_tasks.len(), 5);
 }
 
 pub fn build_project_brief_digest_artifact(view: &ProjectBriefView) -> TaskArtifact {

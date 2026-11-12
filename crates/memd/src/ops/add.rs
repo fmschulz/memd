@@ -103,14 +103,7 @@ pub async fn handle_memory_add<S: Store>(
         )));
     }
     drop_optional_default_retention_for_in_memory_store(store, &mut admission);
-    record_add_usage_event(
-        store,
-        &tenant_id,
-        params.project_id.clone(),
-        add_usage_outcome(&admission).to_string(),
-        1,
-        chunk.text.len(),
-    );
+    let write_bytes = chunk.text.len();
     chunk = apply_admission_tags(chunk, &admission);
 
     // PreparedWrite has already applied normalized tags, priority, and mode.
@@ -210,6 +203,15 @@ pub async fn handle_memory_add<S: Store>(
             vec![candidates[0].to_string()]
         };
 
+        record_add_usage_event(
+            store,
+            &tenant_id,
+            params.project_id.clone(),
+            add_usage_outcome(&admission).to_string(),
+            1,
+            write_bytes,
+        );
+
         info!(
             chunk_id = %new_chunk_id,
             superseded_total = candidates.len(),
@@ -231,6 +233,15 @@ pub async fn handle_memory_add<S: Store>(
 
     let (chunk_id, stored_chunk_ids) =
         add_chunk_with_complete_ids(store, chunk, lifecycle_delta).await?;
+
+    record_add_usage_event(
+        store,
+        &tenant_id,
+        params.project_id.clone(),
+        add_usage_outcome(&admission).to_string(),
+        1,
+        write_bytes,
+    );
 
     info!(chunk_id = %chunk_id, "chunk added");
 

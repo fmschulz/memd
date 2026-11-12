@@ -1369,7 +1369,7 @@ pub async fn handle_artifact_verify<S: Store>(
 
     let supporting_hits = canonical_hits
         .iter()
-        .filter(|hit| artifact_supports_claim(artifact_hit_record(hit), &params.claim, hit.score))
+        .filter(|hit| artifact_supports_claim(artifact_hit_record(hit), &params.claim))
         .collect::<Vec<_>>();
     let support_task_ids = supporting_hits
         .iter()

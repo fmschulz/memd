@@ -777,7 +777,7 @@ impl PersistentStore {
                 Err(e) => {
                     warn!(
                         error = %e,
-                        "failed to initialize dense searcher, falling back to text search"
+                        "failed to initialize dense searcher, falling back to BM25 when available"
                     );
                     eprintln!(
                         "WARNING: Dense searcher initialization failed - embeddings will NOT work!"
@@ -854,11 +854,16 @@ impl PersistentStore {
                         hybrid_config,
                     ))
                 })
+            } else if let Some(dense) = dense_searcher.as_ref() {
+                Some(Arc::new(HybridSearcher::new(
+                    Arc::clone(dense),
+                    sparse_index.clone(),
+                    hybrid_config,
+                )))
             } else {
-                dense_searcher.as_ref().map(|dense| {
-                    Arc::new(HybridSearcher::new(
-                        Arc::clone(dense),
-                        sparse_index.clone(),
+                sparse_index.as_ref().map(|sparse| {
+                    Arc::new(HybridSearcher::new_sparse_only(
+                        Arc::clone(sparse),
                         hybrid_config,
                     ))
                 })

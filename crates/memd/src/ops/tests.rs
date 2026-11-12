@@ -51,6 +51,186 @@ fn make_store() -> MemoryStore {
     MemoryStore::new()
 }
 
+#[tokio::test]
+async fn ops_regression_verify_rejects_unrelated_recent_artifact() {
+    let store = make_store();
+    let tenant = TenantId::new("verify_ops").unwrap();
+    let mut artifact = TaskArtifact::new(ArtifactKind::Evidence, tenant, "task");
+    artifact.summary = Some("Orchids bloom during spring".into());
+    artifact.supports_claim = Some(true);
+    artifact.validation = vec!["Orchid growth was measured".into()];
+    let id = artifact.artifact_id.clone();
+    store
+        .add_task_artifact(artifact.clone(), build_task_projections(&artifact))
+        .await
+        .unwrap();
+    let result = handle_artifact_verify(
+        &store,
+        serde_json::from_value(serde_json::json!({
+            "tenant_id": "verify_ops", "claim": "databases preserve atomic transactions",
+            "candidate_artifact_ids": [id]
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let payload: ArtifactVerifyResult = parse_tool_payload(&result);
+    assert_eq!(
+        payload.grounding_status,
+        GroundingStatus::InsufficientGrounding
+    );
+    assert!(payload.supporting_artifacts.is_empty());
+}
+
+#[tokio::test]
+async fn ops_regression_resume_finds_task_beyond_recent_500() {
+    let _guard = with_fallback_flag().await;
+    let store = make_store();
+    let tenant = TenantId::new("resume_ops").unwrap();
+    for i in 0..501 {
+        let mut artifact =
+            TaskArtifact::new(ArtifactKind::TaskStart, tenant.clone(), format!("task-{i}"));
+        artifact.timestamp_created = i + 1;
+        artifact.goal = Some("Resume old tasks".into());
+        store
+            .add_task_artifact(artifact.clone(), build_task_projections(&artifact))
+            .await
+            .unwrap();
+    }
+    assert!(!store
+        .list_tasks(&tenant, None, 500)
+        .await
+        .unwrap()
+        .iter()
+        .any(|t| t.task_id == "task-0"));
+    let (_, resume) = ensure_task_resume_digest(&store, &tenant, "task-0")
+        .await
+        .unwrap();
+    assert_eq!(resume.task.task_id, "task-0");
+    let aliases = [TenantId::new("empty_alias").unwrap(), tenant.clone()];
+    let candidates = candidate_chunk_ids_for_tenants_and_mode(
+        &store,
+        &aliases,
+        QueryMode::ResumeTask,
+        &TaskSearchFilters {
+            task_id: Some("task-0".into()),
+            ..Default::default()
+        },
+        10,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !candidates.is_empty(),
+        "an empty alias must not hide the task in its owning tenant"
+    );
+    assert!(
+        ensure_task_resume_digest(&store, &TenantId::new("foreign").unwrap(), "task-0")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn ops_regression_hot_context_hides_superseded_and_expired() {
+    let tmp = TempDir::new().unwrap();
+    let store = PersistentStore::open(PersistentStoreConfig {
+        data_dir: tmp.path().into(),
+        enable_dense_search: false,
+        enable_hybrid_search: false,
+        ..Default::default()
+    })
+    .unwrap();
+    let tenant = TenantId::new("hot_ops").unwrap();
+    for (text, delta) in [
+        (
+            "old runbook",
+            LifecycleDelta {
+                status: Some(ChunkStatus::Superseded),
+                ..Default::default()
+            },
+        ),
+        (
+            "expired runbook",
+            LifecycleDelta {
+                expires_at_ms: Some(Some(1)),
+                ..Default::default()
+            },
+        ),
+        ("live runbook", LifecycleDelta::default()),
+    ] {
+        store
+            .add_chunk_with_lifecycle(
+                MemoryChunk::new(tenant.clone(), text, ChunkType::Doc)
+                    .with_tags(vec!["ctx:tier:hot".into()]),
+                delta,
+            )
+            .await
+            .unwrap();
+    }
+    let result = handle_context_find_relevant_context(
+        &store,
+        serde_json::from_value(serde_json::json!({
+            "tenant_id": "hot_ops", "task": "unmatched", "include_hot": true, "k": 5
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let payload: ContextFindRelevantContextResult = parse_tool_payload(&result);
+    assert_eq!(payload.results.len(), 1);
+    assert_eq!(payload.results[0].text, "live runbook");
+}
+
+#[tokio::test]
+async fn ops_regression_failed_add_does_not_count_usage() {
+    let store = SearchMissStore::new(vec![]);
+    let result = handle_memory_add(&store, None, serde_json::from_value(serde_json::json!({
+        "tenant_id": "usage_ops", "text": "Durable test note", "type": "doc", "expires_at_ms": 123
+    })).unwrap()).await;
+    assert!(
+        result.is_err(),
+        "nonpersistent stores cannot apply explicit lifecycle fields"
+    );
+    assert!(store.usage_events.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn ops_regression_reused_add_does_not_count_usage() {
+    let tmp = TempDir::new().unwrap();
+    let store = PersistentStore::open(PersistentStoreConfig {
+        data_dir: tmp.path().into(),
+        enable_dense_search: false,
+        enable_hybrid_search: false,
+        ..Default::default()
+    })
+    .unwrap();
+    for _ in 0..2 {
+        handle_memory_add(
+            &store,
+            None,
+            serde_json::from_value(serde_json::json!({
+                "tenant_id": "usage_ops", "text": "An exact durable memory", "type": "doc"
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+    let events = store
+        .metadata()
+        .usage_events_since(0, Some("usage_ops"), None)
+        .unwrap();
+    assert_eq!(events.iter().filter(|event| event.op == "add").count(), 1);
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|event| event.chunk_count)
+            .sum::<i64>(),
+        1
+    );
+}
+
 struct SearchMissStore {
     chunks: Mutex<Vec<MemoryChunk>>,
     outcome_times: Mutex<Vec<i64>>,

@@ -15,6 +15,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- OMF imports publish all rows, lifecycle metadata and translated supersession edges atomically, map duplicate items into the graph, restore soft-deleted content, and preserve explicit null retention fields.
+- Artifact claim support requires textual evidence; recency, positive markers and unrelated validation alone do not count.
+- Project briefs count tasks with a finish time as completed, regardless of their status label.
+- Task resume looks up IDs directly, including tasks older than the latest 500, while preserving tenant scope.
+- Relevant context applies lifecycle visibility to prepended hot chunks.
+- Add usage events count new chunks only after a successful write and skip reused duplicates.
+- Consolidation records its selection time as the watermark so writes made during the model call remain eligible.
+- Cleanup throwaway names match whole tokens, keeping names such as `retrieval` and `latest` out of name-based cleanup candidates.
+- Warm status and stop propagate protocol, timeout and permission errors instead of reporting a stopped worker.
+- Warm worker PID checks use portable Unix signal-zero semantics, including macOS.
+- Dense initialization failure uses the available BM25 index rather than scanning only recent rows.
+- Context packing skips chunks that exceed the remaining token budget and continues with smaller chunks.
+
 - Warm startup waits for live workers up to a configurable budget, reaps timed-out children before fallback, preserves background consolidation's data directory, and uses a private per-user socket root. Long requests wait for completion.
 - Claude consolidation disables tools and project configuration in a fresh temporary directory; its model is configurable and defaults to `sonnet`.
 - Removed the nonfunctional `memory.metrics` operation, health latency block, and orphaned per-call collectors; health keeps measured store state.

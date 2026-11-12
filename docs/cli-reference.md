@@ -26,7 +26,7 @@ For write-quality expectations and cleanup safety, see the
 | `memd eval-retrieval` | Gate retrieval quality with precision, hit-rate, recall, and MRR thresholds. |
 | `memd audit` | Report tenant/project storage shape, generated-wrapper noise, alias groups, unreadable active rows, and routine progress summaries that still lack an expiry; `--strict` exits 2 when `unreadable_active_chunks > 0`. |
 | `memd report` | Usefulness and self-diagnosis report from the usage ledger and store metadata; `--strict` exits 2 on any `[warn]` line. |
-| `memd cleanup-plan` | Generate a non-destructive cleanup approval report with archive/purge command previews and post-cleanup pass criteria. |
+| `memd cleanup-plan` | Generate a non-destructive cleanup approval report with archive/purge command previews and post-cleanup pass criteria. Throwaway name checks match whole tokens separated by punctuation, so `retrieval` and `latest` do not match `eval` or `test`. |
 | `memd purge` | Dry-run or archive-first cleanup of hidden rows; `--apply` verifies the archive before mutation, and `--include-unreadable-active` includes active rows with confirmed missing or corrupt payloads. Transient read errors abort the purge. |
 | `memd purge-archive` | Read-only verification for `memd purge --archive` files: validates format/counts/payload flags, emits SHA-256, and can enforce expected tenant/project. |
 | `memd consolidate` | Call the configured LLM (Claude Sonnet or Codex Spark, selected by `MEMD_CONSOLIDATOR`) and stage validated output under a journaled run ID. Candidate summaries remain hidden until review. `--promote` requests promotion in the same run; `--legacy-immediate` is a deprecated alias for one compatibility release. Exact source-set reruns reuse the existing run. |
@@ -165,6 +165,9 @@ warm worker is active. Candidate text remains excluded from ordinary recall.
 The run's `validated` state describes consolidation validation, not a check
 that the proposed advice worked.
 
+The scan watermark records the time selection began, with a one-millisecond
+overlap. Writes made during the model call stay eligible for the next scan.
+
 `--tenant-id` and `--project-id` restrict listing, inspection and decisions.
 Without an explicit tenant, the command uses the repository's scope when one
 exists. Without either flags or a scope file, it is a store-wide administrator
@@ -249,6 +252,10 @@ matched event tag under each result's `expanded_siblings` field.
 - `task.add_evidence` for concrete evidence against a task.
 - `task.get`, `task.search`, `task.resume`.
 
+`task.resume` looks up the task ID directly without a recent-task limit and
+checks tenant scope. Project briefs classify a task with `finished_at_ms`
+as completed, including failed or cancelled tasks.
+
 ### `artifact.*` — focused collaboration tools
 
 Artifact collaboration uses four specialized tools with tight schemas:
@@ -269,6 +276,10 @@ Inspection and retrieval:
 - `artifact.find_failures`, `artifact.find_decisions`, `artifact.find_evidence`,
   `artifact.find_highlights`.
 
+Claim support requires at least one whole-word match from the claim's
+non-stopword terms of four or more characters. Recency, a positive marker,
+or unrelated validation text alone does not establish support.
+
 `artifact.create` remains available for backwards compatibility with a
 deprecation warning. Digest artifacts are system-generated and cannot be
 forged through `artifact.create`.
@@ -288,6 +299,8 @@ caller can fetch selected records with `artifact.get`.
 `include_hot` is true. That legacy hot pre-scan is bounded by a short
 wall-clock budget so large tenants still fall through to normal retrieval
 instead of blocking the whole lookup on a full payload scan.
+Hot chunks use the same visibility filter as search; superseded, expired
+and history-tier content stays hidden.
 
 ## Warm and batch execution
 
@@ -310,6 +323,11 @@ Flags:
   reached, and hard-error on cold-only variants.
 
 Routable commands: see [Shared topology](shared-topology.md).
+
+`warm status` and `warm stop` report an absent or refused socket as stopped.
+Timeouts, protocol errors and permission failures return errors. Unix PID
+liveness uses signal-zero checks, including on macOS. Worker caps also count
+live PIDs on macOS; Linux additionally checks the process name.
 
 For scripts that need many structured operations in one loaded process:
 

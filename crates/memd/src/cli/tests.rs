@@ -41,6 +41,40 @@ fn make_persistent_store() -> (PersistentStore, TempDir) {
     (store, dir)
 }
 
+#[tokio::test]
+async fn ops_regression_cli_failed_add_does_not_count_usage() {
+    let (store, dir) = make_persistent_store();
+    let conn = rusqlite::Connection::open(dir.path().join("metadata.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER reject_cli_add BEFORE INSERT ON chunks
+        BEGIN SELECT RAISE(ABORT, 'injected CLI add failure'); END;",
+    )
+    .unwrap();
+    let result = cli_add_rendered(
+        &store,
+        None,
+        CliAddRenderOptions {
+            tenant_id: "cli_usage_ops".into(),
+            text: "A durable note whose storage will fail".into(),
+            chunk_type: ChunkType::Doc,
+            project_id: None,
+            tags: None,
+            source_uri: None,
+            source_path: None,
+        },
+    )
+    .await;
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("injected CLI add failure"));
+    assert!(store
+        .metadata()
+        .usage_events_since(0, Some("cli_usage_ops"), None)
+        .unwrap()
+        .is_empty());
+}
+
 fn segment_payloads_contain(root: &std::path::Path, tenant: &TenantId, needle: &str) -> bool {
     let segments_dir = root.join("tenants").join(tenant.as_str()).join("segments");
     let Ok(entries) = std::fs::read_dir(segments_dir) else {

@@ -1550,9 +1550,28 @@ fn throwaway_name_reason(name: &str) -> Option<&'static str> {
         ("sandbox", "sandbox"),
         ("phase", "phase"),
     ];
-    patterns
-        .iter()
-        .find_map(|(needle, reason)| lowered.contains(needle).then_some(*reason))
+    patterns.iter().find_map(|(needle, reason)| {
+        lowered
+            .split(|ch: char| !ch.is_ascii_alphanumeric())
+            .any(|token| token == *needle)
+            .then_some(*reason)
+    })
+}
+
+#[test]
+fn ops_regression_throwaway_matches_tokens() {
+    for name in ["retrieval", "latest", "contest", "phaseology"] {
+        assert_eq!(throwaway_name_reason(name), None, "{name}");
+    }
+    for name in [
+        "test",
+        "SMOKE-test",
+        "project_eval_12",
+        "tmp.project",
+        "phase-2",
+    ] {
+        assert!(throwaway_name_reason(name).is_some(), "{name}");
+    }
 }
 
 fn export_command(tenant_id: &str, project_id: Option<&str>, archive_dir: &Path) -> String {

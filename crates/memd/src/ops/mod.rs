@@ -562,11 +562,14 @@ fn artifact_text_for_grounding(artifact: &TaskArtifact) -> String {
 }
 
 fn artifact_claim_score(artifact: &TaskArtifact, claim: &str) -> f32 {
-    score_text_candidate(
-        claim,
-        &artifact_text_for_grounding(artifact),
-        artifact.timestamp_created,
-    )
+    let text = artifact_text_for_grounding(artifact).to_ascii_lowercase();
+    let words = text
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .collect::<HashSet<_>>();
+    lexical_overlap_terms(claim)
+        .iter()
+        .filter(|term| words.contains(term.as_str()))
+        .count() as f32
 }
 
 fn artifact_has_negative_marker(artifact: &TaskArtifact) -> bool {
@@ -592,7 +595,7 @@ fn artifact_has_negative_marker(artifact: &TaskArtifact) -> bool {
     )
 }
 
-fn artifact_supports_claim(artifact: &TaskArtifact, claim: &str, score: f32) -> bool {
+fn artifact_supports_claim(artifact: &TaskArtifact, claim: &str) -> bool {
     if matches!(
         derive_artifact_trust_tier(artifact),
         TrustTier::SemanticCandidate | TrustTier::CompiledDigestHint
@@ -603,10 +606,7 @@ fn artifact_supports_claim(artifact: &TaskArtifact, claim: &str, score: f32) -> 
         return false;
     }
 
-    score > 0.0
-        || artifact_claim_score(artifact, claim) > 0.0
-        || artifact.supports_claim == Some(true)
-        || !artifact.validation.is_empty()
+    artifact_claim_score(artifact, claim) > 0.0
 }
 
 fn result_metadata(
@@ -2865,43 +2865,11 @@ async fn ensure_task_resume_digest<S: Store>(
     tenant_id: &TenantId,
     task_id: &str,
 ) -> Result<(TaskArtifact, TaskResumeView), McpError> {
-    let mut task = store
-        .list_tasks(tenant_id, None, 500)
+    let task = store
+        .get_task_global(task_id)
         .await
         .map_err(|e| McpError::ToolError(e.to_string()))?
-        .into_iter()
-        .find(|task| task.task_id == task_id);
-    // Fall back to a daemon-wide scan ONLY when the cross-tenant fallback
-    // is explicitly enabled. Otherwise a missing task in the caller's
-    // tenant means "not found here" — the previous unconditional sweep
-    // leaked the existence (and full 500-task listing) of every other
-    // tenant on the daemon whenever a task_id was unknown.
-    if task.is_none() && cross_tenant_project_fallback_enabled() {
-        for other_tenant in store
-            .list_tenants()
-            .await
-            .map_err(|e| McpError::ToolError(e.to_string()))?
-        {
-            if &other_tenant == tenant_id {
-                continue;
-            }
-            task = store
-                .list_tasks(&other_tenant, None, 500)
-                .await
-                .map_err(|e| McpError::ToolError(e.to_string()))?
-                .into_iter()
-                .find(|task| task.task_id == task_id);
-            if task.is_some() {
-                warn!(
-                    primary_tenant = %tenant_id,
-                    extra_tenant = %other_tenant,
-                    task_id,
-                    "task.resume digest resolved via cross-tenant fallback"
-                );
-                break;
-            }
-        }
-    }
+        .filter(|task| &task.tenant_id == tenant_id || cross_tenant_project_fallback_enabled());
     let task = task.ok_or_else(|| McpError::ToolError("task not found".to_string()))?;
     let artifacts = store
         .list_task_artifacts(&task.tenant_id, task_id)
@@ -3447,6 +3415,17 @@ async fn candidate_chunk_ids_for_tenants_and_mode<S: Store>(
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for tenant in tenants {
+        if matches!(mode, QueryMode::ResumeTask) {
+            if let Some(task_id) = filters.task_id.as_deref() {
+                let task = store
+                    .get_task_global(task_id)
+                    .await
+                    .map_err(|e| McpError::ToolError(e.to_string()))?;
+                if task.is_some_and(|task| &task.tenant_id != tenant) {
+                    continue;
+                }
+            }
+        }
         let ids = candidate_chunk_ids_for_mode(store, tenant, mode, filters, limit).await?;
         for id in ids {
             if seen.insert(id.clone()) {

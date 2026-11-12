@@ -75,7 +75,7 @@ pub(super) async fn cli_add_rendered<S: Store>(
         });
     }
 
-    store.record_usage_event(UsageEvent {
+    let usage_event = UsageEvent {
         op: UsageOp::Add,
         tenant: Some(chunk.tenant_id.to_string()),
         project: project_id_for_usage,
@@ -83,7 +83,7 @@ pub(super) async fn cli_add_rendered<S: Store>(
         chunk_count: Some(1),
         bytes: Some(opts.text.len() as i64),
         detail: None,
-    });
+    };
 
     let lifecycle_delta = prepared.lifecycle_delta();
     let (chunk_id, stored_chunk_ids) = if lifecycle_delta.is_empty() {
@@ -98,6 +98,7 @@ pub(super) async fn cli_add_rendered<S: Store>(
             .add_chunk_with_lifecycle_and_stored_ids(chunk, lifecycle_delta)
             .await?
     };
+    store.record_usage_event(usage_event);
     info!(chunk_id = %chunk_id, "chunk added");
 
     let output = json!({

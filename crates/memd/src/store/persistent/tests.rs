@@ -13,6 +13,46 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 #[tokio::test]
+async fn ops_regression_dense_unavailable_uses_bm25_for_old_chunks() {
+    let dir = tempdir().unwrap();
+    let store = PersistentStore::open(PersistentStoreConfig {
+        data_dir: dir.path().into(),
+        enable_dense_search: false,
+        enable_hybrid_search: true,
+        ..Default::default()
+    })
+    .unwrap();
+    let tenant = TenantId::new("fallback_ops").unwrap();
+    let wanted = store
+        .add(MemoryChunk::new(
+            tenant.clone(),
+            "running sentinel pipeline",
+            ChunkType::Doc,
+        ))
+        .await
+        .unwrap();
+    for i in 0..8 {
+        store
+            .add(MemoryChunk::new(
+                tenant.clone(),
+                format!("recent unrelated {i}"),
+                ChunkType::Doc,
+            ))
+            .await
+            .unwrap();
+    }
+    store.sparse_index().unwrap().commit().unwrap();
+    // The stemmed, noncontiguous query requires BM25 rather than a substring scan.
+    let hits = store
+        .search_with_scores(&tenant, "run pipeline", 1)
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].0.chunk_id, wanted);
+    assert_ne!(store.retrieval_mode(), "text_fallback");
+}
+
+#[tokio::test]
 async fn sparse_revision_rebuilds_all_tenants_once_on_writer_open() {
     let dir = tempdir().unwrap();
     let config = PersistentStoreConfig {
