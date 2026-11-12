@@ -6,6 +6,26 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Fixed
+
+- Embeddings: the attention mask was passed to the model as `token_type_ids` and padding tokens were attended, so a text's vector depended on the other texts in its batch. Token type ids are now zero and the mask is applied. Because new vectors differ from stored ones, a store records its embedder revision in `<data_dir>/embedding_revision`; the first writable open after the upgrade discards the dense indexes, re-embeds every chunk from its segments in the background, saves the rebuilt indexes and then marks the store current. A command that exits during the rebuild waits up to 10 seconds for it; what is indexed by then is saved and the next writer continues from there. Until the rebuild has finished, chunks that are not yet re-embedded are found through the sparse index only.
+- Reranking: relevance is normalised to the best candidate before the recency, project, type and query-text bonuses are added. Raw fused scores (at most about 0.033) were smaller than a single bonus, so a fresh but weaker result could outrank a clearly more relevant one. Reported `score` values are on a new scale.
+- `memd add`: a text longer than one chunk was stored with the spaces and line breaks between sentences removed. Chunks are now exact slices of the source text. Chunks stored earlier keep the fused text until they are added again.
+- Warm worker: every search made the next command report an external metadata change and run an index repair scan. The probe now takes a new baseline when a command finishes.
+- Index repair no longer adds a chunk's sentences to the sparse index a second time when only its vector was missing.
+- Dense index: indexing a chunk that was already indexed (an index repair and a concurrent write can both pick it up) added a second graph point, so the saved graph was rejected and rebuilt on every load until the next clean save. Inserting the same vector again is now a no-op.
+- `supersede_near_duplicates`: a fuzzy `threshold` outside (0, 1] is rejected. A threshold of 0 superseded the most recent chunk in scope whether or not it was similar.
+- `memd consolidate --dry-run --background` started a real consolidation; the two flags now conflict.
+- `memd report --since` and `time_range` timezone parsing no longer panic on a multi-byte character.
+- `memd purge` syncs the archive file and its directory to disk before it deletes any row.
+- `memd eval-write-quality` no longer opens, and locks, the real store.
+- `memd-wiki` with no subcommand crashed; `memd-wiki lint --check-staleness` read the wrong payload shape and never reported a stale page.
+
+### Changed
+
+- CI fails on clippy warnings for the whole workspace, runs the three `test-support` tests, and runs the `memd-wiki` unit tests.
+- `make status` and `verify_memd_enforcement.sh` accept the enforcement block in `~/.claude/rules/*.md`, as `memd doctor` does.
+
 ## [1.9.0] - 2026-10-17
 
 ### Added
