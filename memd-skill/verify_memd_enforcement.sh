@@ -35,13 +35,23 @@ if ! grep -Fq 'memd experience find' "${HOME}/.codex/AGENTS.md"; then
   exit 1
 fi
 
-if ! grep -Fq "<!-- memd-enforcement:start -->" "${HOME}/.claude/CLAUDE.md"; then
-  echo "missing memd enforcement block in ~/.claude/CLAUDE.md" >&2
+# Claude Code loads ~/.claude/CLAUDE.md and every ~/.claude/rules/*.md user
+# rule, so the block may live in either place (`memd doctor` accepts both).
+CLAUDE_RULES_FILE=""
+for candidate in "${HOME}/.claude/CLAUDE.md" "${HOME}"/.claude/rules/*.md; do
+  if [[ -f "$candidate" ]] && grep -Fq "<!-- memd-enforcement:start -->" "$candidate"; then
+    CLAUDE_RULES_FILE="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$CLAUDE_RULES_FILE" ]]; then
+  echo "missing memd enforcement block in ~/.claude/CLAUDE.md and ~/.claude/rules/*.md" >&2
   exit 1
 fi
 
-if ! grep -Fq 'memd experience find' "${HOME}/.claude/CLAUDE.md"; then
-  echo "missing CLI memd contract in ~/.claude/CLAUDE.md" >&2
+if ! grep -Fq 'memd experience find' "$CLAUDE_RULES_FILE"; then
+  echo "missing CLI memd contract in ${CLAUDE_RULES_FILE}" >&2
   exit 1
 fi
 
@@ -56,7 +66,7 @@ if ! grep -Fq 'memd experience find' "${HOME}/.cursor/rules/memd.mdc"; then
 fi
 
 if ! grep -Fq 'Evidence-bound self-improvement' "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/SKILL.md"; then
-  echo "missing memd v1.5 self-improvement guidance in bundled SKILL.md" >&2
+  echo "missing self-improvement guidance in bundled SKILL.md" >&2
   exit 1
 fi
 

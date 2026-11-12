@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL_BIN="${HOME}/.local/bin"
 INSTALL_BINARY=0
 
@@ -222,6 +221,6 @@ printf '  - %s (SessionStart hook)\n' "${HOME}/.claude/settings.json"
 printf 'Codex: copy memd-skill/examples/codex_session_start_hook.json into your\n'
 printf '       project .codex/hooks.json to enable the equivalent hook.\n'
 if [[ "$INSTALL_BINARY" -eq 1 ]]; then
-  printf 'Installed bundled memd CLI: %s\n' "${LOCAL_BIN}/memd"
+  printf 'Installed memd release binary: %s\n' "${LOCAL_BIN}/memd"
 fi
 printf '\nRun '"'"'memd doctor'"'"' to verify the install ('"'"'memd doctor --strict'"'"' exits non-zero on failure; a fresh store reports data dir/project scope as pending until your first session-start).\n'

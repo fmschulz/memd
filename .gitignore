@@ -1,6 +1,5 @@
 # Build artifacts
 /target
-Cargo.lock
 
 # Environment and secrets
 .env
@@ -64,8 +63,8 @@ DOCKER.md
 REPO_AUDIT.md
 TESTING.md
 
-# Never commit the bundled skill binary again — 10+ committed copies of it are
-# why a full clone is ~170 MB. install-skill-bundle copies it at install time.
+# Never commit the bundled skill binary (about 30 MB per copy).
+# install-skill-bundle copies it in at install time.
 /memd-skill/bin/
 
 # Manuscript + external review artifacts (internal only)
@@ -92,6 +91,7 @@ TESTING.md
 /evals/bench/datasets/retrieval/beir_scidocs.json
 /evals/bench/datasets/retrieval/beir_trec-covid.json
 /evals/BENCHMARK_*.md
+!/evals/BENCHMARK_PROTOCOL.md
 /evals/CODEX_*.md
 /evals/COMPREHENSIVE_*.md
 /evals/EMBEDDING_*.md

@@ -209,7 +209,7 @@ status: ## Show built/installed version, PATH location, and skill links
 		elif [ -d "$$t" ]; then echo "(copy)"; \
 		else echo "-"; fi; \
 	done
-	@printf "  enforcement:   "; if grep -qs "memd-enforcement:start" "$(HOME)/.claude/CLAUDE.md"; then echo "$(GREEN)wired$(NC)"; else echo "$(YELLOW)not wired (run 'make install-enforcement')$(NC)"; fi
+	@printf "  enforcement:   "; if grep -qs "memd-enforcement:start" "$(HOME)/.claude/CLAUDE.md" "$(HOME)"/.claude/rules/*.md; then echo "$(GREEN)wired$(NC)"; else echo "$(YELLOW)not wired (run 'make install-enforcement')$(NC)"; fi
 	@printf "  SessionStart:  "; if grep -qs "memd session-start" "$(HOME)/.claude/settings.json"; then echo "$(GREEN)wired$(NC)"; else echo "$(YELLOW)not wired$(NC)"; fi
 	@printf "  warm worker:   "; if command -v memd >/dev/null 2>&1; then \
 		if RUST_LOG=error memd warm status 2>/dev/null | grep -q '"status": "running"'; then echo "running"; else echo "stopped"; fi; \
