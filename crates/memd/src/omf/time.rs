@@ -1,4 +1,4 @@
-//! Minimal UTC RFC-3339 formatter for OMF export.
+//! UTC RFC-3339 formatting and ISO datetime parsing.
 //!
 //! OMF 1.0's `exported_at` and per-item `created_at`/`updated_at`/`expires_at`
 //! are RFC-3339 UTC strings. The rest of memd uses `i64` ms-since-epoch,
@@ -103,9 +103,147 @@ fn civil_from_days(days: i64) -> Option<(i32, u32, u32)> {
     Some((year, m, d))
 }
 
+/// Parse an ISO 8601 datetime string to Unix milliseconds.
+///
+/// Supports formats:
+/// - "2024-01-15T10:30:45Z" (UTC)
+/// - "2024-01-15T10:30:45.123Z" (with millis)
+/// - "2024-01-15T10:30:45+00:00" (with offset)
+pub fn parse_iso_datetime(s: &str) -> crate::error::Result<i64> {
+    // Try to parse RFC3339 format manually
+    parse_rfc3339(s)
+        .ok_or_else(|| crate::error::MemdError::ValidationError(format!("Invalid datetime: {}", s)))
+}
+
+/// Parse RFC3339 datetime string to Unix milliseconds.
+fn parse_rfc3339(s: &str) -> Option<i64> {
+    // Expected format: YYYY-MM-DDTHH:MM:SS[.mmm](Z|+HH:MM|-HH:MM)
+    let s = s.trim();
+    if s.len() < 19 {
+        return None;
+    }
+
+    // Parse date part
+    let year: i32 = s.get(0..4)?.parse().ok()?;
+    if s.get(4..5)? != "-" {
+        return None;
+    }
+    let month: u32 = s.get(5..7)?.parse().ok()?;
+    if s.get(7..8)? != "-" {
+        return None;
+    }
+    let day: u32 = s.get(8..10)?.parse().ok()?;
+    if s.get(10..11)? != "T" {
+        return None;
+    }
+
+    // Parse time part
+    let hour: u32 = s.get(11..13)?.parse().ok()?;
+    if s.get(13..14)? != ":" {
+        return None;
+    }
+    let minute: u32 = s.get(14..16)?.parse().ok()?;
+    if s.get(16..17)? != ":" {
+        return None;
+    }
+    let second: u32 = s.get(17..19)?.parse().ok()?;
+
+    // Parse optional milliseconds and timezone
+    let rest = &s[19..];
+    let (millis, tz_offset_mins) = parse_millis_and_tz(rest)?;
+
+    // Convert to Unix timestamp
+    let days = ymd_to_days(year, month, day)?;
+    let secs = days * 86400 + (hour as i64) * 3600 + (minute as i64) * 60 + (second as i64)
+        - (tz_offset_mins as i64) * 60;
+    let ms = secs * 1000 + (millis as i64);
+
+    Some(ms)
+}
+
+/// Parse milliseconds and timezone offset from the remainder of an RFC3339 string.
+fn parse_millis_and_tz(s: &str) -> Option<(u32, i32)> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Some((0, 0));
+    }
+
+    let (millis, rest) = if let Some(fractional) = s.strip_prefix('.') {
+        // Parse milliseconds
+        let end = fractional
+            .find(|c: char| !c.is_ascii_digit())
+            .map(|i| i + 1)
+            .unwrap_or(s.len());
+        let frac = &s[1..end];
+        let millis: u32 = if frac.len() >= 3 {
+            frac[..3].parse().ok()?
+        } else {
+            let padded = format!("{:0<3}", frac);
+            padded.parse().ok()?
+        };
+        (millis, &s[end..])
+    } else {
+        (0, s)
+    };
+
+    let tz_offset = if rest == "Z" || rest.is_empty() {
+        0
+    } else if rest.starts_with('+') || rest.starts_with('-') {
+        let sign = if rest.starts_with('-') { -1 } else { 1 };
+        let tz = &rest[1..];
+        let (hours, minutes) = if tz.contains(':') {
+            let parts: Vec<&str> = tz.split(':').collect();
+            if parts.len() != 2 {
+                return None;
+            }
+            (parts[0].parse::<i32>().ok()?, parts[1].parse::<i32>().ok()?)
+        } else if tz.len() == 4 && tz.is_ascii() {
+            (tz[..2].parse::<i32>().ok()?, tz[2..].parse::<i32>().ok()?)
+        } else {
+            return None;
+        };
+        sign * (hours * 60 + minutes)
+    } else {
+        return None;
+    };
+
+    Some((millis, tz_offset))
+}
+
+/// Convert year, month, day to days since Unix epoch.
+fn ymd_to_days(year: i32, month: u32, day: u32) -> Option<i64> {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    // Howard Hinnant's algorithm
+    let y = if month <= 2 { year - 1 } else { year };
+    let m = if month <= 2 { month + 12 } else { month };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u32;
+    let doy = (153 * (m - 3) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = (era as i64) * 146097 + (doe as i64) - 719468;
+    Some(days)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_iso_datetime() {
+        let dt = "2024-01-01T00:00:00Z";
+        let ms = parse_iso_datetime(dt).unwrap();
+        assert_eq!(ms, 1704067200000);
+    }
+
+    #[test]
+    fn test_parse_iso_datetime_with_offset() {
+        let dt = "2024-01-01T01:00:00+01:00";
+        let ms = parse_iso_datetime(dt).unwrap();
+        assert_eq!(ms, 1704067200000); // Same as midnight UTC
+    }
 
     #[test]
     fn epoch_formats_to_unix_midnight() {

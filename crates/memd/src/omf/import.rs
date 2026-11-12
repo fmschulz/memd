@@ -90,19 +90,6 @@ pub struct ImportResult {
     pub skipped: usize,
 }
 
-/// Minimal per-write record emitted by `import_omf_with_events` so the
-/// MCP handler can run `post_write_hooks` for each newly-written chunk
-/// without cross-module awareness of the concrete `PostWriteEvent`
-/// type. One instance per actually-imported item (skipped/duplicate
-/// items emit none).
-#[derive(Debug, Clone)]
-pub struct ImportedChunk {
-    pub chunk_id: ChunkId,
-    pub chunk_type: ChunkType,
-    pub project_id: Option<String>,
-    pub text: String,
-}
-
 /// Outcome of one `preview_omf_import` call — Task F4 dry-run shape.
 ///
 /// Counters mirror `ImportResult` semantically (`to_import` ↔ `imported`,
@@ -122,34 +109,13 @@ pub struct PreviewResult {
     pub by_project: BTreeMap<String, usize>,
 }
 
-/// Import an OMF 1.0 document into a tenant. Discards per-write events.
-///
-/// Thin wrapper over `import_omf_with_events` for call sites that only
-/// need the `ImportResult` (direct store callers, tests, CLI). The MCP
-/// handler consumes `import_omf_with_events` so it can run
-/// `post_write_hooks` per imported chunk.
+/// Import an OMF 1.0 document into a tenant.
 pub async fn import_omf(
     store: &PersistentStore,
     tenant_id: &TenantId,
     doc: &OmfDocument,
     opts: ImportOptions,
 ) -> Result<ImportResult> {
-    let (result, _events) = import_omf_with_events(store, tenant_id, doc, opts).await?;
-    Ok(result)
-}
-
-/// Import an OMF 1.0 document and return both the result counters and
-/// one `ImportedChunk` event per actually-imported item. Duplicate /
-/// skipped items emit no event.
-///
-/// The MCP handler calls this variant so it can run the server-owned
-/// post-write hooks (structural indexing) for each newly written chunk.
-pub async fn import_omf_with_events(
-    store: &PersistentStore,
-    tenant_id: &TenantId,
-    doc: &OmfDocument,
-    opts: ImportOptions,
-) -> Result<(ImportResult, Vec<ImportedChunk>)> {
     validate_omf(doc)?;
     let trusted = is_trusted(doc);
 
@@ -170,7 +136,6 @@ pub async fn import_omf_with_events(
         duplicates: 0,
         skipped: 0,
     };
-    let mut events: Vec<ImportedChunk> = Vec::new();
 
     // Item 5 — supersession round-trip. Writers in `export_omf` emit
     // per-item `extensions.memd.chunk_id` plus the lifecycle
@@ -270,7 +235,6 @@ pub async fn import_omf_with_events(
         }
         chunk = prepared.apply_to_chunk(chunk);
 
-        let text = chunk.text.clone();
         let chunk_id = store.add_chunk_with_lifecycle(chunk, initial).await?;
 
         if trusted_item {
@@ -286,18 +250,12 @@ pub async fn import_omf_with_events(
             }
         }
 
-        events.push(ImportedChunk {
-            chunk_id,
-            chunk_type,
-            project_id,
-            text,
-        });
         result.imported += 1;
     }
 
     replay_supersession_edges(store, tenant_id, &source_to_target, &pending_edges)?;
 
-    Ok((result, events))
+    Ok(result)
 }
 
 /// A pending `old → new` supersession edge discovered during pass 1.
@@ -401,8 +359,7 @@ fn replay_supersession_edges(
 }
 
 /// Dry-run `import_omf`: walk the same dedup + filter path, count what
-/// would happen, and return. Never writes, never bumps cache versions,
-/// never calls `add_chunk_with_lifecycle`.
+/// would happen, and return without writing or calling `add_chunk_with_lifecycle`.
 ///
 /// Shares the dedup helpers with `import_omf` so the preview cannot
 /// diverge from what the real import would do.
@@ -414,7 +371,7 @@ pub async fn preview_omf_import(
 ) -> Result<PreviewResult> {
     validate_omf(doc)?;
 
-    // Mirror import_omf_with_events: fail-closed on bad trusted
+    // Mirror import_omf: fail-closed on bad trusted
     // supersession invariants BEFORE counting, so the preview's
     // "to_import" can't claim success for a doc that the real import
     // will reject. Codex Item 5 round-1 MEDIUM (preview parity).

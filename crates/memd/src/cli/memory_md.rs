@@ -32,7 +32,7 @@ pub(super) use action::explicit_agent_action;
 use collect::collect_project_state;
 use evaluate::evaluate_agent_usefulness;
 pub(super) use evaluate::run_memory_md_eval;
-pub(super) use rank::{build_repo_index, repo_doc_covering, RepoDoc};
+use rank::build_repo_index;
 use rank::{
     dedupe_memory_md_union, filter_startup_takeaways, recompute_union_priorities,
     reconcile_candidate_explanations, scan_takeaway_candidates, sort_takeaways,
@@ -88,7 +88,6 @@ pub(super) struct MemoryMdEvalOptions {
     pub(super) top_n: usize,
     pub(super) min_useful_ratio: f64,
     pub(super) max_generated_wrappers: usize,
-    pub(super) agent_usefulness: bool,
     pub(super) gold_file: Option<PathBuf>,
 }
 

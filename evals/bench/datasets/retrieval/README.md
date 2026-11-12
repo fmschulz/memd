@@ -12,13 +12,6 @@ into three tiers by how the fetcher treats them:
 | required | `beir_fiqa.json` | downloads, fails on 404 | `--suite benchmark` |
 | required | `beir_scidocs.json` | downloads, fails on 404 | `--suite benchmark` |
 | optional | `beir_trec-covid.json` | attempts, skips on 404 | `--suite benchmark` |
-| manual | `beir_scifact_fixed.json` | never fetched | `--suite scifact` |
-| manual | `beir_nfcorpus.json` | never fetched | `--suite nfcorpus` |
-
-The `scifact` and `nfcorpus` suites are hardwired to those file names
-(`evals/harness/src/suites/scifact.rs:109`,
-`evals/harness/src/suites/nfcorpus.rs:107`). Place local copies at those
-paths before invoking those suites.
 
 Why:
 

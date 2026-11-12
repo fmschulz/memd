@@ -11,7 +11,6 @@ fn light_config(data_dir: &Path) -> PersistentStoreConfig {
         read_only: false,
         enable_dense_search: false,
         enable_hybrid_search: false,
-        enable_tiered_search: false,
         backfill_hnsw_on_startup: false,
         backfill_canonical_text_on_startup: false,
         ..Default::default()

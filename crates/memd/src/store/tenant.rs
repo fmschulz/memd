@@ -28,7 +28,7 @@ pub struct TenantDiskStats {
 ///   segments/    # Append-only chunk segments
 ///   wal/         # Write-ahead log
 ///   indexes/     # Sparse and dense indexes
-///   cache/       # Semantic cache
+///   cache/       # Empty directory created by tenant setup
 /// ```
 pub struct TenantManager {
     data_dir: PathBuf,

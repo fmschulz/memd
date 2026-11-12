@@ -112,14 +112,12 @@ active metadata rows exist whose segment payloads could not be read.
   recovery-safe rewrite support exists. Non-digest exact duplicates remain
   report-only.
 - `memory.metrics` surfaces per-operation, per-reason rejection counts,
-  cache hit rates, HNSW state snapshots, and estimated serialized payload
+  HNSW state snapshots, and estimated serialized payload
   size by operation.
 
 Token usage is estimated from serialized request/response bytes; exact
 whole-agent or provider billing tokens still require agent or API usage
-capture. See
-[`token_overhead.md`](scientific-task-memory/benchmark-results/token_overhead.md)
-for the benchmark parser and pilot measurement protocol.
+capture. The sibling `memd-bench` repository owns paired agent experiments.
 
 ## Tracing logs
 

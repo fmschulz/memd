@@ -114,9 +114,8 @@ Use these commands before rolling out a memory workflow or after a noisy
 session:
 
 ```bash
-memd eval-memory-md --project-dir . --agent-usefulness --min-useful-ratio 0.8 --max-generated-wrappers 0
+memd eval-memory-md --project-dir . --min-useful-ratio 0.8 --max-generated-wrappers 0
 memd memory-md --project-dir . --output memory.md --explain-output .memd/memory-explain.json
-memd eval-write-quality --project-dir .
 memd eval-retrieval --tenant-id "$TENANT_ID" --project-id "$PROJECT_ID" --project-dir .
 memd audit --tenant-id "$TENANT_ID" --project-id "$PROJECT_ID" --format markdown
 ```

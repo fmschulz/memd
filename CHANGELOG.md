@@ -6,6 +6,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking:** removed legacy evaluations, suites with deleted datasets, unpublished cross-system experiments, and unused evaluation symlinks.
+- **Breaking:** removed the unused `eval-write-quality` and `outcome-scan` commands and the vacuous `eval-memory-md --agent-usefulness` gate; retained evaluations with runtime or skill callers. `eval-memory-md` writes to `memory-eval.md` and rejects the project's `memory.md` as output.
+- **Breaking:** removed the tiered retrieval cache, hot tier, access tracker, and their configuration, metrics, and debug fields; searches retrieve directly through the hybrid lane.
+- **Breaking:** removed the code index, trace index, `code.*` and `debug.*` operations, and tree-sitter grammars; ordinary code and trace memory chunks remain supported.
+
 ### Fixed
 
 - Embeddings: the attention mask was passed to the model as `token_type_ids` and padding tokens were attended, so a text's vector depended on the other texts in its batch. Token type ids are now zero and the mask is applied. Because new vectors differ from stored ones, a store records its embedder revision in `<data_dir>/embedding_revision`; the first writable open after the upgrade discards the dense indexes, re-embeds every chunk from its segments in the background, saves the rebuilt indexes and then marks the store current. A command that exits during the rebuild waits up to 10 seconds for it; what is indexed by then is saved and the next writer continues from there. Until the rebuild has finished, chunks that are not yet re-embedded are found through the sparse index only.
@@ -18,7 +25,6 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - `memd consolidate --dry-run --background` started a real consolidation; the two flags now conflict.
 - `memd report --since` and `time_range` timezone parsing no longer panic on a multi-byte character.
 - `memd purge` syncs the archive file and its directory to disk before it deletes any row.
-- `memd eval-write-quality` no longer opens, and locks, the real store.
 - `memd-wiki` with no subcommand crashed; `memd-wiki lint --check-staleness` read the wrong payload shape and never reported a stale page.
 
 ### Changed

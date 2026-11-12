@@ -22,13 +22,11 @@ mod doctor;
 mod eval_counterfactual;
 mod eval_outcome_ranking;
 mod eval_retrieval;
-mod eval_write_quality;
 mod experience;
 mod experience_check;
 mod maintenance;
 mod memory_md;
 mod ops_bridge;
-mod outcome_scan;
 mod paths;
 mod provenance;
 mod purge;
@@ -57,13 +55,11 @@ use doctor::{failing_checks, run_doctor, DoctorOptions};
 use eval_counterfactual::{run_eval_counterfactual, EvalCounterfactualOptions};
 use eval_outcome_ranking::{run_eval_outcome_ranking, EvalOutcomeRankingOptions};
 use eval_retrieval::{run_eval_retrieval, EvalRetrievalOptions};
-use eval_write_quality::{run_eval_write_quality, EvalWriteQualityOptions};
 pub use experience::{emit_case_if_requested, prepare_experience_command, ExperienceCommand};
 use memory_md::{
     refresh_memory_md_with_health, run_memory_md_eval, MemoryMdEvalOptions, MemoryMdOptions,
 };
 use ops_bridge::cli_call_tool;
-use outcome_scan::{run_outcome_scan, OutcomeScanOptions};
 use paths::{
     absolutize_project_dir, normalize_absolute, path_is_inside, read_omf_input,
     read_stdin_to_string, reject_if_any_symlink_inside_outdir, resolve_data_dir,
@@ -281,7 +277,6 @@ pub async fn run_cli<S: Store>(
             top_n,
             min_useful_ratio,
             max_generated_wrappers,
-            agent_usefulness,
             gold_file,
         } => {
             let result = run_memory_md_eval(
@@ -297,7 +292,6 @@ pub async fn run_cli<S: Store>(
                     top_n,
                     min_useful_ratio,
                     max_generated_wrappers,
-                    agent_usefulness,
                     gold_file,
                 },
             )
@@ -330,26 +324,6 @@ pub async fn run_cli<S: Store>(
                     min_mrr,
                 },
             )
-            .await?;
-            println!("{}", serde_json::to_string_pretty(&result)?);
-        }
-
-        CliCommand::EvalWriteQuality {
-            project_dir,
-            min_rejection_or_downgrade_rate,
-            min_duplicate_reuse_rate,
-            max_total_chunks,
-            max_disk_bytes,
-            require_retention_compaction,
-        } => {
-            let result = run_eval_write_quality(EvalWriteQualityOptions {
-                project_dir,
-                min_rejection_or_downgrade_rate,
-                min_duplicate_reuse_rate,
-                max_total_chunks,
-                max_disk_bytes,
-                require_retention_compaction,
-            })
             .await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
@@ -440,25 +414,6 @@ pub async fn run_cli<S: Store>(
             .map_err(|error| MemdError::ProtocolError(error.to_string()))?;
             let payload = unwrap_content_payload(value.clone()).unwrap_or(value);
             println!("{}", serde_json::to_string_pretty(&payload)?);
-        }
-
-        CliCommand::OutcomeScan {
-            project_dir,
-            sessions_dir,
-            since_days,
-            dry_run,
-        } => {
-            let result = run_outcome_scan(
-                store,
-                OutcomeScanOptions {
-                    project_dir,
-                    sessions_dir,
-                    since_days,
-                    dry_run,
-                },
-            )
-            .await?;
-            println!("{}", serde_json::to_string_pretty(&result)?);
         }
 
         CliCommand::EvalCounterfactual {

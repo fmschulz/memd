@@ -20,14 +20,12 @@ pub struct SupersedeParams {
 /// Handle memory.supersede tool call.
 ///
 /// Atomically supersedes an existing chunk with a new version via
-/// `PersistentStore::supersede_chunk`. Returns both the formatted MCP
-/// response and a `PostWriteEvent` so the server dispatch arm can run
-/// structural indexing for the new chunk (mirroring memory.add).
+/// `PersistentStore::supersede_chunk`. Returns the formatted operation response.
 pub async fn handle_memory_supersede<S: Store>(
     store: &S,
     tenant_manager: Option<&TenantManager>,
     params: SupersedeParams,
-) -> Result<(Value, PostWriteEvent), McpError> {
+) -> Result<Value, McpError> {
     let ps = store.as_persistent().ok_or_else(|| {
         McpError::ToolError("memory.supersede requires a persistent store".into())
     })?;
@@ -48,11 +46,6 @@ pub async fn handle_memory_supersede<S: Store>(
     let old_id = ChunkId::parse(&params.old_chunk_id)
         .map_err(|e| McpError::InvalidParams(format!("old_chunk_id: {e}")))?;
     let chunk_type = parse_chunk_type(&params.chunk_type)?;
-
-    // Capture source_path before `params.source` is consumed by
-    // params_to_source — `SourceParams` is not Clone, so we lift the
-    // path out by reference first and own it for the post-write event.
-    let source_path = params.source.as_ref().and_then(|s| s.path.clone());
 
     let mut new_chunk = MemoryChunk::new(tenant_id.clone(), &params.new_text, chunk_type);
     if let Some(project_id) = params.project_id.clone() {
@@ -91,14 +84,6 @@ pub async fn handle_memory_supersede<S: Store>(
 
     info!(new_chunk_id = %new_id, old_chunk_id = %old_id, "chunk superseded");
 
-    let event = PostWriteEvent {
-        tenant_id: tenant_id.to_string(),
-        chunk_id: new_id.clone(),
-        chunk_type: params.chunk_type.clone(),
-        project_id: params.project_id,
-        source_path,
-        text: params.new_text.clone(),
-    };
     let response = format_mcp_response(&json!({
         "new_chunk_id": new_id.to_string(),
         "new_stored_chunk_ids": stored_chunk_ids.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -107,7 +92,7 @@ pub async fn handle_memory_supersede<S: Store>(
         "admission_reason": admission.outcome.reason,
         "admission_warning": admission.outcome.warning,
     }))?;
-    Ok((response, event))
+    Ok(response)
 }
 
 /// Parameters for memory.set_expiry (Track C6).
@@ -147,8 +132,7 @@ where
 /// Handle memory.set_expiry tool call (Track C6).
 ///
 /// Updates the `expires_at_ms` and/or `review_after_ms` overlay fields
-/// on an existing chunk and bumps the tenant cache version when at
-/// least one field changed. Refuses to run on non-persistent stores
+/// on an existing chunk. Refuses to run on non-persistent stores
 /// because the overlay table only exists on `PersistentStore`.
 pub async fn handle_memory_set_expiry<S: Store>(
     store: &S,

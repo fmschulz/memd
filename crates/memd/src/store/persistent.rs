@@ -24,7 +24,6 @@ use super::hybrid::{
 };
 use super::metadata::{ChunkMetadata, MetadataStore, SqliteMetadataStore};
 use crate::compaction::{CompactionConfig, CompactionMetrics, CompactionResult, CompactionRunner};
-use crate::metrics::TieredMetrics;
 use crate::store::{
     apply_feedback_scores, FeedbackConfig, FeedbackEntry, OutcomeEvent, RetrievalEpisode,
     RetrievalEpisodeId, RetrievalEpisodeItem,
@@ -32,20 +31,7 @@ use crate::store::{
 use crate::task_memory::{
     TaskArtifact, TaskArtifactWriteResult, TaskProjection, TaskRecord, TaskSearchFilters,
 };
-use crate::tiered::{CacheStats, HotTierStats, TierDecision, TieredTiming};
 
-/// Combined tiered search statistics
-#[derive(Debug, Clone)]
-pub struct TieredStats {
-    /// Semantic cache statistics
-    pub cache: Option<CacheStats>,
-    /// Hot tier statistics (if available)
-    pub hot_tier: Option<HotTierStats>,
-    /// Number of entries in access tracker
-    pub access_tracker_entries: usize,
-    /// Aggregated tiered metrics from MetricsCollector
-    pub tiered_metrics: TieredMetrics,
-}
 use super::segment::{SegmentReader, SegmentWriter};
 use super::usage::{usage_ledger_enabled, usage_retention_ms, UsageEvent};
 use super::wal::{TaskArtifactWalPayload, WalReader, WalRecord, WalRecordType, WalWriter};
@@ -57,7 +43,7 @@ use super::{
 use crate::embeddings::{CandleModel, EmbeddingModel};
 use crate::error::{MemdError, Result};
 use crate::index::{Bm25Index, SparseIndex};
-use crate::metrics::{IndexStats, MetricsCollector, QueryMetrics, TieredQueryMetrics};
+use crate::metrics::{IndexStats, MetricsCollector, QueryMetrics};
 use crate::retrieval::RerankerMode;
 use crate::types::lifecycle::{LifecycleDelta, ResolvedChunk};
 use crate::types::{ChunkId, ChunkStatus, MemoryChunk, TenantId};
@@ -108,8 +94,6 @@ pub struct PersistentStoreConfig {
     pub enable_dense_search: bool,
     /// Enable hybrid search (dense + sparse)
     pub enable_hybrid_search: bool,
-    /// Enable tiered search (cache/hot/warm fallback)
-    pub enable_tiered_search: bool,
     /// Hybrid search configuration
     pub hybrid_config: Option<HybridConfig>,
     /// Embedding model to use for dense search
@@ -214,7 +198,6 @@ impl Default for PersistentStoreConfig {
             wal_checkpoint_interval: 0,
             enable_dense_search: true,
             enable_hybrid_search: true,
-            enable_tiered_search: true,
             hybrid_config: None,
             embedding_model: EmbeddingModel::default(),
             candle_model: CandleModel::default(),
@@ -726,7 +709,6 @@ impl PersistentStore {
         config.writer_lock_timeout_cap = Some(Duration::from_millis(500));
         config.enable_dense_search = false;
         config.enable_hybrid_search = false;
-        config.enable_tiered_search = false;
         config.enable_async_indexing = false;
         config.backfill_hnsw_on_startup = false;
         config.backfill_canonical_text_on_startup = false;
@@ -885,9 +867,7 @@ impl PersistentStore {
         // Initialize hybrid searcher. A sparse-only configuration must not
         // load the embedding model or dense index merely to use BM25.
         let hybrid_searcher = if config.enable_hybrid_search {
-            let mut hybrid_config = config.hybrid_config.clone().unwrap_or_default();
-            // Apply tiered search configuration
-            hybrid_config.enable_tiered = config.enable_tiered_search;
+            let hybrid_config = config.hybrid_config.clone().unwrap_or_default();
             if hybrid_config.dense_k == 0 {
                 sparse_index.as_ref().map(|sparse| {
                     Arc::new(HybridSearcher::new_sparse_only(
@@ -1379,68 +1359,6 @@ impl PersistentStore {
         }
     }
 
-    /// Get tiered search statistics
-    ///
-    /// Returns combined stats from cache, hot tier, access tracker, and tiered metrics.
-    /// Returns None if tiered search is not enabled.
-    pub fn get_tiered_stats(&self) -> Option<TieredStats> {
-        let hybrid = self.hybrid_searcher.as_ref()?;
-        if !hybrid.tiered_enabled() {
-            return None;
-        }
-
-        let cache_stats = hybrid.get_cache_stats();
-        let tiered_metrics = self.metrics.get_tiered_stats();
-
-        Some(TieredStats {
-            cache: cache_stats,
-            hot_tier: None,            // Hot tier stats would need per-tenant access
-            access_tracker_entries: 0, // Access tracker is per-tenant
-            tiered_metrics,
-        })
-    }
-
-    /// Run tiered maintenance for a tenant
-    ///
-    /// This should be called periodically (e.g., every 60 seconds) to:
-    /// - Promote frequently accessed chunks to hot tier
-    /// - Demote stale chunks from hot tier
-    /// - Evict if hot tier is over capacity
-    /// - Prune expired cache entries
-    pub fn run_maintenance(
-        &self,
-        tenant_id: &TenantId,
-    ) -> Option<crate::tiered::MaintenanceResult> {
-        if self.config.read_only {
-            tracing::debug!(
-                tenant_id = %tenant_id,
-                "skipping tiered maintenance for read-only store"
-            );
-            return None;
-        }
-        let hybrid = self.hybrid_searcher.as_ref()?;
-        let result = hybrid.run_tiered_maintenance(tenant_id)?;
-
-        // Record promotions and demotions in metrics
-        for _ in 0..result.promotions_count {
-            self.metrics.record_promotion();
-        }
-        for _ in 0..result.demotions_count {
-            self.metrics.record_demotion();
-        }
-
-        Some(result)
-    }
-
-    /// Invalidate a chunk from cache and hot tier
-    ///
-    /// Called when a chunk is deleted to ensure tier consistency.
-    pub fn invalidate_chunk(&self, chunk_id: &ChunkId) {
-        if let Some(ref hybrid) = self.hybrid_searcher {
-            hybrid.invalidate_chunk_in_cache(chunk_id);
-        }
-    }
-
     /// Run compaction for a tenant regardless of thresholds
     ///
     /// Forces compaction to run even if no thresholds are exceeded.
@@ -1451,11 +1369,6 @@ impl PersistentStore {
             .as_ref()
             .ok_or_else(|| MemdError::StorageError("compaction disabled".into()))?;
 
-        let semantic_cache = self
-            .hybrid_searcher
-            .as_ref()
-            .and_then(|h| h.get_semantic_cache());
-
         runner.run_compaction(
             tenant_id,
             &self.metadata,
@@ -1463,8 +1376,6 @@ impl PersistentStore {
                 .as_ref()
                 .ok_or_else(|| MemdError::StorageError("dense searcher not available".into()))?,
             self.sparse_index.as_deref(),
-            semantic_cache,
-            self.hybrid_searcher.as_deref(),
         )
     }
 
@@ -1550,131 +1461,6 @@ impl PersistentStore {
             .unwrap_or(0);
 
         CompactionMetrics::gather(&self.metadata, hnsw_stats, segment_count, tenant_id)
-    }
-
-    /// Search with tier information for debugging
-    ///
-    /// Returns results along with timing breakdown and tier decisions.
-    /// Useful for MCP handlers that want debug info.
-    pub async fn search_with_tier_info(
-        &self,
-        tenant_id: &TenantId,
-        query: &str,
-        k: usize,
-    ) -> Result<(
-        Vec<(MemoryChunk, f32)>,
-        Option<TieredTiming>,
-        Option<Vec<TierDecision>>,
-    )> {
-        self.search_with_tier_info_at(tenant_id, query, k, None)
-            .await
-    }
-
-    pub async fn search_with_tier_info_at(
-        &self,
-        tenant_id: &TenantId,
-        query: &str,
-        k: usize,
-        ranking_time_ms: Option<i64>,
-    ) -> Result<(
-        Vec<(MemoryChunk, f32)>,
-        Option<TieredTiming>,
-        Option<Vec<TierDecision>>,
-    )> {
-        let total_start = Instant::now();
-
-        // Use hybrid search if available
-        if let Some(ref hybrid) = self.hybrid_searcher {
-            let fetch_k = k.saturating_mul(2).min(k.saturating_add(256));
-            let search_context = ranking_time_ms.map(|ranking_time_ms| SearchContext {
-                ranking_time_ms: Some(ranking_time_ms),
-                ..SearchContext::default()
-            });
-            let (hybrid_results, timing) = hybrid
-                .search_with_timing(tenant_id, query, fetch_k, search_context.clone())
-                .await?;
-
-            let mut chunk_by_id = HashMap::with_capacity(hybrid_results.len());
-            let mut rerank_meta = Vec::with_capacity(hybrid_results.len());
-            let mut base_results = Vec::with_capacity(hybrid_results.len());
-            for result in hybrid_results {
-                if let Some(chunk) = self
-                    .get_chunk_for_retrieval(tenant_id, &result.chunk_id, "search_with_tier_info")
-                    .await?
-                {
-                    if hybrid.rerank_enabled() {
-                        rerank_meta.push(ChunkMetaForRerank {
-                            chunk_id: result.chunk_id.clone(),
-                            rrf_score: result.final_score,
-                            timestamp_created: chunk.timestamp_created,
-                            project_id: chunk.project_id.as_option().map(str::to_string),
-                            chunk_type: chunk.chunk_type,
-                            text: Some(chunk.text.clone()),
-                        });
-                    }
-                    chunk_by_id.insert(result.chunk_id.clone(), chunk);
-                    base_results.push(result);
-                    if !hybrid.rerank_enabled() && base_results.len() >= k {
-                        break;
-                    }
-                }
-            }
-            let ranked = if hybrid.rerank_enabled() {
-                hybrid.rerank_with_metadata_for_query(
-                    query,
-                    base_results,
-                    rerank_meta,
-                    search_context,
-                )
-            } else {
-                base_results
-            };
-            let results = ranked
-                .into_iter()
-                .filter_map(|result| {
-                    chunk_by_id
-                        .get(&result.chunk_id)
-                        .cloned()
-                        .map(|chunk| (chunk, result.final_score))
-                })
-                .collect();
-            let feedback = self.list_feedback(tenant_id, query, 512).await?;
-            let mut results = apply_feedback_scores(
-                results,
-                query,
-                &feedback,
-                ranking_time_ms.unwrap_or_else(current_time_ms),
-                &FeedbackConfig::default(),
-            );
-            results.truncate(k);
-
-            // Extract tiered timing and decisions
-            let tiered_timing = timing.tiered.clone();
-
-            // Note: Tier decisions would require changes to HybridSearcher to expose
-            // the TieredSearchResult directly. For now, return None.
-            let tier_decisions = None;
-
-            // Record metrics
-            self.metrics.record_query(QueryMetrics::from_timings(
-                timing.dense_time,
-                timing.sparse_time + timing.fusion_time,
-                total_start.elapsed() - timing.total_time,
-                total_start.elapsed(),
-            ));
-
-            return Ok((results, tiered_timing, tier_decisions));
-        }
-
-        // Fallback
-        let results = match ranking_time_ms {
-            Some(ranking_time_ms) => {
-                self.search_with_scores_at(tenant_id, query, k, ranking_time_ms)
-                    .await?
-            }
-            None => self.search_with_scores(tenant_id, query, k).await?,
-        };
-        Ok((results, None, None))
     }
 
     fn discover_and_recover_tenants(&self) -> Result<()> {
@@ -2355,40 +2141,6 @@ impl Store for PersistentStore {
             }
         }
         Ok(chunks)
-    }
-
-    async fn search_with_tier_info(
-        &self,
-        tenant_id: &TenantId,
-        query: &str,
-        k: usize,
-    ) -> Result<(Vec<(MemoryChunk, f32)>, Option<TieredTiming>)> {
-        // Delegate to the specific method that returns timing info
-        let (results, timing, _) =
-            PersistentStore::search_with_tier_info(self, tenant_id, query, k).await?;
-        Ok((results, timing))
-    }
-
-    async fn search_with_tier_info_at(
-        &self,
-        tenant_id: &TenantId,
-        query: &str,
-        k: usize,
-        ranking_time_ms: i64,
-    ) -> Result<(Vec<(MemoryChunk, f32)>, Option<TieredTiming>)> {
-        let (results, timing, _) = PersistentStore::search_with_tier_info_at(
-            self,
-            tenant_id,
-            query,
-            k,
-            Some(ranking_time_ms),
-        )
-        .await?;
-        Ok((results, timing))
-    }
-
-    fn get_tiered_stats(&self) -> Option<TieredStats> {
-        PersistentStore::get_tiered_stats(self)
     }
 
     fn get_index_stats(&self, tenant_id: Option<&TenantId>) -> HashMap<String, IndexStats> {

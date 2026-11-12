@@ -19,8 +19,6 @@
 //!   tier != 'history' AND lifecycle_updated_at_ms < cutoff`).
 //! - Per-row `update_lifecycle` sets `tier=History` and bumps
 //!   `lifecycle_updated_at_ms` so a second run does not re-promote.
-//! - Cache bump follows the same "only when hybrid is Some" pattern
-//!   as `ExpirySweep`.
 //!
 //! Race considerations:
 //! - Unlike expiry, promotion here is idempotent on the target row
@@ -32,7 +30,6 @@
 //!   the next sweep's candidate list without corrupting state.
 
 use crate::error::Result;
-use crate::store::hybrid::HybridSearcher;
 use crate::store::metadata::MetadataStore;
 use crate::types::TenantId;
 
@@ -72,7 +69,6 @@ impl HistoryPromotion {
     pub fn run(
         &self,
         metadata: &impl MetadataStore,
-        hybrid: Option<&HybridSearcher>,
         tenant_id: &TenantId,
     ) -> Result<PromotionResult> {
         let now = current_time_ms();
@@ -97,12 +93,6 @@ impl HistoryPromotion {
             }
         }
 
-        if promoted > 0 {
-            if let Some(h) = hybrid {
-                h.bump_tenant_memory_version(tenant_id);
-            }
-        }
-
         Ok(PromotionResult {
             promoted_count: promoted,
         })
@@ -116,8 +106,6 @@ mod tests {
     //   - history_promotion_uses_lifecycle_updated_clock_not_created
     //   - history_promotion_is_idempotent_across_consecutive_runs
     //
-    // The cache-bump path is tested by the CompactionRunner integration
-    // once Task C5 lands.
     #[test]
     fn promotion_is_default_constructable_with_threshold() {
         let p = super::HistoryPromotion::new(30 * 86_400_000);

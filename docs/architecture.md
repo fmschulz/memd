@@ -51,7 +51,7 @@ Two surfaces, one shared dispatcher.
   in-band instead of only in logs.
 - **Operation surface.** `memd call <op> --json '{...}'` and the typed CLI
   subcommands dispatch to the same handlers: `memory`, `task`, `artifact`,
-  `context`, `code`, and `debug`. `memory.*` is intentionally flexible
+  and `context`. `memory.*` is intentionally flexible
   (chunks, code, docs, traces); `task.*` and `artifact.*` are stricter and
   preserve the recoverable structure of work.
 
@@ -61,14 +61,12 @@ Two surfaces, one shared dispatcher.
 | --- | --- | --- |
 | Dense (HNSW) | semantic recall | `mapping.bin` (bincode-packed), graph dump optional |
 | Sparse (BM25) | lexical recall | tantivy index, `open_or_create` |
-| Hot tier | recency boost | bounded LRU on top of segment store |
-| Semantic cache | repeat-query short-circuit | TTL-bounded, query-hash keyed |
 | Optional reranker | precision lift | feature-based by default; ONNX cross-encoder and MemReranker-4B opt-in |
 
-Dense and sparse run in parallel; the hybrid searcher fuses their results.
-Hot tier and semantic cache short-circuit recency-biased and repeat-shape
-queries. Rerankers are off the quickstart path — the built-in feature
-reranker handles ordinary agent traffic. See
+Hybrid queries retrieve dense candidates, then sparse candidates; the hybrid
+searcher fuses their results. When sparse retrieval returns no hits, dense
+scores pass through directly. The built-in feature reranker handles ordinary
+agent traffic. See
 [Optional rerankers](reranking.md) for the cross-encoder and MemReranker-4B
 paths.
 
@@ -81,9 +79,6 @@ paths.
   logical (tombstones) until maintenance compacts.
 - **Per-tenant WAL** (`wal.log`) fsynced before commit. Crash recovery
   replays WAL into segments.
-- **Structural code index** sits next to the metadata DB and serves
-  `code.*` definitions, references, callers, and imports without going
-  through the hybrid retriever.
 
 ### Concurrency and the warm worker
 

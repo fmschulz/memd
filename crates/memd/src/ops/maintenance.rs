@@ -497,7 +497,6 @@ pub fn handle_memory_metrics(
     info!(
         tenant_id = ?params.tenant_id,
         include_recent = params.include_recent,
-        include_tiered = params.include_tiered,
         "memory.metrics"
     );
 
@@ -520,11 +519,6 @@ pub fn handle_memory_metrics(
     if !params.include_recent {
         snapshot.recent_queries.clear();
         snapshot.token_usage.recent_tool_calls.clear();
-    }
-
-    // Clear tiered stats if not requested
-    if !params.include_tiered {
-        snapshot.tiered = Default::default();
     }
 
     format_mcp_response(&snapshot)
@@ -574,7 +568,6 @@ pub async fn handle_memory_compact<S: Store>(
             tombstones = result.tombstones_processed,
             hnsw_rebuilt = result.hnsw_rebuild.is_some(),
             segments_merged = result.segment_merge.is_some(),
-            cache_invalidated = result.cache_entries_invalidated,
             duration_ms = result.duration.as_millis(),
             "compaction completed (forced)"
         );
@@ -606,7 +599,6 @@ pub async fn handle_memory_compact<S: Store>(
                 "segments_merged": r.segments_merged,
                 "duration_ms": r.duration.as_millis()
                 })),
-                "cache_entries_invalidated": result.cache_entries_invalidated,
                 "duration_ms": result.duration.as_millis(),
                 "digest_artifacts": digest_artifacts
         }));
@@ -620,7 +612,6 @@ pub async fn handle_memory_compact<S: Store>(
                 tombstones = result.tombstones_processed,
                 hnsw_rebuilt = result.hnsw_rebuild.is_some(),
                 segments_merged = result.segment_merge.is_some(),
-                cache_invalidated = result.cache_entries_invalidated,
                 duration_ms = result.duration.as_millis(),
                 "compaction completed"
             );
@@ -652,7 +643,6 @@ pub async fn handle_memory_compact<S: Store>(
                     "segments_merged": r.segments_merged,
                     "duration_ms": r.duration.as_millis()
                 })),
-                "cache_entries_invalidated": result.cache_entries_invalidated,
                 "duration_ms": result.duration.as_millis(),
                 "digest_artifacts": digest_artifacts
             }))
@@ -1102,15 +1092,12 @@ pub struct ImportOmfParams {
 
 /// Handle memory.import_omf (Track F5).
 ///
-/// Returns both the formatted MCP response and a list of
-/// `PostWriteEvent`s — one per newly imported chunk — so the server
-/// dispatch arm can run structural indexing identically to how
-/// memory.add_batch + memory.supersede already do.
+/// Returns the formatted import result.
 pub async fn handle_memory_import_omf<S: Store>(
     store: &S,
     tenant_manager: Option<&TenantManager>,
     params: ImportOmfParams,
-) -> Result<(Value, Vec<PostWriteEvent>), McpError> {
+) -> Result<Value, McpError> {
     let ps = store.as_persistent().ok_or_else(|| {
         McpError::ToolError("memory.import_omf requires a persistent store".into())
     })?;
@@ -1125,16 +1112,10 @@ pub async fn handle_memory_import_omf<S: Store>(
         include_archived: params.include_archived.unwrap_or(true),
         fuzzy_threshold: params.fuzzy_threshold,
     };
-    let (result, imported) =
-        crate::omf::import::import_omf_with_events(ps, &tenant_id, &params.document, opts)
-            .await
-            .map_err(|e| McpError::ToolError(e.to_string()))?;
+    let result = crate::omf::import::import_omf(ps, &tenant_id, &params.document, opts)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
 
-    let tenant_id_str = tenant_id.to_string();
-    let events: Vec<PostWriteEvent> = imported
-        .into_iter()
-        .map(|ic| PostWriteEvent::from_imported_chunk(ic, &tenant_id_str))
-        .collect();
     store.record_usage_event(UsageEvent {
         op: UsageOp::ImportOmf,
         tenant: Some(tenant_id.to_string()),
@@ -1151,5 +1132,5 @@ pub async fn handle_memory_import_omf<S: Store>(
         "duplicates": result.duplicates,
         "skipped": result.skipped,
     }))?;
-    Ok((response, events))
+    Ok(response)
 }

@@ -201,8 +201,7 @@ Per-item project resolution:
 
 `memory.preview_omf_import(tenant_id, document, include_archived=true,
 fuzzy_threshold=None)` walks the same dedup + filter + trust-gate path
-as `import_omf` but never writes and never bumps
-`tenant_memory_version`. Returns:
+as `import_omf` without writing to the store. Returns:
 
 | Field | Type | Meaning |
 |-------|------|---------|

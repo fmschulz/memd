@@ -46,9 +46,7 @@ BEIR-style fixtures and compares it with versioned baselines.
 ```
 
 CI uses this workload as a regression tripwire. It is deliberately small and
-is not a leaderboard result. An older figure workflow is preserved under
-`evals/legacy/beir-2026-06/`; its missing candidate-source identity prevents
-use as current evidence.
+is not a leaderboard result.
 
 ### Task-memory behavior
 
@@ -83,13 +81,11 @@ available only as shadow telemetry.
 
 The CLI also exposes deterministic local checks:
 
-- `memd eval-memory-md --agent-usefulness` checks startup-context structure,
-  task-source state, scope health, duplicate suppression, and bounded machine
-  context.
+- `memd eval-memory-md` checks the useful-fact ratio and generated-wrapper
+  count, writing the evaluated context to `memory-eval.md`. Gold fixtures can
+  also require or forbid text and bound fragment and unrelated-item counts.
 - `memd eval-retrieval` evaluates known-useful retrieval queries against sparse
   judgments.
-- `memd eval-write-quality` checks admission, deduplication, retention,
-  lifecycle hiding, retrieval durability, and bounded store growth.
 
 ## Public benchmark contract
 
@@ -118,14 +114,5 @@ MemoryData uses matched `k` and token budgets. LongMemEval is untouched
 confirmatory evidence whose retrieval policy must be frozen from development
 benchmarks before its results are opened.
 
-## Historical material
-
-The former in-repository cross-system LoCoMo harness, figures, notebooks, and
-snapshots are archived under `evals/legacy/locomo-2026-05/`. They mixed old and
-new retrieval runs, lacked complete answer-model identity, used unmatched
-budgets, and did not bind results to exact binary bytes. They remain useful for
-historical inspection but must not support current product or manuscript
-claims.
-
-The complete active and retired surface map is in the repository's
+The active surface map is in the repository's
 `evals/bench/BENCHMARK_INVENTORY.md`.

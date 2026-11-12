@@ -85,18 +85,11 @@ async fn get_with_lifecycle_returns_none_for_deleted_chunk() {
 }
 
 #[tokio::test]
-async fn supersede_chunk_is_atomic_and_bumps_cache() {
+async fn supersede_chunk_is_atomic() {
     // End-to-end invariants for PersistentStore::supersede_chunk:
     // * the new chunk id differs from the old one,
     // * the old row transitions to Superseded with superseded_by = new,
     // * the new row carries supersedes = old,
-    // * the tenant memory version either stays at its (missing) default
-    //   when hybrid is disabled in the test harness, or strictly
-    //   increases when hybrid is enabled. Because `persistent_store`
-    //   disables hybrid, the accessor returns `None` and the assert
-    //   degrades to a no-op — the real bump path is covered by the
-    //   in-crate unit test that observes `tenant_memory_version` with a
-    //   seeded tiered searcher.
     let tmp = tempfile::tempdir().unwrap();
     let store = persistent_store(tmp.path()).await;
     let t = tenant("t");
@@ -104,11 +97,6 @@ async fn supersede_chunk_is_atomic_and_bumps_cache() {
         .add(MemoryChunk::new(t.clone(), "v1", ChunkType::Doc))
         .await
         .unwrap();
-    let version_before = store
-        .hybrid()
-        .and_then(|h| h.tenant_memory_version(&t))
-        .unwrap_or(0);
-
     let new_chunk = MemoryChunk::new(t.clone(), "v2", ChunkType::Doc);
     let new_id = store.supersede_chunk(&t, &old_id, new_chunk).await.unwrap();
     assert_ne!(new_id, old_id, "supersede_chunk must mint a fresh chunk id");
@@ -132,20 +120,6 @@ async fn supersede_chunk_is_atomic_and_bumps_cache() {
     assert_eq!(new_resolved.chunk.text, "v2");
     assert_eq!(new_resolved.status, ChunkStatus::Final);
     assert_eq!(new_resolved.lifecycle.supersedes.as_ref().unwrap(), &old_id);
-
-    // When hybrid is enabled this version strictly increases; otherwise
-    // both sides resolve to the `unwrap_or(0)` fallback and the check
-    // degrades to `0 >= 0`, which is still a signal that we never
-    // regress.
-    let version_after = store
-        .hybrid()
-        .and_then(|h| h.tenant_memory_version(&t))
-        .unwrap_or(0);
-    assert!(
-        version_after >= version_before,
-        "tenant memory version must not regress across supersede_chunk: \
-         before={version_before} after={version_after}"
-    );
 }
 
 #[tokio::test]

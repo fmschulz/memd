@@ -364,7 +364,6 @@ fn apply_search_variant(search_variant: SearchVariant, config: &mut PersistentSt
         SearchVariant::Bm25Only => {
             config.enable_dense_search = false;
             config.enable_hybrid_search = true;
-            config.enable_tiered_search = false;
             let hybrid = HybridConfig {
                 dense_k: 0,
                 enable_sparse: true,

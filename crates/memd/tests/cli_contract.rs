@@ -7,6 +7,72 @@ fn memd_bin() -> &'static str {
     env!("CARGO_BIN_EXE_memd")
 }
 
+#[test]
+fn eval_memory_md_default_preserves_project_memory() {
+    let project = tempfile::tempdir().unwrap();
+    let memory = project.path().join("memory.md");
+    std::fs::write(&memory, "existing project memory\n").unwrap();
+    let output = Command::new(memd_bin())
+        .args(["--in-memory", "eval-memory-md", "--tenant-id", "eval"])
+        .arg("--project-dir")
+        .arg(project.path())
+        .output()
+        .unwrap();
+
+    // An empty store fails the quality gate, but must not replace startup memory.
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("quality thresholds failed"));
+    assert_eq!(
+        std::fs::read_to_string(memory).unwrap(),
+        "existing project memory\n"
+    );
+    assert!(project.path().join("memory-eval.md").is_file());
+}
+
+#[test]
+fn eval_memory_md_rejects_project_memory_output() {
+    let project = tempfile::tempdir().unwrap();
+    let memory = project.path().join("memory.md");
+    std::fs::write(&memory, "existing project memory\n").unwrap();
+    let output = Command::new(memd_bin())
+        .args(["--in-memory", "eval-memory-md", "--tenant-id", "eval"])
+        .arg("--project-dir")
+        .arg(project.path())
+        .args(["--output", "memory.md"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("must not replace project memory.md"));
+    assert_eq!(
+        std::fs::read_to_string(memory).unwrap(),
+        "existing project memory\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn eval_memory_md_rejects_symlink_to_project_memory() {
+    let project = tempfile::tempdir().unwrap();
+    let memory = project.path().join("memory.md");
+    std::fs::write(&memory, "existing project memory\n").unwrap();
+    std::os::unix::fs::symlink(&memory, project.path().join("memory-eval.md")).unwrap();
+    let output = Command::new(memd_bin())
+        .args(["--in-memory", "eval-memory-md", "--tenant-id", "eval"])
+        .arg("--project-dir")
+        .arg(project.path())
+        .args(["--output", "memory-eval.md"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("must not replace project memory.md"));
+    assert_eq!(
+        std::fs::read_to_string(memory).unwrap(),
+        "existing project memory\n"
+    );
+}
+
 fn write_project_scope(project_dir: &std::path::Path) {
     std::fs::create_dir_all(project_dir.join(".memd")).unwrap();
     std::fs::write(
@@ -34,7 +100,6 @@ fn supported_cli_help_surfaces_resolve() {
         vec!["memory-md", "--help"],
         vec!["eval-memory-md", "--help"],
         vec!["eval-retrieval", "--help"],
-        vec!["eval-write-quality", "--help"],
         vec!["eval-outcome-ranking", "--help"],
         vec!["audit", "--help"],
         vec!["cleanup-plan", "--help"],

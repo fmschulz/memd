@@ -35,7 +35,6 @@ async fn sparse_only_store_searches_without_a_dense_index() {
         data_dir: dir.path().to_path_buf(),
         enable_dense_search: false,
         enable_hybrid_search: true,
-        enable_tiered_search: false,
         hybrid_config: Some(HybridConfig {
             dense_k: 0,
             enable_sparse: true,
@@ -70,7 +69,6 @@ fn sparse_only_store_fails_when_the_sparse_index_cannot_open() {
         data_dir: dir.path().to_path_buf(),
         enable_dense_search: false,
         enable_hybrid_search: true,
-        enable_tiered_search: false,
         hybrid_config: Some(HybridConfig {
             dense_k: 0,
             enable_sparse: true,
@@ -97,7 +95,6 @@ async fn sparse_only_read_only_missing_store_is_empty_without_creating_data_dir(
         read_only: true,
         enable_dense_search: false,
         enable_hybrid_search: true,
-        enable_tiered_search: false,
         hybrid_config: Some(HybridConfig {
             dense_k: 0,
             enable_sparse: true,
@@ -124,7 +121,6 @@ async fn promoted_candidate_is_refreshed_into_a_cold_dense_index() {
         data_dir: dir.path().to_path_buf(),
         enable_dense_search: false,
         enable_hybrid_search: false,
-        enable_tiered_search: false,
         backfill_hnsw_on_startup: false,
         ..Default::default()
     })
@@ -186,7 +182,6 @@ async fn dense_hybrid_search_never_returns_physically_indexed_candidate() {
         data_dir: dir.path().to_path_buf(),
         enable_dense_search: false,
         enable_hybrid_search: false,
-        enable_tiered_search: false,
         backfill_hnsw_on_startup: false,
         ..Default::default()
     })
@@ -203,7 +198,6 @@ async fn dense_hybrid_search_never_returns_physically_indexed_candidate() {
         None,
         HybridConfig {
             enable_sparse: false,
-            enable_tiered: false,
             ..Default::default()
         },
     );
@@ -1103,7 +1097,6 @@ async fn hybrid_search_skips_crc_corrupted_active_chunk() {
         None,
         HybridConfig {
             enable_sparse: false,
-            enable_tiered: false,
             reranker: RerankerConfig {
                 mode: RerankerMode::Feature,
                 ..Default::default()
@@ -1339,7 +1332,6 @@ async fn rerank_chunks_for_query_uses_hybrid_reranker_for_candidate_set() {
         None,
         HybridConfig {
             enable_sparse: false,
-            enable_tiered: false,
             reranker: RerankerConfig {
                 mode: RerankerMode::Feature,
                 rrf_weight: 0.0,
@@ -1393,56 +1385,6 @@ async fn rerank_chunks_for_query_uses_hybrid_reranker_for_candidate_set() {
     };
     assert_eq!(identity(&fixed), identity(&replayed));
     assert_ne!(identity(&fixed), identity(&later));
-}
-
-#[tokio::test]
-async fn fixed_ranking_time_matches_standard_and_tier_debug_paths() {
-    let (mut store, _dir) = make_test_store();
-    let tenant = make_tenant();
-    let ranking_time_ms = 1_700_000_000_000i64;
-    let embedder = Arc::new(MockEmbedder::new());
-    let dense = Arc::new(DenseSearcher::with_embedder(
-        embedder,
-        DenseSearchConfig {
-            persist: false,
-            ..Default::default()
-        },
-    ));
-    let hybrid = HybridSearcher::new(
-        Arc::clone(&dense),
-        None,
-        HybridConfig {
-            enable_sparse: false,
-            enable_tiered: false,
-            ..Default::default()
-        },
-    );
-    store.dense_searcher = Some(dense);
-    store.hybrid_searcher = Some(Arc::new(hybrid));
-
-    let mut older = make_chunk(&tenant, "car workshop classic restoration");
-    older.timestamp_created = ranking_time_ms - 30 * 24 * 60 * 60 * 1_000;
-    Store::add(&store, older).await.unwrap();
-    let mut newer = make_chunk(&tenant, "car workshop custom engineering");
-    newer.timestamp_created = ranking_time_ms - 24 * 60 * 60 * 1_000;
-    Store::add(&store, newer).await.unwrap();
-
-    let standard = store
-        .search_with_scores_at(&tenant, "car workshop", 1, ranking_time_ms)
-        .await
-        .unwrap();
-    let (debug, _) =
-        Store::search_with_tier_info_at(&store, &tenant, "car workshop", 1, ranking_time_ms)
-            .await
-            .unwrap();
-
-    let identity = |rows: &[(MemoryChunk, f32)]| {
-        rows.iter()
-            .map(|(chunk, score)| (chunk.chunk_id.clone(), score.to_bits()))
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(standard.len(), 1);
-    assert_eq!(identity(&standard), identity(&debug));
 }
 
 #[tokio::test]
@@ -1612,7 +1554,6 @@ async fn backfill_hnsw_for_cold_tenants_reindexes_stranded_chunks() {
         wal_checkpoint_interval: 0,
         enable_dense_search: true,
         enable_hybrid_search: true,
-        enable_tiered_search: false, // keep the test simple
         ..Default::default()
     };
     let mut store = PersistentStore::open(config).unwrap();
@@ -1629,7 +1570,6 @@ async fn backfill_hnsw_for_cold_tenants_reindexes_stranded_chunks() {
         None,
         HybridConfig {
             enable_sparse: false,
-            enable_tiered: false,
             ..Default::default()
         },
     );
@@ -1640,7 +1580,7 @@ async fn backfill_hnsw_for_cold_tenants_reindexes_stranded_chunks() {
     let texts = [
         "alpha lifecycle overlay prototype",
         "bravo wal recovery idempotent replay",
-        "charlie tiered cache invalidation",
+        "charlie lifecycle update",
     ];
     for text in &texts {
         Store::add(&store, make_chunk(&tenant, text)).await.unwrap();
@@ -1664,7 +1604,6 @@ async fn backfill_hnsw_for_cold_tenants_reindexes_stranded_chunks() {
         None,
         HybridConfig {
             enable_sparse: false,
-            enable_tiered: false,
             ..Default::default()
         },
     );
@@ -1730,7 +1669,6 @@ async fn backfill_hnsw_detects_staleness_via_per_chunk_membership_not_counts() {
         wal_checkpoint_interval: 0,
         enable_dense_search: true,
         enable_hybrid_search: true,
-        enable_tiered_search: false,
         ..Default::default()
     };
     let mut store = PersistentStore::open(config).unwrap();
@@ -1747,7 +1685,6 @@ async fn backfill_hnsw_detects_staleness_via_per_chunk_membership_not_counts() {
         None,
         HybridConfig {
             enable_sparse: false,
-            enable_tiered: false,
             ..Default::default()
         },
     );
@@ -1783,7 +1720,6 @@ async fn backfill_hnsw_detects_staleness_via_per_chunk_membership_not_counts() {
         None,
         HybridConfig {
             enable_sparse: false,
-            enable_tiered: false,
             ..Default::default()
         },
     );
@@ -1833,7 +1769,6 @@ async fn chunks_missing_embeddings_is_cache_aware() {
         data_dir: dir.path().to_path_buf(),
         enable_dense_search: true,
         enable_hybrid_search: false,
-        enable_tiered_search: false,
         ..Default::default()
     };
     let mut store = PersistentStore::open(config).unwrap();
@@ -1894,7 +1829,6 @@ async fn backfill_hnsw_skips_tenants_whose_index_is_already_warm() {
         wal_checkpoint_interval: 0,
         enable_dense_search: true,
         enable_hybrid_search: true,
-        enable_tiered_search: false,
         ..Default::default()
     };
     let mut store = PersistentStore::open(config).unwrap();
@@ -1911,7 +1845,6 @@ async fn backfill_hnsw_skips_tenants_whose_index_is_already_warm() {
         None,
         HybridConfig {
             enable_sparse: false,
-            enable_tiered: false,
             ..Default::default()
         },
     );
@@ -1975,215 +1908,6 @@ async fn next_segment_id_skips_over_orphan_directories() {
         "next_segment_id must skip over orphan dirs: got {} but orphan is {}",
         next_id,
         orphan_id
-    );
-}
-
-/// Codex Phase 3 coverage gap: verify that a task/artifact write
-/// bumps the per-tenant warm-tier `memory_version`. The public
-/// write path is `Store::add_task_artifact`, which threads through
-/// the same `hybrid.index_batch` site that `Phase 3.5` hooked with
-/// `bump_tenant_memory_version`. If a future refactor accidentally
-/// takes artifact writes off the hybrid indexing path, the cache
-/// invalidation invariant silently breaks — this test pins it.
-#[tokio::test]
-async fn add_task_artifact_bumps_tenant_memory_version() {
-    use crate::embeddings::MockEmbedder;
-    use crate::retrieval::{RerankerConfig, RerankerMode};
-    use crate::store::dense::{DenseSearchConfig, DenseSearcher};
-    use crate::store::hybrid::{HybridConfig, HybridSearcher};
-    use crate::task_memory::{build_task_projections, TaskArtifact};
-
-    let (store, _dir) = make_test_store_hybrid_tiered();
-    let hybrid = store.hybrid_searcher.as_ref().unwrap().clone();
-    let tenant = make_tenant();
-
-    // Seed the tiered searcher by issuing a search — this builds
-    // the per-tenant warm tier lazily, which is the version
-    // counter we want to observe.
-    store
-        .search_with_scores(&tenant, "seed probe", 1)
-        .await
-        .unwrap();
-
-    let before = hybrid
-        .tenant_memory_version(&tenant)
-        .expect("tiered searcher must exist after a search call");
-
-    // Drive a real task artifact write through Store::add_task_artifact.
-    let mut artifact = TaskArtifact::new_task_start(tenant.clone());
-    artifact.goal = Some("pin version-bump invariant for task writes".to_string());
-    let projections = build_task_projections(&artifact);
-    <PersistentStore as Store>::add_task_artifact(&store, artifact.clone(), projections)
-        .await
-        .unwrap();
-
-    let after = hybrid
-        .tenant_memory_version(&tenant)
-        .expect("tiered searcher must still exist");
-
-    assert!(
-        after > before,
-        "add_task_artifact must bump per-tenant memory_version: \
-         before={} after={}",
-        before,
-        after
-    );
-    // Suppress unused-assignment warning.
-    let _ = hybrid;
-
-    // Avoid dead-code warning on the `store` shadow below.
-    drop(store);
-
-    fn make_test_store_hybrid_tiered() -> (PersistentStore, tempfile::TempDir) {
-        let dir = tempdir().unwrap();
-        let config = PersistentStoreConfig {
-            data_dir: dir.path().to_path_buf(),
-            segment_max_chunks: 100,
-            wal_checkpoint_interval: 0,
-            enable_dense_search: true,
-            enable_hybrid_search: true,
-            enable_tiered_search: true,
-            ..Default::default()
-        };
-        let mut store = PersistentStore::open(config).unwrap();
-
-        let embedder = Arc::new(MockEmbedder::new());
-        let dense = Arc::new(DenseSearcher::with_embedder(
-            embedder,
-            DenseSearchConfig {
-                persist: false,
-                ..Default::default()
-            },
-        ));
-        let hybrid = HybridSearcher::new(
-            dense,
-            None,
-            HybridConfig {
-                enable_sparse: false,
-                enable_tiered: true,
-                reranker: RerankerConfig {
-                    mode: RerankerMode::Feature,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        );
-        store.hybrid_searcher = Some(Arc::new(hybrid));
-        (store, dir)
-    }
-}
-
-/// Track C6: `PersistentStore::update_lifecycle_if_exists` must
-/// bump `tenant_memory_version` when the row was found AND hybrid
-/// is enabled, and MUST NOT bump when the row didn't exist. Pins
-/// the cache-invalidation contract that `memory.set_expiry`
-/// depends on so a later refactor can't silently take it off the
-/// bump path.
-#[tokio::test]
-async fn update_lifecycle_if_exists_bumps_only_on_match() {
-    use crate::embeddings::MockEmbedder;
-    use crate::retrieval::{RerankerConfig, RerankerMode};
-    use crate::store::dense::{DenseSearchConfig, DenseSearcher};
-    use crate::store::hybrid::{HybridConfig, HybridSearcher};
-    use crate::types::LifecycleDelta;
-
-    fn hybrid_store() -> (PersistentStore, tempfile::TempDir) {
-        let dir = tempdir().unwrap();
-        let config = PersistentStoreConfig {
-            data_dir: dir.path().to_path_buf(),
-            segment_max_chunks: 100,
-            wal_checkpoint_interval: 0,
-            enable_dense_search: true,
-            enable_hybrid_search: true,
-            enable_tiered_search: true,
-            ..Default::default()
-        };
-        let mut store = PersistentStore::open(config).unwrap();
-        let embedder = Arc::new(MockEmbedder::new());
-        let dense = Arc::new(DenseSearcher::with_embedder(
-            embedder,
-            DenseSearchConfig {
-                persist: false,
-                ..Default::default()
-            },
-        ));
-        let hybrid = HybridSearcher::new(
-            dense,
-            None,
-            HybridConfig {
-                enable_sparse: false,
-                enable_tiered: true,
-                reranker: RerankerConfig {
-                    mode: RerankerMode::Feature,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        );
-        store.hybrid_searcher = Some(Arc::new(hybrid));
-        (store, dir)
-    }
-
-    let (store, _dir) = hybrid_store();
-    let hybrid = store.hybrid_searcher.as_ref().unwrap().clone();
-    let tenant = make_tenant();
-
-    // Seed the tiered warm tier so tenant_memory_version is live.
-    store
-        .search_with_scores(&tenant, "seed probe", 1)
-        .await
-        .unwrap();
-
-    // Add a chunk we can update.
-    let id = <PersistentStore as Store>::add(
-        &store,
-        MemoryChunk::new(tenant.clone(), "target", ChunkType::Doc),
-    )
-    .await
-    .unwrap();
-
-    let v_after_add = hybrid
-        .tenant_memory_version(&tenant)
-        .expect("tiered searcher must exist after an add");
-
-    // Matched update must return true AND bump the version.
-    let updated = store
-        .update_lifecycle_if_exists(
-            &tenant,
-            &id,
-            &LifecycleDelta {
-                expires_at_ms: Some(Some(1_i64)),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    assert!(updated, "existing row must report updated=true");
-    let v_after_update = hybrid.tenant_memory_version(&tenant).unwrap_or(0);
-    assert!(
-        v_after_update > v_after_add,
-        "matched update must bump tenant_memory_version: \
-         before={v_after_add} after={v_after_update}"
-    );
-
-    // Unmatched update must return false AND leave the version alone.
-    let bogus = ChunkId::new();
-    let updated = store
-        .update_lifecycle_if_exists(
-            &tenant,
-            &bogus,
-            &LifecycleDelta {
-                expires_at_ms: Some(Some(1_i64)),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    assert!(!updated, "nonexistent row must report updated=false");
-    let v_after_noop = hybrid.tenant_memory_version(&tenant).unwrap_or(0);
-    assert_eq!(
-        v_after_noop, v_after_update,
-        "nonexistent-row update must NOT bump tenant_memory_version"
     );
 }
 
@@ -2282,7 +2006,6 @@ async fn sparse_backfill_rebuilds_empty_index_for_active_tenant() {
         dense.clone(),
         Some(sparse.clone()),
         HybridConfig {
-            enable_tiered: false,
             reranker: RerankerConfig {
                 mode: RerankerMode::Feature,
                 ..Default::default()

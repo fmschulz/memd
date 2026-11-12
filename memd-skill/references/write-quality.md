@@ -43,7 +43,7 @@ in future `memory.md` refreshes. If startup context looks noisy or displayed
 facts are stale or duplicate repository content, inspect the selection with:
 
 ```bash
-memd eval-memory-md --project-dir . --agent-usefulness --min-useful-ratio 0.8 --max-generated-wrappers 0
+memd eval-memory-md --project-dir . --min-useful-ratio 0.8 --max-generated-wrappers 0
 memd memory-md --project-dir . --output memory.md --explain-output .memd/memory-explain.json
 memd audit --tenant-id "$TENANT_ID" --project-id "$PROJECT_ID" --format markdown
 memd report --strict

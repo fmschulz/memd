@@ -22,9 +22,8 @@ For write-quality expectations and cleanup safety, see the
 | `memd init` | Write `.memd/` scope files and CLI guardrail blocks. |
 | `memd doctor` | Diagnose binary discovery (incl. PATH-binary version skew), the resolved `--data-dir`, warm-worker reachability and worker-vs-CLI version skew, global agent rules, Claude Code SessionStart hook, and current project scope; `--strict` exits 2 when any check fails. |
 | `memd memory-md` | Refresh project-root `memory.md` with ranked fact libraries for session-start use. |
-| `memd eval-memory-md` | Gate startup-memory quality with `--min-useful-ratio`, `--max-generated-wrappers`, and optional `--agent-usefulness`. |
+| `memd eval-memory-md` | Gate startup-memory quality with `--min-useful-ratio` and `--max-generated-wrappers`; evaluate into `memory-eval.md`. |
 | `memd eval-retrieval` | Gate retrieval quality with precision, hit-rate, recall, and MRR thresholds. |
-| `memd eval-write-quality` | Gate write admission, duplicate reuse, storage growth, and retention compaction. |
 | `memd audit` | Report tenant/project storage shape, generated-wrapper noise, alias groups, unreadable active rows, and routine progress summaries that still lack an expiry; `--strict` exits 2 when `unreadable_active_chunks > 0`. |
 | `memd report` | Usefulness and self-diagnosis report from the usage ledger and store metadata; `--strict` exits 2 on any `[warn]` line. |
 | `memd cleanup-plan` | Generate a non-destructive cleanup approval report with archive/purge command previews and post-cleanup pass criteria. |
@@ -54,12 +53,11 @@ list of every physical chunk created by document splitting.
   bounded pool before display limits are applied. Exact IDs, consolidation
   lineage, and high-confidence topic matches appear in one section only, with
   the active project's section taking precedence.
-- `eval-memory-md --agent-usefulness` adds checks for an unreported scope
-  mismatch, continuation fragments, generated boilerplate actions, and more
-  than two unrelated machine-wide items. Duplicate counts and degraded-memory
-  warnings are reported as metrics. `--gold-file` runs these checks over local
+- `eval-memory-md` writes to `memory-eval.md` by default and rejects an output
+  that resolves to the project's `memory.md`. `--gold-file` evaluates local
   multi-project fixtures with required or forbidden text and fragment or
-  unrelated-item limits when specified.
+  unrelated-item limits when specified. Scope, duplicate, and degraded-memory
+  metrics remain available in the explanation output.
 - `eval-retrieval` gates with `--min-precision-at-k`,
   `--min-hit-rate-at-k`, `--min-known-recall-at-k`, and `--min-mrr`.
 - `eval-outcome-ranking --queries <jsonl> --report-json <path>` records normal
@@ -79,9 +77,6 @@ list of every physical chunk created by document splitting.
   linkage fields. Keep them opaque and non-sensitive. Retrieval episode tables
   store query hashes rather than raw queries, but an explicit
   `agent-context --log-dir` audit log includes the raw query summaries.
-- `eval-write-quality` gates with `--min-rejection-or-downgrade-rate`,
-  `--min-duplicate-reuse-rate`, `--max-total-chunks`, `--max-disk-bytes`, and
-  `--require-retention-compaction`.
 
 ## Experience
 
@@ -220,8 +215,8 @@ explicitly scoped lines continue.
 
 - `memory.add` — single chunk. The response contains the primary `chunk_id`
   and `stored_chunk_ids`, an ordered list of every stored split child with the
-  primary ID first. Code chunks with a real `source.path` are parsed into the
-  structural index.
+  primary ID first. Code chunks retain their text and source metadata for
+  ordinary memory retrieval.
 - `memory.add_batch` — many chunks in one call. Its `chunk_ids` array contains
   one primary ID per logical input, preserving input order. It does not expose
   split-child IDs; use individual `memory.add` calls when physical write
@@ -276,12 +271,6 @@ forged through `artifact.create`.
 adds `budget_info`; `include_artifact: false` and `include_matched_text: false`
 return only identifiers, summaries, ranking, and trust/grounding metadata so a
 caller can fetch selected records with `artifact.get`.
-
-### `code.*` — structural navigation
-
-`code.find_definition`, `code.find_references`, `code.find_callers`,
-`code.find_imports`. Index source by calling `memory.add` with `type = "code"`
-and a real `source.path`.
 
 ### `context.*` — summary-first retrieval
 

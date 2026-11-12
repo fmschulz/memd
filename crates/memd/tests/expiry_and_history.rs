@@ -258,7 +258,7 @@ async fn expiry_sweep_marks_rows_expired() {
 
     let sweep = ExpirySweep::new();
     let result = sweep
-        .run(server.store().metadata(), server.store().hybrid(), &tenant)
+        .run(server.store().metadata(), &tenant)
         .expect("sweep ok");
     assert_eq!(result.expired_count, 1);
 
@@ -478,12 +478,12 @@ async fn expiry_sweep_is_idempotent_across_consecutive_runs() {
 
     let sweep = ExpirySweep::new();
     let r1 = sweep
-        .run(server.store().metadata(), server.store().hybrid(), &tenant)
+        .run(server.store().metadata(), &tenant)
         .expect("first sweep ok");
     assert_eq!(r1.expired_count, 2);
 
     let r2 = sweep
-        .run(server.store().metadata(), server.store().hybrid(), &tenant)
+        .run(server.store().metadata(), &tenant)
         .expect("second sweep ok");
     assert_eq!(
         r2.expired_count, 0,
@@ -532,7 +532,7 @@ async fn history_promotion_uses_lifecycle_updated_clock_not_created() {
 
     let promo = HistoryPromotion::new(30 * 86_400_000);
     let r1 = promo
-        .run(server.store().metadata(), server.store().hybrid(), &tenant)
+        .run(server.store().metadata(), &tenant)
         .expect("run ok");
     assert_eq!(
         r1.promoted_count, 0,
@@ -557,7 +557,7 @@ async fn history_promotion_uses_lifecycle_updated_clock_not_created() {
         .expect("backdate ok");
 
     let r2 = promo
-        .run(server.store().metadata(), server.store().hybrid(), &tenant)
+        .run(server.store().metadata(), &tenant)
         .expect("run ok");
     assert_eq!(
         r2.promoted_count, 1,
@@ -613,12 +613,12 @@ async fn history_promotion_is_idempotent_across_consecutive_runs() {
 
     let promo = HistoryPromotion::new(30 * 86_400_000);
     let r1 = promo
-        .run(server.store().metadata(), server.store().hybrid(), &tenant)
+        .run(server.store().metadata(), &tenant)
         .expect("run ok");
     assert_eq!(r1.promoted_count, 1);
 
     let r2 = promo
-        .run(server.store().metadata(), server.store().hybrid(), &tenant)
+        .run(server.store().metadata(), &tenant)
         .expect("run ok");
     assert_eq!(
         r2.promoted_count, 0,
@@ -800,7 +800,7 @@ async fn history_promotion_also_demotes_long_stale_expired_rows() {
 
     let promo = HistoryPromotion::new(30 * 86_400_000);
     let result = promo
-        .run(server.store().metadata(), server.store().hybrid(), &tenant)
+        .run(server.store().metadata(), &tenant)
         .expect("run ok");
     assert_eq!(result.promoted_count, 1);
 
@@ -896,7 +896,7 @@ async fn compaction_runs_expiry_sweep_and_history_promotion() {
     );
 
     let result = runner
-        .run_compaction(&tenant, store.metadata(), &dense, None, None, None)
+        .run_compaction(&tenant, store.metadata(), &dense, None)
         .expect("run_compaction ok");
 
     assert_eq!(result.expired_count, 1, "ExpirySweep must have fired");
@@ -989,7 +989,7 @@ async fn compaction_skips_sweeps_when_disabled_via_config() {
     );
 
     let result = runner
-        .run_compaction(&tenant, store.metadata(), &dense, None, None, None)
+        .run_compaction(&tenant, store.metadata(), &dense, None)
         .expect("run_compaction ok");
 
     assert_eq!(result.expired_count, 0, "sweep must not run when disabled");
@@ -1006,8 +1006,7 @@ async fn compaction_skips_sweeps_when_disabled_via_config() {
     assert_eq!(r1.status, ChunkStatus::Final);
 }
 
-/// Track C6: `memory.set_expiry` updates the overlay and bumps the
-/// tenant cache version.
+/// Track C6: `memory.set_expiry` updates the overlay.
 #[tokio::test]
 async fn memory_set_expiry_updates_overlay() {
     let (server, _tmp) = test_server().await;
@@ -1211,23 +1210,8 @@ async fn memory_set_expiry_refuses_cross_tenant_access() {
     );
 }
 
-/// Cache-bump contract: `PersistentStore::update_lifecycle_if_exists`
-/// must advance `tenant_memory_version` when hybrid is enabled AND
-/// the row existed. Exercises the bump path via the same code path
-/// `memory.set_expiry` uses, but on a PersistentStore directly so the
-/// bump is observable (the MCP harness test_server disables hybrid).
 #[tokio::test]
-async fn update_lifecycle_if_exists_bumps_tenant_memory_version() {
-    // This test needs hybrid search enabled. PersistentStore's hybrid
-    // init requires a working DenseSearcher, and the production init
-    // path can't reach the model in tempdir-backed tests. Skip when
-    // real hybrid init isn't available. The underlying set_expiry
-    // bump is already covered at the unit level in persistent.rs's
-    // lib tests once the end-to-end harness is ready.
-    //
-    // We assert the failing return value when the chunk doesn't
-    // exist instead, which is the observable half of the contract
-    // that survives on the stripped-down integration harness:
+async fn update_lifecycle_if_exists_reports_missing_row() {
     use memd::store::persistent::{PersistentStore, PersistentStoreConfig};
     use memd::types::LifecycleDelta;
 
@@ -1241,7 +1225,7 @@ async fn update_lifecycle_if_exists_bumps_tenant_memory_version() {
     let store = PersistentStore::open(cfg).expect("persistent store");
     let tenant = TenantId::new("t").expect("valid tenant id");
 
-    // No row under this chunk_id => returns false with no bump.
+    // No row under this chunk_id => returns false.
     let bogus = ChunkId::new();
     let updated = store
         .update_lifecycle_if_exists(

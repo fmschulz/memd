@@ -624,11 +624,6 @@ async fn preview_omf_returns_counts_without_writing() {
         .len();
     assert_eq!(pre_rows, 1);
 
-    let version_before = ps
-        .hybrid()
-        .and_then(|h| h.tenant_memory_version(&tenant("t")))
-        .unwrap_or(0);
-
     let preview = preview_omf_import(ps, &tenant("t"), &doc, ImportOptions::default())
         .await
         .unwrap();
@@ -653,19 +648,6 @@ async fn preview_omf_returns_counts_without_writing() {
         .unwrap()
         .len();
     assert_eq!(post_rows, pre_rows);
-
-    // And: tenant memory version must not have advanced. When hybrid is
-    // disabled (test_server harness), both sides resolve via the
-    // `unwrap_or(0)` fallback and this still signals that preview didn't
-    // reach a bump site; when hybrid is enabled the equality is strict.
-    let version_after = ps
-        .hybrid()
-        .and_then(|h| h.tenant_memory_version(&tenant("t")))
-        .unwrap_or(0);
-    assert_eq!(
-        version_before, version_after,
-        "preview must not bump tenant_memory_version"
-    );
 }
 
 #[tokio::test]
@@ -1967,7 +1949,7 @@ async fn preview_omf_import_matches_real_import_on_malformed_supersession_refs()
 //
 // The v0.8.0 handoff flagged a broader parity audit: the only existing
 // test (above) pinned `chunk_id = not-a-uuid`. Any future parse-time
-// check added to `import_omf_with_events` without the matching
+// check added to `import_omf` without the matching
 // `preview_omf_import` branch would silently break the "preview
 // predicts import" contract, producing `to_import = N` for docs the
 // real import will reject.

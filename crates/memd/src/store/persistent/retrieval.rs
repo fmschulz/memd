@@ -176,27 +176,6 @@ impl PersistentStore {
                 total_start.elapsed(),
             ));
 
-            // Record tiered metrics if tiered search was used
-            if let Some(tiered_timing) = timing.tiered.as_ref() {
-                self.metrics.record_tiered_query(TieredQueryMetrics {
-                    source_tier: if tiered_timing.cache_lookup_ms > 0
-                        && tiered_timing.hot_tier_ms == 0
-                        && tiered_timing.warm_tier_ms == 0
-                    {
-                        "cache".to_string()
-                    } else if tiered_timing.hot_tier_ms > 0 {
-                        "hot".to_string()
-                    } else {
-                        "warm".to_string()
-                    },
-                    cache_lookup_ms: tiered_timing.cache_lookup_ms,
-                    hot_tier_ms: tiered_timing.hot_tier_ms,
-                    warm_tier_ms: tiered_timing.warm_tier_ms,
-                    cache_hit: tiered_timing.warm_tier_ms == 0 && tiered_timing.hot_tier_ms == 0,
-                    hot_tier_hit: tiered_timing.hot_tier_ms > 0 && tiered_timing.warm_tier_ms == 0,
-                });
-            }
-
             return Ok(results);
         }
 
@@ -288,7 +267,7 @@ impl PersistentStore {
             }
         }
 
-        // Remove from hybrid/sparse index and invalidate cache/hot tier
+        // Remove from hybrid/sparse index
         if let Some(ref hybrid) = self.hybrid_searcher {
             if let Err(e) = hybrid.delete_chunk(tenant_id, chunk_id) {
                 warn!(
@@ -298,9 +277,6 @@ impl PersistentStore {
                 );
             }
         }
-
-        // Explicit cache/tier invalidation (hybrid.delete_chunk also does this)
-        self.invalidate_chunk(chunk_id);
 
         info!(tenant_id = %tenant_str, chunk_id = %chunk_id, "chunk deleted");
         Ok(true)

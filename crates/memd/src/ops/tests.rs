@@ -287,7 +287,6 @@ async fn search_empty_store() {
         project_id: None,
         k: 10,
         filters: None,
-        debug_tiers: None,
         mode: None,
         include_superseded: None,
         include_expired: None,
@@ -319,7 +318,6 @@ async fn search_rejects_k_zero() {
         project_id: None,
         k: 0,
         filters: None,
-        debug_tiers: None,
         mode: None,
         include_superseded: None,
         include_expired: None,
@@ -348,7 +346,6 @@ async fn search_rejects_k_above_max() {
         project_id: None,
         k: 101,
         filters: None,
-        debug_tiers: None,
         mode: None,
         include_superseded: None,
         include_expired: None,
@@ -571,7 +568,6 @@ async fn add_and_search() {
         project_id: None,
         k: 10,
         filters: None,
-        debug_tiers: None,
         mode: None,
         include_superseded: None,
         include_expired: None,
@@ -720,7 +716,7 @@ async fn explicit_supersede_returns_every_replacement_chunk_id() {
         ))
         .await
         .unwrap();
-    let (result, event) = handle_memory_supersede(
+    let result = handle_memory_supersede(
         &store,
         None,
         SupersedeParams {
@@ -739,8 +735,6 @@ async fn explicit_supersede_returns_every_replacement_chunk_id() {
     let response: Value = parse_tool_payload(&result);
     let stored_ids = response["new_stored_chunk_ids"].as_array().unwrap();
     assert!(stored_ids.len() > 1);
-    let event_chunk_id = event.chunk_id.to_string();
-    assert_eq!(stored_ids[0].as_str(), Some(event_chunk_id.as_str()));
     assert_eq!(response["new_chunk_id"], stored_ids[0]);
 }
 
@@ -1314,7 +1308,6 @@ async fn search_filters_by_project_id() {
             project_id: Some("project_a".to_string()),
             k: 10,
             filters: None,
-            debug_tiers: None,
             mode: None,
             include_superseded: None,
             include_expired: None,
@@ -1382,7 +1375,6 @@ async fn search_filters_by_types() {
                 episode_id: None,
                 time_range: None,
             }),
-            debug_tiers: None,
             mode: None,
             include_superseded: None,
             include_expired: None,
@@ -1416,17 +1408,17 @@ async fn search_filters_by_time_range() {
 
     let mut old_chunk = MemoryChunk::new(tenant_id.clone(), "old chunk", ChunkType::Doc);
     old_chunk.timestamp_created =
-        crate::structural::parse_iso_datetime("2026-01-01T00:00:00Z").unwrap();
+        crate::omf::time::parse_iso_datetime("2026-01-01T00:00:00Z").unwrap();
     store.add(old_chunk).await.unwrap();
 
     let mut middle_chunk = MemoryChunk::new(tenant_id.clone(), "middle chunk", ChunkType::Doc);
     middle_chunk.timestamp_created =
-        crate::structural::parse_iso_datetime("2026-01-15T12:00:00Z").unwrap();
+        crate::omf::time::parse_iso_datetime("2026-01-15T12:00:00Z").unwrap();
     store.add(middle_chunk).await.unwrap();
 
     let mut new_chunk = MemoryChunk::new(tenant_id, "new chunk", ChunkType::Doc);
     new_chunk.timestamp_created =
-        crate::structural::parse_iso_datetime("2026-02-01T00:00:00Z").unwrap();
+        crate::omf::time::parse_iso_datetime("2026-02-01T00:00:00Z").unwrap();
     store.add(new_chunk).await.unwrap();
 
     let result = handle_memory_search(
@@ -1444,7 +1436,6 @@ async fn search_filters_by_time_range() {
                     to: Some("2026-01-20T23:59:59Z".to_string()),
                 }),
             }),
-            debug_tiers: None,
             mode: None,
             include_superseded: None,
             include_expired: None,
@@ -1528,7 +1519,6 @@ async fn search_filters_by_episode_id() {
                 episode_id: Some("ep1".to_string()),
                 time_range: None,
             }),
-            debug_tiers: None,
             mode: None,
             include_superseded: None,
             include_expired: None,
@@ -1606,7 +1596,6 @@ async fn search_returns_citation_with_provenance_and_offsets() {
             project_id: None,
             k: 10,
             filters: None,
-            debug_tiers: None,
             mode: None,
             include_superseded: None,
             include_expired: None,
@@ -1677,7 +1666,6 @@ async fn search_repair_loop_recovers_result() {
             project_id: None,
             k: 5,
             filters: None,
-            debug_tiers: None,
             mode: None,
             include_superseded: None,
             include_expired: None,
@@ -2073,7 +2061,6 @@ async fn invalid_tenant_id() {
         project_id: None,
         k: 10,
         filters: None,
-        debug_tiers: None,
         mode: None,
         include_superseded: None,
         include_expired: None,
@@ -2165,7 +2152,6 @@ async fn tenant_isolation() {
         project_id: None,
         k: 10,
         filters: None,
-        debug_tiers: None,
         mode: None,
         include_superseded: None,
         include_expired: None,
@@ -2184,61 +2170,6 @@ async fn tenant_isolation() {
     let text = result["content"][0]["text"].as_str().unwrap();
     let search_response: SearchResult = serde_json::from_str(text).unwrap();
     assert!(search_response.results.is_empty());
-}
-
-#[tokio::test]
-async fn search_with_debug_tiers() {
-    let store = make_store();
-
-    // Add a chunk
-    let add_params = AddParams {
-        tenant_id: "test".to_string(),
-        text: "debug tier test".to_string(),
-        chunk_type: "doc".to_string(),
-        project_id: None,
-        episode_id: None,
-        source: None,
-        tags: vec![],
-        expires_at_ms: None,
-        review_after_ms: None,
-
-        mode: None,
-        supersede_near_duplicates: None,
-        event_time_ms: None,
-    };
-
-    handle_memory_add(&store, None, add_params).await.unwrap();
-
-    // Search with debug_tiers enabled
-    let search_params = SearchParams {
-        tenant_id: "test".to_string(),
-        query: "debug".to_string(),
-        project_id: None,
-        k: 10,
-        filters: None,
-        debug_tiers: Some(true),
-        mode: None,
-        include_superseded: None,
-        include_expired: None,
-        include_history: None,
-        oversample_factor: None,
-        expand_event_siblings: false,
-        compact: false,
-        token_budget: None,
-        include_text: None,
-        include_artifact: None,
-        suppress_usage_event: false,
-        ..Default::default()
-    };
-
-    let result = handle_memory_search(&store, search_params).await.unwrap();
-    let text = result["content"][0]["text"].as_str().unwrap();
-    let search_response: SearchResult = serde_json::from_str(text).unwrap();
-
-    // MemoryStore doesn't have tiered support, so tier_info should be None
-    // and source_tier on results should be None (since timing is None)
-    assert_eq!(search_response.results.len(), 1);
-    assert!(search_response.tier_info.is_none());
 }
 
 #[tokio::test]
@@ -3032,7 +2963,6 @@ async fn memory_search_project_scope_spans_tenants_for_raw_chunks() {
             project_id: Some("advanced_benchmark".to_string()),
             k: 5,
             filters: None,
-            debug_tiers: None,
             mode: None,
             include_superseded: None,
             include_expired: None,
@@ -3889,7 +3819,6 @@ async fn task_start_stores_canonical_artifact_and_projection_chunks() {
             project_id: Some("proj_alpha".to_string()),
             k: 10,
             filters: None,
-            debug_tiers: None,
             mode: None,
             include_superseded: None,
             include_expired: None,
@@ -3972,7 +3901,6 @@ async fn task_finish_stores_failed_and_validation_projections() {
             project_id: Some("proj_alpha".to_string()),
             k: 10,
             filters: None,
-            debug_tiers: None,
             mode: None,
             include_superseded: None,
             include_expired: None,

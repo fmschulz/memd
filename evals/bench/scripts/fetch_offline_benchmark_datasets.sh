@@ -22,15 +22,6 @@ Currently fetched (required):
 Optionally fetched (skipped silently if absent from the pinned commit mirror):
   - beir_trec-covid.json (~140 MB, TREC-COVID 2020 corpus)
 
-Suite-specific datasets NOT fetched by this script (scifact / nfcorpus
-suites expect them present locally when you run --suite scifact or
---suite nfcorpus):
-  - beir_scifact_fixed.json
-  - beir_nfcorpus.json
-
-If you already have a local converted copy of any unfetched dataset,
-place it under evals/bench/datasets/retrieval/ with the filename listed
-above.
 EOF
 }
 
@@ -85,8 +76,4 @@ try_fetch_one "beir_trec-covid.json"
 cat <<'EOF'
 
 Downloaded mirrored offline benchmark datasets.
-
-Optional datasets NOT fetched by this script (place manually when needed):
-  evals/bench/datasets/retrieval/beir_scifact_fixed.json  (suite: scifact)
-  evals/bench/datasets/retrieval/beir_nfcorpus.json       (suite: nfcorpus)
 EOF

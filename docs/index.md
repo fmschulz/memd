@@ -29,7 +29,7 @@ private CLI-managed warm worker driven by ordinary CLI commands.
 | **Raw memory** | Store operational facts and index selected source material for retrieval | `memd add`, `memd search`, `memd get`, `memd stats` |
 | **Experience cases** | Preserve attempts and checks; return applicable current lessons or an explicit abstention | `memd experience note`, `find`, `get`, `check`, `export`, `import` |
 | **Agent context** | Bounded pre-work context + JSON audit logs | `memd agent-context --output .memd/context.md` |
-| **Startup memory** | Refresh project `memory.md` with scope, health warnings, and ranked facts filtered against repository documents | `memd memory-md`, `memd eval-memory-md --agent-usefulness` |
+| **Startup memory** | Refresh project `memory.md` with scope, health warnings, and ranked facts filtered against repository documents | `memd memory-md`, `memd eval-memory-md` |
 | **Usefulness report** | Usage-ledger and store self-diagnosis for growth, learning, retrieval, and warnings | `memd report --strict` |
 | **Warm CLI** | Keep store/index state hot for repeated local calls | `memd warm start`, `memd warm status` |
 | **Batch CLI** | Many structured operations in one loaded process | `memd batch --jsonl requests.jsonl` |

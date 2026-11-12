@@ -441,63 +441,12 @@ async fn eval_memory_md_passes_actionable_fixture() {
             tenant_id: Some("memory_md_eval_tenant".to_string()),
             project_id: Some("memory_md_eval_project".to_string()),
             project_dir: dir.path().to_path_buf(),
-            output: PathBuf::from("memory.md"),
+            output: PathBuf::from("memory-eval.md"),
             project_limit: 10,
             candidate_k: 20,
             top_n: 10,
             min_useful_ratio: 0.8,
             max_generated_wrappers: 0,
-            agent_usefulness: false,
-            gold_file: None,
-        },
-    )
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
-async fn eval_memory_md_agent_usefulness_passes_synthetic_fixture() {
-    let store = MemoryStore::new();
-    let tenant = TenantId::new("memory_md_agent_eval_tenant").unwrap();
-    let project = ProjectId::from("memory_md_agent_eval_project");
-    store
-        .add(
-            MemoryChunk::new(
-                tenant.clone(),
-                "Project architecture configuration deployment key decisions tradeoffs: \
-                     Validation: startup state fixture has concrete work. \
-                     Agent action: Verify the source-backed next action before resuming.",
-                ChunkType::Summary,
-            )
-            .with_project(project.clone())
-            .with_tags(vec!["kind:finish".to_string(), "priority:9".to_string()]),
-        )
-        .await
-        .unwrap();
-
-    let dir = tempdir().unwrap();
-    let tasks_dir = dir.path().join("tasks");
-    std::fs::create_dir_all(&tasks_dir).unwrap();
-    std::fs::write(
-        tasks_dir.join("todo.md"),
-        "# Synthetic Work\n\n- [ ] verify startup state fixture\n",
-    )
-    .unwrap();
-
-    run_cli(
-        &store,
-        None,
-        CliCommand::EvalMemoryMd {
-            tenant_id: Some("memory_md_agent_eval_tenant".to_string()),
-            project_id: Some("memory_md_agent_eval_project".to_string()),
-            project_dir: dir.path().to_path_buf(),
-            output: PathBuf::from("memory.md"),
-            project_limit: 10,
-            candidate_k: 20,
-            top_n: 10,
-            min_useful_ratio: 0.8,
-            max_generated_wrappers: 0,
-            agent_usefulness: true,
             gold_file: None,
         },
     )
@@ -534,6 +483,8 @@ async fn eval_memory_md_gold_file_passes_synthetic_project() {
     )
     .unwrap();
     let gold_path = dir.path().join("gold.json");
+    let memory_path = dir.path().join("memory.md");
+    std::fs::write(&memory_path, "existing project memory\n").unwrap();
     std::fs::write(
         &gold_path,
         format!(
@@ -561,18 +512,21 @@ async fn eval_memory_md_gold_file_passes_synthetic_project() {
             tenant_id: Some("memory_md_gold_eval_tenant".to_string()),
             project_id: Some("memory_md_gold_eval_project".to_string()),
             project_dir: dir.path().to_path_buf(),
-            output: PathBuf::from("memory.md"),
+            output: PathBuf::from("memory-eval.md"),
             project_limit: 10,
             candidate_k: 20,
             top_n: 10,
             min_useful_ratio: 0.8,
             max_generated_wrappers: 0,
-            agent_usefulness: true,
             gold_file: Some(gold_path),
         },
     )
     .await
     .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(memory_path).unwrap(),
+        "existing project memory\n"
+    );
 }
 
 #[tokio::test]

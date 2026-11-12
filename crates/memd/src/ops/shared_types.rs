@@ -27,9 +27,6 @@ pub struct SearchParams {
     pub k: usize,
     #[serde(default)]
     pub filters: Option<SearchFilters>,
-    /// Enable debug output showing tier source for each result
-    #[serde(default)]
-    pub debug_tiers: Option<bool>,
     #[serde(default)]
     pub mode: Option<QueryMode>,
     /// Return chunks with `status=Superseded` in results instead of hiding
@@ -144,7 +141,6 @@ impl Default for SearchParams {
             project_id: None,
             k: default_k(),
             filters: None,
-            debug_tiers: None,
             mode: None,
             include_superseded: None,
             include_expired: None,
@@ -904,9 +900,6 @@ pub struct MetricsParams {
     pub tenant_id: Option<String>,
     #[serde(default = "default_true")]
     pub include_recent: bool,
-    /// Include tiered stats (cache, hot tier, promotions) - default true
-    #[serde(default = "default_true")]
-    pub include_tiered: bool,
 }
 
 fn default_verify_k() -> usize {
@@ -1055,94 +1048,8 @@ fn default_true() -> bool {
     true
 }
 
-fn default_depth() -> u32 {
-    1
-}
-
-/// Parameters for code.find_definition
-#[derive(Debug, Deserialize)]
-pub struct FindDefinitionParams {
-    #[serde(default)]
-    pub tenant_id: String,
-    pub name: String,
-    #[serde(default)]
-    pub project_id: Option<String>,
-}
-
-/// Parameters for code.find_references
-#[derive(Debug, Deserialize)]
-pub struct FindReferencesParams {
-    #[serde(default)]
-    pub tenant_id: String,
-    pub name: String,
-    #[serde(default)]
-    pub project_id: Option<String>,
-}
-
-/// Parameters for code.find_callers
-#[derive(Debug, Deserialize)]
-pub struct FindCallersParams {
-    #[serde(default)]
-    pub tenant_id: String,
-    pub name: String,
-    #[serde(default = "default_depth")]
-    pub depth: u32,
-    #[serde(default)]
-    pub project_id: Option<String>,
-}
-
-/// Parameters for code.find_imports
-#[derive(Debug, Deserialize)]
-pub struct FindImportsParams {
-    #[serde(default)]
-    pub tenant_id: String,
-    pub module: String,
-    #[serde(default)]
-    pub project_id: Option<String>,
-}
-
 fn default_limit() -> usize {
     50
-}
-
-/// Parameters for debug.find_tool_calls
-#[derive(Debug, Deserialize)]
-pub struct FindToolCallsParams {
-    #[serde(default)]
-    pub tenant_id: String,
-    #[serde(default)]
-    pub tool_name: Option<String>,
-    #[serde(default)]
-    pub session_id: Option<String>,
-    #[serde(default)]
-    pub time_from: Option<String>,
-    #[serde(default)]
-    pub time_to: Option<String>,
-    #[serde(default)]
-    pub errors_only: bool,
-    #[serde(default = "default_limit")]
-    pub limit: usize,
-}
-
-/// Parameters for debug.find_errors
-#[derive(Debug, Deserialize)]
-pub struct FindErrorsParams {
-    #[serde(default)]
-    pub tenant_id: String,
-    #[serde(default)]
-    pub error_signature: Option<String>,
-    #[serde(default)]
-    pub function_name: Option<String>,
-    #[serde(default)]
-    pub file_path: Option<String>,
-    #[serde(default)]
-    pub time_from: Option<String>,
-    #[serde(default)]
-    pub time_to: Option<String>,
-    #[serde(default = "default_limit")]
-    pub limit: usize,
-    #[serde(default = "default_true")]
-    pub include_frames: bool,
 }
 
 // ---------- Response Types ----------
@@ -1163,9 +1070,6 @@ pub struct SearchResult {
     pub budget_info: Option<BudgetInfo>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub scope_expansion: Option<ScopeExpansion>,
-    /// Tier debug info (only present when debug_tiers=true)
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub tier_info: Option<TierDebugInfo>,
     /// Repair-loop diagnostics when a fallback query rewrite was attempted
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub repair_info: Option<RepairInfo>,
@@ -1182,23 +1086,6 @@ pub struct RankingPolicyInfo {
     pub mode: RankingPolicyMode,
     pub candidate_count: usize,
     pub shadow_order_changed: bool,
-}
-
-/// Debug information about tier performance
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TierDebugInfo {
-    /// Primary source tier ("cache" | "hot" | "warm" | "hybrid")
-    pub source_tier: String,
-    /// Whether cache was hit
-    pub cache_hit: bool,
-    /// Whether hot tier returned results
-    pub hot_tier_hit: bool,
-    /// Cache lookup latency (ms)
-    pub cache_lookup_ms: u64,
-    /// Hot tier search latency (ms)
-    pub hot_tier_ms: u64,
-    /// Warm tier search latency (ms)
-    pub warm_tier_ms: u64,
 }
 
 /// Diagnostics for query repair behavior.
@@ -1292,7 +1179,7 @@ pub struct ChunkResult {
     pub grounding_refs: Vec<GroundingRef>,
     #[serde(default)]
     pub verification_hint: VerificationHint,
-    /// Which tier this result came from (only present when debug_tiers=true)
+    /// Context tier label, when the result comes from a context profile
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub source_tier: Option<String>,
     /// Canonical artifact linked to this projection chunk when available.
@@ -1766,123 +1653,4 @@ pub struct CompactionStatsResult {
     pub hnsw_index_size: usize,
     /// Whether compaction is needed based on default thresholds
     pub needs_compaction: bool,
-}
-
-/// Combined tiered search statistics result
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TieredStatsResult {
-    /// Semantic cache statistics
-    pub cache_stats: CacheStatsResult,
-    /// Hot tier statistics
-    pub hot_tier_stats: HotTierStatsResult,
-    /// Tiered performance metrics
-    pub metrics: TieredMetricsResult,
-}
-
-/// Cache statistics
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CacheStatsResult {
-    /// Total cache lookups
-    pub total_lookups: u64,
-    /// Cache hits
-    pub hits: u64,
-    /// Cache misses
-    pub misses: u64,
-    /// Hit rate (0.0-1.0)
-    pub hit_rate: f32,
-    /// Number of entries in cache
-    pub entry_count: usize,
-    /// Average confidence of cached entries
-    pub avg_confidence: f32,
-}
-
-/// Hot tier statistics
-#[derive(Debug, Serialize, Deserialize)]
-pub struct HotTierStatsResult {
-    /// Number of chunks in hot tier
-    pub chunk_count: usize,
-    /// Capacity used (0.0-1.0)
-    pub capacity_used: f32,
-    /// Hot tier version
-    pub version: u64,
-    /// Average promotion score of chunks in hot tier
-    pub avg_promotion_score: f32,
-}
-
-/// Tiered performance metrics
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TieredMetricsResult {
-    /// Total promotions
-    pub promotions: u64,
-    /// Total demotions
-    pub demotions: u64,
-    /// Average cache lookup latency (ms)
-    pub avg_cache_ms: f64,
-    /// Average hot tier search latency (ms)
-    pub avg_hot_tier_ms: f64,
-    /// Average warm tier search latency (ms)
-    pub avg_warm_tier_ms: f64,
-}
-
-/// Result of code.find_definition
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FindDefinitionResult {
-    pub definitions: Vec<SymbolLocationResult>,
-}
-
-/// A symbol location in the codebase
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SymbolLocationResult {
-    pub file_path: String,
-    pub name: String,
-    pub kind: String,
-    pub line_start: u32,
-    pub line_end: u32,
-    pub col_start: u32,
-    pub col_end: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub signature: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub docstring: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub visibility: Option<String>,
-    pub language: String,
-}
-
-/// Result of code.find_references
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FindReferencesResult {
-    pub references: Vec<SymbolLocationResult>,
-}
-
-/// Result of code.find_callers
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FindCallersResult {
-    pub callers: Vec<CallerInfoResult>,
-}
-
-/// Information about a caller
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CallerInfoResult {
-    pub caller_name: String,
-    pub caller_file: String,
-    pub call_line: u32,
-    pub call_col: u32,
-    pub caller_kind: String,
-    pub depth: u32,
-}
-
-/// Result of code.find_imports
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FindImportsResult {
-    pub imports: Vec<ImportInfoResult>,
-}
-
-/// Information about an import
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ImportInfoResult {
-    pub importing_file: String,
-    pub import_line: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub alias: Option<String>,
 }

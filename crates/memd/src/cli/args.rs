@@ -409,8 +409,8 @@ pub enum CliCommand {
         #[arg(long, default_value = ".")]
         project_dir: PathBuf,
 
-        /// Output path for the generated memory.md under evaluation.
-        #[arg(long, default_value = "memory.md")]
+        /// Evaluation output path; must not resolve to project memory.md.
+        #[arg(long, default_value = "memory-eval.md")]
         output: PathBuf,
 
         /// Maximum project-specific takeaways to evaluate, capped at 10.
@@ -433,10 +433,6 @@ pub enum CliCommand {
         /// Maximum generated wrapper records allowed in displayed project items.
         #[arg(long, default_value_t = 0)]
         max_generated_wrappers: usize,
-
-        /// Enable structured startup-briefing usefulness checks.
-        #[arg(long)]
-        agent_usefulness: bool,
 
         /// Optional JSON file with local project expectations.
         #[arg(long)]
@@ -482,33 +478,6 @@ pub enum CliCommand {
         /// Minimum mean reciprocal rank of the first useful hit.
         #[arg(long, default_value_t = 0.0)]
         min_mrr: f64,
-    },
-
-    /// Evaluate synthetic write admission, dedupe, and storage-growth behavior.
-    EvalWriteQuality {
-        /// Project directory used only for the eval report output path.
-        #[arg(long, default_value = ".")]
-        project_dir: PathBuf,
-
-        /// Minimum low-value write rejection/downgrade rate.
-        #[arg(long, default_value_t = 1.0)]
-        min_rejection_or_downgrade_rate: f64,
-
-        /// Minimum exact duplicate reuse rate.
-        #[arg(long, default_value_t = 1.0)]
-        min_duplicate_reuse_rate: f64,
-
-        /// Maximum chunks a synthetic session may leave in its isolated store.
-        #[arg(long, default_value_t = 6)]
-        max_total_chunks: usize,
-
-        /// Maximum isolated persistent-store byte growth for the synthetic session.
-        #[arg(long, default_value_t = 5_000_000)]
-        max_disk_bytes: u64,
-
-        /// Require the synthetic retention/compaction stage to expire at least one row.
-        #[arg(long, default_value_t = true, action = ArgAction::Set)]
-        require_retention_compaction: bool,
     },
 
     /// Consolidate recent memory chunks into deduplicated lessons.
@@ -642,33 +611,6 @@ pub enum CliCommand {
         /// Route this write through the local warm worker.
         #[arg(long, value_enum, default_value = "auto")]
         warm: WarmMode,
-    },
-
-    /// Scan Codex session logs for observed memd retrieval reuse.
-    ///
-    /// Detects tool-call outputs that rendered a retrieval episode, then
-    /// records served chunks whose distinctive literals appear in later
-    /// tool-call inputs (commands or patches) of the same session. Writes
-    /// non-ranking `external_tool` `observed_used` events;
-    /// `.memd/data/outcome_scan_state.json` keeps re-runs from writing
-    /// duplicate events.
-    OutcomeScan {
-        /// Project directory containing `.memd/project_scope.json`.
-        #[arg(long, default_value = ".")]
-        project_dir: PathBuf,
-
-        /// Session log directory, scanned recursively for `*.jsonl` files.
-        /// Defaults to `~/.codex/sessions`.
-        #[arg(long)]
-        sessions_dir: Option<PathBuf>,
-
-        /// Only scan session files modified within this many days.
-        #[arg(long, default_value_t = 90)]
-        since_days: u64,
-
-        /// Report candidate outcome events without writing events or state.
-        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
-        dry_run: bool,
     },
 
     /// Counterfactual retrieval eval (Phase 3).
@@ -1292,8 +1234,6 @@ impl CliCommand {
             CliCommand::MemoryMd { .. } => StoreAccess::ReadOnly,
             CliCommand::EvalMemoryMd { .. } => StoreAccess::ReadOnly,
             CliCommand::EvalRetrieval { .. } => StoreAccess::ReadOnly,
-            // Opens and mutates an isolated scratch PersistentStore.
-            CliCommand::EvalWriteQuality { .. } => StoreAccess::Writer,
             CliCommand::Consolidate { .. } => StoreAccess::Writer,
             CliCommand::ConsolidateReview { accept, reject, .. } => {
                 if *accept || *reject {
@@ -1303,7 +1243,6 @@ impl CliCommand {
                 }
             }
             CliCommand::Outcome { .. } => StoreAccess::Writer,
-            CliCommand::OutcomeScan { .. } => StoreAccess::Writer,
             CliCommand::EvalCounterfactual { .. } => StoreAccess::Writer,
             CliCommand::EvalOutcomeRanking { .. } => StoreAccess::Writer,
             CliCommand::SessionStart { .. } => StoreAccess::ReadOnly,
@@ -1337,10 +1276,7 @@ impl CliCommand {
     pub fn requires_store(&self) -> bool {
         !matches!(
             self,
-            CliCommand::Init { .. }
-                | CliCommand::Warm { .. }
-                | CliCommand::Maintenance { .. }
-                | CliCommand::EvalWriteQuality { .. }
+            CliCommand::Init { .. } | CliCommand::Warm { .. } | CliCommand::Maintenance { .. }
         )
     }
 

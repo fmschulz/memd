@@ -1,9 +1,7 @@
 use super::*;
 
 impl PersistentStore {
-    /// Apply a lifecycle delta through the metadata overlay and bump the tenant
-    /// cache version so any tiered searcher invalidates entries that predate
-    /// the lifecycle change.
+    /// Apply a lifecycle delta through the metadata overlay.
     ///
     /// Intentionally `async` even though the current body has no `.await`:
     /// callers introduced by A6+ (e.g. `supersede_chunk`) and C6 live in
@@ -18,9 +16,6 @@ impl PersistentStore {
     ) -> Result<()> {
         self.ensure_writable("update_lifecycle")?;
         self.metadata.update_lifecycle(tenant_id, chunk_id, delta)?;
-        if let Some(h) = self.hybrid() {
-            h.bump_tenant_memory_version(tenant_id);
-        }
         Ok(())
     }
 
@@ -28,8 +23,7 @@ impl PersistentStore {
     ///
     /// Returns `Ok(true)` when exactly one row was updated, `Ok(false)`
     /// when the UPDATE matched zero rows (non-existent chunk_id OR
-    /// cross-tenant access). The cache-version bump only fires on a
-    /// successful update — a failed match is a no-op end-to-end.
+    /// cross-tenant access). A failed match is a no-op.
     ///
     /// Used by `memory.set_expiry` (Track C6) to make the tool's
     /// `{"updated": true}` payload a load-bearing claim rather than a
@@ -46,9 +40,6 @@ impl PersistentStore {
             .metadata
             .update_lifecycle_counted(tenant_id, chunk_id, delta)?;
         if rows > 0 {
-            if let Some(h) = self.hybrid() {
-                h.bump_tenant_memory_version(tenant_id);
-            }
             Ok(true)
         } else {
             Ok(false)
@@ -59,18 +50,11 @@ impl PersistentStore {
     ///
     /// Flow:
     /// 1. Write the payload through the normal `Store::add` path
-    ///    (WAL + segment + metadata + async index), which already bumps the
-    ///    tenant memory version when hybrid/tiered is enabled.
+    ///    (WAL + segment + metadata + async index).
     /// 2. Persist the canonical text used by writer-driven digest /
     ///    supersession-by-content-identity flows (Track D).
     /// 3. If the initial delta has any non-default field, apply it through
-    ///    the overlay UPDATE and bump the tenant cache version a second
-    ///    time so consumers observing a snapshot between (1) and (3)
-    ///    invalidate it.
-    ///
-    /// Structural indexing is intentionally NOT performed here — it lives
-    /// at the MCP/server layer via post-write hooks so the store stays
-    /// agnostic about language-aware extraction.
+    ///    the overlay UPDATE.
     pub async fn add_chunk_with_lifecycle(
         &self,
         chunk: MemoryChunk,
@@ -112,11 +96,6 @@ impl PersistentStore {
             for stored_id in &stored_ids {
                 self.metadata
                     .update_lifecycle(&tenant_id, stored_id, &delta)?;
-            }
-            // Bump again to invalidate any snapshot captured between
-            // `add()` and this overlay UPDATE.
-            if let Some(h) = self.hybrid() {
-                h.bump_tenant_memory_version(&tenant_id);
             }
         }
 
@@ -173,9 +152,6 @@ impl PersistentStore {
             return Ok(());
         }
         self.ensure_writable("refresh_promoted_chunks")?;
-        if let Some(hybrid) = self.hybrid() {
-            hybrid.bump_tenant_memory_version(tenant_id);
-        }
 
         let mut index_rows = Vec::with_capacity(chunk_ids.len());
         for chunk_id in chunk_ids {
@@ -252,9 +228,6 @@ impl PersistentStore {
         let Some(dense) = self.dense_searcher.as_ref() else {
             return Ok(());
         };
-        if let Some(hybrid) = self.hybrid() {
-            hybrid.bump_tenant_memory_version(tenant_id);
-        }
         let mut index_rows = Vec::with_capacity(chunk_ids.len());
         for chunk_id in chunk_ids {
             let metadata = self.metadata.get(tenant_id, chunk_id)?.ok_or_else(|| {
@@ -292,22 +265,16 @@ impl PersistentStore {
     ///    hops to detect pre-existing cycles before we touch disk.
     /// 3. Write `new_chunk` through `add_chunk_with_lifecycle`, which
     ///    runs the full WAL + segment + metadata + canonical-text path
-    ///    and bumps the tenant cache version.
+    ///    and updates the lifecycle metadata.
     /// 4. Link old ↔ new in one SQLite transaction via
     ///    `MetadataStore::atomic_supersede`. The pair of UPDATEs is
     ///    all-or-nothing on SQLite's side, so a mid-call crash cannot
     ///    leave a half-linked edge.
     /// 5. Best-effort drop of `old_id` from the BM25 sparse index
-    ///    (immediate, when hybrid+sparse is enabled) and bump the
-    ///    tenant cache version so tiered/in-memory snapshots taken
-    ///    between (3) and (4) invalidate. HNSW exclusion happens at
+    ///    (immediate, when hybrid+sparse is enabled). HNSW exclusion happens at
     ///    next compaction rebuild. Authoritative invisibility of
     ///    superseded rows in retrieval is the visibility filter at
     ///    the handler boundary (Track B), not anything in this layer.
-    ///
-    /// Structural indexing is intentionally NOT performed here — it
-    /// happens at the MCP/server layer via post-write hooks after the
-    /// caller's dispatch arm invokes this method.
     pub async fn supersede_chunk(
         &self,
         tenant_id: &TenantId,
@@ -423,10 +390,10 @@ impl PersistentStore {
             // metadata-only mark_deleted is not enough — without a WAL
             // delete record, recover_from_wal would replay the original
             // Add after restart and resurrect the orphan as Final; and
-            // the hybrid/sparse/dense/tiered indexes would still carry
+            // the hybrid/sparse/dense indexes would still carry
             // the chunk until the next compaction. Routing through
             // `Store::delete_chunk` hits WAL + metadata + segment
-            // tombstone + hybrid delete + cache invalidation, so after
+            // tombstone + hybrid delete, so after
             // this call the orphan is gone from every surface.
             let mut delete_errors = Vec::new();
             for stored_id in &stored_ids {
@@ -455,8 +422,7 @@ impl PersistentStore {
         }
 
         // Step 5: drop old from the sparse index (immediate when
-        // hybrid+sparse enabled) and bump the tenant memory version
-        // for tiered/in-memory caches. HNSW exclusion lands at next
+        // hybrid+sparse enabled). HNSW exclusion lands at next
         // compaction rebuild; the handler-boundary visibility filter
         // (Track B) is the authoritative invisibility guarantee.
         if let Some(h) = self.hybrid() {
@@ -466,7 +432,6 @@ impl PersistentStore {
                 // until the next compaction.
                 let _ = sparse.delete(tenant_id, old_id);
             }
-            h.bump_tenant_memory_version(tenant_id);
         }
 
         Ok((new_id, stored_ids))

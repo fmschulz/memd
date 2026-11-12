@@ -144,11 +144,7 @@ async fn dispatch_operation<S: memd::store::Store>(
         }
         "memory.compact" => handle_memory_compact(store, parse_params(name, args)?).await,
         "memory.dream" => handle_memory_dream(store, None, parse_params(name, args)?).await,
-        "memory.supersede" => {
-            let (value, _) =
-                handle_memory_supersede(store, None, parse_params(name, args)?).await?;
-            Ok(value)
-        }
+        "memory.supersede" => handle_memory_supersede(store, None, parse_params(name, args)?).await,
         "memory.set_expiry" => {
             handle_memory_set_expiry(store, None, parse_params(name, args)?).await
         }
@@ -163,9 +159,7 @@ async fn dispatch_operation<S: memd::store::Store>(
             handle_memory_preview_omf_import(store, parse_params(name, args)?).await
         }
         "memory.import_omf" => {
-            let (value, _) =
-                handle_memory_import_omf(store, None, parse_params(name, args)?).await?;
-            Ok(value)
+            handle_memory_import_omf(store, None, parse_params(name, args)?).await
         }
         "memory.consolidate_episode" => {
             handle_memory_consolidate_episode(store, parse_params(name, args)?).await

@@ -73,7 +73,7 @@ struct Args {
     #[arg(long, default_value = "target/debug/memd")]
     memd_path: String,
 
-    /// Suite to run (all, sanity, cli-contract, persistence, retrieval, hybrid, scifact, true-semantic, nfcorpus, codesearchnet, tiered, structural, compaction, benchmark, benchmark-regression)
+    /// Suite to run (all, cli-contract, persistence, retrieval, benchmark, benchmark-regression, longitudinal)
     #[arg(long, default_value = "all")]
     suite: String,
 
@@ -88,14 +88,6 @@ struct Args {
     /// Embedding model to use (all-minilm, qwen3)
     #[arg(long, default_value = "all-minilm")]
     embedding_model: String,
-
-    /// Include structural tests in 'all' suite
-    #[arg(long, default_value = "true")]
-    include_structural: bool,
-
-    /// Include compaction tests in 'all' suite (slower, tests compaction correctness)
-    #[arg(long, default_value = "false")]
-    include_compaction: bool,
 
     /// Override dataset file path for dataset-backed suites
     ///
@@ -269,74 +261,17 @@ fn main() -> ExitCode {
     let results: Vec<TestResult> = match args.suite.as_str() {
         "all" => {
             let mut all = vec![];
-            // Run sanity check first - halt if it fails
-            let sanity_results = suites::sanity::run_sanity_tests(&memd_binary, embedding_model);
-            if sanity_results.iter().any(|r| !r.passed) {
-                eprintln!("\n[X] Sanity checks FAILED - halting benchmarks");
-                eprintln!("Fix evaluation harness bugs before running full benchmarks.");
-                return ExitCode::FAILURE;
-            }
-            println!("\n[OK] Sanity checks PASSED - proceeding with benchmarks\n");
-
-            all.extend(sanity_results);
             all.extend(suites::cli_contract::run(&args.memd_path));
             all.extend(suites::persistence::run_all(&memd_binary));
             all.extend(suites::retrieval::run_retrieval_tests(
                 &memd_binary,
                 embedding_model,
             ));
-            all.extend(suites::hybrid::run_hybrid_tests(
-                &memd_binary,
-                embedding_model,
-            ));
-            all.extend(suites::true_semantic::run_true_semantic_tests(
-                &memd_binary,
-                embedding_model,
-            ));
-            all.extend(suites::scifact::run_scifact_tests(
-                &memd_binary,
-                embedding_model,
-            ));
-            all.extend(suites::codesearchnet::run_codesearchnet_tests(
-                &memd_binary,
-                embedding_model,
-            ));
-
-            // Structural tests (Suite E)
-            if args.include_structural {
-                all.extend(suites::structural::run_structural_tests(
-                    &memd_binary,
-                    embedding_model,
-                ));
-            }
-
-            // Compaction tests (Suite F) - excluded by default (slower)
-            if args.include_compaction {
-                all.extend(suites::compaction::run_compaction_tests(
-                    &memd_binary,
-                    embedding_model,
-                ));
-            }
             all
         }
-        "sanity" => suites::sanity::run_sanity_tests(&memd_binary, embedding_model),
         "cli" | "cli-contract" => suites::cli_contract::run(&args.memd_path),
         "persistence" => suites::persistence::run_all(&memd_binary),
         "retrieval" => suites::retrieval::run_retrieval_tests(&memd_binary, embedding_model),
-        "hybrid" => suites::hybrid::run_hybrid_tests(&memd_binary, embedding_model),
-        "true-semantic" => {
-            suites::true_semantic::run_true_semantic_tests(&memd_binary, embedding_model)
-        }
-        "scifact" => suites::scifact::run_scifact_tests(&memd_binary, embedding_model),
-        "nfcorpus" => suites::nfcorpus::run_nfcorpus_tests(&memd_binary, embedding_model),
-        "codesearchnet" => {
-            suites::codesearchnet::run_codesearchnet_tests(&memd_binary, embedding_model)
-        }
-        "tiered" => suites::tiered::run_tiered_tests(&memd_binary, embedding_model),
-        "structural" => suites::structural::run_structural_tests(&memd_binary, embedding_model),
-        "compaction" | "f" => {
-            suites::compaction::run_compaction_tests(&memd_binary, embedding_model)
-        }
         "benchmark" | "benchmark-protocol" => {
             if dataset_paths.is_empty() {
                 eprintln!("--dataset-path or --dataset-manifest is required for --suite benchmark");
@@ -402,7 +337,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "Unknown suite: {}. Available: all, sanity, cli-contract, persistence, retrieval, hybrid, true-semantic, scifact, nfcorpus, codesearchnet, tiered, structural, compaction, benchmark, benchmark-regression, longitudinal",
+                "Unknown suite: {}. Available: all, cli-contract, persistence, retrieval, benchmark, benchmark-regression, longitudinal",
                 args.suite
             );
             return ExitCode::FAILURE;

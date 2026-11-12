@@ -883,7 +883,6 @@ pub async fn handle_task_search<S: Store>(
         ranking_policy: None,
         budget_info: None,
         scope_expansion,
-        tier_info: None,
         repair_info: None,
         scope_status: None,
     })

@@ -178,9 +178,6 @@ impl McpClient {
             "task.finish",
             "artifact.create",
             "artifact.search",
-            "code.find_references",
-            "code.find_definition",
-            "debug.find_tool_calls",
         ]
         .into_iter()
         .map(|name| json!({ "name": name }))

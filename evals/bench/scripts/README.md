@@ -2,10 +2,7 @@
 
 This directory contains the benchmark entrypoints that still matter in this repo.
 
-For a map of completed runs and where their result artifacts live, see
-[`../BENCHMARK_INVENTORY.md`](../BENCHMARK_INVENTORY.md). For the next proposed
-agent benchmark, see
-[`../memd-multiturn-token-savings/README.md`](../memd-multiturn-token-savings/README.md).
+See [`../BENCHMARK_INVENTORY.md`](../BENCHMARK_INVENTORY.md) for the retained checks and fixtures.
 
 ## Entrypoints
 

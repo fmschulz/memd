@@ -348,27 +348,6 @@ impl DenseSearcher {
         self.embedder.dimension()
     }
 
-    /// Search using a pre-computed query embedding (for tiered search)
-    ///
-    /// This avoids re-embedding when the caller already has the embedding.
-    pub fn search_with_embedding(
-        &self,
-        tenant_id: &TenantId,
-        query_embedding: &[f32],
-        k: usize,
-    ) -> Result<Vec<DenseSearchResult>> {
-        let index = self.get_or_create_index(tenant_id)?;
-        let results = index.search(query_embedding, k)?;
-
-        Ok(results
-            .into_iter()
-            .map(|r| DenseSearchResult {
-                chunk_id: r.chunk_id,
-                score: r.score,
-            })
-            .collect())
-    }
-
     /// Get the number of indexed chunks for a tenant
     pub fn index_len(&self, tenant_id: &TenantId) -> usize {
         let indices = self.indices.read();
@@ -468,11 +447,6 @@ impl DenseSearcher {
             })
             .cloned()
             .collect()
-    }
-
-    /// Embed a query text (exposes embedder for tiered search)
-    pub async fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
-        self.embedder.embed_query(text).await
     }
 
     /// Get rebuild stats (cache_size, index_size) for a tenant

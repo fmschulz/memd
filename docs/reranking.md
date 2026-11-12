@@ -95,5 +95,4 @@ is required.
 | Highest precision, GPU-friendly | MemReranker-4B (`--reranker auto`) |
 | Default agent use | Neither — hybrid feature reranker already does well |
 
-The scoped Bright-Pro adapter under `evals/bench/bright-pro-memd/`
-table shows the recall/nDCG lift each path delivers on a biology workload.
+The sibling `memd-bench` repository owns cross-system reranker experiments.

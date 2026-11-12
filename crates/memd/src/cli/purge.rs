@@ -234,7 +234,6 @@ pub(super) async fn run_purge<S: Store>(store: &S, options: PurgeOptions) -> Res
                 "hnsw_rebuilt": result.hnsw_rebuild.is_some(),
                 "hnsw_rebuild": hnsw_rebuild,
                 "segment_merge_ran": result.segment_merge.is_some(),
-                "cache_entries_invalidated": result.cache_entries_invalidated,
                 "duration_ms": result.duration.as_millis(),
             }))
         }

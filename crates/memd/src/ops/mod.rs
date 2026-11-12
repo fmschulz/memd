@@ -115,10 +115,6 @@ pub(crate) fn resolved_agent_id(explicit: Option<&str>) -> Option<String> {
 
 pub mod error;
 
-pub use error::OperationError;
-use error::OperationError as McpError;
-// `pub use` keeps `memd::ops::PostWriteEvent` canonical while the compatibility
-// module continues to expose the historical `memd::mcp::*` paths.
 use crate::config::ProjectAliasConfig;
 use crate::maintenance::{
     apply_lifecycle_actions, build_reclaimed, disk_snapshot, estimated_hidden_payload_bytes,
@@ -129,7 +125,6 @@ use crate::maintenance::{
     DIGEST_ROLE_DREAM_REPORT,
 };
 use crate::metrics::{IndexStats, MetricsCollector};
-pub use crate::post_write_hooks::PostWriteEvent;
 use crate::retrieval::{ContextPacker, PackerConfig, PackerInput};
 use crate::store::metadata::MetadataStore;
 use crate::store::usage::{query_hash_hex, UsageEvent, UsageOp};
@@ -152,7 +147,6 @@ use crate::task_memory::{
     DIGEST_ROLE_FAILURE_LIBRARY, DIGEST_ROLE_HIGHLIGHT_LIBRARY, DIGEST_ROLE_PROJECT_BRIEF,
     DIGEST_ROLE_TASK_RESUME,
 };
-use crate::tiered::TieredTiming;
 use crate::types::{
     ChunkId, ChunkStatus, ChunkType, LifecycleDelta, MemoryChunk, ProjectId, Source, TenantId,
     VisibilityPolicy,
@@ -160,6 +154,8 @@ use crate::types::{
 use crate::write_service::{PrepareWriteRequest, PreparedWrite};
 #[cfg(test)]
 use crate::write_service::{WRITE_ADMISSION_PROGRESS_TTL_MS, WRITE_ADMISSION_RUN_TRACE_TTL_MS};
+pub use error::OperationError;
+use error::OperationError as McpError;
 
 mod shared_types;
 pub use shared_types::*;
@@ -216,7 +212,7 @@ fn validate_search_time_range(
         .from
         .as_deref()
         .map(|s| {
-            crate::structural::parse_iso_datetime(s).map_err(|e| {
+            crate::omf::time::parse_iso_datetime(s).map_err(|e| {
                 McpError::InvalidParams(format!("invalid filters.time_range.from: {}", e))
             })
         })
@@ -226,7 +222,7 @@ fn validate_search_time_range(
         .to
         .as_deref()
         .map(|s| {
-            crate::structural::parse_iso_datetime(s).map_err(|e| {
+            crate::omf::time::parse_iso_datetime(s).map_err(|e| {
                 McpError::InvalidParams(format!("invalid filters.time_range.to: {}", e))
             })
         })
@@ -2550,59 +2546,6 @@ async fn lexical_overlap_candidates_for_project_scopes<S: Store>(
         .into_iter()
         .map(|(chunk, score)| (chunk, score + LEXICAL_OVERLAP_SCORE_BOOST))
         .collect())
-}
-
-async fn search_with_tier_info_for_project_scopes<S: Store>(
-    store: &S,
-    scopes: &[ProjectSearchScope],
-    query: &str,
-    fetch_k: usize,
-    ranking_time_ms: Option<i64>,
-) -> Result<(Vec<(MemoryChunk, f32)>, Option<TieredTiming>), McpError> {
-    if scopes.len() == 1 {
-        let (mut scored, timing) = match ranking_time_ms {
-            Some(ranking_time_ms) => {
-                store
-                    .search_with_tier_info_at(&scopes[0].tenant_id, query, fetch_k, ranking_time_ms)
-                    .await
-            }
-            None => {
-                store
-                    .search_with_tier_info(&scopes[0].tenant_id, query, fetch_k)
-                    .await
-            }
-        }
-        .map_err(|e| McpError::ToolError(e.to_string()))?;
-        if let Some(project_id) = scopes[0].project_id.as_deref() {
-            scored.retain(|(chunk, _)| chunk.project_id.as_option() == Some(project_id));
-        }
-        return Ok((scored, timing));
-    }
-
-    let mut lists = Vec::with_capacity(scopes.len());
-    for scope in scopes {
-        let (mut results, _) = match ranking_time_ms {
-            Some(ranking_time_ms) => {
-                store
-                    .search_with_tier_info_at(&scope.tenant_id, query, fetch_k, ranking_time_ms)
-                    .await
-            }
-            None => {
-                store
-                    .search_with_tier_info(&scope.tenant_id, query, fetch_k)
-                    .await
-            }
-        }
-        .map_err(|e| McpError::ToolError(e.to_string()))?;
-        if let Some(project_id) = scope.project_id.as_deref() {
-            results.retain(|(chunk, _)| chunk.project_id.as_option() == Some(project_id));
-        }
-        lists.push(results);
-    }
-    Ok((
-        merge_scored_chunk_lists(lists, fetch_k.saturating_mul(scopes.len().max(1))),
-        None,
-    ))
 }
 
 fn finalize_artifact_for_storage(artifact: &mut TaskArtifact) {

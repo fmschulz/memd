@@ -1,7 +1,6 @@
 //! Compaction runner for orchestrating all compaction operations
 //!
-//! CompactionRunner coordinates HNSW rebuild, segment merge, and cache
-//! invalidation with throttling between major operations.
+//! CompactionRunner coordinates HNSW rebuild and segment merge with throttling between major operations.
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -16,9 +15,7 @@ use crate::compaction::CompactionConfig;
 use crate::error::Result;
 use crate::index::Bm25Index;
 use crate::store::dense::DenseSearcher;
-use crate::store::hybrid::HybridSearcher;
 use crate::store::metadata::{MetadataStore, SqliteMetadataStore};
-use crate::tiered::SemanticCache;
 use crate::types::{ChunkId, TenantId};
 
 /// Result of a compaction operation
@@ -30,8 +27,6 @@ pub struct CompactionResult {
     pub hnsw_rebuild: Option<RebuildResult>,
     /// Segment merge result (if merge was triggered)
     pub segment_merge: Option<MergeResult>,
-    /// Number of cache entries invalidated
-    pub cache_entries_invalidated: usize,
     /// Number of rows whose status flipped to `Expired` during this
     /// cycle's `ExpirySweep` (Track C3/C5). 0 when the sweep was
     /// disabled via `CompactionConfig::expiry_sweep_enabled` or when
@@ -47,7 +42,7 @@ pub struct CompactionResult {
 
 /// Compaction runner that orchestrates all compaction operations
 ///
-/// Coordinates HNSW rebuild, segment merge, and cache invalidation
+/// Coordinates HNSW rebuild and segment merge
 /// with throttle delays between major operations.
 pub struct CompactionRunner {
     config: CompactionConfig,
@@ -75,7 +70,6 @@ impl CompactionRunner {
     /// 1. Gather metrics and deleted chunk IDs
     /// 2. HNSW rebuild (if staleness exceeds threshold)
     /// 3. Segment merge (if segment count exceeds threshold)
-    /// 4. Cache invalidation (always, for deleted chunks)
     ///
     /// Inserts throttle delays between major operations.
     pub fn run_compaction(
@@ -84,8 +78,6 @@ impl CompactionRunner {
         metadata: &SqliteMetadataStore,
         dense_searcher: &DenseSearcher,
         sparse_index: Option<&Bm25Index>,
-        semantic_cache: Option<&SemanticCache>,
-        hybrid: Option<&HybridSearcher>,
     ) -> Result<CompactionResult> {
         let start = Instant::now();
 
@@ -94,12 +86,9 @@ impl CompactionRunner {
         // 0. Track C5 — ExpirySweep and HistoryPromotion run BEFORE
         //    the excluded-ID set is gathered so the sweep/promotion's
         //    status/tier transitions flow into B2's HNSW-rebuild
-        //    exclusion via `list_lifecycle_hidden` below. Both sweeps
-        //    are invoked with `hybrid=None` — the runner owns the
-        //    single centralised cache bump at the end of the cycle
-        //    rather than letting each sweep bump independently.
+        //    exclusion via `list_lifecycle_hidden` below.
         let expired_count = if self.config.expiry_sweep_enabled {
-            match ExpirySweep::new().run(metadata, None, tenant_id) {
+            match ExpirySweep::new().run(metadata, tenant_id) {
                 Ok(r) => {
                     tracing::debug!(
                         tenant_id = %tenant_id,
@@ -123,7 +112,7 @@ impl CompactionRunner {
 
         let promoted_count = if self.config.history_promotion_enabled {
             match HistoryPromotion::new(self.config.history_promotion_age_ms)
-                .run(metadata, None, tenant_id)
+                .run(metadata, tenant_id)
             {
                 Ok(r) => {
                     tracing::debug!(
@@ -154,7 +143,7 @@ impl CompactionRunner {
         // wall-clock), or in the History tier — they must not show up in
         // search results (enforced by the B1 visibility filter at the
         // handler boundary). If we rebuild HNSW with those rows still
-        // included, the tiered/dense backend carries the weight
+        // included, the dense backend carries the weight
         // (distance, memory) for chunks that are already unreachable to
         // callers, and over time the HNSW drifts toward a graph
         // dominated by hidden history.
@@ -289,53 +278,6 @@ impl CompactionRunner {
             None
         };
 
-        // THROTTLE between merge and cache invalidation
-        self.throttle.delay_sync();
-
-        // 5. Cache invalidation (for deleted chunks)
-        let cache_entries_invalidated = if let Some(cache) = semantic_cache {
-            if !deleted_chunk_ids.is_empty() {
-                tracing::debug!(
-                    tenant_id = %tenant_id,
-                    chunks = deleted_chunk_ids.len(),
-                    "invalidating cache entries for deleted chunks"
-                );
-
-                cache.invalidate_chunks(&deleted_chunk_ids);
-
-                // Return count of chunks we tried to invalidate
-                // (actual entries removed tracked in cache stats)
-                deleted_chunk_ids.len()
-            } else {
-                0
-            }
-        } else {
-            0
-        };
-
-        // Centralised cache bump for the whole cycle — narrowly
-        // scoped to C3/C4 overlay transitions. Only these two phases
-        // need a runner-level bump because:
-        //   * HNSW rebuild / segment merge have no observable overlay
-        //     effect the handler layer would cache differently, and
-        //     dense rebuild already cycles its own internal state.
-        //   * Cache invalidation for tombstones is handled by
-        //     `SemanticCache::invalidate_chunks` above.
-        //   * The sweeps are invoked with hybrid=None so they do not
-        //     bump independently; the single bump below collapses
-        //     them into one tenant_memory_version advance.
-        //
-        // Importantly, we do NOT use `tombstones_processed` as a
-        // "something happened" proxy: that number reflects the
-        // current tombstone inventory (the existing deleted-row
-        // count from `get_deleted_chunk_ids`), not whether this
-        // particular cycle mutated anything.
-        if let Some(h) = hybrid {
-            if expired_count > 0 || promoted_count > 0 {
-                h.bump_tenant_memory_version(tenant_id);
-            }
-        }
-
         let duration = start.elapsed();
 
         tracing::info!(
@@ -345,7 +287,6 @@ impl CompactionRunner {
             promoted = promoted_count,
             hnsw_rebuilt = hnsw_rebuild.is_some(),
             segments_merged = segment_merge.is_some(),
-            cache_invalidated = cache_entries_invalidated,
             duration_ms = duration.as_millis(),
             "compaction complete"
         );
@@ -354,7 +295,6 @@ impl CompactionRunner {
             tombstones_processed,
             hnsw_rebuild,
             segment_merge,
-            cache_entries_invalidated,
             expired_count,
             promoted_count,
             duration,

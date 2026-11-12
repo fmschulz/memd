@@ -8,9 +8,6 @@
 //!
 //! - **Suite A**: CLI contract (cli_contract)
 //! - **Suite B**: Retrieval quality (retrieval)
-//! - **Suite C**: Hybrid retrieval (hybrid)
-//! - **Suite D**: Tiered search (tiered)
-//! - **Suite E**: Structural queries (structural)
 //! - **Suite P6**: Offline benchmark protocol (benchmark)
 
 pub mod cli_client;
@@ -18,9 +15,6 @@ pub mod mcp_client;
 pub mod metrics;
 pub mod statistics;
 pub mod suites;
-
-// Re-export structural suite results for external use
-pub use suites::structural::{StructuralSuiteResults, StructuralTestResult};
 
 use std::path::PathBuf;
 use std::time::Instant;

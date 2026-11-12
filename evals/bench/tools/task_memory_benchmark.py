@@ -258,7 +258,7 @@ def make_memd_client(
 def read_chunks_indexed(client: MemdCliClient, tenant_id: str) -> int:
     payload = client.call_tool(
         "memory.metrics",
-        {"tenant_id": tenant_id, "include_recent": False, "include_tiered": False},
+        {"tenant_id": tenant_id, "include_recent": False},
     )
     index = payload.get("index", {})
     if not isinstance(index, dict):

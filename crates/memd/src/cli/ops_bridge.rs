@@ -1,9 +1,5 @@
-use std::path::Path;
-use std::sync::Arc;
-
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tracing::warn;
 
 use crate::maintenance::DreamParams;
 use crate::metrics::MetricsCollector;
@@ -15,34 +11,27 @@ use crate::ops::{
     handle_context_brief_project, handle_context_find_relevant_context,
     handle_context_get_files_for_subsystem, handle_context_get_hot_context,
     handle_context_list_subsystems, handle_context_search_documents, handle_context_suggest_agent,
-    handle_find_callers, handle_find_definition, handle_find_errors, handle_find_imports,
-    handle_find_references, handle_find_tool_calls, handle_memory_add, handle_memory_add_batch,
-    handle_memory_compact, handle_memory_consolidate_episode, handle_memory_delete,
-    handle_memory_dream, handle_memory_export_markdown, handle_memory_export_omf,
-    handle_memory_feedback, handle_memory_find_near_duplicates, handle_memory_get,
-    handle_memory_health, handle_memory_import_omf, handle_memory_metrics,
-    handle_memory_preview_omf_import, handle_memory_record_outcome, handle_memory_search,
-    handle_memory_set_expiry, handle_memory_stats, handle_memory_supersede,
-    handle_task_add_evidence, handle_task_finish, handle_task_get, handle_task_progress,
-    handle_task_resume, handle_task_run_finish, handle_task_run_start, handle_task_search,
-    handle_task_start, AddBatchParams, AddParams, ArtifactCreateParams, ArtifactGetParams,
-    ArtifactLibraryParams, ArtifactListThreadParams, ArtifactVerifyParams, CompactParams,
-    ConsolidateEpisodeParams, ContextFindRelevantContextParams, ContextGetFilesForSubsystemParams,
+    handle_memory_add, handle_memory_add_batch, handle_memory_compact,
+    handle_memory_consolidate_episode, handle_memory_delete, handle_memory_dream,
+    handle_memory_export_markdown, handle_memory_export_omf, handle_memory_feedback,
+    handle_memory_find_near_duplicates, handle_memory_get, handle_memory_health,
+    handle_memory_import_omf, handle_memory_metrics, handle_memory_preview_omf_import,
+    handle_memory_record_outcome, handle_memory_search, handle_memory_set_expiry,
+    handle_memory_stats, handle_memory_supersede, handle_task_add_evidence, handle_task_finish,
+    handle_task_get, handle_task_progress, handle_task_resume, handle_task_run_finish,
+    handle_task_run_start, handle_task_search, handle_task_start, AddBatchParams, AddParams,
+    ArtifactCreateParams, ArtifactGetParams, ArtifactLibraryParams, ArtifactListThreadParams,
+    ArtifactVerifyParams, CompactParams, ConsolidateEpisodeParams,
+    ContextFindRelevantContextParams, ContextGetFilesForSubsystemParams,
     ContextGetHotContextParams, ContextListSubsystemsParams, ContextSearchDocumentsParams,
     ContextSuggestAgentParams, DeleteParams, ExportMarkdownParams, ExportOmfParams, FeedbackParams,
-    FindCallersParams, FindDefinitionParams, FindErrorsParams, FindImportsParams,
-    FindNearDuplicatesParams, FindReferencesParams, FindToolCallsParams, GetParams, HealthParams,
-    ImportOmfParams, MetricsParams, PreviewOmfImportParams, ProjectBriefParams,
-    RecordOutcomeParams, SearchParams, SetExpiryParams, StatsParams, SupersedeParams,
-    TaskAddEvidenceParams, TaskFinishParams, TaskGetParams, TaskProgressParams, TaskResumeParams,
-    TaskRunFinishParams, TaskRunStartParams, TaskSearchParams, TaskStartParams,
+    FindNearDuplicatesParams, GetParams, HealthParams, ImportOmfParams, MetricsParams,
+    PreviewOmfImportParams, ProjectBriefParams, RecordOutcomeParams, SearchParams, SetExpiryParams,
+    StatsParams, SupersedeParams, TaskAddEvidenceParams, TaskFinishParams, TaskGetParams,
+    TaskProgressParams, TaskResumeParams, TaskRunFinishParams, TaskRunStartParams,
+    TaskSearchParams, TaskStartParams,
 };
 use crate::store::{Store, TenantManager};
-use crate::structural::{
-    CallGraphIndexer, CallGraphSymbolRecord, StructuralStore, SymbolIndexer, SymbolQueryService,
-    TraceQueryService,
-};
-use crate::types::TenantId;
 
 fn parse_tool_params<T: DeserializeOwned>(
     tool: &str,
@@ -50,164 +39,6 @@ fn parse_tool_params<T: DeserializeOwned>(
 ) -> std::result::Result<T, McpError> {
     serde_json::from_value(arguments)
         .map_err(|e| McpError::InvalidParams(format!("invalid {tool} params: {e}")))
-}
-
-struct CliStructuralRuntime {
-    structural_store: Arc<StructuralStore>,
-    symbol_indexer: Arc<SymbolIndexer>,
-    call_graph_indexer: Arc<CallGraphIndexer>,
-    symbol_query_service: Arc<SymbolQueryService>,
-    trace_query_service: Arc<TraceQueryService>,
-}
-
-impl CliStructuralRuntime {
-    fn open(data_dir: &Path) -> std::result::Result<Self, McpError> {
-        let structural_store = Arc::new(
-            StructuralStore::open(&data_dir.join("structural.db"))
-                .map_err(|e| McpError::ToolError(e.to_string()))?,
-        );
-        Ok(Self {
-            structural_store: structural_store.clone(),
-            symbol_indexer: Arc::new(SymbolIndexer::new(structural_store.clone())),
-            call_graph_indexer: Arc::new(CallGraphIndexer::new(structural_store.clone())),
-            symbol_query_service: Arc::new(SymbolQueryService::new(structural_store.clone())),
-            trace_query_service: Arc::new(TraceQueryService::new(structural_store)),
-        })
-    }
-}
-
-fn ensure_structural_runtime<'a>(
-    slot: &'a mut Option<CliStructuralRuntime>,
-    tenant_manager: Option<&TenantManager>,
-) -> std::result::Result<&'a CliStructuralRuntime, McpError> {
-    if slot.is_none() {
-        let tenant_manager = tenant_manager.ok_or_else(|| {
-            McpError::ToolError("structural index requires a persistent data directory".to_string())
-        })?;
-        *slot = Some(CliStructuralRuntime::open(tenant_manager.data_dir())?);
-    }
-    Ok(slot.as_ref().expect("structural runtime initialized"))
-}
-
-fn maybe_index_structural_chunk(
-    slot: &mut Option<CliStructuralRuntime>,
-    tenant_manager: Option<&TenantManager>,
-    tenant_id: &str,
-    project_id: Option<&str>,
-    chunk_type: &str,
-    source_path: Option<&str>,
-    text: &str,
-) {
-    if !chunk_type.eq_ignore_ascii_case("code") {
-        return;
-    }
-    let Some(source_path) = source_path.filter(|value| !value.trim().is_empty()) else {
-        return;
-    };
-    let runtime = match ensure_structural_runtime(slot, tenant_manager) {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            warn!(
-                tenant_id = tenant_id,
-                source_path = source_path,
-                error = %error,
-                "skipping structural indexing because the local runtime is unavailable"
-            );
-            return;
-        }
-    };
-
-    let path = Path::new(source_path);
-    if crate::structural::detect_language(path).is_none() {
-        return;
-    }
-
-    let tenant_id = match TenantId::new(tenant_id) {
-        Ok(tenant_id) => tenant_id,
-        Err(error) => {
-            warn!(
-                tenant_id = tenant_id,
-                source_path = source_path,
-                error = %error,
-                "skipping structural indexing because tenant validation failed"
-            );
-            return;
-        }
-    };
-
-    let parsed = match crate::structural::parse_file(path, text) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            warn!(
-                tenant_id = %tenant_id,
-                source_path = source_path,
-                error = %error,
-                "skipping structural indexing because parsing failed"
-            );
-            return;
-        }
-    };
-
-    if let Err(error) = runtime.symbol_indexer.index_file(
-        &tenant_id,
-        project_id,
-        source_path,
-        &parsed.tree,
-        text.as_bytes(),
-        parsed.language,
-    ) {
-        warn!(
-            tenant_id = %tenant_id,
-            source_path = source_path,
-            error = %error,
-            "skipping structural indexing because symbol indexing failed"
-        );
-        return;
-    }
-
-    let file_symbols = match runtime
-        .structural_store
-        .find_symbols_by_file(&tenant_id, source_path)
-    {
-        Ok(symbols) => symbols,
-        Err(error) => {
-            warn!(
-                tenant_id = %tenant_id,
-                source_path = source_path,
-                error = %error,
-                "skipping structural indexing because symbol lookup failed"
-            );
-            return;
-        }
-    };
-
-    let call_graph_symbols = file_symbols
-        .iter()
-        .filter_map(|symbol| {
-            symbol.symbol_id.map(|symbol_id| CallGraphSymbolRecord {
-                symbol_id,
-                name: symbol.name.clone(),
-                start_line: symbol.line_start,
-                end_line: symbol.line_end,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    if let Err(error) = runtime.call_graph_indexer.index_file(
-        &tenant_id,
-        source_path,
-        &parsed.tree,
-        text.as_bytes(),
-        parsed.language,
-        &call_graph_symbols,
-    ) {
-        warn!(
-            tenant_id = %tenant_id,
-            source_path = source_path,
-            error = %error,
-            "skipping structural indexing because call graph indexing failed"
-        );
-    }
 }
 
 pub(super) async fn cli_call_tool<S: Store>(
@@ -222,7 +53,6 @@ pub(super) async fn cli_call_tool<S: Store>(
             .map_err(|error| McpError::ToolError(error.to_string()));
     }
     let metrics = MetricsCollector::default();
-    let mut structural_runtime: Option<CliStructuralRuntime> = None;
 
     match tool {
         "memory.search" => {
@@ -231,55 +61,11 @@ pub(super) async fn cli_call_tool<S: Store>(
         }
         "memory.add" => {
             let params: AddParams = parse_tool_params(tool, arguments)?;
-            let tenant_id = params.tenant_id.clone();
-            let project_id = params.project_id.clone();
-            let chunk_type = params.chunk_type.clone();
-            let source_path = params
-                .source
-                .as_ref()
-                .and_then(|source| source.path.as_deref())
-                .map(str::to_string);
-            let text = params.text.clone();
-            let response = handle_memory_add(store, tenant_manager, params).await?;
-            maybe_index_structural_chunk(
-                &mut structural_runtime,
-                tenant_manager,
-                &tenant_id,
-                project_id.as_deref(),
-                &chunk_type,
-                source_path.as_deref(),
-                &text,
-            );
-            Ok(response)
+            handle_memory_add(store, tenant_manager, params).await
         }
         "memory.add_batch" => {
             let params: AddBatchParams = parse_tool_params(tool, arguments)?;
-            let tenant_id = params.tenant_id.clone();
-            let chunks_to_index = params
-                .chunks
-                .iter()
-                .map(|chunk| {
-                    (
-                        chunk.project_id.clone(),
-                        chunk.chunk_type.clone(),
-                        chunk.source.as_ref().and_then(|source| source.path.clone()),
-                        chunk.text.clone(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let response = handle_memory_add_batch(store, tenant_manager, params).await?;
-            for (project_id, chunk_type, source_path, text) in chunks_to_index {
-                maybe_index_structural_chunk(
-                    &mut structural_runtime,
-                    tenant_manager,
-                    &tenant_id,
-                    project_id.as_deref(),
-                    &chunk_type,
-                    source_path.as_deref(),
-                    &text,
-                );
-            }
-            Ok(response)
+            handle_memory_add_batch(store, tenant_manager, params).await
         }
         "task.start" => {
             let params: TaskStartParams = parse_tool_params(tool, arguments)?;
@@ -414,17 +200,7 @@ pub(super) async fn cli_call_tool<S: Store>(
         }
         "memory.supersede" => {
             let params: SupersedeParams = parse_tool_params(tool, arguments)?;
-            let (response, event) = handle_memory_supersede(store, tenant_manager, params).await?;
-            maybe_index_structural_chunk(
-                &mut structural_runtime,
-                tenant_manager,
-                &event.tenant_id,
-                event.project_id.as_deref(),
-                &event.chunk_type,
-                event.source_path.as_deref(),
-                &event.text,
-            );
-            Ok(response)
+            handle_memory_supersede(store, tenant_manager, params).await
         }
         "memory.set_expiry" => {
             let params: SetExpiryParams = parse_tool_params(tool, arguments)?;
@@ -448,20 +224,7 @@ pub(super) async fn cli_call_tool<S: Store>(
         }
         "memory.import_omf" => {
             let params: ImportOmfParams = parse_tool_params(tool, arguments)?;
-            let (response, events) =
-                handle_memory_import_omf(store, tenant_manager, params).await?;
-            for event in &events {
-                maybe_index_structural_chunk(
-                    &mut structural_runtime,
-                    tenant_manager,
-                    &event.tenant_id,
-                    event.project_id.as_deref(),
-                    &event.chunk_type,
-                    event.source_path.as_deref(),
-                    &event.text,
-                );
-            }
-            Ok(response)
+            handle_memory_import_omf(store, tenant_manager, params).await
         }
         "memory.consolidate_episode" => {
             let params: ConsolidateEpisodeParams = parse_tool_params(tool, arguments)?;
@@ -494,36 +257,6 @@ pub(super) async fn cli_call_tool<S: Store>(
         "context.get_hot_context" => {
             let params: ContextGetHotContextParams = parse_tool_params(tool, arguments)?;
             handle_context_get_hot_context(store, params).await
-        }
-        "code.find_definition" => {
-            let params: FindDefinitionParams = parse_tool_params(tool, arguments)?;
-            let runtime = ensure_structural_runtime(&mut structural_runtime, tenant_manager)?;
-            handle_find_definition(runtime.symbol_query_service.as_ref(), params)
-        }
-        "code.find_references" => {
-            let params: FindReferencesParams = parse_tool_params(tool, arguments)?;
-            let runtime = ensure_structural_runtime(&mut structural_runtime, tenant_manager)?;
-            handle_find_references(runtime.symbol_query_service.as_ref(), params)
-        }
-        "code.find_callers" => {
-            let params: FindCallersParams = parse_tool_params(tool, arguments)?;
-            let runtime = ensure_structural_runtime(&mut structural_runtime, tenant_manager)?;
-            handle_find_callers(runtime.symbol_query_service.as_ref(), params)
-        }
-        "code.find_imports" => {
-            let params: FindImportsParams = parse_tool_params(tool, arguments)?;
-            let runtime = ensure_structural_runtime(&mut structural_runtime, tenant_manager)?;
-            handle_find_imports(runtime.symbol_query_service.as_ref(), params)
-        }
-        "debug.find_tool_calls" => {
-            let params: FindToolCallsParams = parse_tool_params(tool, arguments)?;
-            let runtime = ensure_structural_runtime(&mut structural_runtime, tenant_manager)?;
-            handle_find_tool_calls(runtime.trace_query_service.as_ref(), params)
-        }
-        "debug.find_errors" => {
-            let params: FindErrorsParams = parse_tool_params(tool, arguments)?;
-            let runtime = ensure_structural_runtime(&mut structural_runtime, tenant_manager)?;
-            handle_find_errors(runtime.trace_query_service.as_ref(), params)
         }
         _ => Err(McpError::MethodNotFound(format!("unknown tool '{tool}'"))),
     }

@@ -32,7 +32,6 @@ use crate::metrics::IndexStats;
 use crate::task_memory::{
     TaskArtifact, TaskArtifactWriteResult, TaskProjection, TaskRecord, TaskSearchFilters,
 };
-use crate::tiered::TieredTiming;
 use crate::types::lifecycle::{LifecycleMetadata, ResolvedChunk};
 use crate::types::{ChunkId, MemoryChunk, TenantId};
 pub use feedback::{
@@ -668,43 +667,6 @@ pub trait Store: Send + Sync {
         Ok(None)
     }
 
-    /// Search with tier info for debugging
-    ///
-    /// Returns results with tiered timing and optional tier decisions.
-    /// Default implementation calls search_with_scores and returns None for timing.
-    /// PersistentStore overrides this with real tiered search info.
-    async fn search_with_tier_info(
-        &self,
-        tenant_id: &TenantId,
-        query: &str,
-        k: usize,
-    ) -> Result<(Vec<(MemoryChunk, f32)>, Option<TieredTiming>)> {
-        let results = self.search_with_scores(tenant_id, query, k).await?;
-        Ok((results, None))
-    }
-
-    /// Search with tier info at a fixed wall-clock reference.
-    async fn search_with_tier_info_at(
-        &self,
-        tenant_id: &TenantId,
-        query: &str,
-        k: usize,
-        ranking_time_ms: i64,
-    ) -> Result<(Vec<(MemoryChunk, f32)>, Option<TieredTiming>)> {
-        let results = self
-            .search_with_scores_at(tenant_id, query, k, ranking_time_ms)
-            .await?;
-        Ok((results, None))
-    }
-
-    /// Get tiered search statistics
-    ///
-    /// Returns None if tiered search is not enabled.
-    /// PersistentStore overrides this with real tiered stats.
-    fn get_tiered_stats(&self) -> Option<persistent::TieredStats> {
-        None
-    }
-
     /// Get dense index statistics
     ///
     /// Returns per-tenant index stats when available.
@@ -747,7 +709,7 @@ pub trait Store: Send + Sync {
 pub use dense::{DenseSearchConfig, DenseSearchResult, DenseSearcher};
 pub use hybrid::{HybridConfig, HybridSearchResult, HybridSearcher, HybridTiming, SearchContext};
 pub use memory::MemoryStore;
-pub use persistent::{PersistentStore, PersistentStoreConfig, TieredStats};
+pub use persistent::{PersistentStore, PersistentStoreConfig};
 pub use shared_add::{split_for_add, ADD_CHUNK_THRESHOLD};
 pub use tenant::TenantManager;
 pub use tombstone::TombstoneSet;

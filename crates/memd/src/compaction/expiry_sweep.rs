@@ -16,15 +16,8 @@
 //!   `status = Expired` and a stamped `lifecycle_updated_at_ms`. That
 //!   bump is load-bearing for C4 — history promotion uses the overlay
 //!   clock, not `timestamp_created`.
-//! - Cache invalidation via `HybridSearcher::bump_tenant_memory_version`
-//!   is guarded: when called standalone (hybrid=Some) the sweep bumps
-//!   once after all rows are updated; when called from
-//!   `CompactionRunner` (Task C5) callers pass `hybrid=None` and do a
-//!   single centralised bump for the whole cycle. This keeps cache
-//!   bumps at exactly one per tenant per sweep regardless of call site.
 
 use crate::error::Result;
-use crate::store::hybrid::HybridSearcher;
 use crate::store::metadata::MetadataStore;
 use crate::types::TenantId;
 
@@ -63,18 +56,10 @@ impl ExpirySweep {
     ///
     /// - `metadata`: the SQLite metadata store (trait so this module
     ///   stays decoupled from the concrete `SqliteMetadataStore`).
-    /// - `hybrid`: when `Some` and at least one row was promoted, bump
-    ///   the tenant memory version so any warm-tier snapshot invalidates
-    ///   now rather than at next access.
     /// - `tenant_id`: the tenant to sweep. Callers fan out per tenant.
     ///
     /// Returns `SweepResult { expired_count }`.
-    pub fn run(
-        &self,
-        metadata: &impl MetadataStore,
-        hybrid: Option<&HybridSearcher>,
-        tenant_id: &TenantId,
-    ) -> Result<SweepResult> {
+    pub fn run(&self, metadata: &impl MetadataStore, tenant_id: &TenantId) -> Result<SweepResult> {
         let now = current_time_ms();
         let ids = metadata.list_expired_before(tenant_id, now)?;
         if ids.is_empty() {
@@ -96,12 +81,6 @@ impl ExpirySweep {
             }
         }
 
-        if promoted > 0 {
-            if let Some(h) = hybrid {
-                h.bump_tenant_memory_version(tenant_id);
-            }
-        }
-
         Ok(SweepResult {
             expired_count: promoted,
         })
@@ -117,11 +96,6 @@ mod tests {
     //   - expiry_sweep_is_idempotent_across_consecutive_runs
     //   - expiry_sweep_is_safe_against_concurrent_status_change (race guard)
     //
-    // The cache-bump path (bump_tenant_memory_version when hybrid is
-    // Some) is exercised by the CompactionRunner integration in Task C5
-    // rather than in a standalone unit test — spinning up a
-    // HybridSearcher in isolation pulls in dense search init which is
-    // tempdir-hostile for small-footprint tests.
     #[test]
     fn sweep_struct_is_default_constructable() {
         let _ = super::ExpirySweep::new();

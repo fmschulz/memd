@@ -38,6 +38,13 @@ pub(in crate::cli) async fn run_memory_md_eval<S: Store>(
     } else {
         project_dir.join(&output)
     };
+    if resolve_eval_destination(&rendered_path)?
+        == resolve_eval_destination(&project_dir.join("memory.md"))?
+    {
+        return Err(MemdError::ValidationError(
+            "evaluation output must not replace project memory.md".to_string(),
+        ));
+    }
     let refresh = refresh_memory_md_with_health(
         store,
         tenant_manager,
@@ -47,7 +54,7 @@ pub(in crate::cli) async fn run_memory_md_eval<S: Store>(
             project_dir,
             output,
             project_limit: options.project_limit,
-            global_limit: if options.agent_usefulness { 2 } else { 0 },
+            global_limit: 0,
             candidate_k: options.candidate_k,
             explain_output: None,
         },
@@ -74,26 +81,9 @@ pub(in crate::cli) async fn run_memory_md_eval<S: Store>(
             report.generated_wrapper_count, options.max_generated_wrappers
         ));
     }
-    let agent_usefulness = if options.agent_usefulness {
-        let metrics: AgentUsefulnessMetrics = serde_json::from_value(
-            refresh
-                .get("agent_usefulness")
-                .cloned()
-                .unwrap_or_else(|| json!({})),
-        )
-        .map_err(|error| {
-            MemdError::ValidationError(format!("invalid agent_usefulness metrics: {error}"))
-        })?;
-        failures.extend(agent_usefulness_failures(&metrics));
-        Some(metrics)
-    } else {
-        None
-    };
-
     let payload = json!({
         "passed": failures.is_empty(),
         "output": rendered_path,
-        "agent_usefulness": agent_usefulness,
         "top_n": top_n,
         "displayed_count": report.displayed_count,
         "useful_count": report.useful_count,
@@ -115,6 +105,27 @@ pub(in crate::cli) async fn run_memory_md_eval<S: Store>(
     }
 
     Ok(payload)
+}
+
+/// Resolve existing symlinks and missing leaf names without creating files.
+fn resolve_eval_destination(path: &Path) -> Result<PathBuf> {
+    match fs::canonicalize(path) {
+        Ok(resolved) => Ok(resolved),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A dangling symlink cannot be checked against the protected path.
+            // Fail closed rather than let atomic_replace follow it later.
+            match fs::symlink_metadata(path) {
+                Ok(_) => return Err(error.into()),
+                Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(metadata_error) => return Err(metadata_error.into()),
+            }
+            let name = path.file_name().ok_or_else(|| {
+                MemdError::ValidationError("evaluation output has no filename".to_string())
+            })?;
+            Ok(fs::canonicalize(path.parent().unwrap_or_else(|| Path::new(".")))?.join(name))
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,12 +159,13 @@ pub(super) async fn run_memory_md_gold_eval<S: Store>(
 
     let mut project_results = Vec::new();
     let mut failures = Vec::new();
-    for (idx, project) in gold.projects.iter().enumerate() {
+    for project in &gold.projects {
         let name = project
             .name
             .clone()
             .unwrap_or_else(|| project.project_dir.display().to_string());
-        let output = std::env::temp_dir().join(format!("memd-memory-md-gold-{idx}.md"));
+        let output =
+            std::env::temp_dir().join(format!("memd-memory-md-gold-{}.md", uuid::Uuid::now_v7()));
         let refresh = refresh_memory_md_with_health(
             store,
             tenant_manager,
@@ -179,7 +191,7 @@ pub(super) async fn run_memory_md_gold_eval<S: Store>(
         .map_err(|error| {
             MemdError::ValidationError(format!("invalid agent_usefulness metrics: {error}"))
         })?;
-        let mut project_failures = agent_usefulness_failures(&metrics);
+        let mut project_failures = Vec::new();
         if let Some(max_fragments) = project.max_fragments {
             if metrics.fragment_count > max_fragments {
                 project_failures.push(format!(
@@ -233,43 +245,14 @@ pub(super) async fn run_memory_md_gold_eval<S: Store>(
     Ok(payload)
 }
 
-pub(super) fn agent_usefulness_failures(metrics: &AgentUsefulnessMetrics) -> Vec<String> {
-    let mut failures = Vec::new();
-    if !metrics.scope_health_present {
-        failures.push("scope health is missing".to_string());
-    }
-    if metrics.fragment_count > 0 {
-        failures.push(format!(
-            "fragment_count {} exceeds threshold 0",
-            metrics.fragment_count
-        ));
-    }
-    if metrics.boilerplate_action_count > 0 {
-        failures.push(format!(
-            "boilerplate_action_count {} exceeds threshold 0",
-            metrics.boilerplate_action_count
-        ));
-    }
-    if metrics.unrelated_machine_items > 2 {
-        failures.push(format!(
-            "unrelated_machine_items {} exceeds threshold 2",
-            metrics.unrelated_machine_items
-        ));
-    }
-    if !metrics.answerability_passed {
-        failures.push("answerability_passed=false".to_string());
-    }
-    failures
-}
-
 pub(super) fn evaluate_agent_usefulness(
     state: &ProjectState,
     project_takeaways: &[Takeaway],
     global_takeaways: &[Takeaway],
 ) -> AgentUsefulnessMetrics {
     // These metrics are computed from the same structured state and filtered
-    // startup items used by the renderer. They are a deterministic regression
-    // gate for startup answerability, not an independent semantic judge.
+    // startup items used by the renderer. They describe the rendered items;
+    // they are not an independent quality gate.
     let scope_health_present = scope_health_checked(state);
     let memory_degraded_warning_present = state
         .memory
