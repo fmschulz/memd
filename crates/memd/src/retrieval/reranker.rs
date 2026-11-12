@@ -138,6 +138,29 @@ pub struct FeatureReranker {
     config: RerankerConfig,
 }
 
+/// Best relevance score in a candidate set.
+fn max_relevance(chunks: &[ChunkWithMeta]) -> f32 {
+    chunks
+        .iter()
+        .map(|chunk| chunk.rrf_score)
+        .fold(f32::NEG_INFINITY, f32::max)
+}
+
+/// Relevance on a 0..=1 scale relative to the best candidate.
+///
+/// Raw fused scores are tiny (RRF tops out near 2 / (k + 1) = 0.033 for
+/// k = 60) and their scale depends on the retrieval path (RRF, or raw cosine
+/// when the sparse side returns nothing), while the bonuses are on a fixed
+/// 0..=1 scale. Weighting the raw score let recency and text overlap decide
+/// the order. A non-positive maximum leaves the scores as they are.
+fn normalized_relevance(score: f32, max_relevance: f32) -> f32 {
+    if max_relevance > 0.0 {
+        score / max_relevance
+    } else {
+        score
+    }
+}
+
 impl FeatureReranker {
     pub fn new(config: RerankerConfig) -> Self {
         Self { config }
@@ -152,6 +175,7 @@ impl FeatureReranker {
         chunks: Vec<ChunkWithMeta>,
         context: &RerankerContext,
     ) -> Vec<RankedResult> {
+        let max_relevance = max_relevance(&chunks);
         let mut results: Vec<RankedResult> = chunks
             .into_iter()
             .map(|chunk| {
@@ -165,7 +189,8 @@ impl FeatureReranker {
                     context.query_text.as_deref().unwrap_or_default(),
                     chunk.text.as_deref(),
                 );
-                let final_score = self.config.rrf_weight * chunk.rrf_score
+                let final_score = self.config.rrf_weight
+                    * normalized_relevance(chunk.rrf_score, max_relevance)
                     + self.config.recency_weight * recency_bonus
                     + self.config.project_weight * project_bonus
                     + self.config.type_weight * type_bonus
@@ -292,6 +317,7 @@ impl CrossEncoderReranker {
         let feature = FeatureReranker::new(self.config.clone());
         let query = context.query_text.as_deref().unwrap_or("");
         let cross_scores = cross_encoder_scores(query, &chunks);
+        let max_relevance = max_relevance(&chunks);
 
         let mut results: Vec<RankedResult> = chunks
             .into_iter()
@@ -305,7 +331,8 @@ impl CrossEncoderReranker {
                 let type_bonus =
                     feature.compute_type_bonus(chunk.chunk_type, &context.preferred_types);
 
-                let final_score = self.config.rrf_weight * chunk.rrf_score
+                let final_score = self.config.rrf_weight
+                    * normalized_relevance(chunk.rrf_score, max_relevance)
                     + self.config.cross_encoder_weight * cross_encoder_score
                     + self.config.recency_weight * recency_bonus
                     + self.config.project_weight * project_bonus
@@ -622,7 +649,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "enabled by the RRF-normalization change"]
     fn feature_reranker_bonuses_do_not_dominate_clear_rrf_gaps() {
         // Raw RRF scores live near weight/(k+rank) with k=60, so a rank-1
         // both-sources hit (~0.033) and a mid-rank single-source hit
