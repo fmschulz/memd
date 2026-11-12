@@ -1868,6 +1868,7 @@ async fn handle_warm_connection<S: Store>(
                 Ok((output, log_payload)) => WarmWireResponse::ok_output(output, log_payload),
                 Err(error) => WarmWireResponse::for_command_error(&error),
             };
+            store.rebaseline_external_mutation_probe();
             drop(permit);
             response
         }

@@ -606,6 +606,28 @@ impl ExternalMutationProbe {
         Ok(check)
     }
 
+    /// Take the current `data_version` and write epoch as the new baseline
+    /// without classifying the change.
+    ///
+    /// The warm worker calls this when a command finishes. A command's own
+    /// commits include bookkeeping that deliberately does not bump the write
+    /// epoch (retrieval episodes, outcome events, the usage ledger). Without
+    /// a fresh baseline the next probe sees `data_version` move with an
+    /// unchanged epoch and reports the worker's own search as an external
+    /// mutation, which schedules an HNSW repair scan after every search.
+    fn rebaseline(&self) -> Result<()> {
+        let data_version = {
+            let connection = self.connection.lock();
+            Self::query_data_version(&connection)?
+        };
+        let write_epoch = self.write_epoch.load(Ordering::Acquire);
+        *self.snapshot.lock() = ExternalMutationSnapshot {
+            last_data_version: data_version,
+            last_write_epoch: write_epoch,
+        };
+        Ok(())
+    }
+
     fn stats(&self) -> RywProbeStats {
         // `repairs` / `repair_in_progress` are owned by `HnswRepairState`
         // and filled in by `PersistentStore::ryw_probe_stats`.
@@ -1148,6 +1170,17 @@ impl PersistentStore {
     /// Get shared metrics collector
     pub fn metrics_arc(&self) -> Arc<MetricsCollector> {
         Arc::clone(&self.metrics)
+    }
+
+    /// Re-baseline the external-mutation probe after this process finished a
+    /// command (see [`ExternalMutationProbe::rebaseline`]). Best effort: a
+    /// failed read only costs one spurious repair at the next probe.
+    pub fn rebaseline_external_mutation_probe(&self) {
+        if let Some(probe) = self.external_mutation_probe.as_ref() {
+            if let Err(error) = probe.rebaseline() {
+                debug!(error = %error, "external mutation probe rebaseline failed");
+            }
+        }
     }
 
     pub async fn probe_external_mutation(&self) -> ExternalMutationOutcome {
@@ -2057,6 +2090,10 @@ impl Store for PersistentStore {
 
     async fn probe_external_mutation(&self) -> ExternalMutationOutcome {
         PersistentStore::probe_external_mutation(self).await
+    }
+
+    fn rebaseline_external_mutation_probe(&self) {
+        PersistentStore::rebaseline_external_mutation_probe(self)
     }
 
     fn ryw_probe_stats(&self) -> Option<RywProbeStats> {

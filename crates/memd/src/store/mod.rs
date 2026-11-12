@@ -531,6 +531,10 @@ pub trait Store: Send + Sync {
         ExternalMutationOutcome::Unavailable
     }
 
+    /// Tell the external-mutation probe that this process just finished a
+    /// command, so the commits it made are not read as external next time.
+    fn rebaseline_external_mutation_probe(&self) {}
+
     /// Read-your-writes probe counters for warm-worker status payloads.
     fn ryw_probe_stats(&self) -> Option<RywProbeStats> {
         None
