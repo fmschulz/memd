@@ -142,6 +142,38 @@ impl IndexMapping {
     }
 }
 
+/// Largest per-component difference at which two embeddings of one chunk
+/// count as the same vector. The same text embedded in different batches
+/// differs only by floating-point noise, orders of magnitude below this.
+const SAME_EMBEDDING_TOLERANCE: f32 = 1e-4;
+
+/// Whether `chunk_id` is already indexed with this embedding.
+///
+/// A chunk can reach the index twice: a repair pass and the write path may
+/// both index a chunk that was stored while the repair was taking its
+/// snapshot. The mapping returns the existing internal id, so a second graph
+/// insert would add a second point under that id; the saved graph then holds
+/// more points than the embedding cache and is rejected, and rebuilt, on
+/// every load until a writer saves a clean one. Inserting the same vector
+/// again is therefore a no-op. A different vector still replaces the old one.
+fn already_indexed(
+    mapping: &IndexMapping,
+    cache: &EmbeddingCache,
+    chunk_id: &ChunkId,
+    embedding: &[f32],
+) -> bool {
+    mapping
+        .get_internal_id(chunk_id)
+        .and_then(|internal_id| cache.get(internal_id))
+        .is_some_and(|existing| {
+            existing.len() == embedding.len()
+                && existing
+                    .iter()
+                    .zip(embedding)
+                    .all(|(a, b)| (a - b).abs() <= SAME_EMBEDDING_TOLERANCE)
+        })
+}
+
 /// HNSW warm tier index
 pub struct HnswIndex {
     /// The HNSW graph structure
@@ -282,12 +314,17 @@ impl HnswIndex {
             )));
         }
 
-        let internal_id = self.mapping.write().insert(chunk_id);
-
-        // Store in cache for persistence
-        self.embedding_cache
-            .write()
-            .insert(internal_id, embedding)?;
+        let internal_id = {
+            let mut mapping = self.mapping.write();
+            let mut cache = self.embedding_cache.write();
+            if already_indexed(&mapping, &cache, chunk_id, embedding) {
+                return Ok(());
+            }
+            let internal_id = mapping.insert(chunk_id);
+            // Store in cache for persistence
+            cache.insert(internal_id, embedding)?;
+            internal_id
+        };
 
         let hnsw = self.hnsw.write();
         hnsw.insert_slice((embedding, internal_id));
@@ -313,6 +350,9 @@ impl HnswIndex {
                 )));
             }
 
+            if already_indexed(&mapping, &cache, chunk_id, embedding) {
+                continue;
+            }
             let internal_id = mapping.insert(chunk_id);
             cache.insert(internal_id, embedding)?;
             to_insert.push((embedding.as_slice(), internal_id));
@@ -1082,6 +1122,55 @@ mod tests {
         assert!(
             err_msg.contains("rebuild-index") || err_msg.contains("delete the data"),
             "error should include rebuild instructions"
+        );
+    }
+
+    /// A repair pass and the write path can both index the same chunk. The
+    /// second insert must not add a graph point: the saved graph would hold
+    /// more points than the embedding cache and be rejected on load.
+    #[test]
+    fn reinserting_an_indexed_chunk_adds_no_graph_point() {
+        let index = HnswIndex::new(HnswConfig {
+            max_elements: 100,
+            dimension: 4,
+            ..Default::default()
+        });
+        let first = ChunkId::new();
+        let second = ChunkId::new();
+        let mut emb = vec![1.0, 0.0, 0.0, 0.0];
+        normalize(&mut emb);
+        let mut other = vec![0.0, 1.0, 0.0, 0.0];
+        normalize(&mut other);
+
+        index.insert(&first, &emb).unwrap();
+        index.insert(&first, &emb).unwrap();
+        index
+            .insert_batch(&[
+                (first.clone(), emb.clone()),
+                (second.clone(), other.clone()),
+                (second.clone(), other.clone()),
+            ])
+            .unwrap();
+
+        assert_eq!(index.hnsw.read().get_nb_point(), 2);
+        assert_eq!(index.embedding_cache.read().len(), 2);
+        let hits = index.search(&emb, 5).unwrap();
+        assert_eq!(
+            hits.iter().filter(|hit| hit.chunk_id == first).count(),
+            1,
+            "the chunk is returned once"
+        );
+
+        // A different vector for the same chunk still replaces the old one.
+        index.insert(&first, &other).unwrap();
+        let internal_id = index.mapping.read().get_internal_id(&first).unwrap();
+        assert_eq!(
+            index
+                .embedding_cache
+                .read()
+                .get(internal_id)
+                .map(<[f32]>::to_vec),
+            Some(other)
         );
     }
 
