@@ -390,7 +390,10 @@ pub(super) fn parse_since_window_ms(s: &str) -> Result<i64> {
         return Err(invalid());
     }
 
-    let (number, suffix) = trimmed.split_at(trimmed.len() - 1);
+    let Some((suffix_start, _)) = trimmed.char_indices().last() else {
+        return Err(invalid());
+    };
+    let (number, suffix) = trimmed.split_at(suffix_start);
     if number.is_empty() || !number.chars().all(|ch| ch.is_ascii_digit()) {
         return Err(invalid());
     }
@@ -1015,7 +1018,7 @@ mod tests {
 
     #[test]
     fn parse_since_rejects_invalid_values() {
-        for value in ["", "0d", "7w", "banana", "7", "3651d", "87601h"] {
+        for value in ["", "0d", "7w", "banana", "7", "3651d", "87601h", "7д", "д"] {
             let err = parse_since_window_ms(value).unwrap_err().to_string();
             assert!(err.contains("invalid --since value"), "{err}");
             assert!(err.contains("<N>d"), "{err}");

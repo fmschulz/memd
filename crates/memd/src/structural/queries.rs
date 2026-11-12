@@ -893,7 +893,7 @@ fn parse_millis_and_tz(s: &str) -> Option<(u32, i32)> {
                 return None;
             }
             (parts[0].parse::<i32>().ok()?, parts[1].parse::<i32>().ok()?)
-        } else if tz.len() == 4 {
+        } else if tz.len() == 4 && tz.is_ascii() {
             (tz[..2].parse::<i32>().ok()?, tz[2..].parse::<i32>().ok()?)
         } else {
             return None;

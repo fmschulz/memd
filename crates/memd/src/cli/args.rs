@@ -537,7 +537,12 @@ pub enum CliCommand {
         max_region: usize,
 
         /// Build and print the prompt without calling the LLM.
-        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        #[arg(
+            long,
+            default_value_t = false,
+            action = ArgAction::SetTrue,
+            conflicts_with = "background"
+        )]
         dry_run: bool,
 
         /// Run consolidation in a detached background process.
@@ -1332,7 +1337,10 @@ impl CliCommand {
     pub fn requires_store(&self) -> bool {
         !matches!(
             self,
-            CliCommand::Init { .. } | CliCommand::Warm { .. } | CliCommand::Maintenance { .. }
+            CliCommand::Init { .. }
+                | CliCommand::Warm { .. }
+                | CliCommand::Maintenance { .. }
+                | CliCommand::EvalWriteQuality { .. }
         )
     }
 

@@ -653,6 +653,13 @@ fn write_archive(
     });
     file.write_all(serde_json::to_string_pretty(&payload)?.as_bytes())?;
     file.write_all(b"\n")?;
+    // The archive is the only copy of the rows the purge deletes next, so
+    // the file and its directory entry must be on disk before any delete.
+    file.sync_all()?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
     Ok(())
 }
 

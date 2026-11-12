@@ -2033,6 +2033,7 @@ impl Store for PersistentStore {
     }
 
     async fn record_outcome(&self, tenant_id: &TenantId, event: OutcomeEvent) -> Result<()> {
+        self.reject_if_read_only("record_outcome")?;
         self.metadata.insert_outcome_event(tenant_id, &event)
     }
 
