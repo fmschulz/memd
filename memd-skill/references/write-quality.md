@@ -24,7 +24,8 @@ For an operational fact unavailable in repository files, record:
 - enough scope and freshness information to verify the fact again
 
 For high-priority records with `priority:8+` or `importance:8+`, include a
-concrete `Agent action:` sentence; the write-quality gate requires it. The
+concrete `Agent action:` sentence; without it the write is stored at priority
+7 with a warning. The
 sentence should tell the next agent what to do, check, prefer, avoid, verify,
 reuse, or resolve. Avoid vague labels such as "benchmark state" unless they are
 followed by the action rule and evidence that make them useful.

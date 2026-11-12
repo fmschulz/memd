@@ -36,7 +36,7 @@ Full annotated reference:
 # Copy to ~/.config/memd/config.toml and customize.
 
 # Directory for tenant data storage.
-# Each tenant gets a subdirectory: {data_dir}/{tenant_id}/
+# Each tenant gets a subdirectory: {data_dir}/tenants/{tenant_id}/
 # Supports ~ for home directory expansion.
 data_dir = "~/.memd/data"
 

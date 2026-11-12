@@ -3,7 +3,7 @@
 This example stores source/documentation chunks and records the indexing job
 itself with CLI memories.
 
-Tenant: `repo-memory`
+Tenant: `repo_memory`
 Project: `payments-api`
 Task tag: `indexing`
 
@@ -14,7 +14,7 @@ Indexing intent is short-lived by default; tag verified indexing results as
 
 ```bash
 memd add \
-  --tenant-id repo-memory \
+  --tenant-id repo_memory \
   --project-id payments-api \
   --chunk-type summary \
   --tags kind:progress,task:indexing \
@@ -25,7 +25,7 @@ memd add \
 
 ```bash
 memd add \
-  --tenant-id repo-memory \
+  --tenant-id repo_memory \
   --project-id payments-api \
   --chunk-type code \
   --tags ctx:file:src/payments/router.rs,lang:rust \
@@ -35,7 +35,7 @@ memd add \
 
 ```bash
 memd add \
-  --tenant-id repo-memory \
+  --tenant-id repo_memory \
   --project-id payments-api \
   --chunk-type doc \
   --tags ctx:file:docs/payments.md \
@@ -50,7 +50,7 @@ by file section or symbol.
 
 ```bash
 memd add \
-  --tenant-id repo-memory \
+  --tenant-id repo_memory \
   --project-id payments-api \
   --chunk-type summary \
   --tags kind:finish,task:indexing \
@@ -61,7 +61,7 @@ memd add \
 
 ```bash
 memd search \
-  --tenant-id repo-memory \
+  --tenant-id repo_memory \
   --project-id payments-api \
   --query "payment idempotency retry routing" \
   --compact \

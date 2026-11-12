@@ -30,7 +30,7 @@ private CLI-managed warm worker driven by ordinary CLI commands.
 | Surface | Purpose | Primary CLI commands |
 | --- | --- | --- |
 | Raw memory | Store operational facts and index selected source material for retrieval | `memd add`, `memd search`, `memd get`, `memd stats` |
-| Experience cases | Connect problems, attempts, check receipts, lessons, and corrections; recall only applicable lessons | `memd experience record`, `check`, `get`, `find` |
+| Experience cases | Connect problems, attempts, check receipts, lessons, and corrections; recall only applicable lessons | `memd experience note`, `find`, `get`, `check`, `export`, `import` |
 | Agent context | Bounded pre-work context + JSON audit logs | `memd agent-context --output .memd/context.md` |
 | Startup memory | Refresh project `memory.md` with scope, health warnings, and ranked facts filtered against repository documents | `memd memory-md`, `memd eval-memory-md --agent-usefulness` |
 | Usefulness report | Usage-ledger and store self-diagnosis for growth, learning, retrieval, and warnings | `memd report --strict` |
@@ -58,7 +58,7 @@ priority 7 with a warning. Tell the next agent what to verify, run, reuse, or av
 ## 30-second quickstart
 
 ```bash
-git clone --depth 1 https://github.com/fmschulz/memd   # --depth 1: skip 150+ MB of history
+git clone --depth 1 https://github.com/fmschulz/memd
 cd memd
 make install   # prebuilt binary (seconds; compiles only if needed) + skill + enforcement
 memd doctor
@@ -145,31 +145,18 @@ contract, the internal release gates, and the reproduction commands.
 
 The agent skill is the default way to make agents use `memd` through the CLI.
 
-Install the binary, agent skill, and enforcement in one command:
-
-```bash
-git clone --depth 1 https://github.com/fmschulz/memd   # --depth 1: skip 150+ MB of history
-cd memd
-make install   # prebuilt binary (seconds; compiles only if needed) + skill + enforcement
-memd doctor
-```
-
-Prebuilt binary only (no clone):
-
-```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/fmschulz/memd/releases/latest/download/memd-installer.sh | sh
-```
-
-The prebuilt installer installs only the binary. For everything without
-compiling, run `make install` from a clone — it tests the prebuilt release
-binary and builds from source only if that fails (`make install-prebuilt` is
-a kept alias). `make install-source` always builds from source,
+`make install` from the [30-second quickstart](#30-second-quickstart) installs
+the binary, the agent skill, and the enforcement wiring. It tests the prebuilt
+release binary and builds from source only if that fails
+(`make install-prebuilt` is a kept alias). The prebuilt installer alone
+installs only the binary. `make install-source` always builds from source,
 `make install-binary` installs only the binary, `make menu` opens an
 interactive TUI to pick components, and `make uninstall` removes what
 `make install` installed.
 
-For component-target development, `make install-skill` installs the skill as
-symlinks. Use `make install-skill-bundle` to copy the current skill plus the
+Keep the clone: by default the installed skill is a symlink into it. Run
+`make install INSTALL_METHOD=copy` for a standalone copy. Use
+`make install-skill-bundle` to copy the current skill plus the
 repo-built binary into each unique existing standard skill directory among
 `~/.agents/skills`, `~/.claude/skills`, and `~/.codex/skills`.
 

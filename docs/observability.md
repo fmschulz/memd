@@ -2,8 +2,8 @@
 
 `memd` has four observability surfaces: the usage ledger and `memd report`
 (including the session-start health header), stats/health/metrics operations,
-structured tracing logs, and per-search hit counters in
-`.memd/data/hit_counts.jsonl`.
+structured tracing logs, and the per-search exposure log
+`retrieval_exposures.jsonl` in the data directory.
 
 ## Usage ledger
 
@@ -28,10 +28,9 @@ through the worker.
 Worker-scoped environment variables are resolved from the worker process; see
 [Configuration](configuration.md#worker-environment).
 
-Search query text is never stored verbatim. The ledger stores only a 16-hex
-`q_hash` for distinct-query analytics. The hash is not stable across Rust
-releases, so distinctness comparisons are meaningful only among events written
-by the same `memd` build.
+Search query text is never stored verbatim. The ledger stores only `q_hash`,
+a SHA-256 digest of the whitespace-normalised query, for distinct-query
+analytics. The digest is stable across `memd` builds.
 
 ## memd report
 
@@ -134,9 +133,11 @@ Deprecation warnings for `artifact.create` (mega-schema),
 ## Hit counters
 
 Every CLI search appends one JSONL record per returned chunk to
-`.memd/data/hit_counts.jsonl`. The `memory.md` priority formula consumes a
-per-chunk 30-day aggregate (1 h TTL cache) — frequently retrieved chunks get
-up to +8, chunks with no hits older than 30 days get −2.
+`retrieval_exposures.jsonl` in the data directory. The `memory.md` priority
+formula consumes a per-chunk 30-day aggregate (1 h TTL cache). Being retrieved
+earns no bonus, because exposure is not evidence of usefulness; a chunk older
+than 30 days with no hits gets −2. See
+[Self-improvement loop](self-improvement.md).
 
 `memd eval-counterfactual` measures whether `kind:consolidated` chunks change
 ranks versus a same-pass filtered baseline.

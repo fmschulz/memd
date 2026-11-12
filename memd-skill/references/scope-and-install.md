@@ -44,6 +44,6 @@ Codex, Cursor), the Claude `SessionStart` hook, and the current project's
 `.memd` scope. Use `--format json` for machine-readable output.
 
 `memd doctor --strict` exits non-zero when any check fails. Use it in scripts.
-On a fresh store, the data dir and project scope checks read as failing until
-your first `session-start`. For store-content health (rejected writes, hit-rate,
+On a fresh store, the data dir and project scope checks pass with a note
+(`empty — fresh install`, `none yet`). For store-content health (rejected writes, hit-rate,
 noise), run `memd report --strict`.

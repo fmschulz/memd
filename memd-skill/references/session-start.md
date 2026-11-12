@@ -88,7 +88,7 @@ Run `memd init` explicitly when you want the full guardrail suite.
 
 ### Write-time priority
 
-`memd add` (and the MCP `memory.add` handler) automatically stamp a heuristic
+`memd add` and `memd call memory.add` automatically stamp a heuristic
 `priority:N` tag (3..=7) based on `--chunk-type`, `kind:*` tags, and
 validation/finish text signals when the caller does not pass one. Explicit
 user tags take precedence. Reserve `priority:8`/`priority:9` for verified lessons

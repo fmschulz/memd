@@ -3,7 +3,7 @@
 This example shows how one agent can start work and another agent can later
 recover the useful history with the `memd` CLI.
 
-Tenant: `ecommerce-api`
+Tenant: `ecommerce_api`
 Project: `auth`
 Task tag: `jwt-auth`
 
@@ -11,7 +11,7 @@ Task tag: `jwt-auth`
 
 ```bash
 memd agent-context \
-  --tenant-id ecommerce-api \
+  --tenant-id ecommerce_api \
   --project-id auth \
   --query "JWT authentication key rotation prior work" \
   --k 2 \
@@ -29,7 +29,7 @@ results to `kind:evidence`, `kind:decision`, `kind:finish`, or explicit
 
 ```bash
 memd add \
-  --tenant-id ecommerce-api \
+  --tenant-id ecommerce_api \
   --project-id auth \
   --chunk-type summary \
   --tags kind:progress,task:jwt-auth \
@@ -40,7 +40,7 @@ memd add \
 
 ```bash
 memd add \
-  --tenant-id ecommerce-api \
+  --tenant-id ecommerce_api \
   --project-id auth \
   --chunk-type trace \
   --tags kind:run,task:jwt-auth,tool:cargo-test,status:failed \
@@ -51,7 +51,7 @@ memd add \
 
 ```bash
 memd add \
-  --tenant-id ecommerce-api \
+  --tenant-id ecommerce_api \
   --project-id auth \
   --chunk-type research \
   --tags kind:evidence,task:jwt-auth,supports:true \
@@ -62,7 +62,7 @@ memd add \
 
 ```bash
 memd search \
-  --tenant-id ecommerce-api \
+  --tenant-id ecommerce_api \
   --project-id auth \
   --query "JWT auth expiration UTC evidence" \
   --compact \
@@ -74,7 +74,7 @@ memd search \
 
 ```bash
 memd add \
-  --tenant-id ecommerce-api \
+  --tenant-id ecommerce_api \
   --project-id auth \
   --chunk-type summary \
   --tags kind:finish,task:jwt-auth \

@@ -3,7 +3,7 @@
 This example shows how agents can preserve evidence and decisions through the
 CLI.
 
-Tenant: `microservices-platform`
+Tenant: `microservices_platform`
 Project: `platform-architecture`
 Task tag: `event-bus`
 
@@ -11,7 +11,7 @@ Task tag: `event-bus`
 
 ```bash
 memd agent-context \
-  --tenant-id microservices-platform \
+  --tenant-id microservices_platform \
   --project-id platform-architecture \
   --query "event bus replay throughput prior decisions" \
   --k 2 \
@@ -25,7 +25,7 @@ memd agent-context \
 
 ```bash
 memd add \
-  --tenant-id microservices-platform \
+  --tenant-id microservices_platform \
   --project-id platform-architecture \
   --chunk-type trace \
   --tags kind:run,task:event-bus,tool:benchmark-runner,status:completed \
@@ -36,7 +36,7 @@ memd add \
 
 ```bash
 memd add \
-  --tenant-id microservices-platform \
+  --tenant-id microservices_platform \
   --project-id platform-architecture \
   --chunk-type research \
   --tags kind:evidence,task:event-bus,supports:kafka \
@@ -47,7 +47,7 @@ memd add \
 
 ```bash
 memd add \
-  --tenant-id microservices-platform \
+  --tenant-id microservices_platform \
   --project-id platform-architecture \
   --chunk-type decision \
   --tags kind:decision,task:event-bus \
@@ -58,7 +58,7 @@ memd add \
 
 ```bash
 memd search \
-  --tenant-id microservices-platform \
+  --tenant-id microservices_platform \
   --project-id platform-architecture \
   --query "event bus replay throughput decision" \
   --mode find_decisions \
