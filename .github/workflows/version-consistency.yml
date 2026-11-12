@@ -7,6 +7,7 @@ name: Version consistency
 # Sources checked:
 #   - Cargo.toml                          (canonical)
 #   - tools/wiki/pyproject.toml
+#   - tools/wiki/compiled_wiki/__init__.py
 #   - README.md                           (shields.io badge)
 #   - docs/index.md                       (shields.io badge)
 #   - CHANGELOG.md                        (top "## [X.Y.Z]" header)
@@ -20,6 +21,7 @@ on:
     paths:
       - 'Cargo.toml'
       - 'tools/wiki/pyproject.toml'
+      - 'tools/wiki/compiled_wiki/__init__.py'
       - 'README.md'
       - 'docs/index.md'
       - 'CHANGELOG.md'
@@ -29,6 +31,7 @@ on:
     paths:
       - 'Cargo.toml'
       - 'tools/wiki/pyproject.toml'
+      - 'tools/wiki/compiled_wiki/__init__.py'
       - 'README.md'
       - 'docs/index.md'
       - 'CHANGELOG.md'

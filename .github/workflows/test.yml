@@ -53,20 +53,18 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-      # TODO tighten: restore '-- -D warnings' once the pre-existing clippy
-      # baseline in crates/memd is fixed (103 warning sites as of 2026-06-09;
-      # memd-evals is already clean). Until then this step surfaces warnings
-      # in the log but only fails on hard errors.
+      # The whole workspace is clippy-clean, so warnings fail the build.
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets
-
-      # Ratchet: memd-evals is already clippy-clean — keep it clean while the
-      # crates/memd baseline (103 pre-existing warning sites) is burned down.
-      - name: Clippy ratchet (memd-evals)
-        run: env RUSTC_WRAPPER= cargo clippy -p memd-evals --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run tests
         run: cargo test --workspace
+
+      # Three canonical-text backfill tests need the `test-support` feature
+      # (it exposes store helpers that release builds must not carry), so
+      # the plain workspace run above skips them.
+      - name: Run feature-gated tests
+        run: cargo test -p memd --features test-support --test fuzzy_dedup backfill_canonical_text
 
       - name: Reject close_range glibc imports
         run: |
@@ -75,3 +73,21 @@ jobs:
             echo "::error::memd imports glibc close_range and will not link on older glibc"
             exit 1
           fi
+
+  wiki:
+    name: Wiki tool tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Standard library only: no install step.
+      - name: Run memd-wiki unit tests
+        working-directory: tools/wiki
+        run: python -m unittest discover -s tests
