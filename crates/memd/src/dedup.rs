@@ -61,6 +61,13 @@ fn resolve_config(cfg: &DedupConfig) -> Result<ResolvedDedup> {
         }
     };
     let threshold = cfg.threshold.unwrap_or(DEFAULT_FUZZY_THRESHOLD);
+    // The threshold is a trigram Jaccard similarity. Zero, a negative value
+    // or NaN would match, and supersede, chunks that share nothing.
+    if !threshold.is_finite() || threshold <= 0.0 || threshold > 1.0 {
+        return Err(MemdError::ValidationError(format!(
+            "supersede_near_duplicates.threshold: expected a similarity in (0, 1], got {threshold}"
+        )));
+    }
     let scope_project = match cfg.scope.as_deref().unwrap_or("project") {
         "project" => true,
         "tenant" => false,
@@ -179,4 +186,38 @@ fn project_scope_matches(
 /// either non-mutable or owned by another writer's edge.
 fn is_live_head_row(m: &ChunkMetadata) -> bool {
     m.status == ChunkStatus::Final && m.lifecycle.superseded_by.is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fuzzy(threshold: Option<f32>) -> DedupConfig {
+        DedupConfig {
+            mode: Some("fuzzy".to_string()),
+            threshold,
+            scope: None,
+        }
+    }
+
+    #[test]
+    fn fuzzy_threshold_must_be_a_similarity() {
+        for bad in [0.0, -0.5, 1.5, f32::NAN, f32::INFINITY] {
+            let err = resolve_config(&fuzzy(Some(bad)))
+                .err()
+                .expect("an out-of-range threshold must be rejected")
+                .to_string();
+            assert!(err.contains("threshold"), "threshold {bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn fuzzy_threshold_accepts_valid_values_and_the_default() {
+        assert_eq!(resolve_config(&fuzzy(Some(0.85))).unwrap().threshold, 0.85);
+        assert_eq!(resolve_config(&fuzzy(Some(1.0))).unwrap().threshold, 1.0);
+        assert_eq!(
+            resolve_config(&fuzzy(None)).unwrap().threshold,
+            DEFAULT_FUZZY_THRESHOLD
+        );
+    }
 }

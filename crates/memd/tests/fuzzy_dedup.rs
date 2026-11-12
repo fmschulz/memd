@@ -1353,7 +1353,7 @@ async fn add_batch_with_dedup_preserves_lifecycle_overlay_on_match() {
         "memory.add_batch",
         serde_json::json!({
             "tenant_id": "t",
-            "supersede_near_duplicates": { "mode": "fuzzy", "threshold": 0.0 },
+            "supersede_near_duplicates": { "mode": "fuzzy", "threshold": 1e-6 },
             "chunks": [
                 {
                     "text": "Replacement release note with enough detail for deterministic splitting. ".repeat(80),

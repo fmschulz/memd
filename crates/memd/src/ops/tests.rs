@@ -679,7 +679,8 @@ async fn dedup_supersession_returns_and_updates_every_split_child() {
             expires_at_ms: Some(expires_at_ms),
             supersede_near_duplicates: Some(DedupSpec::Config(DedupConfig {
                 mode: Some("fuzzy".to_string()),
-                threshold: Some(0.0),
+                // Smallest practical threshold: any shared trigram matches.
+                threshold: Some(1e-6),
                 scope: Some("project".to_string()),
             })),
             ..Default::default()
