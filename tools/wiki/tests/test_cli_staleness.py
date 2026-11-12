@@ -70,7 +70,7 @@ class _FakeClient:
         task_id = arguments.get("task_id")
         if task_id in self._call_raises:
             raise self._call_raises[task_id]
-        return self._responses.get(task_id, {"task": {}})
+        return self._responses.get(task_id, {"resume": {"task": {}}})
 
 
 class BuildStalenessLookupTests(unittest.TestCase):
@@ -100,10 +100,10 @@ class BuildStalenessLookupTests(unittest.TestCase):
         args = _args(tenant_id="memd", project_id="memd")
         fake = _FakeClient(
             responses={
-                "task-1": {"task": {"updated_at_ms": 123_000}},
-                "task-2": {"task": {"finished_at_ms": 777}},
-                "task-3": {"task": {"started_at_ms": 55}},
-                "task-4": {"task": {}},
+                "task-1": {"resume": {"task": {"updated_at_ms": 123_000}}},
+                "task-2": {"resume": {"task": {"finished_at_ms": 777}}},
+                "task-3": {"resume": {"task": {"started_at_ms": 55}}},
+                "task-4": {"resume": {"task": {}}},
             }
         )
         with patch("compiled_wiki.cli_client.MemdCliClient", return_value=fake):
@@ -115,7 +115,7 @@ class BuildStalenessLookupTests(unittest.TestCase):
 
     def test_results_are_cached_per_task(self) -> None:
         args = _args(tenant_id="memd", project_id="memd")
-        fake = _FakeClient(responses={"task-1": {"task": {"updated_at_ms": 5}}})
+        fake = _FakeClient(responses={"task-1": {"resume": {"task": {"updated_at_ms": 5}}}})
         with patch("compiled_wiki.cli_client.MemdCliClient", return_value=fake):
             lookup = _build_staleness_lookup(args, _discovered())
         self.assertEqual(lookup("task-1"), 5)
@@ -128,7 +128,7 @@ class BuildStalenessLookupTests(unittest.TestCase):
     def test_call_tool_failure_disables_remaining_lookups(self) -> None:
         args = _args(tenant_id="memd", project_id="memd")
         fake = _FakeClient(
-            responses={"task-good": {"task": {"updated_at_ms": 1}}},
+            responses={"task-good": {"resume": {"task": {"updated_at_ms": 1}}}},
             call_raises={"task-bad": RuntimeError("cli boom")},
         )
         stderr = io.StringIO()

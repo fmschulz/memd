@@ -8,14 +8,14 @@ version = "1.9.0"
 description = "Deterministic compiled markdown wiki over memd project state."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
+license = { text = "MIT" }
 authors = [{ name = "memd maintainers" }]
 keywords = ["memd", "wiki", "markdown", "knowledge-base"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
-  "License :: OSI Approved :: Apache Software License",
+  "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
 ]
 # stdlib only; no runtime dependencies

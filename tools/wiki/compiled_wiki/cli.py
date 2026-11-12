@@ -79,11 +79,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     _add_serve_subparser(subparsers)
 
     args = parser.parse_args(argv)
-    # Backwards-compat: if no subcommand and no subcommand-specific
-    # flags were given, default to `build` for the simple first-run
-    # ergonomics ("memd-wiki" with a config file does the right thing).
+    # No subcommand means `build` ("memd-wiki" with a config file does the
+    # right thing). Parse again as `build` so the namespace carries every
+    # build argument; setting only `args.command` left them undefined.
     if args.command is None:
-        args.command = "build"
+        rest = list(sys.argv[1:] if argv is None else argv)
+        args = parser.parse_args(["build", *rest])
     return args
 
 
@@ -469,7 +470,11 @@ def _build_staleness_lookup(
             disabled["flag"] = True
             cache[task_id] = None
             return None
-        task = (payload or {}).get("task", {}) if isinstance(payload, dict) else {}
+        # `task.resume` returns {"artifact": ..., "resume": {"task": ...}}.
+        resume = payload.get("resume") if isinstance(payload, dict) else None
+        task = resume.get("task") if isinstance(resume, dict) else None
+        if not isinstance(task, dict):
+            task = {}
         latest = (
             task.get("updated_at_ms")
             or task.get("finished_at_ms")

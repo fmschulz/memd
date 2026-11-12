@@ -120,7 +120,8 @@ def _add_serve_subparser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             f"Address to bind. Default: {DEFAULT_SERVE_HOST!r}. "
-            "Use 0 for any free port (useful for tests and CI)."
+            "A non-loopback address (including 0 or 0.0.0.0) exposes the "
+            "unauthenticated wiki to the network."
         ),
     )
     serve.add_argument(

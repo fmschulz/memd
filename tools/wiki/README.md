@@ -65,7 +65,7 @@ memd-wiki serve [--output-dir PATH] [--host 127.0.0.1] [--port 8099]
 ```
 
 Read-only stdlib HTTP server over a compiled tree. Binds localhost
-by default; pass `--host 0` or `--port 0` for ephemeral addresses
+by default; pass `--port 0` for an OS-assigned port
 (useful in tests and CI). SIGINT / SIGTERM shut the server down
 cleanly. `memd-wiki serve` never rebuilds the tree — run
 `memd-wiki build` first whenever memd state changes.
