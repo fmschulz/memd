@@ -137,9 +137,14 @@ fn max_promotion(promotions: impl IntoIterator<Item = PromotionState>) -> Promot
     best
 }
 
-pub fn stable_digest_identity(role: &str, scope_key: &str) -> (String, String, String) {
+pub fn stable_digest_identity(
+    tenant_id: &TenantId,
+    role: &str,
+    scope_key: &str,
+) -> (String, String, String) {
     let digest_key = format!(
-        "{}::{}",
+        "{}::{}::{}",
+        tenant_id.as_str(),
         sanitize_tag_value(role),
         sanitize_tag_value(scope_key)
     );
@@ -687,7 +692,7 @@ pub fn infer_highlight_items(artifacts: &[TaskArtifact]) -> Vec<HighlightViewIte
 pub fn build_task_resume_digest_artifact(view: &TaskResumeView) -> TaskArtifact {
     let scope_key = view.task.task_id.clone();
     let (artifact_id, _task_id, digest_key) =
-        stable_digest_identity(DIGEST_ROLE_TASK_RESUME, &scope_key);
+        stable_digest_identity(&view.task.tenant_id, DIGEST_ROLE_TASK_RESUME, &scope_key);
     let mut artifact = TaskArtifact::new_digest(
         view.task.tenant_id.clone(),
         view.task.task_id.clone(),
@@ -728,7 +733,7 @@ pub fn build_library_digest_artifact(
     related_artifact_ids: Vec<String>,
     source_updated_at_ms: i64,
 ) -> TaskArtifact {
-    let (artifact_id, task_id, digest_key) = stable_digest_identity(role, scope_key);
+    let (artifact_id, task_id, digest_key) = stable_digest_identity(&tenant_id, role, scope_key);
     let mut artifact = TaskArtifact::new_digest(tenant_id, task_id, digest_key, role);
     artifact.artifact_id = artifact_id;
     artifact.project_id = project_id.unwrap_or_default();
@@ -848,6 +853,31 @@ pub fn build_project_brief_digest_artifact(view: &ProjectBriefView) -> TaskArtif
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn regression_store_digest_identity_is_tenant_scoped() {
+        let build = |tenant: &str| {
+            super::build_library_digest_artifact(
+                crate::types::TenantId::new(tenant).unwrap(),
+                Some(crate::types::ProjectId::from("shared_project")),
+                super::DIGEST_ROLE_PROJECT_BRIEF,
+                "shared_project",
+                "summary".to_string(),
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                1,
+            )
+        };
+        let first = build("digest_a");
+        let second = build("digest_b");
+        assert_ne!(first.artifact_id, second.artifact_id);
+        assert_ne!(first.task_id, second.task_id);
+        assert_ne!(first.digest_key, second.digest_key);
+        assert_eq!(first.artifact_id, build("digest_a").artifact_id);
+        assert_ne!(first.artifact_id, build("Digest_a").artifact_id);
+    }
+
     use super::*;
 
     #[test]

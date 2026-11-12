@@ -1,13 +1,13 @@
 //! WAL reader for crash recovery
 //!
 //! Reads WAL records and supports replaying for recovery.
-//! Handles partial/corrupt records gracefully (stops at first error).
+//! Skips corrupt bytes and continues from the next valid record.
 
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
-use super::format::{WalRecord, WalRecordType, WAL_HEADER_SIZE};
+use super::format::{WalRecord, WalRecordType, WAL_HEADER_SIZE, WAL_MAGIC};
 
 /// WAL reader
 pub struct WalReader {
@@ -42,26 +42,40 @@ impl WalReader {
 
     /// Read all valid records from WAL
     ///
-    /// Stops at first corrupted record (partial write on crash).
-    /// Returns records and count of bytes successfully read.
+    /// Reports corruption and scans for the next magic/header/CRC-valid record.
+    /// Returns records and the total byte count belonging to valid records.
     pub fn read_all_records(&self) -> io::Result<(Vec<WalRecord>, usize)> {
         let mut records = Vec::new();
         let mut offset = 0;
+        let mut valid_bytes = 0;
 
         while offset + WAL_HEADER_SIZE <= self.data.len() {
             match WalRecord::decode_from_bytes(&self.data[offset..]) {
                 Ok((record, consumed)) => {
                     records.push(record);
                     offset += consumed;
+                    valid_bytes += consumed;
                 }
-                Err(_) => {
-                    // Corrupted record - stop here (partial write on crash)
-                    break;
+                Err(error) => {
+                    tracing::warn!(offset, error = %error, "skipping corrupt WAL record");
+                    let next = self.data[offset + 1..]
+                        .windows(WAL_MAGIC.len())
+                        .position(|bytes| bytes == WAL_MAGIC);
+                    match next {
+                        Some(next) => offset += next + 1,
+                        None => break,
+                    }
                 }
             }
         }
 
-        Ok((records, offset))
+        if valid_bytes != self.data.len() {
+            tracing::warn!(
+                corrupt_bytes = self.data.len() - valid_bytes,
+                "WAL contains skipped corrupt bytes"
+            );
+        }
+        Ok((records, valid_bytes))
     }
 
     /// Find the index of the last checkpoint record
@@ -77,7 +91,7 @@ impl WalReader {
     ///
     /// Returns records that need to be replayed.
     pub fn records_for_recovery(&self) -> io::Result<Vec<WalRecord>> {
-        let (records, _) = self.read_all_records()?;
+        let (mut records, _) = self.read_all_records()?;
 
         let checkpoint_idx = records
             .iter()
@@ -85,7 +99,7 @@ impl WalReader {
             .map(|i| i + 1) // Start after checkpoint
             .unwrap_or(0); // No checkpoint = replay all
 
-        Ok(records[checkpoint_idx..].to_vec())
+        Ok(records.drain(checkpoint_idx..).collect())
     }
 }
 
@@ -318,6 +332,28 @@ mod tests {
         assert_eq!(records[1].chunk_id, "c2");
         // bytes_read should be less than total file size
         assert!(bytes_read < reader.len());
+    }
+
+    #[test]
+    fn recovery_continues_after_corrupt_record() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("corrupt.wal");
+        let first = WalRecord::add("t1".into(), "c1".into(), 1, b"first".to_vec());
+        let middle = WalRecord::add("t1".into(), "c2".into(), 2, b"bad".to_vec());
+        let last = WalRecord::add("t2".into(), "c3".into(), 3, b"last".to_vec());
+        let mut bytes = first.encode_to_bytes();
+        let mut corrupt = middle.encode_to_bytes();
+        *corrupt.last_mut().unwrap() ^= 0xff;
+        bytes.extend(corrupt);
+        bytes.extend(last.encode_to_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        let reader = WalReader::open(&path).unwrap();
+        let records = reader.records_for_recovery().unwrap();
+        assert_eq!(
+            records,
+            vec![first, last],
+            "CRC failure must not hide later valid records"
+        );
     }
 
     #[test]

@@ -108,7 +108,15 @@ impl SqliteMetadataStore {
     /// metadata WAL, not the tenant append-only WAL.
     pub fn checkpoint_wal(&self) -> Result<()> {
         let conn = self.pool.get();
-        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+        let (busy, log_frames, checkpointed_frames): (i64, i64, i64) =
+            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+        if busy != 0 || log_frames != checkpointed_frames {
+            return Err(MemdError::StorageError(format!(
+                "metadata WAL checkpoint incomplete: busy={busy}, log_frames={log_frames}, checkpointed_frames={checkpointed_frames}"
+            )));
+        }
         Ok(())
     }
 

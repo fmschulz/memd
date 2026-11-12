@@ -307,11 +307,12 @@ pub(super) async fn collect_scanned_chunks<S: Store>(
     let mut chunks = Vec::new();
     let mut offset = 0usize;
     loop {
-        let page = if let Some(persistent) = store.as_persistent() {
+        let (page, got) = if let Some(persistent) = store.as_persistent() {
             let metadata_rows = persistent
                 .metadata()
                 .list_for_project(tenant, project_id, page_size, offset)?;
-            let mut rows = Vec::with_capacity(metadata_rows.len());
+            let got = metadata_rows.len();
+            let mut rows = Vec::with_capacity(got);
             for meta in metadata_rows {
                 if let Some(chunk) = persistent
                     .get_chunk_for_retrieval(tenant, &meta.chunk_id, "audit")
@@ -323,9 +324,9 @@ pub(super) async fn collect_scanned_chunks<S: Store>(
                     });
                 }
             }
-            rows
+            (rows, got)
         } else {
-            store
+            let rows = store
                 .list_chunks_for_project(tenant, project_id, page_size, offset)
                 .await?
                 .into_iter()
@@ -333,12 +334,13 @@ pub(super) async fn collect_scanned_chunks<S: Store>(
                     chunk,
                     expires_at_ms: None,
                 })
-                .collect()
+                .collect::<Vec<_>>();
+            let got = rows.len();
+            (rows, got)
         };
-        if page.is_empty() {
+        if got == 0 {
             break;
         }
-        let got = page.len();
         chunks.extend(page);
         if got < page_size {
             break;

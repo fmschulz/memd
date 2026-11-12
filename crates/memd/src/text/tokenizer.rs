@@ -32,8 +32,8 @@ pub struct TypedToken {
 /// Features:
 /// - Splits camelCase: "parseUserInput" -> ["parse", "User", "Input"]
 /// - Splits snake_case: "parse_user_input" -> ["parse", "user", "input"]
-/// - Preserves acronyms: "HTTPResponse" -> ["HTTP", "Response"]
-/// - Stems prose tokens using Porter algorithm
+/// - Keeps acronym boundaries: "HTTPResponse" -> ["http", "respons"]
+/// - Lowercases every token before English stemming
 #[derive(Clone)]
 pub struct CodeTokenizer {
     stemmer: Arc<Stemmer>,
@@ -95,20 +95,7 @@ impl CodeTokenizer {
 
             let subtoken_end = subtoken_pos + subtoken.len();
             let token_type = detect_token_type(&subtoken);
-            let normalized = match token_type {
-                TokenType::Code => {
-                    if is_acronym(&subtoken) {
-                        subtoken.clone()
-                    } else {
-                        subtoken.to_lowercase()
-                    }
-                }
-                TokenType::Prose => {
-                    let lower = subtoken.to_lowercase();
-                    self.stemmer.stem(&lower).to_string()
-                }
-                TokenType::Mixed => subtoken.to_lowercase(),
-            };
+            let normalized = self.stemmer.stem(&subtoken.to_lowercase()).to_string();
 
             tokens.push(TypedToken {
                 text: normalized,
@@ -321,19 +308,19 @@ mod tests {
     }
 
     #[test]
-    fn test_acronym_preservation() {
+    fn test_acronym_boundaries_and_normalization() {
         let tokenizer = CodeTokenizer::new();
 
-        // Acronyms should be preserved uppercase
+        // Acronyms remain whole tokens and use the same normalization as prose.
         let tokens = tokenizer.tokenize("HTTPResponse");
-        assert_eq!(tokens, vec!["HTTP", "response"]);
+        assert_eq!(tokens, vec!["http", "respons"]);
 
         let tokens = tokenizer.tokenize("parseJSONData");
-        assert_eq!(tokens, vec!["pars", "JSON", "data"]);
+        assert_eq!(tokens, vec!["pars", "json", "data"]);
 
-        // API, SQL should stay uppercase
+        // Identifier components are normalized too.
         let tokens = tokenizer.tokenize("getAPIKey");
-        assert_eq!(tokens, vec!["get", "API", "key"]);
+        assert_eq!(tokens, vec!["get", "api", "key"]);
     }
 
     #[test]
@@ -362,10 +349,10 @@ mod tests {
         let tokenizer = CodeTokenizer::new();
 
         let tokens = tokenizer.tokenize("parseJSONData");
-        assert_eq!(tokens, vec!["pars", "JSON", "data"]);
+        assert_eq!(tokens, vec!["pars", "json", "data"]);
 
         let tokens = tokenizer.tokenize("XMLHttpRequest");
-        assert_eq!(tokens, vec!["XML", "http", "request"]);
+        assert_eq!(tokens, vec!["xml", "http", "request"]);
     }
 
     #[test]
@@ -374,9 +361,9 @@ mod tests {
 
         let typed = tokenizer.tokenize_typed("HTTPResponse");
         assert_eq!(typed.len(), 2);
-        assert_eq!(typed[0].text, "HTTP");
+        assert_eq!(typed[0].text, "http");
         assert_eq!(typed[0].token_type, TokenType::Code);
-        assert_eq!(typed[1].text, "response");
+        assert_eq!(typed[1].text, "respons");
         assert_eq!(typed[1].token_type, TokenType::Code);
     }
 

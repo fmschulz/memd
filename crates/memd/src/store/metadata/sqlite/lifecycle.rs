@@ -32,7 +32,12 @@ impl SqliteMetadataStore {
                 superseded_by           = COALESCE(:superseded_by, superseded_by),
                 expires_at_ms           = CASE WHEN :set_expires = 1 THEN :expires_at ELSE expires_at_ms END,
                 review_after_ms         = CASE WHEN :set_review  = 1 THEN :review_at  ELSE review_after_ms END,
-                lifecycle_updated_at_ms = COALESCE(:lifecycle_at, lifecycle_updated_at_ms)
+                lifecycle_updated_at_ms = CASE WHEN :status = 'deleted'
+                    THEN CAST(ROUND(unixepoch('subsec') * 1000) AS INTEGER)
+                    ELSE COALESCE(:lifecycle_at, lifecycle_updated_at_ms) END,
+                deleted_at_ms = CASE WHEN :status = 'deleted'
+                    THEN CAST(ROUND(unixepoch('subsec') * 1000) AS INTEGER)
+                    ELSE deleted_at_ms END
              WHERE tenant_id = :tenant
                AND chunk_id = :chunk
                AND status != 'deleted'",

@@ -301,6 +301,25 @@ impl Bm25Index {
         })
     }
 
+    fn chunk_query(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> BooleanQuery {
+        BooleanQuery::new(vec![
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(self.tenant_field, tenant_id.as_str()),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(self.chunk_field, &chunk_id.to_string()),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+        ])
+    }
+
     /// Commit pending writes if needed.
     fn commit_if_dirty(&self) -> Result<()> {
         let Some(writer) = self.writer.as_ref() else {
@@ -406,6 +425,11 @@ impl SparseIndex for Bm25Index {
             .map_err(|e| MemdError::StorageError(format!("lock writer: {}", e)))?;
 
         for (tenant_id, chunk_id, sentences) in items {
+            writer
+                .delete_query(Box::new(self.chunk_query(tenant_id, chunk_id)))
+                .map_err(|error| {
+                    MemdError::StorageError(format!("replace chunk documents: {error}"))
+                })?;
             for (idx, sentence) in sentences.iter().enumerate() {
                 let doc = doc!(
                     self.tenant_field => tenant_id.as_str(),
@@ -528,22 +552,7 @@ impl SparseIndex for Bm25Index {
             .lock()
             .map_err(|e| MemdError::StorageError(format!("lock writer: {}", e)))?;
 
-        // Build query to match both tenant and chunk
-        let tenant_term = Term::from_field_text(self.tenant_field, tenant_id.as_str());
-        let chunk_term = Term::from_field_text(self.chunk_field, &chunk_id.to_string());
-
-        // Delete by term queries combined
-        // Tantivy delete_term deletes all docs matching that term
-        // We need to be more precise, so we use delete_query
-        let tenant_query: Box<dyn Query> =
-            Box::new(TermQuery::new(tenant_term, IndexRecordOption::Basic));
-        let chunk_query: Box<dyn Query> =
-            Box::new(TermQuery::new(chunk_term, IndexRecordOption::Basic));
-
-        let delete_query = BooleanQuery::new(vec![
-            (Occur::Must, tenant_query),
-            (Occur::Must, chunk_query),
-        ]);
+        let delete_query = self.chunk_query(tenant_id, chunk_id);
 
         // Get count before delete to determine if anything was deleted
         self.reader
@@ -586,6 +595,56 @@ impl SparseIndex for Bm25Index {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bm25_case_and_stemming_are_shared_by_index_and_query() {
+        let tenant = create_test_tenant();
+        for text in ["error", "Error", "ERROR", "running", "Running", "RUNNING"] {
+            let index = Bm25Index::new().unwrap();
+            let chunk_id = ChunkId::new();
+            index
+                .insert(&tenant, &chunk_id, &[text.to_string()])
+                .unwrap();
+            let queries = if text.eq_ignore_ascii_case("error") {
+                ["error", "Error", "ERROR"]
+            } else {
+                ["run", "Running", "RUNNING"]
+            };
+            for query in queries {
+                let hits = index.search(&tenant, query, 10).unwrap();
+                assert_eq!(hits.len(), 1, "indexed {text:?}, queried {query:?}");
+                assert_eq!(hits[0].chunk_id, chunk_id);
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_chunk_indexing_replaces_sentences_without_affecting_other_tenants() {
+        let index = Bm25Index::new().unwrap();
+        let tenant = create_test_tenant();
+        let other = TenantId::new("other_bm25").unwrap();
+        let chunk_id = ChunkId::new();
+        index
+            .insert(&tenant, &chunk_id, &["obsolete".into()])
+            .unwrap();
+        index
+            .insert(&other, &chunk_id, &["other tenant".into()])
+            .unwrap();
+        index
+            .insert(&tenant, &chunk_id, &["replacement".into()])
+            .unwrap();
+        assert_eq!(index.doc_count(&tenant).unwrap(), 1);
+        assert!(index.search(&tenant, "obsolete", 10).unwrap().is_empty());
+        assert_eq!(
+            index.search(&tenant, "replacement", 10).unwrap()[0].chunk_id,
+            chunk_id
+        );
+        assert_eq!(index.doc_count(&other).unwrap(), 1);
+        assert_eq!(
+            index.search(&other, "other", 10).unwrap()[0].chunk_id,
+            chunk_id
+        );
+    }
 
     fn create_test_tenant() -> TenantId {
         TenantId::new("test_tenant").unwrap()

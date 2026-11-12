@@ -29,7 +29,7 @@ impl SqliteMetadataStore {
                 |row| row.get::<usize, String>(0),
             )
             .optional()?;
-        reject_experience_artifact_overwrite(existing_json, artifact)?;
+        reject_artifact_overwrite(existing_json, artifact)?;
 
         if artifact.artifact_kind != ArtifactKind::Digest {
             reject_cross_tenant_task_write(
@@ -212,11 +212,13 @@ impl SqliteMetadataStore {
         let old_projection_chunk_ids = if artifact.artifact_kind == ArtifactKind::Digest {
             let mut stmt = tx.prepare(
                 "SELECT chunk_id FROM artifact_links
-                 WHERE artifact_id = ?1 AND link_kind = 'retrieval_projection'",
+                 WHERE artifact_id = ?1 AND link_kind = 'retrieval_projection'
+                   AND chunk_id IN (SELECT chunk_id FROM chunks WHERE tenant_id = ?2)",
             )?;
-            let rows = stmt.query_map(rusqlite::params![artifact.artifact_id.as_str()], |row| {
-                row.get::<usize, String>(0)
-            })?;
+            let rows = stmt.query_map(
+                rusqlite::params![artifact.artifact_id.as_str(), artifact.tenant_id.as_str()],
+                |row| row.get::<usize, String>(0),
+            )?;
             let mut ids = Vec::new();
             for row in rows {
                 ids.push(row?);
@@ -253,8 +255,9 @@ impl SqliteMetadataStore {
 
             tx.execute(
                 "DELETE FROM artifact_links
-                 WHERE artifact_id = ?1 AND link_kind = 'retrieval_projection'",
-                rusqlite::params![artifact.artifact_id.as_str()],
+                 WHERE artifact_id = ?1 AND link_kind = 'retrieval_projection'
+                   AND chunk_id IN (SELECT chunk_id FROM chunks WHERE tenant_id = ?2)",
+                rusqlite::params![artifact.artifact_id.as_str(), artifact.tenant_id.as_str()],
             )?;
         }
 
@@ -389,7 +392,7 @@ impl SqliteMetadataStore {
         Ok(())
     }
 
-    /// Reject a different payload that would replace an experience artifact.
+    /// Reject cross-tenant replacements and changes to experience artifacts.
     pub fn ensure_task_artifact_write_safe(&self, artifact: &TaskArtifact) -> Result<()> {
         let conn = self.pool.get();
         let existing_json = conn
@@ -399,7 +402,7 @@ impl SqliteMetadataStore {
                 |row| row.get::<usize, String>(0),
             )
             .optional()?;
-        reject_experience_artifact_overwrite(existing_json, artifact)?;
+        reject_artifact_overwrite(existing_json, artifact)?;
         if artifact.artifact_kind != ArtifactKind::Digest {
             reject_cross_tenant_task_write(
                 conn.query_row(
@@ -848,14 +851,17 @@ impl SqliteMetadataStore {
     }
 }
 
-fn reject_experience_artifact_overwrite(
-    existing_json: Option<String>,
-    incoming: &TaskArtifact,
-) -> Result<()> {
+fn reject_artifact_overwrite(existing_json: Option<String>, incoming: &TaskArtifact) -> Result<()> {
     let Some(existing_json) = existing_json else {
         return Ok(());
     };
     let existing: TaskArtifact = serde_json::from_str(&existing_json)?;
+    if existing.tenant_id != incoming.tenant_id {
+        return Err(MemdError::ValidationError(format!(
+            "artifact_id collision for '{}': existing tenant differs from '{}'",
+            incoming.artifact_id, incoming.tenant_id
+        )));
+    }
     if existing == *incoming {
         return Ok(());
     }

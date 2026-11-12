@@ -11,6 +11,16 @@ const CHUNK_COLUMNS: &str = "chunk_id, tenant_id, project_id, segment_id, ordina
                              tier, supersedes, superseded_by, expires_at_ms, review_after_ms, \
                              lifecycle_updated_at_ms, canonical_text, ingestion_mode";
 
+const HARD_PURGE_PREDICATE: &str = "WHERE tenant_id = :tenant
+    AND (:project IS NULL OR project_id = :project)
+    AND (
+        (status = 'deleted' AND deleted_at_ms <= :cutoff)
+        OR (status IN ('superseded', 'expired', 'error')
+            AND COALESCE(NULLIF(lifecycle_updated_at_ms, 0), timestamp_created) <= :cutoff)
+        OR (status != 'deleted' AND tier = 'history'
+            AND expires_at_ms IS NOT NULL AND expires_at_ms <= :cutoff)
+    )";
+
 impl SqliteMetadataStore {
     /// Convert a database row to [`ChunkMetadata`].
     ///
@@ -182,20 +192,7 @@ impl SqliteMetadataStore {
         }
         let conn = self.pool.get();
         let sql = format!(
-            "SELECT {CHUNK_COLUMNS} FROM chunks
-             WHERE tenant_id = :tenant
-               AND (:project IS NULL OR project_id = :project)
-               AND (
-                    (
-                        status IN ('deleted', 'superseded', 'expired', 'error')
-                        AND COALESCE(NULLIF(lifecycle_updated_at_ms, 0), timestamp_created) <= :cutoff
-                    )
-                    OR (
-                        tier = 'history'
-                        AND expires_at_ms IS NOT NULL
-                        AND expires_at_ms <= :cutoff
-                    )
-               )
+            "SELECT {CHUNK_COLUMNS} FROM chunks {HARD_PURGE_PREDICATE}
              ORDER BY COALESCE(NULLIF(lifecycle_updated_at_ms, 0), timestamp_created) ASC
              LIMIT :limit"
         );
@@ -214,6 +211,26 @@ impl SqliteMetadataStore {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// Count every hidden row eligible for purge, without applying a page limit.
+    pub fn count_hard_purge_candidates(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        cutoff_ms: i64,
+    ) -> Result<usize> {
+        let conn = self.pool.get();
+        let count: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM chunks {HARD_PURGE_PREDICATE}"),
+            rusqlite::named_params! {
+                ":tenant": tenant_id.as_str(),
+                ":project": project_id,
+                ":cutoff": cutoff_ms,
+            },
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
     }
 
     /// Physically remove metadata/link rows for chunks that have already
@@ -249,6 +266,33 @@ impl SqliteMetadataStore {
         }
         tx.commit()?;
         Ok(deleted)
+    }
+
+    /// Repair recovered segment coordinates and invalidate stale index state atomically.
+    pub fn repair_recovered_chunk_location_pending(
+        &self,
+        tenant_id: &TenantId,
+        chunk_id: &ChunkId,
+        segment_id: u64,
+        ordinal: u32,
+        now_ms: i64,
+    ) -> Result<usize> {
+        let conn = self.pool.get();
+        Ok(conn.execute(
+            "UPDATE chunks
+             SET segment_id = ?1, ordinal = ?2,
+                 index_state = 'pending', index_attempts = 0,
+                 index_last_error = NULL, indexed_at_ms = NULL,
+                 index_updated_at_ms = ?3
+             WHERE tenant_id = ?4 AND chunk_id = ?5 AND status != 'deleted'",
+            rusqlite::params![
+                segment_id as i64,
+                ordinal as i64,
+                now_ms,
+                tenant_id.as_str(),
+                chunk_id.to_string(),
+            ],
+        )?)
     }
 
     /// Move live metadata rows to rewritten segment coordinates.
@@ -293,6 +337,16 @@ impl SqliteMetadataStore {
         }
         tx.commit()?;
         Ok(updated)
+    }
+
+    pub(crate) fn max_segment_id(&self, tenant_id: &TenantId) -> Result<u64> {
+        let conn = self.pool.get();
+        let id: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(segment_id), 0) FROM chunks WHERE tenant_id = ?1",
+            [tenant_id.as_str()],
+            |row| row.get(0),
+        )?;
+        Ok(id as u64)
     }
 }
 
@@ -347,12 +401,17 @@ pub(super) fn compact_text_preview(text: &str, max_chars: usize) -> String {
     text[..end].trim_end().to_string()
 }
 
-impl MetadataStore for SqliteMetadataStore {
-    fn insert(&self, metadata: &ChunkMetadata) -> Result<()> {
-        self.insert_many(std::slice::from_ref(metadata))
+impl SqliteMetadataStore {
+    /// Recover metadata with pending indexing in the same SQLite transaction.
+    pub fn insert_pending_recovered(&self, metadata: &ChunkMetadata) -> Result<()> {
+        self.insert_many_with_index_state(std::slice::from_ref(metadata), true)
     }
 
-    fn insert_many(&self, metadata: &[ChunkMetadata]) -> Result<()> {
+    fn insert_many_with_index_state(
+        &self,
+        metadata: &[ChunkMetadata],
+        pending: bool,
+    ) -> Result<()> {
         if metadata.is_empty() {
             return Ok(());
         }
@@ -366,8 +425,8 @@ impl MetadataStore for SqliteMetadataStore {
                     chunk_id, tenant_id, project_id, segment_id, ordinal,
                     chunk_type, status, timestamp_created, hash, source_uri,
                     tier, supersedes, superseded_by, expires_at_ms, review_after_ms,
-                    lifecycle_updated_at_ms, canonical_text, ingestion_mode
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                    lifecycle_updated_at_ms, canonical_text, ingestion_mode, index_state
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             )?;
             for row in metadata {
                 stmt.execute(rusqlite::params![
@@ -389,12 +448,23 @@ impl MetadataStore for SqliteMetadataStore {
                     row.lifecycle.lifecycle_updated_at_ms,
                     row.canonical_text.as_deref(),
                     row.ingestion_mode.to_string(),
+                    if pending { "pending" } else { "indexed" },
                 ])?;
             }
         }
 
         tx.commit()?;
         Ok(())
+    }
+}
+
+impl MetadataStore for SqliteMetadataStore {
+    fn insert(&self, metadata: &ChunkMetadata) -> Result<()> {
+        self.insert_many(std::slice::from_ref(metadata))
+    }
+
+    fn insert_many(&self, metadata: &[ChunkMetadata]) -> Result<()> {
+        self.insert_many_with_index_state(metadata, false)
     }
 
     fn get(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<Option<ChunkMetadata>> {
@@ -494,7 +564,9 @@ impl MetadataStore for SqliteMetadataStore {
         let conn = self.pool.get();
 
         let rows_affected = conn.execute(
-            "UPDATE chunks SET status = 'deleted'
+            "UPDATE chunks SET status = 'deleted',
+                 deleted_at_ms = CAST(ROUND(unixepoch('subsec') * 1000) AS INTEGER),
+                 lifecycle_updated_at_ms = CAST(ROUND(unixepoch('subsec') * 1000) AS INTEGER)
              WHERE tenant_id = ?1 AND chunk_id = ?2 AND status != 'deleted'",
             rusqlite::params![tenant_id.as_str(), chunk_id.to_string()],
         )?;

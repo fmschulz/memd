@@ -286,8 +286,18 @@ pub(super) async fn run_cleanup_plan<S: Store>(
             summary.scanned_chunks,
         )
         .await?;
-        let unreadable_active_chunks =
-            metadata_active_chunks.saturating_sub(summary.scanned_chunks);
+        let unreadable_active_chunks = if let Some(persistent) = store.as_persistent() {
+            super::purge::list_unreadable_active_candidates(
+                persistent,
+                &tenant,
+                options.project_id.as_deref(),
+                usize::MAX,
+            )
+            .await?
+            .len()
+        } else {
+            metadata_active_chunks.saturating_sub(summary.scanned_chunks)
+        };
         let purge = hidden_purge_summary(
             store,
             &tenant,
@@ -377,7 +387,7 @@ pub(super) async fn run_cleanup_plan<S: Store>(
             .then_with(|| left.tenant_id.cmp(&right.tenant_id))
     });
 
-    let approval_items = approval_items(&tenant_plans, &options.archive_dir);
+    let approval_items = approval_items(&tenant_plans, &options.archive_dir, older_than_days);
     totals.tenants_with_approval_items = tenant_plans
         .iter()
         .filter(|tenant| {
@@ -469,11 +479,12 @@ async fn collect_scanned_chunks<S: Store>(
     let mut chunks = Vec::new();
     let mut offset = 0usize;
     loop {
-        let page = if let Some(persistent) = store.as_persistent() {
+        let (page, got) = if let Some(persistent) = store.as_persistent() {
             let metadata_rows = persistent
                 .metadata()
                 .list_for_project(tenant, project_id, page_size, offset)?;
-            let mut rows = Vec::with_capacity(metadata_rows.len());
+            let got = metadata_rows.len();
+            let mut rows = Vec::with_capacity(got);
             for meta in metadata_rows {
                 if let Some(chunk) = persistent
                     .get_chunk_for_retrieval(tenant, &meta.chunk_id, "cleanup_plan")
@@ -485,9 +496,9 @@ async fn collect_scanned_chunks<S: Store>(
                     });
                 }
             }
-            rows
+            (rows, got)
         } else {
-            store
+            let rows = store
                 .list_chunks_for_project(tenant, project_id, page_size, offset)
                 .await?
                 .into_iter()
@@ -495,12 +506,13 @@ async fn collect_scanned_chunks<S: Store>(
                     chunk,
                     expires_at_ms: None,
                 })
-                .collect()
+                .collect::<Vec<_>>();
+            let got = rows.len();
+            (rows, got)
         };
-        if page.is_empty() {
+        if got == 0 {
             break;
         }
-        let got = page.len();
         chunks.extend(page);
         if got < page_size {
             break;
@@ -604,7 +616,9 @@ async fn hidden_purge_summary<S: Store>(
             .unwrap_or(0);
     }
     Ok(HiddenPurgeSummary {
-        candidate_count: candidates.len(),
+        candidate_count: persistent
+            .metadata()
+            .count_hard_purge_candidates(tenant, project_id, cutoff_ms)?,
         estimated_payload_bytes,
     })
 }
@@ -749,7 +763,11 @@ fn classify_project(
     (dedupe(classes), reasons)
 }
 
-fn approval_items(tenants: &[TenantCleanupPlan], archive_dir: &Path) -> Vec<ApprovalItem> {
+fn approval_items(
+    tenants: &[TenantCleanupPlan],
+    archive_dir: &Path,
+    older_than_days: u64,
+) -> Vec<ApprovalItem> {
     let mut items = Vec::new();
     for tenant in tenants {
         if tenant
@@ -808,15 +826,22 @@ fn approval_items(tenants: &[TenantCleanupPlan], archive_dir: &Path) -> Vec<Appr
             .iter()
             .any(|class| class == "payload_integrity_review")
         {
-            let first_batch_limit = tenant
-                .unreadable_active_chunks
-                .clamp(1, PURGE_COMMAND_LIMIT);
-            let batch_previews = unreadable_purge_batch_previews(
+            let combined_candidates = tenant
+                .hidden_purge_candidates
+                .saturating_add(tenant.unreadable_active_chunks);
+            let first_batch_limit = combined_candidates.clamp(1, PURGE_COMMAND_LIMIT);
+            let mut batch_previews = unreadable_purge_batch_previews(
                 &tenant.tenant_id,
                 tenant.project_id_filter.as_deref(),
-                tenant.unreadable_active_chunks,
+                combined_candidates,
                 archive_dir,
             );
+            for batch in &mut batch_previews {
+                batch.dry_run_command =
+                    with_purge_retention(batch.dry_run_command.clone(), older_than_days);
+                batch.destructive_command =
+                    with_purge_retention(batch.destructive_command.clone(), older_than_days);
+            }
             items.push(ApprovalItem {
                 approval_id: approval_id(
                     "review_payload_integrity_tenant",
@@ -838,20 +863,20 @@ fn approval_items(tenants: &[TenantCleanupPlan], archive_dir: &Path) -> Vec<Appr
                 generated_wrapper_ratio: tenant.generated_wrapper_ratio,
                 hidden_purge_candidates: tenant.hidden_purge_candidates,
                 estimated_payload_bytes: tenant.estimated_purge_payload_bytes,
-                risk: "medium: metadata references active rows that normal retrieval/export cannot load"
+                risk: "medium: purges hidden retention candidates first, then confirmed missing or corrupt active payloads; run a fresh preview before each batch"
                     .to_string(),
                 reason: tenant.reasons.join("; "),
-                command_preview: unreadable_purge_dry_run_command(
+                command_preview: with_purge_retention(unreadable_purge_dry_run_command(
                     &tenant.tenant_id,
                     tenant.project_id_filter.as_deref(),
-                    tenant.unreadable_active_chunks,
-                ),
-                destructive_command_preview: Some(unreadable_purge_apply_command(
+                    combined_candidates,
+                ), older_than_days),
+                destructive_command_preview: Some(with_purge_retention(unreadable_purge_apply_command(
                     &tenant.tenant_id,
                     tenant.project_id_filter.as_deref(),
-                    tenant.unreadable_active_chunks,
+                    combined_candidates,
                     archive_dir,
-                )),
+                ), older_than_days)),
                 verification_command_preview: Some(purge_archive_verify_command(
                     &unreadable_purge_archive_path(
                         &tenant.tenant_id,
@@ -863,7 +888,7 @@ fn approval_items(tenants: &[TenantCleanupPlan], archive_dir: &Path) -> Vec<Appr
                     tenant.project_id_filter.as_deref(),
                     first_batch_limit,
                 )),
-                estimated_batches: Some(estimated_batches(tenant.unreadable_active_chunks)),
+                estimated_batches: Some(estimated_batches(combined_candidates)),
                 batch_command_previews: batch_previews,
             });
         }
@@ -1391,6 +1416,14 @@ fn unreadable_purge_dry_run_command(
             shell_quote(tenant_id),
             limit
         ),
+    }
+}
+
+fn with_purge_retention(command: String, older_than_days: u64) -> String {
+    if older_than_days == 30 {
+        command
+    } else {
+        format!("{command} --older-than-days {older_than_days}")
     }
 }
 
@@ -1923,6 +1956,40 @@ mod tests {
     use crate::store::StoreStats;
     use crate::types::{ChunkType, ProjectId};
 
+    #[tokio::test]
+    async fn cleanup_scan_continues_past_a_page_with_unreadable_payload() {
+        use crate::store::persistent::{PersistentStore, PersistentStoreConfig};
+        let dir = tempfile::tempdir().unwrap();
+        let store = PersistentStore::open(PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            ..Default::default()
+        })
+        .unwrap();
+        let tenant = TenantId::new("cleanup_scan_pages").unwrap();
+        let mut ids = Vec::new();
+        for timestamp in [30, 20, 10] {
+            let mut chunk = MemoryChunk::new(
+                tenant.clone(),
+                format!("payload {timestamp}"),
+                ChunkType::Doc,
+            );
+            chunk.timestamp_created = timestamp;
+            ids.push(store.add(chunk).await.unwrap());
+        }
+        let conn = rusqlite::Connection::open(dir.path().join("metadata.db")).unwrap();
+        conn.execute(
+            "UPDATE chunks SET segment_id = 99999 WHERE chunk_id = ?1",
+            [ids[0].to_string()],
+        )
+        .unwrap();
+        let rows = collect_scanned_chunks(&store, &tenant, None, 2)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2, "later metadata pages must still be scanned");
+    }
+
     fn chunk(text: &str, project_id: Option<&str>, tags: Vec<&str>) -> MemoryChunk {
         let mut chunk =
             MemoryChunk::new(TenantId::new("tenant").unwrap(), text, ChunkType::Summary);
@@ -2091,7 +2158,7 @@ mod tests {
 
     #[test]
     fn approval_items_include_unreadable_purge_dry_run() {
-        let tenant = TenantCleanupPlan {
+        let mut tenant = TenantCleanupPlan {
             tenant_id: "memd".to_string(),
             project_id_filter: Some("memd".to_string()),
             disk_total_bytes: Some(100),
@@ -2122,7 +2189,7 @@ mod tests {
             projects: Vec::new(),
         };
 
-        let items = approval_items(&[tenant], Path::new("/tmp/archive"));
+        let items = approval_items(std::slice::from_ref(&tenant), Path::new("/tmp/archive"), 30);
         let item = items
             .iter()
             .find(|item| item.action == "review_payload_integrity_tenant")
@@ -2146,6 +2213,32 @@ mod tests {
             item.verification_command_preview.as_deref(),
             Some("memd purge-archive --archive /tmp/archive/memd__memd__unreadable_active_batch001_archive.json --expect-tenant-id memd --min-records 17 --expect-project-id memd")
         );
+        // This command selects hidden rows first, so its limit and archive
+        // verification must cover those rows as well as the unreadable ones.
+        tenant.hidden_purge_candidates = 3;
+        let items = approval_items(&[tenant], Path::new("/tmp/archive"), 7);
+        let item = &items[0];
+        assert!(item.command_preview.contains("--limit 20"));
+        assert!(item
+            .destructive_command_preview
+            .as_ref()
+            .unwrap()
+            .contains("--limit 20"));
+        assert!(item
+            .verification_command_preview
+            .as_ref()
+            .unwrap()
+            .contains("--min-records 20"));
+        assert_eq!(item.batch_command_previews[0].limit, 20);
+        assert!(item.command_preview.contains("--older-than-days 7"));
+        assert!(item
+            .destructive_command_preview
+            .as_ref()
+            .unwrap()
+            .contains("--older-than-days 7"));
+        assert!(item.batch_command_previews[0]
+            .destructive_command
+            .contains("--older-than-days 7"));
     }
 
     #[test]
@@ -2184,7 +2277,7 @@ mod tests {
             projects: Vec::new(),
         };
 
-        let items = approval_items(&[tenant], Path::new("/tmp/archive"));
+        let items = approval_items(&[tenant], Path::new("/tmp/archive"), 30);
         let item = items
             .iter()
             .find(|item| item.action == "review_legacy_progress_retention")
@@ -2623,7 +2716,7 @@ mod tests {
             }],
         };
 
-        let items = approval_items(&[tenant], Path::new("/tmp/archive"));
+        let items = approval_items(&[tenant], Path::new("/tmp/archive"), 30);
         assert!(items
             .iter()
             .any(|item| item.action == "review_high_noise_tenant"));

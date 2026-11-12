@@ -1,5 +1,70 @@
 use super::*;
 
+impl PersistentStore {
+    /// A sync writer must finish pending recovery before serving searches.
+    pub(super) fn recover_pending_indexes_synchronously(&self) -> Result<()> {
+        if self.config.read_only
+            || self.async_indexer.is_some()
+            || (self.hybrid_searcher.is_none() && self.dense_searcher.is_none())
+        {
+            return Ok(());
+        }
+        let mut pending = self.pending_index_count()?;
+        if pending == 0 {
+            return Ok(());
+        }
+
+        // open() is synchronous and may be called inside either kind of Tokio
+        // runtime. A separate scoped thread avoids nesting/blocking that runtime.
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| -> Result<()> {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()?;
+                    runtime.block_on(async {
+                        while pending > 0 {
+                            sweep_pending_index_jobs(
+                                self.metadata.as_ref(),
+                                self.tenants.as_ref(),
+                                self.hybrid_searcher.as_ref(),
+                                self.dense_searcher.as_ref(),
+                                self.config.async_index_batch_size.max(1),
+                                &self.write_epoch,
+                            )
+                            .await;
+                            let remaining = self.pending_index_count()?;
+                            // Candidate rows remain pending until promotion; failed
+                            // bookkeeping must not make store open loop forever.
+                            if remaining >= pending {
+                                break;
+                            }
+                            pending = remaining;
+                        }
+                        Ok(())
+                    })
+                })
+                .join()
+                .map_err(|_| {
+                    MemdError::StorageError("pending recovery index thread panicked".into())
+                })?
+        })
+    }
+
+    fn pending_index_count(&self) -> Result<usize> {
+        let tenant_ids: Vec<_> = self.tenants.read().keys().cloned().collect();
+        let mut pending = 0usize;
+        for tenant_id in tenant_ids {
+            pending = pending.saturating_add(
+                self.metadata
+                    .count_by_index_state(&TenantId::new(tenant_id)?)?
+                    .0,
+            );
+        }
+        Ok(pending)
+    }
+}
+
 pub(super) async fn run_async_index_job(
     metadata: &SqliteMetadataStore,
     hybrid_searcher: Option<&Arc<HybridSearcher>>,
@@ -22,6 +87,15 @@ pub(super) async fn run_async_index_job(
             index_error = Some(e.to_string());
             break;
         }
+    }
+
+    // SQLite must not claim success before the sparse index commit survives
+    // this process. This also makes sync startup recovery visible to readers.
+    if index_error.is_none() {
+        index_error = hybrid_searcher
+            .and_then(|hybrid| hybrid.sparse_index())
+            .and_then(|sparse| sparse.commit().err())
+            .map(|error| error.to_string());
     }
 
     if let Some(error_message) = index_error {
@@ -429,6 +503,9 @@ pub(super) async fn sweep_pending_index_jobs(
     batch_size: usize,
     write_epoch: &AtomicU64,
 ) {
+    if hybrid_searcher.is_none() && dense_searcher.is_none() {
+        return;
+    }
     let tenant_ids: Vec<String> = tenants.read().keys().cloned().collect();
     for tenant_id_str in tenant_ids {
         let tenant_id = match TenantId::new(&tenant_id_str) {
@@ -498,5 +575,79 @@ pub(super) async fn sweep_pending_index_jobs(
             )
             .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use crate::types::ChunkType;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn sync_writer_indexes_wal_recovered_chunk_before_open_returns() {
+        let dir = tempdir().unwrap();
+        let tenant = TenantId::new("recovered_index").unwrap();
+        let chunk = MemoryChunk::new(
+            tenant.clone(),
+            "unique recovered wal vocabulary",
+            ChunkType::Doc,
+        );
+        let config = || PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            enable_dense_search: false,
+            enable_hybrid_search: true,
+            enable_async_indexing: false,
+            hybrid_config: Some(HybridConfig {
+                dense_k: 0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        // A current nonempty sparse index excludes the separate analyzer
+        // revision rebuild and empty-index self-heal paths.
+        {
+            let store = PersistentStore::open(config()).unwrap();
+            store
+                .add(MemoryChunk::new(
+                    tenant.clone(),
+                    "seed document",
+                    ChunkType::Doc,
+                ))
+                .await
+                .unwrap();
+            store.shutdown().unwrap();
+        }
+        let tenant_dir = dir.path().join("tenants").join(tenant.as_str());
+        std::fs::create_dir_all(&tenant_dir).unwrap();
+        WalWriter::open_or_create(&tenant_dir.join("wal.log"))
+            .unwrap()
+            .append_batch(&[WalRecord::add(
+                tenant.to_string(),
+                chunk.chunk_id.to_string(),
+                chunk.timestamp_created,
+                serde_json::to_vec(&chunk).unwrap(),
+            )])
+            .unwrap();
+        let store = PersistentStore::open(config()).unwrap();
+        assert_eq!(
+            store.metadata.count_by_index_state(&tenant).unwrap(),
+            (0, 2, 0)
+        );
+        let reader = Bm25Index::with_path_read_only(dir.path().join("sparse_index"))
+            .unwrap()
+            .unwrap();
+        let durable_hits = reader.search(&tenant, "vocabulary", 10).unwrap();
+        assert!(
+            durable_hits
+                .iter()
+                .any(|hit| hit.chunk_id == chunk.chunk_id),
+            "startup marked a recovered chunk indexed before its sparse commit was durable"
+        );
+        let hits = store.search(&tenant, "vocabulary", 10).await.unwrap();
+        assert!(
+            hits.iter().any(|hit| hit.chunk_id == chunk.chunk_id),
+            "sync recovery did not populate BM25"
+        );
     }
 }

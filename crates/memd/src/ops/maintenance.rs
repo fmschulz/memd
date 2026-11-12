@@ -191,7 +191,7 @@ fn build_dream_report_artifact(
 ) -> TaskArtifact {
     let scope_key = build_scope_key(project_id, tenant_id, DIGEST_ROLE_DREAM_REPORT);
     let (artifact_id, task_id, digest_key) =
-        stable_digest_identity(DIGEST_ROLE_DREAM_REPORT, &scope_key);
+        stable_digest_identity(tenant_id, DIGEST_ROLE_DREAM_REPORT, &scope_key);
     let mut artifact = TaskArtifact::new_digest(
         tenant_id.clone(),
         task_id,

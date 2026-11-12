@@ -54,10 +54,7 @@ impl PersistentStore {
                 error = %e,
                 "segment reader missing from cache and on-demand open failed"
             );
-            MemdError::StorageError(format!(
-                "segment {} missing from cache; on-demand open failed: {}",
-                meta.segment_id, e
-            ))
+            MemdError::IoError(e)
         })?;
 
         warn!(
@@ -127,6 +124,26 @@ impl PersistentStore {
                 Ok(None)
             }
             Err(err) => Err(err),
+        }
+    }
+
+    /// Destructive maintenance must distinguish confirmed missing/corrupt
+    /// payloads from operational failures. Retrieval deliberately skips both.
+    pub(crate) async fn get_chunk_for_purge(
+        &self,
+        tenant_id: &TenantId,
+        chunk_id: &ChunkId,
+    ) -> Result<Option<MemoryChunk>> {
+        match self.get_chunk(tenant_id, chunk_id).await {
+            Err(MemdError::IoError(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidData
+                ) =>
+            {
+                Ok(None)
+            }
+            result => result,
         }
     }
 }

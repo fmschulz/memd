@@ -97,7 +97,7 @@ mod tests {
         assert_eq!(processed.len(), 1);
         assert!(!processed[0].is_code);
         assert!(processed[0].tokens.contains(&"pars".to_string())); // stemmed "parses"
-        assert!(processed[0].tokens.contains(&"JSON".to_string())); // acronym preserved
+        assert!(processed[0].tokens.contains(&"json".to_string()));
     }
 
     #[test]

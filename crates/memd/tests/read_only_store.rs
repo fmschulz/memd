@@ -19,13 +19,6 @@ fn light_config(data_dir: &Path, read_only: bool) -> PersistentStoreConfig {
     }
 }
 
-fn finalized_light_config(data_dir: &Path, read_only: bool) -> PersistentStoreConfig {
-    PersistentStoreConfig {
-        min_finalize_chunks: 1,
-        ..light_config(data_dir, read_only)
-    }
-}
-
 fn chunk(tenant: &TenantId, text: &str) -> MemoryChunk {
     MemoryChunk::new(tenant.clone(), text, ChunkType::Doc)
         .with_project(ProjectId::from("ro_project"))
@@ -108,7 +101,7 @@ async fn read_only_store_suppresses_all_disk_mutations() {
     let tenant = TenantId::new("readonly").unwrap();
 
     let known_id = {
-        let store = PersistentStore::open(finalized_light_config(&data_dir, false)).unwrap();
+        let store = PersistentStore::open(light_config(&data_dir, false)).unwrap();
         let first = store
             .add(chunk(&tenant, "readonly alpha token"))
             .await
@@ -132,7 +125,7 @@ async fn read_only_store_suppresses_all_disk_mutations() {
     );
 
     {
-        let store = PersistentStore::open(finalized_light_config(&data_dir, true)).unwrap();
+        let store = PersistentStore::open(light_config(&data_dir, true)).unwrap();
         let got = store.get(&tenant, &known_id).await.unwrap();
         assert_eq!(
             got.as_ref().map(|chunk| chunk.text.as_str()),
@@ -200,7 +193,7 @@ async fn missing_tenant_dir_returns_empty_not_create() {
     let missing = TenantId::new("missing_tenant").unwrap();
 
     {
-        let store = PersistentStore::open(finalized_light_config(&data_dir, false)).unwrap();
+        let store = PersistentStore::open(light_config(&data_dir, false)).unwrap();
         store
             .add(chunk(&tenant, "present tenant data"))
             .await
@@ -211,7 +204,7 @@ async fn missing_tenant_dir_returns_empty_not_create() {
     let before = snapshot_files(&data_dir);
 
     {
-        let store = PersistentStore::open(finalized_light_config(&data_dir, true)).unwrap();
+        let store = PersistentStore::open(light_config(&data_dir, true)).unwrap();
         let search = store.search(&missing, "anything", 10).await.unwrap();
         assert!(search.is_empty());
         let listed = store.list_chunks(&missing, 10, 0).await.unwrap();

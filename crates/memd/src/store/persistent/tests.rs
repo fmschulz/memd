@@ -12,6 +12,181 @@ use std::fs;
 use std::sync::Arc;
 use tempfile::tempdir;
 
+#[tokio::test]
+async fn sparse_revision_rebuilds_all_tenants_once_on_writer_open() {
+    let dir = tempdir().unwrap();
+    let config = PersistentStoreConfig {
+        data_dir: dir.path().to_path_buf(),
+        enable_dense_search: false,
+        enable_hybrid_search: true,
+        hybrid_config: Some(HybridConfig {
+            dense_k: 0,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let tenants = [
+        TenantId::new("revision_a").unwrap(),
+        TenantId::new("revision_b").unwrap(),
+    ];
+    let mut ids = Vec::new();
+    {
+        let store = PersistentStore::open(config.clone()).unwrap();
+        for tenant in &tenants {
+            ids.push(
+                store
+                    .add(MemoryChunk::new(
+                        tenant.clone(),
+                        "ERROR Running sentinel",
+                        ChunkType::Doc,
+                    ))
+                    .await
+                    .unwrap(),
+            );
+        }
+    }
+    // A nonempty, obsolete index must be rebuilt even though the ordinary
+    // empty-index self-heal cannot detect it.
+    {
+        let index = Bm25Index::with_path(Some(dir.path().join("sparse_index"))).unwrap();
+        for (tenant, id) in tenants.iter().zip(&ids) {
+            index.delete(tenant, id).unwrap();
+            index
+                .insert(tenant, id, &["obsolete tokens".into()])
+                .unwrap();
+        }
+        index.commit().unwrap();
+    }
+    let marker = dir.path().join("sparse_revision");
+    fs::write(&marker, "0\n").unwrap();
+    {
+        let store = PersistentStore::open(PersistentStoreConfig {
+            read_only: true,
+            ..config.clone()
+        })
+        .unwrap();
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "0\n");
+        assert!(store
+            .sparse_index()
+            .unwrap()
+            .search(&tenants[0], "error", 10)
+            .unwrap()
+            .is_empty());
+    }
+    {
+        let store = PersistentStore::open(config.clone()).unwrap();
+        for (tenant, id) in tenants.iter().zip(&ids) {
+            let hits = store
+                .sparse_index()
+                .unwrap()
+                .search(tenant, "error", 10)
+                .unwrap();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(&hits[0].chunk_id, id);
+            assert!(store
+                .sparse_index()
+                .unwrap()
+                .search(tenant, "obsolete", 10)
+                .unwrap()
+                .is_empty());
+        }
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "1\n");
+    }
+    // A document not represented by metadata survives a current-revision
+    // reopen, proving we did not discard and rebuild the index again.
+    let extra = ChunkId::new();
+    {
+        let index = Bm25Index::with_path(Some(dir.path().join("sparse_index"))).unwrap();
+        index
+            .insert(&tenants[0], &extra, &["keepcurrent".into()])
+            .unwrap();
+        index.commit().unwrap();
+    }
+    let store = PersistentStore::open(config).unwrap();
+    assert_eq!(
+        store
+            .sparse_index()
+            .unwrap()
+            .search(&tenants[0], "keepcurrent", 10)
+            .unwrap()[0]
+            .chunk_id,
+        extra
+    );
+}
+
+#[tokio::test]
+async fn sparse_revision_skips_bad_payloads_without_rebuilding_healthy_tenants_again() {
+    for damage in ["missing", "checksum"] {
+        let dir = tempdir().unwrap();
+        let config = PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            enable_dense_search: false,
+            enable_hybrid_search: true,
+            hybrid_config: Some(HybridConfig {
+                dense_k: 0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let healthy = TenantId::new("healthy_sparse").unwrap();
+        let broken = TenantId::new("broken_sparse").unwrap();
+        let broken_id;
+        let healthy_id;
+        {
+            let store = PersistentStore::open(config.clone()).unwrap();
+            healthy_id = store
+                .add(MemoryChunk::new(
+                    healthy.clone(),
+                    "ERROR sentinel",
+                    ChunkType::Doc,
+                ))
+                .await
+                .unwrap();
+            broken_id = store
+                .add(MemoryChunk::new(
+                    broken,
+                    "unreadable payload",
+                    ChunkType::Doc,
+                ))
+                .await
+                .unwrap();
+        }
+        if damage == "missing" {
+            let conn = Connection::open(dir.path().join("metadata.db")).unwrap();
+            conn.execute(
+                "UPDATE chunks SET ordinal = 999 WHERE chunk_id = ?1",
+                [broken_id.to_string()],
+            )
+            .unwrap();
+        } else {
+            let payload = dir
+                .path()
+                .join("tenants/broken_sparse/segments/seg_000001/payload.bin");
+            let mut bytes = fs::read(&payload).unwrap();
+            bytes[0] ^= 1;
+            fs::write(payload, bytes).unwrap();
+        }
+        fs::write(dir.path().join("tenants/broken_sparse/wal.log"), b"").unwrap();
+        let marker = dir.path().join("sparse_revision");
+        fs::write(&marker, "1 rebuilding\n").unwrap();
+        for _ in 0..2 {
+            let store = PersistentStore::open(config.clone()).unwrap();
+            let hits = store
+                .sparse_index()
+                .unwrap()
+                .search(&healthy, "error", 10)
+                .unwrap();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].chunk_id, healthy_id);
+            assert_eq!(fs::read_to_string(&marker).unwrap(), "1\n");
+            drop(store);
+            // Let the runtime drop the aborted startup-repair task's index handle
+            // before opening another writer on the same directory.
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn hybrid_search_debug_preview_handles_multibyte_query() {
     let (store, _dir) = make_test_store();
@@ -402,7 +577,6 @@ async fn probe_baseline_is_after_startup_wal_recovery() {
     let config = || PersistentStoreConfig {
         data_dir: dir.path().to_path_buf(),
         segment_max_chunks: 100,
-        min_finalize_chunks: 256,
         wal_checkpoint_interval: 0,
         enable_dense_search: false,
         enable_hybrid_search: false,
@@ -686,7 +860,11 @@ async fn pending_chunks_are_recovered_by_worker_sweep() {
         segment_max_chunks: 100,
         wal_checkpoint_interval: 10,
         enable_dense_search: false,
-        enable_hybrid_search: false,
+        enable_hybrid_search: true,
+        hybrid_config: Some(HybridConfig {
+            dense_k: 0,
+            ..Default::default()
+        }),
         enable_async_indexing: true,
         async_index_poll_ms: 25,
         ..Default::default()
@@ -723,6 +901,12 @@ async fn pending_chunks_are_recovered_by_worker_sweep() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(recovered, "worker sweep should re-index pending chunks");
+    let hits = store
+        .sparse_index()
+        .unwrap()
+        .search(&tenant, "sweep", 10)
+        .unwrap();
+    assert!(hits.iter().any(|hit| hit.chunk_id == chunk_id));
 }
 
 #[tokio::test]
@@ -849,7 +1033,6 @@ async fn text_search_skips_crc_corrupted_active_chunk() {
         // the active segment. Opt out of the default 256-chunk gate
         // so the test exercises the rollover/finalize path it cares
         // about, not the segment-proliferation guard.
-        min_finalize_chunks: 1,
         wal_checkpoint_interval: 10,
         enable_dense_search: false,
         enable_hybrid_search: false,
@@ -898,7 +1081,6 @@ async fn list_chunks_skips_unreadable_finalized_segment() {
         // the active segment. Opt out of the default 256-chunk gate
         // so the test exercises the rollover/finalize path it cares
         // about, not the segment-proliferation guard.
-        min_finalize_chunks: 1,
         wal_checkpoint_interval: 10,
         enable_dense_search: false,
         enable_hybrid_search: false,
@@ -964,7 +1146,6 @@ async fn list_chunks_for_project_filters_metadata_before_payload_reads() {
         // the active segment. Opt out of the default 256-chunk gate
         // so the test exercises the rollover/finalize path it cares
         // about, not the segment-proliferation guard.
-        min_finalize_chunks: 1,
         wal_checkpoint_interval: 10,
         enable_dense_search: false,
         enable_hybrid_search: false,
@@ -1030,7 +1211,6 @@ async fn text_search_skips_crc_corrupted_finalized_chunk() {
         // the active segment. Opt out of the default 256-chunk gate
         // so the test exercises the rollover/finalize path it cares
         // about, not the segment-proliferation guard.
-        min_finalize_chunks: 1,
         wal_checkpoint_interval: 10,
         enable_dense_search: false,
         enable_hybrid_search: false,
@@ -1075,7 +1255,6 @@ async fn hybrid_search_skips_crc_corrupted_active_chunk() {
         // the active segment. Opt out of the default 256-chunk gate
         // so the test exercises the rollover/finalize path it cares
         // about, not the segment-proliferation guard.
-        min_finalize_chunks: 1,
         wal_checkpoint_interval: 10,
         enable_dense_search: false,
         enable_hybrid_search: false,

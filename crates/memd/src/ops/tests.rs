@@ -248,7 +248,7 @@ fn project_brief_digest_fixture(
     source_updated_at_ms: i64,
 ) -> TaskArtifact {
     let (artifact_id, task_id, digest_key) =
-        crate::task_memory::stable_digest_identity(DIGEST_ROLE_PROJECT_BRIEF, project_id);
+        crate::task_memory::stable_digest_identity(tenant, DIGEST_ROLE_PROJECT_BRIEF, project_id);
     let mut artifact = TaskArtifact::new_digest(
         tenant.clone(),
         task_id,

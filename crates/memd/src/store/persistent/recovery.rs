@@ -1,4 +1,20 @@
 use super::*;
+use std::collections::{BTreeMap, HashSet};
+
+impl PersistentStore {
+    /// Discard stale Add records before purge removes their deletion metadata.
+    pub fn checkpoint_tenant_wal(&self, tenant_id: &TenantId) -> Result<()> {
+        self.ensure_writable("checkpoint_tenant_wal")?;
+        let tenant = self.tenants.read().get(tenant_id.as_str()).cloned();
+        if let Some(tenant) = tenant {
+            tenant.ensure_wal_recovery_complete()?;
+            tenant.finalize_active_segment()?;
+            self.metadata.checkpoint_wal()?;
+            tenant.truncate_wal()?;
+        }
+        Ok(())
+    }
+}
 
 impl TenantStore {
     pub(super) fn open(
@@ -6,8 +22,6 @@ impl TenantStore {
         base_dir: PathBuf,
         metadata: &SqliteMetadataStore,
         segment_max_chunks: u32,
-        min_finalize_chunks: u32,
-        wal_checkpoint_interval: u32,
         read_only: bool,
     ) -> Result<Self> {
         let wal_path = base_dir.join("wal.log");
@@ -32,19 +46,31 @@ impl TenantStore {
             active_segment: Mutex::new(None),
             segments: RwLock::new(HashMap::new()),
             wal: Mutex::new(wal_writer),
+            wal_recovery_incomplete: AtomicBool::new(false),
             wal_overlay: RwLock::new(wal_overlay),
             writes_since_checkpoint: Mutex::new(0),
             segment_max_chunks,
-            min_finalize_chunks,
-            wal_checkpoint_interval,
+            segment_id_floor: metadata.max_segment_id(&TenantId::new(&tenant_id)?)? + 1,
         };
 
         // Load existing segments
         store.load_segments()?;
 
         if !read_only {
-            // Recover from WAL - FULL IMPLEMENTATION
+            // Recover locations before choosing which sealed segments to pack.
             store.recover_from_wal(&wal_reader, metadata)?;
+            match store.rewrite_finalized_segments(metadata, &TenantId::new(&tenant_id)?) {
+                Ok(result) => {
+                    for warning in result.warnings {
+                        warn!(tenant = %tenant_id, warning, "segment cleanup deferred");
+                    }
+                }
+                Err(error) => {
+                    // A corrupt payload or a busy metadata checkpoint must not
+                    // prevent other records and tenants from opening.
+                    warn!(tenant = %tenant_id, error = %error, "segment packing deferred; source segments retained");
+                }
+            }
         }
 
         Ok(store)
@@ -150,6 +176,10 @@ impl TenantStore {
     }
 
     pub(super) fn append_wal_checkpoint(&self, tenant_id: &str, timestamp: i64) -> Result<()> {
+        if self.wal_recovery_incomplete.load(Ordering::Acquire) {
+            warn!(tenant = %self.tenant_id, "skipping checkpoint that would hide unresolved WAL records");
+            return Ok(());
+        }
         let mut wal = self.wal.lock();
         let Some(wal) = wal.as_mut() else {
             return Err(MemdError::ReadOnlyStore {
@@ -161,6 +191,7 @@ impl TenantStore {
     }
 
     pub(super) fn truncate_wal(&self) -> Result<()> {
+        self.ensure_wal_recovery_complete()?;
         let mut wal = self.wal.lock();
         let Some(wal) = wal.as_mut() else {
             return Err(MemdError::ReadOnlyStore {
@@ -171,22 +202,32 @@ impl TenantStore {
         Ok(())
     }
 
-    /// Full WAL recovery implementation
-    ///
-    /// Replays Add and Delete records from WAL to restore uncommitted state.
-    /// Idempotent: skips records for chunks that already exist in metadata.
+    fn ensure_wal_recovery_complete(&self) -> Result<()> {
+        if self.wal_recovery_incomplete.load(Ordering::Acquire) {
+            return Err(MemdError::StorageError(format!(
+                "cannot discard WAL for tenant {}: recovery has unresolved records",
+                self.tenant_id
+            )));
+        }
+        Ok(())
+    }
+
+    /// Replay each record independently, preserving SQLite lifecycle/index state.
     pub(super) fn recover_from_wal(
         &self,
         wal_reader: &WalReader,
         metadata: &SqliteMetadataStore,
     ) -> Result<()> {
+        let (_, valid_bytes) = wal_reader.read_all_records()?;
+        self.wal_recovery_incomplete
+            .store(valid_bytes != wal_reader.len(), Ordering::Release);
         if wal_reader.is_empty() {
-            return Ok(());
+            return self.remove_unreferenced_segments(metadata, &TenantId::new(&self.tenant_id)?);
         }
 
         let records = wal_reader.records_for_recovery()?;
         if records.is_empty() {
-            return Ok(());
+            return self.remove_unreferenced_segments(metadata, &TenantId::new(&self.tenant_id)?);
         }
 
         info!(
@@ -199,151 +240,219 @@ impl TenantStore {
         let mut deletes = 0;
         let mut task_artifacts = 0;
         let mut skipped = 0;
+        let mut failed = 0;
+        let tenant_id = TenantId::new(&self.tenant_id)?;
+        let deleted_ids: HashSet<_> = metadata
+            .get_deleted_chunk_ids(&tenant_id)?
+            .into_iter()
+            .map(|id| id.to_string())
+            .chain(
+                records
+                    .iter()
+                    .filter(|record| {
+                        record.record_type == WalRecordType::Delete
+                            && record.tenant_id == self.tenant_id
+                    })
+                    .map(|record| record.chunk_id.clone()),
+            )
+            .collect();
 
         for record in &records {
-            match record.record_type {
-                WalRecordType::Add => {
-                    // Check if chunk already exists and is readable
-                    let tenant_id = TenantId::new(&record.tenant_id).map_err(|e| {
-                        MemdError::StorageError(format!("invalid tenant_id in WAL: {}", e))
-                    })?;
-                    let chunk_id = ChunkId::parse(&record.chunk_id).map_err(|e| {
-                        MemdError::StorageError(format!("invalid chunk_id in WAL: {}", e))
-                    })?;
-
-                    // If metadata exists, check if segment data is readable.
-                    // Keep the row for the repair path below: the WAL Add
-                    // payload contains the status from initial insertion, but
-                    // SQLite may hold a newer lifecycle state (candidate
-                    // promoted to final, superseded, expired, or error).
-                    let existing_metadata = metadata.get(&tenant_id, &chunk_id)?;
-                    if let Some(existing_meta) = existing_metadata.as_ref() {
-                        // Try to read from segment to verify data is intact
-                        let segments = self.segments.read();
-                        if let Some(reader) = segments.get(&existing_meta.segment_id) {
-                            if reader
-                                .read_chunk(existing_meta.ordinal)
-                                .ok()
-                                .flatten()
-                                .is_some()
-                            {
-                                // Data exists and is readable, skip
-                                skipped += 1;
-                                continue;
-                            }
+            // A tenant WAL must never write another tenant's metadata.
+            if record.tenant_id != self.tenant_id {
+                warn!(tenant = %self.tenant_id, record_tenant = %record.tenant_id, "skipping foreign tenant WAL record");
+                failed += 1;
+                continue;
+            }
+            let result = (|| -> Result<()> {
+                match record.record_type {
+                    WalRecordType::Add => {
+                        // UUIDs identify immutable chunks. A later Delete wins even
+                        // when purge has already removed its SQLite row.
+                        if deleted_ids.contains(&record.chunk_id) {
+                            skipped += 1;
+                            return Ok(());
                         }
-                        // Metadata exists but segment data is missing or unreadable
-                        // This is a crash recovery case - re-write the chunk
-                        debug!(
-                            chunk_id = %chunk_id,
-                            "recovering orphan metadata - segment data missing"
-                        );
-                    }
-
-                    // Deserialize chunk from payload
-                    let chunk: MemoryChunk =
-                        serde_json::from_slice(&record.payload).map_err(|e| {
-                            MemdError::StorageError(format!("deserialize WAL chunk: {}", e))
+                        // Check if chunk already exists and is readable
+                        let tenant_id = TenantId::new(&record.tenant_id).map_err(|e| {
+                            MemdError::StorageError(format!("invalid tenant_id in WAL: {}", e))
+                        })?;
+                        let chunk_id = ChunkId::parse(&record.chunk_id).map_err(|e| {
+                            MemdError::StorageError(format!("invalid chunk_id in WAL: {}", e))
                         })?;
 
-                    // Write to active segment
-                    self.get_or_create_active_segment(self.segment_max_chunks)?;
-                    let (segment_id, ordinal) = {
-                        let mut active = self.active_segment.lock();
-                        let seg = active.as_mut().ok_or_else(|| {
-                            MemdError::StorageError("no active segment during recovery".into())
-                        })?;
-                        let ordinal = seg.writer.append_chunk(&record.payload)?;
-                        seg.chunk_count += 1;
-                        (seg.writer.id(), ordinal)
-                    };
-
-                    // Write to metadata
-                    let chunk_meta = if let Some(mut current) = existing_metadata {
-                        // Repair only the physical payload coordinates. SQLite
-                        // is authoritative for every lifecycle field that may
-                        // have changed after the original Add record.
-                        current.segment_id = segment_id;
-                        current.ordinal = ordinal;
-                        current
-                    } else {
-                        ChunkMetadata {
-                            chunk_id: chunk.chunk_id.clone(),
-                            tenant_id: chunk.tenant_id.clone(),
-                            project_id: chunk.project_id.as_option().map(|s| s.to_string()),
-                            segment_id,
-                            ordinal,
-                            chunk_type: chunk.chunk_type,
-                            status: chunk.status,
-                            timestamp_created: chunk.timestamp_created,
-                            hash: chunk.hash.clone(),
-                            source_uri: chunk.source.uri.clone(),
-                            lifecycle: crate::types::LifecycleMetadata::default(),
-                            canonical_text: Some(
-                                crate::store::supersession::canonicalize_for_type(
-                                    &chunk.text,
-                                    chunk.chunk_type,
-                                ),
-                            ),
-                            ingestion_mode: chunk.ingestion_mode,
-                        }
-                    };
-                    metadata.insert(&chunk_meta)?;
-
-                    adds += 1;
-                }
-                WalRecordType::Delete => {
-                    // Apply delete: mark in metadata and tombstone
-                    let tenant_id = TenantId::new(&record.tenant_id).map_err(|e| {
-                        MemdError::StorageError(format!("invalid tenant_id in WAL: {}", e))
-                    })?;
-                    let chunk_id = ChunkId::parse(&record.chunk_id).map_err(|e| {
-                        MemdError::StorageError(format!("invalid chunk_id in WAL: {}", e))
-                    })?;
-
-                    // Get metadata to find segment/ordinal
-                    if let Some(meta) = metadata.get(&tenant_id, &chunk_id)? {
-                        if meta.status != ChunkStatus::Deleted {
-                            // Mark in metadata
-                            metadata.mark_deleted(&tenant_id, &chunk_id)?;
-
-                            // Mark the segment tombstone using the same pattern
-                            // as the live delete path in `retrieval.rs`: the
-                            // per-segment `Arc<RwLock<TombstoneSet>>`
-                            // lets us do this under a read lock on the
-                            // enclosing map.
+                        // If metadata exists, check if segment data is readable.
+                        // Keep the row for the repair path below: the WAL Add
+                        // payload contains the status from initial insertion, but
+                        // SQLite may hold a newer lifecycle state (candidate
+                        // promoted to final, superseded, expired, or error).
+                        let existing_metadata = metadata.get(&tenant_id, &chunk_id)?;
+                        if let Some(existing_meta) = existing_metadata.as_ref() {
+                            // Try to read from segment to verify data is intact
                             let segments = self.segments.read();
-                            if let Some(reader) = segments.get(&meta.segment_id) {
-                                reader.mark_deleted(meta.ordinal)?;
+                            if let Some(reader) = segments.get(&existing_meta.segment_id) {
+                                if reader
+                                    .read_chunk(existing_meta.ordinal)
+                                    .ok()
+                                    .flatten()
+                                    .is_some()
+                                {
+                                    // Data exists and is readable, skip
+                                    skipped += 1;
+                                    return Ok(());
+                                }
                             }
+                            // Metadata exists but segment data is missing or unreadable
+                            // This is a crash recovery case - re-write the chunk
+                            debug!(
+                                chunk_id = %chunk_id,
+                                "recovering orphan metadata - segment data missing"
+                            );
+                        }
 
-                            deletes += 1;
+                        // Validate every payload before rewriting it. SQLite still
+                        // controls lifecycle and index state for an existing row.
+                        let chunk: MemoryChunk =
+                            serde_json::from_slice(&record.payload).map_err(|e| {
+                                MemdError::StorageError(format!("deserialize WAL chunk: {}", e))
+                            })?;
+                        if chunk.chunk_id != chunk_id || chunk.tenant_id != tenant_id {
+                            return Err(MemdError::StorageError(
+                                "WAL chunk identity does not match record".into(),
+                            ));
+                        }
+
+                        // Write to active segment
+                        self.get_or_create_active_segment(self.segment_max_chunks)?;
+                        let (segment_id, ordinal) = {
+                            let mut active = self.active_segment.lock();
+                            let seg = active.as_mut().ok_or_else(|| {
+                                MemdError::StorageError("no active segment during recovery".into())
+                            })?;
+                            let ordinal = seg.writer.append_chunk(&record.payload)?;
+                            seg.chunk_count += 1;
+                            (seg.writer.id(), ordinal)
+                        };
+
+                        // Write to metadata
+                        if existing_metadata.is_some() {
+                            let updated = metadata.repair_recovered_chunk_location_pending(
+                                &tenant_id,
+                                &chunk_id,
+                                segment_id,
+                                ordinal,
+                                current_time_ms(),
+                            )?;
+                            if updated != 1 {
+                                return Err(MemdError::StorageError(format!(
+                                    "WAL repair location update matched {updated} rows"
+                                )));
+                            }
+                        } else {
+                            let chunk_meta = ChunkMetadata {
+                                chunk_id: chunk.chunk_id.clone(),
+                                tenant_id: chunk.tenant_id.clone(),
+                                project_id: chunk.project_id.as_option().map(|s| s.to_string()),
+                                segment_id,
+                                ordinal,
+                                chunk_type: chunk.chunk_type,
+                                status: chunk.status,
+                                timestamp_created: chunk.timestamp_created,
+                                hash: chunk.hash.clone(),
+                                source_uri: chunk.source.uri.clone(),
+                                lifecycle: crate::types::LifecycleMetadata::default(),
+                                canonical_text: Some(
+                                    crate::store::supersession::canonicalize_for_type(
+                                        &chunk.text,
+                                        chunk.chunk_type,
+                                    ),
+                                ),
+                                ingestion_mode: chunk.ingestion_mode,
+                            };
+                            metadata.insert_pending_recovered(&chunk_meta)?;
+                        }
+
+                        adds += 1;
+                    }
+                    WalRecordType::Delete => {
+                        // Apply delete: mark in metadata and tombstone
+                        let tenant_id = TenantId::new(&record.tenant_id).map_err(|e| {
+                            MemdError::StorageError(format!("invalid tenant_id in WAL: {}", e))
+                        })?;
+                        let chunk_id = ChunkId::parse(&record.chunk_id).map_err(|e| {
+                            MemdError::StorageError(format!("invalid chunk_id in WAL: {}", e))
+                        })?;
+
+                        // Get metadata to find segment/ordinal
+                        if let Some(meta) = metadata.get(&tenant_id, &chunk_id)? {
+                            if meta.status != ChunkStatus::Deleted {
+                                // Mark in metadata
+                                metadata.mark_deleted(&tenant_id, &chunk_id)?;
+
+                                // Mark the segment tombstone using the same pattern
+                                // as the live delete path in `retrieval.rs`: the
+                                // per-segment `Arc<RwLock<TombstoneSet>>`
+                                // lets us do this under a read lock on the
+                                // enclosing map.
+                                let segments = self.segments.read();
+                                if let Some(reader) = segments.get(&meta.segment_id) {
+                                    reader.mark_deleted(meta.ordinal)?;
+                                }
+
+                                deletes += 1;
+                            } else {
+                                skipped += 1;
+                            }
                         } else {
                             skipped += 1;
                         }
-                    } else {
-                        skipped += 1;
+                    }
+                    WalRecordType::TaskArtifact => {
+                        let payload: TaskArtifactWalPayload =
+                            serde_json::from_slice(&record.payload).map_err(|e| {
+                                MemdError::StorageError(format!(
+                                    "deserialize WAL task artifact payload: {}",
+                                    e
+                                ))
+                            })?;
+                        if payload.artifact.tenant_id != tenant_id {
+                            return Err(MemdError::StorageError(
+                                "WAL task artifact tenant does not match record".into(),
+                            ));
+                        }
+                        if payload.projection_chunk_ids.len() != payload.projection_kinds.len() {
+                            return Err(MemdError::StorageError(
+                                "WAL task projection lengths do not match".into(),
+                            ));
+                        }
+                        let had_projections = !payload.projection_chunk_ids.is_empty();
+                        let (projection_chunk_ids, projection_kinds): (Vec<_>, Vec<_>) = payload
+                            .projection_chunk_ids
+                            .into_iter()
+                            .zip(payload.projection_kinds)
+                            .filter(|(id, _)| !deleted_ids.contains(id))
+                            .unzip();
+                        if had_projections && projection_chunk_ids.is_empty() {
+                            skipped += 1;
+                            return Ok(());
+                        }
+                        metadata.insert_task_artifact_bundle(
+                            &payload.artifact,
+                            &projection_chunk_ids,
+                            &projection_kinds,
+                        )?;
+                        task_artifacts += 1;
+                    }
+                    WalRecordType::Checkpoint => {
+                        // Checkpoint records are filtered out by records_for_recovery()
+                        // but handle gracefully if encountered
                     }
                 }
-                WalRecordType::TaskArtifact => {
-                    let payload: TaskArtifactWalPayload = serde_json::from_slice(&record.payload)
-                        .map_err(|e| {
-                        MemdError::StorageError(format!(
-                            "deserialize WAL task artifact payload: {}",
-                            e
-                        ))
-                    })?;
-                    metadata.insert_task_artifact_bundle(
-                        &payload.artifact,
-                        &payload.projection_chunk_ids,
-                        &payload.projection_kinds,
-                    )?;
-                    task_artifacts += 1;
-                }
-                WalRecordType::Checkpoint => {
-                    // Checkpoint records are filtered out by records_for_recovery()
-                    // but handle gracefully if encountered
-                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                failed += 1;
+                warn!(tenant = %self.tenant_id, chunk_id = %record.chunk_id, record_type = ?record.record_type, error = %error, "skipping failed WAL record");
             }
         }
 
@@ -352,9 +461,13 @@ impl TenantStore {
             deletes,
             task_artifacts,
             skipped,
+            failed,
             tenant = %self.tenant_id,
             "WAL recovery complete"
         );
+        if failed > 0 {
+            self.wal_recovery_incomplete.store(true, Ordering::Release);
+        }
 
         // Durability barrier before WAL truncation.
         //
@@ -375,10 +488,66 @@ impl TenantStore {
             self.finalize_active_segment()?;
         }
 
-        // After durable recovery, truncate WAL to start fresh.
-        self.truncate_wal()?;
+        // Persist relocation commits before dropping the WAL or obsolete
+        // unfinished directories. Retain the source WAL on record failures.
+        if let Err(error) = metadata.checkpoint_wal() {
+            warn!(tenant = %self.tenant_id, error = %error, "retaining WAL and old segments because metadata checkpoint did not finish");
+            return Ok(());
+        }
+        // Failed records retain their WAL source, not unrelated orphan files.
+        // The completed metadata checkpoint makes directory cleanup safe.
+        self.remove_unreferenced_segments(metadata, &tenant_id)?;
+        if failed == 0 {
+            if valid_bytes == wal_reader.len() {
+                self.truncate_wal()?;
+            } else {
+                warn!(tenant = %self.tenant_id, "retaining WAL containing corrupt bytes after recovery");
+            }
+        }
 
         Ok(())
+    }
+
+    fn remove_unreferenced_segments(
+        &self,
+        metadata: &SqliteMetadataStore,
+        tenant_id: &TenantId,
+    ) -> Result<()> {
+        let segments_dir = self.base_dir.join("segments");
+        let mut obsolete = Vec::new();
+        for entry in std::fs::read_dir(&segments_dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let Some(id) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_prefix("seg_"))
+                .and_then(|id| id.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            if metadata
+                .get_by_segment(tenant_id, id)?
+                .iter()
+                .all(|row| row.status == ChunkStatus::Deleted)
+            {
+                obsolete.push((id, entry.path()));
+            }
+        }
+        if obsolete.is_empty() {
+            return Ok(());
+        }
+        if let Err(error) = metadata.checkpoint_wal() {
+            warn!(tenant = %self.tenant_id, error = %error, "retaining obsolete segments because metadata checkpoint did not finish");
+            return Ok(());
+        }
+        for (id, path) in obsolete {
+            std::fs::remove_dir_all(path)?;
+            self.segments.write().remove(&id);
+        }
+        sync_directory_if_exists(&segments_dir)
     }
 
     pub(super) fn next_segment_id(&self) -> u64 {
@@ -418,7 +587,10 @@ impl TenantStore {
             }
         }
 
-        max_on_disk.map(|id| id + 1).unwrap_or(1)
+        max_on_disk
+            .map(|id| id + 1)
+            .unwrap_or(1)
+            .max(self.segment_id_floor)
     }
 
     pub(super) fn get_or_create_active_segment(&self, max_chunks: u32) -> Result<()> {
@@ -483,15 +655,7 @@ impl TenantStore {
         Ok(())
     }
 
-    /// Finalize active segment for graceful shutdown.
-    ///
-    /// Always seals the segment when one exists (no `min_finalize_chunks`
-    /// gate here). Callers that want the threshold gate must use
-    /// `finalize_active_segment_if_above_threshold` instead. The WAL
-    /// recovery path at the durability barrier in `recover_from_wal`
-    /// must keep using this unconditional method — recovered chunks
-    /// have to land in a finalized segment before WAL truncation, or a
-    /// second crash strands them.
+    /// Seal active payloads before shutdown or discarding their WAL records.
     pub(super) fn finalize_active_segment(&self) -> Result<()> {
         if self.read_only {
             tracing::debug!(
@@ -519,57 +683,6 @@ impl TenantStore {
             }
         }
         Ok(())
-    }
-
-    /// Variant of `finalize_active_segment` that honors the
-    /// `min_finalize_chunks` threshold. Used by graceful-shutdown and
-    /// Drop paths so a CLI invocation that wrote 1-2 chunks does not
-    /// seal its active segment; instead the segment is left in place
-    /// and grown by future invocations. The chunks remain durable
-    /// because the WAL has already persisted them and `recover_from_wal`
-    /// replays them into the active segment on next startup.
-    ///
-    /// CRASH SAFETY: the gate is disabled when
-    /// `wal_checkpoint_interval > 0`. With checkpointing enabled the
-    /// WAL may already have been truncated past the records that would
-    /// be needed to recover the unfinalized active segment, so leaving
-    /// it unfinalized would lose chunks. Default config has
-    /// `wal_checkpoint_interval = 0` (the v0.3.1 safety valve), so the
-    /// gate is active for typical deployments.
-    ///
-    /// KNOWN LIMITATION: this gate is necessary but not sufficient to
-    /// eliminate the segment-per-CLI-call pathology. On the next
-    /// startup, `recover_from_wal` replays the WAL records: it finds
-    /// metadata pointing to the unfinalized segment, the segment cache
-    /// does not have it (load_segments skips dirs without `meta`), and
-    /// the "missing or unreadable" branch rewrites each chunk into a
-    /// freshly created active segment that the WAL durability barrier
-    /// then finalizes. A full fix requires reopening the existing
-    /// unfinalized segment for append (tracked as future work — needs
-    /// incremental payload.idx persistence). Today this method makes
-    /// the gate visible and configurable so the eventual segment-reuse
-    /// path has a stable entry point.
-    pub(super) fn finalize_active_segment_if_above_threshold(&self) -> Result<()> {
-        if self.read_only {
-            return Ok(());
-        }
-        if self.wal_checkpoint_interval > 0 {
-            return self.finalize_active_segment();
-        }
-        let active_chunks = {
-            let active = self.active_segment.lock();
-            active.as_ref().map(|s| s.chunk_count).unwrap_or(0)
-        };
-        if active_chunks < self.min_finalize_chunks {
-            tracing::debug!(
-                chunks = active_chunks,
-                threshold = self.min_finalize_chunks,
-                tenant = %self.tenant_id,
-                "skipping finalize on shutdown: active segment below threshold"
-            );
-            return Ok(());
-        }
-        self.finalize_active_segment()
     }
 
     /// Read chunk from active segment by ordinal
@@ -609,88 +722,111 @@ impl TenantStore {
         };
         segment_ids.sort_unstable();
 
-        let segments_dir = self.base_dir.join("segments");
-        let mut result = SegmentRewriteResult::default();
-
-        for old_segment_id in segment_ids {
-            let rows = metadata.get_by_segment(tenant_id, old_segment_id)?;
-            let live_rows = rows
+        // Plan carries before copying. Two groups in tier k produce a group
+        // in tier k+1, so each copied chunk advances a tier. Stop at half
+        // capacity: joining two smaller groups cannot exceed capacity.
+        let full = self.segment_max_chunks.div_ceil(2).max(1) as usize;
+        let mut tiers: BTreeMap<u32, (usize, Vec<u64>)> = BTreeMap::new();
+        let mut groups = Vec::new();
+        for id in segment_ids {
+            let mut count = metadata
+                .get_by_segment(tenant_id, id)?
                 .iter()
                 .filter(|row| row.status != ChunkStatus::Deleted)
-                .collect::<Vec<_>>();
-
-            let mut segments = self.segments.write();
-            let Some(reader) = segments.get(&old_segment_id) else {
-                continue;
-            };
-
-            let chunk_count = reader.chunk_count() as usize;
-            let active_count = reader.active_count() as usize;
-            if live_rows.len() == chunk_count && active_count == chunk_count {
-                continue;
-            }
-
-            let old_dir = reader.dir().to_path_buf();
-            let old_size = path_size(&old_dir)?;
-            result.bytes_before = result.bytes_before.saturating_add(old_size);
-
-            if live_rows.is_empty() {
-                segments.remove(&old_segment_id);
-                match std::fs::remove_dir_all(&old_dir) {
-                    Ok(()) => {
-                        result.segments_removed += 1;
-                        result.segments_rewritten += 1;
-                        result.bytes_reclaimed = result.bytes_reclaimed.saturating_add(old_size);
-                    }
-                    Err(err) => result.warnings.push(format!(
-                        "failed to remove obsolete segment {}: {}",
-                        old_segment_id, err
-                    )),
+                .count();
+            let mut ids = vec![id];
+            while count > 0 && count < full {
+                let tier = count.ilog2();
+                if let Some((other_count, other_ids)) = tiers.remove(&tier) {
+                    count += other_count;
+                    ids.extend(other_ids);
+                } else {
+                    tiers.insert(tier, (count, ids));
+                    ids = Vec::new();
+                    break;
                 }
+            }
+            if !ids.is_empty() {
+                groups.push(ids);
+            }
+        }
+        groups.extend(tiers.into_values().map(|(_, ids)| ids));
+
+        let segments_dir = self.base_dir.join("segments");
+        let mut result = SegmentRewriteResult::default();
+        for ids in groups {
+            let mut segments = self.segments.write();
+            let mut rows = Vec::new();
+            let mut old_dirs = Vec::new();
+            let mut old_size = 0u64;
+            let mut needs_rewrite = ids.len() > 1;
+            for id in &ids {
+                let reader = &segments[id];
+                let live = metadata
+                    .get_by_segment(tenant_id, *id)?
+                    .into_iter()
+                    .filter(|row| row.status != ChunkStatus::Deleted)
+                    .collect::<Vec<_>>();
+                needs_rewrite |= live.len() != reader.chunk_count() as usize
+                    || reader.active_count() != reader.chunk_count();
+                rows.extend(live);
+                old_size = old_size.saturating_add(path_size(reader.dir())?);
+                old_dirs.push(reader.dir().to_path_buf());
+            }
+            if !needs_rewrite {
                 continue;
             }
 
-            let mut payloads = Vec::with_capacity(live_rows.len());
-            for row in &live_rows {
-                let payload = reader.read_chunk(row.ordinal)?.ok_or_else(|| {
-                    MemdError::StorageError(format!(
-                        "live metadata row {} points at missing/tombstoned segment {} ordinal {}",
-                        row.chunk_id, old_segment_id, row.ordinal
-                    ))
-                })?;
-                payloads.push((row.chunk_id.clone(), payload));
+            let mut new_size = 0;
+            if !rows.is_empty() {
+                // Validate every source before creating a replacement, so a
+                // bad payload cannot leave a partial merge or relocate rows.
+                let payloads = rows.iter().map(|row| {
+                    segments[&row.segment_id].read_chunk(row.ordinal)?.ok_or_else(|| {
+                        MemdError::StorageError(format!(
+                            "live metadata row {} points at missing/tombstoned segment {} ordinal {}",
+                            row.chunk_id, row.segment_id, row.ordinal
+                        ))
+                    })
+                }).collect::<Result<Vec<_>>>()?;
+                let new_id = next_segment_id;
+                next_segment_id += 1;
+                let mut writer = SegmentWriter::create(&segments_dir, new_id)?;
+                let mut relocations = Vec::with_capacity(rows.len());
+                for (row, payload) in rows.iter().zip(&payloads) {
+                    relocations.push((row.chunk_id.clone(), new_id, writer.append_chunk(payload)?));
+                }
+                writer.finalize()?;
+                // finalize syncs the files and child directory. Persist the
+                // parent's new entry before committing metadata locations.
+                sync_directory_if_exists(&segments_dir)?;
+                let new_dir = segments_dir.join(format!("seg_{:06}", new_id));
+                let new_reader = SegmentReader::open(new_dir.clone())?;
+                new_size = path_size(&new_dir)?;
+                // On an uncertain commit outcome retain both copies. Recovery
+                // uses SQLite locations to decide which directories are old.
+                segments.insert(new_id, new_reader);
+                metadata.update_chunk_locations(tenant_id, &relocations)?;
             }
-
-            let new_segment_id = next_segment_id;
-            next_segment_id += 1;
-            let mut writer = SegmentWriter::create(&segments_dir, new_segment_id)?;
-            let mut relocations = Vec::with_capacity(payloads.len());
-            for (chunk_id, payload) in &payloads {
-                let new_ordinal = writer.append_chunk(payload)?;
-                relocations.push((chunk_id.clone(), new_segment_id, new_ordinal));
+            // Includes the all-deleted case: deletion metadata must also be
+            // durable before its source bytes can disappear.
+            metadata.checkpoint_wal()?;
+            for (id, dir) in ids.iter().zip(&old_dirs) {
+                match std::fs::remove_dir_all(dir) {
+                    Ok(()) => {
+                        segments.remove(id);
+                    }
+                    Err(err) => result
+                        .warnings
+                        .push(format!("failed to remove obsolete segment {id}: {err}")),
+                }
             }
-            writer.finalize()?;
-            let new_dir = segments_dir.join(format!("seg_{:06}", new_segment_id));
-            let new_reader = SegmentReader::open(new_dir.clone())?;
-            let new_size = path_size(&new_dir)?;
-
-            if let Err(err) = metadata.update_chunk_locations(tenant_id, &relocations) {
-                let _ = std::fs::remove_dir_all(&new_dir);
-                return Err(err);
+            result.segments_rewritten += ids.len();
+            if rows.is_empty() {
+                result.segments_removed += ids.len();
             }
-
-            segments.remove(&old_segment_id);
-            segments.insert(new_segment_id, new_reader);
-            match std::fs::remove_dir_all(&old_dir) {
-                Ok(()) => {}
-                Err(err) => result.warnings.push(format!(
-                    "failed to remove rewritten segment {}: {}",
-                    old_segment_id, err
-                )),
-            }
-
-            result.segments_rewritten += 1;
-            result.chunks_moved += relocations.len();
+            result.chunks_moved += rows.len();
+            result.bytes_before = result.bytes_before.saturating_add(old_size);
             result.bytes_after = result.bytes_after.saturating_add(new_size);
             result.bytes_reclaimed = result
                 .bytes_reclaimed
@@ -712,9 +848,13 @@ fn build_wal_overlay(wal_reader: &WalReader, tenant_id: &str) -> Result<HashMap<
         if record.record_type != WalRecordType::Add || record.tenant_id != tenant_id {
             continue;
         }
-        let chunk_id = ChunkId::parse(&record.chunk_id).map_err(|e| {
-            MemdError::StorageError(format!("invalid chunk_id in WAL overlay: {}", e))
-        })?;
+        let chunk_id = match ChunkId::parse(&record.chunk_id) {
+            Ok(id) => id,
+            Err(error) => {
+                warn!(tenant_id, error = %error, "skipping invalid chunk id in read-only WAL overlay");
+                continue;
+            }
+        };
         overlay.insert(chunk_id, record.payload);
     }
 
@@ -754,15 +894,509 @@ fn sync_directory_if_exists(path: &Path) -> Result<()> {
 
 impl Drop for TenantStore {
     fn drop(&mut self) {
-        // Best-effort finalization on drop. Same gate as the shutdown
-        // path: tiny segments are kept across runs to avoid the
-        // segment-per-CLI-call pathology.
-        if let Err(e) = self.finalize_active_segment_if_above_threshold() {
+        if let Err(e) = self.finalize_active_segment() {
             warn!(
                 tenant = %self.tenant_id,
                 error = %e,
                 "failed to finalize segment on TenantStore drop"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ChunkType, LifecycleMetadata};
+    use tempfile::tempdir;
+
+    fn chunk() -> MemoryChunk {
+        MemoryChunk::new(
+            TenantId::new("recovery").unwrap(),
+            "recover me",
+            ChunkType::Doc,
+        )
+    }
+
+    fn add_record(chunk: &MemoryChunk) -> WalRecord {
+        WalRecord::add(
+            chunk.tenant_id.to_string(),
+            chunk.chunk_id.to_string(),
+            chunk.timestamp_created,
+            serde_json::to_vec(chunk).unwrap(),
+        )
+    }
+
+    fn row(chunk: &MemoryChunk) -> ChunkMetadata {
+        ChunkMetadata {
+            chunk_id: chunk.chunk_id.clone(),
+            tenant_id: chunk.tenant_id.clone(),
+            project_id: None,
+            segment_id: 1,
+            ordinal: 0,
+            chunk_type: chunk.chunk_type,
+            status: chunk.status,
+            timestamp_created: chunk.timestamp_created,
+            hash: chunk.hash.clone(),
+            source_uri: None,
+            lifecycle: LifecycleMetadata::default(),
+            canonical_text: None,
+            ingestion_mode: chunk.ingestion_mode,
+        }
+    }
+
+    fn write_records(base: &Path, records: &[WalRecord]) {
+        std::fs::create_dir_all(base).unwrap();
+        WalWriter::open_or_create(&base.join("wal.log"))
+            .unwrap()
+            .append_batch(records)
+            .unwrap();
+    }
+
+    fn open(base: &Path, metadata: &SqliteMetadataStore) -> Result<TenantStore> {
+        TenantStore::open(
+            "recovery".to_string(),
+            base.to_path_buf(),
+            metadata,
+            100,
+            false,
+        )
+    }
+
+    #[test]
+    fn wal_repair_preserves_pending_index_state() {
+        let dir = tempdir().unwrap();
+        let metadata = SqliteMetadataStore::open_in_memory().unwrap();
+        let chunk = chunk();
+        metadata.insert(&row(&chunk)).unwrap();
+        metadata
+            .mark_index_pending(&chunk.tenant_id, std::slice::from_ref(&chunk.chunk_id), 123)
+            .unwrap();
+        write_records(dir.path(), &[add_record(&chunk)]);
+        let _store = open(dir.path(), &metadata).unwrap();
+        assert_eq!(
+            metadata.count_by_index_state(&chunk.tenant_id).unwrap(),
+            (1, 0, 0)
+        );
+    }
+
+    #[test]
+    fn wal_new_chunk_remains_pending_until_indexed() {
+        let dir = tempdir().unwrap();
+        let metadata = SqliteMetadataStore::open_in_memory().unwrap();
+        let chunk = chunk();
+        write_records(dir.path(), &[add_record(&chunk)]);
+        let _store = open(dir.path(), &metadata).unwrap();
+        assert_eq!(
+            metadata.count_by_index_state(&chunk.tenant_id).unwrap(),
+            (1, 0, 0)
+        );
+    }
+
+    #[test]
+    fn wal_physical_repair_marks_previously_indexed_chunk_pending() {
+        let dir = tempdir().unwrap();
+        let metadata = SqliteMetadataStore::open_in_memory().unwrap();
+        let chunk = chunk();
+        metadata.insert(&row(&chunk)).unwrap();
+        assert_eq!(
+            metadata.count_by_index_state(&chunk.tenant_id).unwrap(),
+            (0, 1, 0)
+        );
+        write_records(dir.path(), &[add_record(&chunk)]);
+        let _store = open(dir.path(), &metadata).unwrap();
+        assert_eq!(
+            metadata.count_by_index_state(&chunk.tenant_id).unwrap(),
+            (1, 0, 0),
+            "physical repair must queue indexes that may have skipped the missing payload"
+        );
+    }
+
+    #[test]
+    fn wal_add_does_not_resurrect_soft_deleted_chunk() {
+        let dir = tempdir().unwrap();
+        let metadata = SqliteMetadataStore::open_in_memory().unwrap();
+        let chunk = chunk();
+        metadata.insert(&row(&chunk)).unwrap();
+        metadata
+            .mark_deleted(&chunk.tenant_id, &chunk.chunk_id)
+            .unwrap();
+        write_records(dir.path(), &[add_record(&chunk)]);
+        let store = open(dir.path(), &metadata).unwrap();
+        assert!(metadata
+            .get(&chunk.tenant_id, &chunk.chunk_id)
+            .unwrap()
+            .is_none());
+        assert!(
+            store.segments.read().is_empty(),
+            "deleted bytes must not be replayed"
+        );
+    }
+
+    #[test]
+    fn wal_add_delete_does_not_recreate_purged_row() {
+        let dir = tempdir().unwrap();
+        let metadata = SqliteMetadataStore::open_in_memory().unwrap();
+        let chunk = chunk();
+        metadata.insert(&row(&chunk)).unwrap();
+        metadata
+            .mark_deleted(&chunk.tenant_id, &chunk.chunk_id)
+            .unwrap();
+        metadata
+            .hard_delete_chunks(&chunk.tenant_id, std::slice::from_ref(&chunk.chunk_id))
+            .unwrap();
+        write_records(
+            dir.path(),
+            &[
+                add_record(&chunk),
+                WalRecord::delete(chunk.tenant_id.to_string(), chunk.chunk_id.to_string(), 456),
+            ],
+        );
+        let store = open(dir.path(), &metadata).unwrap();
+        assert!(
+            metadata
+                .get_deleted_chunk_ids(&chunk.tenant_id)
+                .unwrap()
+                .is_empty(),
+            "purged row was recreated"
+        );
+        assert!(
+            store.segments.read().is_empty(),
+            "purged bytes must not be replayed"
+        );
+    }
+
+    #[test]
+    fn wal_bad_record_does_not_block_later_valid_chunk() {
+        let dir = tempdir().unwrap();
+        let metadata = SqliteMetadataStore::open_in_memory().unwrap();
+        let chunk = chunk();
+        let bad = WalRecord::add(
+            "recovery".to_string(),
+            ChunkId::new().to_string(),
+            1,
+            b"invalid json".to_vec(),
+        );
+        write_records(dir.path(), &[bad, add_record(&chunk)]);
+        let store =
+            open(dir.path(), &metadata).expect("one invalid payload must not block store open");
+        let meta = metadata
+            .get(&chunk.tenant_id, &chunk.chunk_id)
+            .unwrap()
+            .unwrap();
+        assert!(store
+            .read_payload_fallback(&chunk.chunk_id, meta.segment_id, meta.ordinal)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn wal_task_artifact_does_not_restore_purged_projection_link() {
+        let dir = tempdir().unwrap();
+        let metadata = SqliteMetadataStore::open_in_memory().unwrap();
+        let chunk = chunk();
+        let artifact = TaskArtifact::new_task_start(chunk.tenant_id.clone());
+        let payload = TaskArtifactWalPayload {
+            artifact: artifact.clone(),
+            projection_chunk_ids: vec![chunk.chunk_id.to_string()],
+            projection_kinds: vec!["task".to_string()],
+        };
+        metadata.insert(&row(&chunk)).unwrap();
+        metadata
+            .insert_task_artifact_bundle(
+                &artifact,
+                &payload.projection_chunk_ids,
+                &payload.projection_kinds,
+            )
+            .unwrap();
+        metadata
+            .mark_deleted(&chunk.tenant_id, &chunk.chunk_id)
+            .unwrap();
+        metadata
+            .hard_delete_chunks(&chunk.tenant_id, std::slice::from_ref(&chunk.chunk_id))
+            .unwrap();
+        write_records(
+            dir.path(),
+            &[
+                add_record(&chunk),
+                WalRecord::task_artifact(
+                    chunk.tenant_id.to_string(),
+                    artifact.artifact_id.clone(),
+                    123,
+                    serde_json::to_vec(&payload).unwrap(),
+                ),
+                WalRecord::delete(chunk.tenant_id.to_string(), chunk.chunk_id.to_string(), 456),
+            ],
+        );
+        let _store = open(dir.path(), &metadata).unwrap();
+        assert!(metadata
+            .search_task_projection_chunk_ids(&chunk.tenant_id, &TaskSearchFilters::default(), 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn wal_purge_barrier_refuses_incomplete_recovery_without_losing_source() {
+        let dir = tempdir().unwrap();
+        let tenant = TenantId::new("recovery").unwrap();
+        let base = dir.path().join("tenants").join(tenant.as_str());
+        let bad = WalRecord::add(
+            tenant.to_string(),
+            ChunkId::new().to_string(),
+            1,
+            b"invalid payload".to_vec(),
+        );
+        write_records(&base, &[bad]);
+        let before = std::fs::read(base.join("wal.log")).unwrap();
+        let store = PersistentStore::open(PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            store.checkpoint_tenant_wal(&tenant).is_err(),
+            "purge must refuse a WAL retained for failed recovery"
+        );
+        let tenant_store = store.get_or_create_tenant(tenant.as_str()).unwrap();
+        assert!(tenant_store.truncate_wal().is_err());
+        tenant_store
+            .append_wal_checkpoint(tenant.as_str(), 456)
+            .unwrap();
+        assert_eq!(std::fs::read(base.join("wal.log")).unwrap(), before);
+    }
+
+    #[test]
+    fn wal_existing_row_repair_rejects_mismatched_payload_identity() {
+        let dir = tempdir().unwrap();
+        let metadata = SqliteMetadataStore::open_in_memory().unwrap();
+        let original = chunk();
+        let different = chunk();
+        metadata.insert(&row(&original)).unwrap();
+        let bad = WalRecord::add(
+            original.tenant_id.to_string(),
+            original.chunk_id.to_string(),
+            original.timestamp_created,
+            serde_json::to_vec(&different).unwrap(),
+        );
+        write_records(dir.path(), &[bad]);
+        let store = open(dir.path(), &metadata).unwrap();
+        assert!(
+            store.segments.read().is_empty(),
+            "repair wrote another chunk's payload at the existing row's coordinates"
+        );
+        assert!(!std::fs::read(dir.path().join("wal.log"))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn wal_reopen_does_not_rewrite_small_segment_or_leave_orphan() {
+        let dir = tempdir().unwrap();
+        let metadata = SqliteMetadataStore::open_in_memory().unwrap();
+        let chunk = chunk();
+        let store = open(dir.path(), &metadata).unwrap();
+        store
+            .append_wal_records(&[add_record(&chunk)], "test")
+            .unwrap();
+        store.get_or_create_active_segment(100).unwrap();
+        store
+            .active_segment
+            .lock()
+            .as_mut()
+            .unwrap()
+            .writer
+            .append_chunk(&serde_json::to_vec(&chunk).unwrap())
+            .unwrap();
+        store.active_segment.lock().as_mut().unwrap().chunk_count += 1;
+        metadata.insert(&row(&chunk)).unwrap();
+        drop(store);
+        let _store = open(dir.path(), &metadata).unwrap();
+        let meta = metadata
+            .get(&chunk.tenant_id, &chunk.chunk_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            meta.segment_id, 1,
+            "gracefully closed payload must retain its coordinates"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("segments"))
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn wal_recovery_removes_unreferenced_unfinished_directory() {
+        let dir = tempdir().unwrap();
+        let metadata = SqliteMetadataStore::open_in_memory().unwrap();
+        let chunk = chunk();
+        let segments = dir.path().join("segments");
+        let mut writer = SegmentWriter::create(&segments, 1).unwrap();
+        writer
+            .append_chunk(&serde_json::to_vec(&chunk).unwrap())
+            .unwrap();
+        writer.flush_payload().unwrap();
+        drop(writer);
+        metadata.insert(&row(&chunk)).unwrap();
+        write_records(dir.path(), &[add_record(&chunk)]);
+        let _store = open(dir.path(), &metadata).unwrap();
+        assert!(
+            !segments.join("seg_000001").exists(),
+            "recovery left obsolete unfinished payload bytes on disk"
+        );
+        assert_eq!(std::fs::read_dir(segments).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn wal_empty_startup_removes_old_unreferenced_unfinished_directory() {
+        let dir = tempdir().unwrap();
+        let metadata = SqliteMetadataStore::open_in_memory().unwrap();
+        let segments = dir.path().join("segments");
+        let mut writer = SegmentWriter::create(&segments, 1).unwrap();
+        writer.append_chunk(b"obsolete payload").unwrap();
+        writer.flush_payload().unwrap();
+        drop(writer);
+        let _store = open(dir.path(), &metadata).unwrap();
+        assert!(!segments.join("seg_000001").exists());
+    }
+
+    #[test]
+    fn packing_preserves_pending_and_unresolved_wal() {
+        let dir = tempdir().unwrap();
+        let metadata = SqliteMetadataStore::open_in_memory().unwrap();
+        let tenant = TenantId::new("recovery").unwrap();
+        // A crash can leave unrelated unfinished bytes next to a bad WAL.
+        // Retaining that WAL must not also retain unreferenced payload files.
+        let orphan = dir.path().join("segments/seg_009999");
+        let mut unfinished = SegmentWriter::create(&dir.path().join("segments"), 9999).unwrap();
+        unfinished.append_chunk(b"purged orphan plaintext").unwrap();
+        unfinished.flush_payload().unwrap();
+        drop(unfinished);
+        let mut chunks = Vec::new();
+        for id in 1..=5 {
+            let chunk = chunk();
+            let mut writer = SegmentWriter::create(&dir.path().join("segments"), id).unwrap();
+            writer
+                .append_chunk(&serde_json::to_vec(&chunk).unwrap())
+                .unwrap();
+            writer.finalize().unwrap();
+            let mut meta = row(&chunk);
+            meta.segment_id = id;
+            metadata.insert(&meta).unwrap();
+            metadata
+                .mark_index_pending(&tenant, std::slice::from_ref(&chunk.chunk_id), 123)
+                .unwrap();
+            chunks.push(chunk);
+        }
+        metadata.mark_deleted(&tenant, &chunks[3].chunk_id).unwrap();
+        metadata.mark_deleted(&tenant, &chunks[4].chunk_id).unwrap();
+        metadata
+            .hard_delete_chunks(&tenant, std::slice::from_ref(&chunks[4].chunk_id))
+            .unwrap();
+        let bad = WalRecord::add(
+            tenant.to_string(),
+            ChunkId::new().to_string(),
+            1,
+            b"bad json".to_vec(),
+        );
+        write_records(
+            dir.path(),
+            &[
+                bad,
+                add_record(&chunks[3]),
+                add_record(&chunks[4]),
+                WalRecord::delete(tenant.to_string(), chunks[4].chunk_id.to_string(), 456),
+            ],
+        );
+        let before = std::fs::read(dir.path().join("wal.log")).unwrap();
+        let store = open(dir.path(), &metadata).unwrap();
+        assert_eq!(metadata.count_by_index_state(&tenant).unwrap(), (3, 0, 0));
+        assert_eq!(
+            store.segments.read().len(),
+            2,
+            "three live one-chunk segments must pack"
+        );
+        for chunk in &chunks[..3] {
+            let meta = metadata.get(&tenant, &chunk.chunk_id).unwrap().unwrap();
+            assert_eq!(
+                store
+                    .read_payload_fallback(&chunk.chunk_id, meta.segment_id, meta.ordinal)
+                    .unwrap()
+                    .unwrap(),
+                serde_json::to_vec(chunk).unwrap()
+            );
+        }
+        for chunk in &chunks[3..] {
+            assert!(metadata.get(&tenant, &chunk.chunk_id).unwrap().is_none());
+        }
+        assert_eq!(
+            metadata.get_deleted_chunk_ids(&tenant).unwrap(),
+            vec![chunks[3].chunk_id.clone()]
+        );
+        assert!(store.truncate_wal().is_err());
+        assert_eq!(std::fs::read(dir.path().join("wal.log")).unwrap(), before);
+        assert!(
+            !orphan.exists(),
+            "unresolved WAL retained an unrelated orphan"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("segments"))
+                .unwrap()
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn packing_leaves_full_segments_immutable() {
+        let dir = tempdir().unwrap();
+        let metadata = SqliteMetadataStore::open_in_memory().unwrap();
+        let tenant = TenantId::new("recovery").unwrap();
+        let segments_dir = dir.path().join("segments");
+        for (id, count) in [(1, 4), (2, 2), (3, 1), (4, 1)] {
+            let mut writer = SegmentWriter::create(&segments_dir, id).unwrap();
+            for ordinal in 0..count {
+                let chunk = chunk();
+                writer
+                    .append_chunk(&serde_json::to_vec(&chunk).unwrap())
+                    .unwrap();
+                let mut meta = row(&chunk);
+                meta.segment_id = id;
+                meta.ordinal = ordinal;
+                metadata.insert(&meta).unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+        let full = segments_dir.join("seg_000001/payload.bin");
+        let before = (
+            full.metadata().unwrap().modified().unwrap(),
+            std::fs::read(&full).unwrap(),
+        );
+        let store = TenantStore::open(
+            tenant.to_string(),
+            dir.path().to_path_buf(),
+            &metadata,
+            8,
+            false,
+        )
+        .unwrap();
+        assert_eq!(store.segments.read().len(), 2);
+        assert!(store
+            .segments
+            .read()
+            .values()
+            .all(|reader| reader.chunk_count() == 4));
+        assert_eq!(
+            (
+                full.metadata().unwrap().modified().unwrap(),
+                std::fs::read(&full).unwrap()
+            ),
+            before
+        );
+        assert_eq!(std::fs::read_dir(segments_dir).unwrap().count(), 2);
     }
 }

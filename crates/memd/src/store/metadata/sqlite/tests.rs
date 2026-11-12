@@ -5,6 +5,13 @@ use crate::types::ProjectId;
 use rusqlite::Connection;
 use tempfile::tempdir;
 
+fn current_timestamp_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
 fn create_test_metadata(tenant: &str, chunk_id: &ChunkId) -> ChunkMetadata {
     ChunkMetadata {
         chunk_id: chunk_id.clone(),
@@ -160,6 +167,271 @@ fn soft_delete() {
     // Deleting again returns false
     let deleted_again = store.mark_deleted(&tenant_id, &chunk_id).unwrap();
     assert!(!deleted_again);
+}
+
+#[test]
+fn regression_store_soft_delete_starts_purge_grace_at_deletion() {
+    let store = SqliteMetadataStore::open_in_memory().unwrap();
+    let chunk_id = ChunkId::new();
+    let tenant = TenantId::new("delete_grace").unwrap();
+    let mut row = create_test_metadata(tenant.as_str(), &chunk_id);
+    row.lifecycle.tier = MemoryTier::History;
+    row.lifecycle.expires_at_ms = Some(1);
+    store.insert(&row).unwrap();
+    let before_delete = current_timestamp_ms();
+    assert!(store.mark_deleted(&tenant, &chunk_id).unwrap());
+    assert!(store
+        .list_hard_purge_candidates(&tenant, None, before_delete - 1, 10)
+        .unwrap()
+        .is_empty());
+    let rows = store
+        .list_hard_purge_candidates(&tenant, None, i64::MAX, 10)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].lifecycle.lifecycle_updated_at_ms >= before_delete);
+    let deletion_time = rows[0].lifecycle.lifecycle_updated_at_ms;
+    assert!(!store.mark_deleted(&tenant, &chunk_id).unwrap());
+    assert_eq!(
+        store
+            .list_hard_purge_candidates(&tenant, None, i64::MAX, 10)
+            .unwrap()[0]
+            .lifecycle
+            .lifecycle_updated_at_ms,
+        deletion_time
+    );
+}
+
+#[test]
+fn regression_store_unknown_legacy_deletion_time_gets_full_grace_once() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("legacy_delete.db");
+    let tenant = TenantId::new("legacy_delete_grace").unwrap();
+    let chunk_id = ChunkId::new();
+    {
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        let mut row = create_test_metadata(tenant.as_str(), &chunk_id);
+        row.status = ChunkStatus::Deleted;
+        row.lifecycle.lifecycle_updated_at_ms = 42;
+        store.insert(&row).unwrap();
+    }
+    let first_open = current_timestamp_ms();
+    let first_stamp = {
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        assert!(store
+            .list_hard_purge_candidates(&tenant, None, first_open - 1, 10)
+            .unwrap()
+            .is_empty());
+        store
+            .list_hard_purge_candidates(&tenant, None, i64::MAX, 10)
+            .unwrap()[0]
+            .lifecycle
+            .lifecycle_updated_at_ms
+    };
+    assert!(first_stamp >= first_open);
+    let store = SqliteMetadataStore::open(&path).unwrap();
+    assert_eq!(
+        store
+            .list_hard_purge_candidates(&tenant, None, i64::MAX, 10)
+            .unwrap()[0]
+            .lifecycle
+            .lifecycle_updated_at_ms,
+        first_stamp
+    );
+}
+
+#[test]
+fn regression_store_digest_collision_cannot_replace_another_tenant() {
+    let store = SqliteMetadataStore::open_in_memory().unwrap();
+    let tenant_a = TenantId::new("digest_a").unwrap();
+    let tenant_b = TenantId::new("digest_b").unwrap();
+    let chunk_a = ChunkId::new();
+    let chunk_b = ChunkId::new();
+    store
+        .insert(&create_test_metadata(tenant_a.as_str(), &chunk_a))
+        .unwrap();
+    store
+        .insert(&create_test_metadata(tenant_b.as_str(), &chunk_b))
+        .unwrap();
+    let mut first = TaskArtifact::new_digest(
+        tenant_a.clone(),
+        "digest_task",
+        "digest_key",
+        "project_brief",
+    );
+    first.artifact_id = "shared_legacy_digest_id".to_string();
+    store
+        .insert_task_artifact_bundle(&first, &[chunk_a.to_string()], &["digest".to_string()])
+        .unwrap();
+    let mut incoming = first.clone();
+    incoming.tenant_id = tenant_b;
+    assert!(store.ensure_task_artifact_write_safe(&incoming).is_err());
+    assert!(store
+        .insert_task_artifact_bundle(&incoming, &[chunk_b.to_string()], &["digest".to_string()])
+        .is_err());
+    assert_eq!(
+        store
+            .get_task_artifact(&tenant_a, &first.artifact_id)
+            .unwrap(),
+        Some(first)
+    );
+    let conn = store.pool.get();
+    let linked: String = conn
+        .query_row(
+            "SELECT chunk_id FROM artifact_links WHERE artifact_id = 'shared_legacy_digest_id'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(linked, chunk_a.to_string());
+}
+
+#[test]
+fn regression_store_outcome_priors_exclude_expired_episodes_and_old_history() {
+    let store = SqliteMetadataStore::open_in_memory().unwrap();
+    let tenant = TenantId::new("prior_retention").unwrap();
+    let chunk = ChunkId::new();
+    store
+        .insert(&create_test_metadata(tenant.as_str(), &chunk))
+        .unwrap();
+    let now = 20_000_000_000;
+    let ttl = 90 * 24 * 60 * 60 * 1_000;
+    for (created, expires, timestamp) in [
+        (now - 10, now, now - 1),
+        (now - ttl - 1, now + 10, now - 1),
+        (now - 10, now + 10, now - 1),
+    ] {
+        let episode = RetrievalEpisode {
+            episode_id: RetrievalEpisodeId::new(),
+            tenant_id: tenant.clone(),
+            project_id: None,
+            query_hash: crate::store::stable_query_hash("retention"),
+            query_mode: "generic".to_string(),
+            requested_k: 1,
+            fetched_k: 1,
+            rendered_k: 1,
+            policy_version: "outcome-v1".to_string(),
+            policy_mode: RankingPolicyMode::Shadow,
+            task_id: None,
+            thread_id: None,
+            created_at_ms: created,
+            expires_at_ms: expires,
+        };
+        let item = RetrievalEpisodeItem {
+            episode_id: episode.episode_id.clone(),
+            chunk_id: chunk.clone(),
+            origin_tenant_id: tenant.clone(),
+            origin_project_id: None,
+            original_rank: 0,
+            original_score: 0.5,
+            lane_scores_json: "{}".to_string(),
+            outcome_adjustment: 0.0,
+            served_rank: Some(0),
+            shadow_rank: Some(0),
+            rendered: true,
+            source_dedup_group: None,
+        };
+        store.insert_retrieval_episode(&episode, &[item]).unwrap();
+        let outcome = OutcomeEvent::new(
+            episode.episode_id,
+            OutcomeKind::Passed,
+            OutcomeVerifier::AutomatedTest,
+            vec![chunk.clone()],
+            vec![],
+            Some("artifact:test".to_string()),
+            timestamp,
+        );
+        store.insert_outcome_event(&tenant, &outcome).unwrap();
+    }
+    let priors = store.outcome_priors(&tenant, None, &[chunk], now).unwrap();
+    assert_eq!(priors.len(), 1);
+    assert_eq!(priors[0].eligible_episode_count, 1);
+    assert_eq!(
+        store
+            .prune_expired_retrieval_episodes(&tenant, None, now)
+            .unwrap(),
+        1
+    );
+    for table in [
+        "retrieval_episodes",
+        "retrieval_episode_items",
+        "outcome_events",
+    ] {
+        let count: i64 = store
+            .pool
+            .get()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 2, "expired dependent rows remained in {table}");
+    }
+}
+
+#[test]
+fn regression_store_outcome_priors_time_window_uses_scope_index() {
+    let store = SqliteMetadataStore::open_in_memory().unwrap();
+    let conn = store.pool.get();
+    let sql = format!(
+        "EXPLAIN QUERY PLAN {}",
+        super::episodes::outcome_priors_query(1)
+    );
+    let mut statement = conn.prepare(&sql).unwrap();
+    let plan = statement
+        .query_map(
+            rusqlite::params![
+                "plan_tenant",
+                "project",
+                20_000_000_000_i64,
+                12_224_000_000_i64,
+                ChunkId::new().to_string()
+            ],
+            |row| row.get::<_, String>(3),
+        )
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|line| line.contains("idx_retrieval_episodes_scope_created")
+                && line.contains("created_at_ms>?")
+                && line.contains("created_at_ms<?")),
+        "{plan:?}"
+    );
+    assert!(
+        plan.first()
+            .is_some_and(|line| line
+                .starts_with("SEARCH e USING INDEX idx_retrieval_episodes_scope_created")),
+        "{plan:?}"
+    );
+    println!("outcome priors query plan: {plan:?}");
+}
+
+#[test]
+fn regression_store_checkpoint_reports_busy_reader() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("checkpoint.db");
+    let store = SqliteMetadataStore::open(&path).unwrap();
+    store
+        .insert(&create_test_metadata("checkpoint", &ChunkId::new()))
+        .unwrap();
+    let reader = Connection::open(&path).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    reader
+        .query_row("SELECT COUNT(*) FROM chunks", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap();
+    let mut second = create_test_metadata("checkpoint", &ChunkId::new());
+    second.segment_id = 2;
+    store.insert(&second).unwrap();
+    store
+        .pool
+        .get()
+        .busy_timeout(std::time::Duration::ZERO)
+        .unwrap();
+    assert!(store.checkpoint_wal().is_err());
+    reader.execute_batch("COMMIT").unwrap();
+    store.checkpoint_wal().unwrap();
 }
 
 #[test]

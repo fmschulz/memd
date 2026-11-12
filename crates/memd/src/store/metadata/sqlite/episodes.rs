@@ -1,5 +1,28 @@
 use super::*;
 
+const OUTCOME_PRIOR_WINDOW_MS: i64 = 90 * 24 * 60 * 60 * 1_000;
+
+pub(super) fn outcome_priors_query(chunk_count: usize) -> String {
+    let placeholders = vec!["?"; chunk_count].join(",");
+    format!(
+        "SELECT o.episode_id, i.chunk_id, o.outcome, o.verifier_type,
+                o.evidence_reference, o.used_chunk_ids_json,
+                o.harmful_chunk_ids_json, o.timestamp_ms
+         FROM retrieval_episodes e INDEXED BY idx_retrieval_episodes_scope_created
+         JOIN retrieval_episode_items i ON i.episode_id = e.episode_id
+         JOIN outcome_events o ON o.episode_id = e.episode_id
+         WHERE o.ranking_eligible = 1
+           AND e.tenant_id = ?1
+           AND e.project_id IS ?2
+           AND e.created_at_ms >= ?4
+           AND e.created_at_ms <= ?3
+           AND e.expires_at_ms > ?3
+           AND o.timestamp_ms <= ?3
+           AND i.chunk_id IN ({placeholders})
+         ORDER BY o.timestamp_ms DESC, o.event_id DESC"
+    )
+}
+
 pub(super) fn sql_usize(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<usize> {
     usize::try_from(row.get::<_, i64>(column)?).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -126,6 +149,35 @@ pub(super) fn query_retrieval_episode_items(
 }
 
 impl SqliteMetadataStore {
+    /// Prune expired retrieval episodes and their items/outcomes together.
+    /// A missing project scopes maintenance to every project in the tenant.
+    pub fn prune_expired_retrieval_episodes(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        now_ms: i64,
+    ) -> Result<usize> {
+        let mut conn = self.pool.get();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let expired = "SELECT episode_id FROM retrieval_episodes
+                       WHERE expires_at_ms <= ?1 AND tenant_id = ?2
+                         AND (?3 IS NULL OR project_id = ?3)";
+        for table in ["outcome_events", "retrieval_episode_items"] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE episode_id IN ({expired})"),
+                rusqlite::params![now_ms, tenant_id.as_str(), project_id],
+            )?;
+        }
+        let deleted = tx.execute(
+            "DELETE FROM retrieval_episodes
+             WHERE expires_at_ms <= ?1 AND tenant_id = ?2
+               AND (?3 IS NULL OR project_id = ?3)",
+            rusqlite::params![now_ms, tenant_id.as_str(), project_id],
+        )?;
+        tx.commit()?;
+        Ok(deleted)
+    }
+
     /// Insert one retrieval episode and all candidate items atomically.
     pub fn insert_retrieval_episode(
         &self,
@@ -388,6 +440,7 @@ impl SqliteMetadataStore {
 
     /// Aggregate the newest eligible attribution per episode/chunk into
     /// decayed priors scoped to the tenant/project that requested retrieval.
+    /// Only unexpired episodes created in the last 90 days are considered.
     /// An aliased chunk therefore learns only inside the requester's scope;
     /// its origin tenant cannot be influenced by another tenant's outcomes.
     pub fn outcome_priors(
@@ -402,35 +455,33 @@ impl SqliteMetadataStore {
             return Ok(Vec::new());
         }
         let conn = self.pool.get();
-        let mut statement = conn.prepare(
-            "SELECT o.episode_id, i.chunk_id, o.outcome, o.verifier_type,
-                    o.evidence_reference, o.used_chunk_ids_json,
-                    o.harmful_chunk_ids_json, o.timestamp_ms
-             FROM outcome_events o
-             JOIN retrieval_episode_items i ON i.episode_id = o.episode_id
-             JOIN retrieval_episodes e ON e.episode_id = o.episode_id
-             WHERE o.ranking_eligible = 1
-               AND e.tenant_id = ?1
-               AND ((?2 IS NULL AND e.project_id IS NULL)
-                    OR e.project_id = ?2)
-               AND o.timestamp_ms <= ?3
-             ORDER BY o.timestamp_ms DESC, o.event_id DESC",
-        )?;
-        let rows = statement.query_map(
-            rusqlite::params![scope_tenant_id.as_str(), scope_project_id, now_ms],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, i64>(7)?,
-                ))
-            },
-        )?;
+        let sql = outcome_priors_query(requested.len());
+        let mut parameters = vec![
+            rusqlite::types::Value::Text(scope_tenant_id.as_str().to_string()),
+            scope_project_id
+                .map(|project| rusqlite::types::Value::Text(project.to_string()))
+                .unwrap_or(rusqlite::types::Value::Null),
+            rusqlite::types::Value::Integer(now_ms),
+            rusqlite::types::Value::Integer(now_ms.saturating_sub(OUTCOME_PRIOR_WINDOW_MS)),
+        ];
+        parameters.extend(
+            requested
+                .iter()
+                .map(|chunk| rusqlite::types::Value::Text(chunk.to_string())),
+        );
+        let mut statement = conn.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(parameters), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, i64>(7)?,
+            ))
+        })?;
         let mut priors = HashMap::<ChunkId, OutcomePrior>::new();
         let mut seen_episode_chunks = HashSet::<(String, ChunkId)>::new();
         for row in rows {
@@ -447,9 +498,6 @@ impl SqliteMetadataStore {
             let Ok(chunk_id) = ChunkId::parse(&chunk_id) else {
                 continue;
             };
-            if !requested.contains(&chunk_id) {
-                continue;
-            }
             let outcome = OutcomeKind::parse(&outcome)?;
             let verifier = OutcomeVerifier::parse(&verifier)?;
             if crate::store::outcome::is_legacy_codex_scanner_outcome(

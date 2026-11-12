@@ -1,25 +1,311 @@
-//! Verify that a CLI-style shutdown does NOT seal an active segment
-//! that holds fewer than `min_finalize_chunks` chunks.
-//!
-//! Bug being pinned here: `finalize_active_segment` runs on every
-//! graceful shutdown / Drop, so a CLI invocation that wrote only 1-2
-//! chunks would seal a tiny segment on every call. Real tenants
-//! accumulated thousands of <100-chunk segment dirs. With the
-//! `min_finalize_chunks` gate at the shutdown call sites, small active
-//! segments are left unfinalized between invocations and grow across
-//! runs until they cross the threshold.
+//! Short CLI lifetimes must not accumulate thousands of tiny segment directories.
+//! Shutdown seals payloads; writer open packs small segments with bounded copying.
 
 #[path = "common/mod.rs"]
 mod common;
 
+use memd::store::hybrid::HybridConfig;
+use memd::store::metadata::MetadataStore;
 use memd::store::persistent::{PersistentStore, PersistentStoreConfig};
 use memd::store::Store;
 use memd::types::{ChunkType, MemoryChunk, TenantId};
+use std::collections::{BTreeMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::tempdir;
 
+fn growth_config(path: &Path) -> PersistentStoreConfig {
+    PersistentStoreConfig {
+        data_dir: path.to_path_buf(),
+        enable_dense_search: false,
+        enable_hybrid_search: true,
+        hybrid_config: Some(HybridConfig {
+            dense_k: 0,
+            enable_rerank: false,
+            ..Default::default()
+        }),
+        backfill_hnsw_on_startup: false,
+        backfill_canonical_text_on_startup: false,
+        ..Default::default()
+    }
+}
+
+fn segment_dirs(root: &Path, tenant: &TenantId) -> Vec<PathBuf> {
+    std::fs::read_dir(root.join("tenants").join(tenant.as_str()).join("segments"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_dir())
+        .collect()
+}
+
 #[tokio::test]
-async fn shutdown_does_not_finalize_tiny_segment() {
+async fn merge_retains_sources_until_metadata_checkpoint_finishes() {
+    let tmp = tempdir().unwrap();
+    let tenant = TenantId::new("merge_busy").unwrap();
+    let store = PersistentStore::open(growth_config(tmp.path())).unwrap();
+    let live = store
+        .add(MemoryChunk::new(
+            tenant.clone(),
+            "live payload",
+            ChunkType::Doc,
+        ))
+        .await
+        .unwrap();
+    let deleted = store
+        .add(MemoryChunk::new(
+            tenant.clone(),
+            "deleted payload",
+            ChunkType::Doc,
+        ))
+        .await
+        .unwrap();
+    store.checkpoint_tenant_wal(&tenant).unwrap();
+    store.delete(&tenant, &deleted).await.unwrap();
+    store.checkpoint_tenant_wal(&tenant).unwrap();
+    let sources = segment_dirs(tmp.path(), &tenant);
+    let reader = rusqlite::Connection::open(tmp.path().join("metadata.db")).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    reader
+        .query_row("SELECT COUNT(*) FROM chunks", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap();
+    assert!(
+        store.rewrite_segments_for_tenant(&tenant).is_err(),
+        "blocked metadata checkpoint must prevent source removal"
+    );
+    assert!(sources.iter().all(|path| path.exists()));
+    assert_eq!(
+        store.get(&tenant, &live).await.unwrap().unwrap().text,
+        "live payload"
+    );
+    reader.execute_batch("COMMIT").unwrap();
+    store.shutdown().unwrap();
+    drop(store);
+    let store = PersistentStore::open(growth_config(tmp.path())).unwrap();
+    assert!(sources.iter().all(|path| !path.exists()));
+    assert_eq!(segment_dirs(tmp.path(), &tenant).len(), 1);
+    assert!(store.get(&tenant, &deleted).await.unwrap().is_none());
+    assert!(store.get(&tenant, &live).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn short_writer_lifetimes_bound_segments_and_amortize_copies() {
+    use std::os::unix::fs::MetadataExt;
+
+    let tmp = tempdir().unwrap();
+    let tenant = TenantId::new("growth").unwrap();
+    let mut ids = Vec::new();
+    let mut locations = BTreeMap::new();
+    let mut moves = BTreeMap::new();
+    for i in 0..300 {
+        let before: Vec<_> = if i == 0 {
+            Vec::new()
+        } else {
+            segment_dirs(tmp.path(), &tenant)
+                .into_iter()
+                .map(|dir| {
+                    let file = dir.join("payload.bin");
+                    let meta = file.metadata().unwrap();
+                    (
+                        file.clone(),
+                        meta.ino(),
+                        meta.modified().unwrap(),
+                        std::fs::read(file).unwrap(),
+                    )
+                })
+                .collect()
+        };
+        let store = PersistentStore::open(growth_config(tmp.path())).unwrap();
+        // Surviving durable payloads are immutable. Only a merge may replace them.
+        for (file, ino, modified, bytes) in before {
+            if file.exists() {
+                let meta = file.metadata().unwrap();
+                assert_eq!(meta.ino(), ino);
+                assert_eq!(meta.modified().unwrap(), modified);
+                assert_eq!(std::fs::read(file).unwrap(), bytes);
+            }
+        }
+        for id in &ids {
+            let row = store.metadata().get(&tenant, id).unwrap().unwrap();
+            if locations
+                .insert(id.clone(), row.segment_id)
+                .is_some_and(|old| old != row.segment_id)
+            {
+                *moves.entry(id.clone()).or_insert(0usize) += 1;
+            }
+        }
+        let id = store
+            .add(MemoryChunk::new(
+                tenant.clone(),
+                format!("lifetime payload record{i}"),
+                ChunkType::Doc,
+            ))
+            .await
+            .unwrap();
+        locations.insert(
+            id.clone(),
+            store
+                .metadata()
+                .get(&tenant, &id)
+                .unwrap()
+                .unwrap()
+                .segment_id,
+        );
+        ids.push(id);
+        store.shutdown().unwrap();
+    }
+    let dirs = segment_dirs(tmp.path(), &tenant);
+    let store = PersistentStore::open(growth_config(tmp.path())).unwrap();
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(
+            store.get(&tenant, id).await.unwrap().unwrap().text,
+            format!("lifetime payload record{i}")
+        );
+    }
+    let found: HashSet<_> = store
+        .search(&tenant, "lifetime", 300)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|chunk| chunk.chunk_id)
+        .collect();
+    assert_eq!(found, ids.into_iter().collect());
+    // At most one segment per occupied binary tier for 299 chunks, plus the
+    // just-sealed chunk: ceil(log2(300)) + 1 = 10. No merge reaches capacity.
+    assert!(
+        dirs.len() <= 10,
+        "300 short writers left {} directories",
+        dirs.len()
+    );
+    assert!(
+        moves.values().all(|count| *count <= 9),
+        "a copy must advance a size tier: {moves:?}"
+    );
+    store.shutdown().unwrap();
+    drop(store);
+
+    let snapshot = || {
+        let mut files = BTreeMap::new();
+        for dir in segment_dirs(tmp.path(), &tenant) {
+            let path = dir.join("payload.bin");
+            let meta = path.metadata().unwrap();
+            files.insert(
+                path.clone(),
+                (
+                    meta.ino(),
+                    meta.modified().unwrap(),
+                    std::fs::read(path).unwrap(),
+                ),
+            );
+        }
+        files
+    };
+    let before = snapshot();
+    for _ in 0..5 {
+        let store = PersistentStore::open(growth_config(tmp.path())).unwrap();
+        store.shutdown().unwrap();
+    }
+    assert_eq!(
+        snapshot(),
+        before,
+        "opens without new writes must do no merge work"
+    );
+}
+
+#[tokio::test]
+async fn writer_reclaims_purged_payload_and_interrupted_merge_orphan() {
+    let tmp = tempdir().unwrap();
+    let tenant = TenantId::new("reclaim").unwrap();
+    let secret = "PURGED_PLAINTEXT_MARKER_2B";
+    let store = PersistentStore::open(growth_config(tmp.path())).unwrap();
+    let live = store
+        .add(MemoryChunk::new(
+            tenant.clone(),
+            "keep lifetime payload",
+            ChunkType::Doc,
+        ))
+        .await
+        .unwrap();
+    let purged = store
+        .add(MemoryChunk::new(tenant.clone(), secret, ChunkType::Doc))
+        .await
+        .unwrap();
+    store.checkpoint_tenant_wal(&tenant).unwrap();
+    store.delete(&tenant, &purged).await.unwrap();
+    store.checkpoint_tenant_wal(&tenant).unwrap();
+    store
+        .metadata()
+        .hard_delete_chunks(&tenant, std::slice::from_ref(&purged))
+        .unwrap();
+    store.shutdown().unwrap();
+    drop(store);
+    // A sealed replacement written before its metadata transaction committed.
+    let original = segment_dirs(tmp.path(), &tenant).pop().unwrap();
+    let orphan = original.parent().unwrap().join("seg_009000");
+    std::fs::create_dir(&orphan).unwrap();
+    for entry in std::fs::read_dir(&original).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), orphan.join(entry.file_name())).unwrap();
+    }
+    let store = PersistentStore::open(growth_config(tmp.path())).unwrap();
+    assert!(store.get(&tenant, &purged).await.unwrap().is_none());
+    assert_eq!(
+        store.get(&tenant, &live).await.unwrap().unwrap().text,
+        "keep lifetime payload"
+    );
+    store.shutdown().unwrap();
+    assert!(
+        !orphan.exists(),
+        "unreferenced finalized directory must be removed"
+    );
+    for dir in segment_dirs(tmp.path(), &tenant) {
+        let bytes = std::fs::read(dir.join("payload.bin")).unwrap();
+        assert!(
+            !bytes
+                .windows(secret.len())
+                .any(|window| window == secret.as_bytes()),
+            "purged plaintext remains in {}",
+            dir.display()
+        );
+    }
+}
+
+#[tokio::test]
+async fn packing_deleted_only_segments_preserves_deletion_metadata() {
+    let tmp = tempdir().unwrap();
+    let tenant = TenantId::new("deleted_coordinates").unwrap();
+    let config = || PersistentStoreConfig {
+        enable_hybrid_search: false,
+        ..growth_config(tmp.path())
+    };
+    let deleted;
+    {
+        let store = PersistentStore::open(config()).unwrap();
+        deleted = store
+            .add(MemoryChunk::new(tenant.clone(), "deleted", ChunkType::Doc))
+            .await
+            .unwrap();
+        store.delete(&tenant, &deleted).await.unwrap();
+        store.shutdown().unwrap();
+    }
+    for _ in 0..2 {
+        let store = PersistentStore::open(config()).unwrap();
+        store
+            .add(MemoryChunk::new(tenant.clone(), "new live", ChunkType::Doc))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.metadata().get_deleted_chunk_ids(&tenant).unwrap(),
+            vec![deleted.clone()]
+        );
+        assert!(store.get(&tenant, &deleted).await.unwrap().is_none());
+        store.shutdown().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn shutdown_finalizes_tiny_segment_without_replay_rewrite() {
     let tmp = tempdir().unwrap();
     let config = PersistentStoreConfig {
         data_dir: tmp.path().to_path_buf(),
@@ -28,13 +314,12 @@ async fn shutdown_does_not_finalize_tiny_segment() {
         backfill_hnsw_on_startup: false,
         backfill_canonical_text_on_startup: false,
         segment_max_chunks: 10_000,
-        min_finalize_chunks: 100,
         ..Default::default()
     };
     let store = Arc::new(PersistentStore::open(config).expect("persistent store"));
     let tenant = TenantId::new("t1".to_string()).unwrap();
 
-    // Insert 3 chunks (far below min_finalize_chunks).
+    // Even a short CLI write must leave a finalized segment.
     for i in 0..3 {
         let chunk = MemoryChunk::new(tenant.clone(), format!("chunk {i}"), ChunkType::Doc);
         store.add(chunk).await.unwrap();
@@ -56,16 +341,13 @@ async fn shutdown_does_not_finalize_tiny_segment() {
         }
     }
     assert_eq!(
-        finalized, 0,
-        "shutdown finalized a tiny segment (3 chunks < min_finalize_chunks=100)"
+        finalized, 1,
+        "shutdown must seal tiny segments so replay need not rewrite their payloads"
     );
 }
 
 #[tokio::test]
-async fn shutdown_finalizes_segment_at_or_above_threshold() {
-    // Symmetric guard: when the active segment IS at the threshold we
-    // must still finalize on shutdown so it becomes searchable across
-    // restarts the normal way.
+async fn repeated_shutdown_does_not_create_extra_segments() {
     let tmp = tempdir().unwrap();
     let config = PersistentStoreConfig {
         data_dir: tmp.path().to_path_buf(),
@@ -74,7 +356,6 @@ async fn shutdown_finalizes_segment_at_or_above_threshold() {
         backfill_hnsw_on_startup: false,
         backfill_canonical_text_on_startup: false,
         segment_max_chunks: 10_000,
-        min_finalize_chunks: 3,
         ..Default::default()
     };
     let store = Arc::new(PersistentStore::open(config).expect("persistent store"));
@@ -85,6 +366,7 @@ async fn shutdown_finalizes_segment_at_or_above_threshold() {
         store.add(chunk).await.unwrap();
     }
 
+    store.shutdown().unwrap();
     store.shutdown().unwrap();
 
     let seg_dir = tmp.path().join("tenants").join("t2").join("segments");
@@ -102,11 +384,8 @@ async fn shutdown_finalizes_segment_at_or_above_threshold() {
 
 #[tokio::test]
 async fn unfinalized_chunks_survive_restart_via_wal_recovery() {
-    // The whole point of the gate: between calls, unfinalized chunks
-    // must still be recoverable on the next startup. WAL replay handles
-    // this — recover_from_wal flushes them into a new active segment
-    // and (via the unconditional finalize_active_segment in the WAL
-    // durability barrier) seals it before truncating the WAL.
+    // Recreate the incomplete directory left by a process that died
+    // before finalization. Its WAL remains the source for recovery.
     let tmp = tempdir().unwrap();
     let make_config = || PersistentStoreConfig {
         data_dir: tmp.path().to_path_buf(),
@@ -115,7 +394,6 @@ async fn unfinalized_chunks_survive_restart_via_wal_recovery() {
         backfill_hnsw_on_startup: false,
         backfill_canonical_text_on_startup: false,
         segment_max_chunks: 10_000,
-        min_finalize_chunks: 100,
         ..Default::default()
     };
     let tenant = TenantId::new("t3".to_string()).unwrap();
@@ -128,6 +406,8 @@ async fn unfinalized_chunks_survive_restart_via_wal_recovery() {
         store.shutdown().unwrap();
         drop(store);
     }
+    let old_segment = tmp.path().join("tenants/t3/segments/seg_000001");
+    std::fs::remove_file(old_segment.join("meta")).unwrap();
 
     let store2 = Arc::new(PersistentStore::open(make_config()).expect("persistent store"));
     let recovered = store2.get(&tenant, &id).await.unwrap();
@@ -136,16 +416,14 @@ async fn unfinalized_chunks_survive_restart_via_wal_recovery() {
         "chunk in an unfinalized active segment must be recovered via WAL replay"
     );
     assert_eq!(recovered.unwrap().text, "must-survive-restart");
+    assert!(
+        !old_segment.exists(),
+        "recovery must remove obsolete unfinished bytes"
+    );
 }
 
 #[tokio::test]
-async fn checkpoint_enabled_forces_finalize_even_below_threshold() {
-    // Codex review HIGH for Phase 3: with wal_checkpoint_interval > 0,
-    // the WAL may be truncated past records that would otherwise be
-    // needed to recover an unfinalized active segment. The gate must
-    // disable itself in that mode or data is lost. Verify that the
-    // shutdown finalizes the segment regardless of min_finalize_chunks
-    // when checkpointing is on.
+async fn checkpoint_enabled_shutdown_leaves_finalized_segments() {
     let tmp = tempdir().unwrap();
     let config = PersistentStoreConfig {
         data_dir: tmp.path().to_path_buf(),
@@ -154,7 +432,6 @@ async fn checkpoint_enabled_forces_finalize_even_below_threshold() {
         backfill_hnsw_on_startup: false,
         backfill_canonical_text_on_startup: false,
         segment_max_chunks: 10_000,
-        min_finalize_chunks: 1_000_000,
         // Non-zero interval activates the checkpoint path.
         wal_checkpoint_interval: 1,
         ..Default::default()
@@ -181,8 +458,7 @@ async fn checkpoint_enabled_forces_finalize_even_below_threshold() {
     }
     assert!(
         finalized >= 1,
-        "with wal_checkpoint_interval>0 the gate must disable itself \
-         to avoid data loss; expected at least 1 finalized segment, got {finalized}"
+        "checkpointed writes must remain finalized; got {finalized}"
     );
 }
 
@@ -203,7 +479,6 @@ async fn checkpoint_finalizes_active_segment_immediately() {
         backfill_hnsw_on_startup: false,
         backfill_canonical_text_on_startup: false,
         segment_max_chunks: 10_000,
-        min_finalize_chunks: 1_000_000,
         wal_checkpoint_interval: 1,
         ..Default::default()
     };

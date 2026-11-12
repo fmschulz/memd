@@ -35,7 +35,10 @@ impl WalWriter {
             std::fs::create_dir_all(parent)?;
         }
 
-        let file = OpenOptions::new().create_new(true).write(true).open(path)?;
+        let file = OpenOptions::new()
+            .create_new(true)
+            .append(true)
+            .open(path)?;
 
         Ok(Self {
             file,
@@ -453,6 +456,25 @@ mod tests {
         let size_after = std::fs::metadata(&wal_path).unwrap().len();
         assert_eq!(size_after, 0);
         assert_eq!(writer.records_written(), 0);
+    }
+
+    #[test]
+    fn truncate_then_append_remains_readable() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("truncate-append.wal");
+        let mut writer = WalWriter::create(&path).unwrap();
+        writer.append_add("t1", "old", 1, b"old".to_vec()).unwrap();
+        writer.truncate().unwrap();
+        writer.append_add("t1", "new", 2, b"new".to_vec()).unwrap();
+        let reader = crate::store::wal::WalReader::open(&path).unwrap();
+        let (records, valid_bytes) = reader.read_all_records().unwrap();
+        assert_eq!(
+            valid_bytes,
+            reader.len(),
+            "append after truncate left a zero-filled hole"
+        );
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].chunk_id, "new");
     }
 
     #[test]

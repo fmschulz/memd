@@ -27,7 +27,7 @@ For write-quality expectations and cleanup safety, see the
 | `memd audit` | Report tenant/project storage shape, generated-wrapper noise, alias groups, unreadable active rows, and routine progress summaries that still lack an expiry; `--strict` exits 2 when `unreadable_active_chunks > 0`. |
 | `memd report` | Usefulness and self-diagnosis report from the usage ledger and store metadata; `--strict` exits 2 on any `[warn]` line. |
 | `memd cleanup-plan` | Generate a non-destructive cleanup approval report with archive/purge command previews and post-cleanup pass criteria. |
-| `memd purge` | Dry-run or archive-first cleanup of hidden rows; `--apply` verifies the archive before mutation, and `--include-unreadable-active` previews active metadata rows whose segment payload cannot be loaded. |
+| `memd purge` | Dry-run or archive-first cleanup of hidden rows; `--apply` verifies the archive before mutation, and `--include-unreadable-active` includes active rows with confirmed missing or corrupt payloads. Transient read errors abort the purge. |
 | `memd purge-archive` | Read-only verification for `memd purge --archive` files: validates format/counts/payload flags, emits SHA-256, and can enforce expected tenant/project. |
 | `memd consolidate` | Call the configured LLM (Claude Haiku or Codex Spark, selected by `MEMD_CONSOLIDATOR`) and stage validated output under a journaled run ID. Candidate summaries remain hidden until review. `--promote` requests promotion in the same run; `--legacy-immediate` is a deprecated alias for one compatibility release. Exact source-set reruns reuse the existing run. |
 | `memd consolidate-review` | List staged runs, inspect a proposal and its sources, accept it for atomic promotion, or reject it while leaving every source active. |
@@ -77,6 +77,12 @@ list of every physical chunk created by document splitting.
   linkage fields. Keep them opaque and non-sensitive. Retrieval episode tables
   store query hashes rather than raw queries, but an explicit
   `agent-context --log-dir` audit log includes the raw query summaries.
+
+`purge --older-than-days` counts a deleted row's grace period from deletion.
+A deleted row whose deletion time is unknown receives a full grace period at
+its first writable open. An applied purge also removes expired retrieval
+episodes and their items and outcome events in the selected tenant and project.
+Episode expiry is normally 90 days after creation. A dry run retains these rows.
 
 ## Experience
 

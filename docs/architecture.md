@@ -72,13 +72,55 @@ paths.
 
 ### Persistent store
 
+BM25 splits code identifiers, then lowercases and stems every token with the
+same analyzer for indexing and querying. `<data_dir>/sparse_revision` records
+the analyzer revision. A writer rebuilds an older sparse index from segment
+payloads before serving requests, then commits the index and marks it current.
+An interrupted rebuild starts again at the next writable open. Read-only opens
+do not rebuild or change the marker.
+
+Missing or undecodable payloads are reported and skipped. A completed pass over
+the readable payloads marks the index current. Read or commit failures leave
+the rebuild pending. WAL recovery queues new and physically repaired chunks for
+indexing; repeated indexing replaces that chunk's sparse documents.
+
 - **SQLite metadata** under WAL-mode locking with a bounded connection pool
   (`MEMD_SQLITE_POOL_MAX`). Pooled WAL gives concurrent readers without
   starving writers.
 - **Immutable segments** per tenant. Append-only payload files; deletion is
-  logical (tombstones) until maintenance compacts.
+  logical (tombstones) until writer open or maintenance reclaims the bytes.
 - **Per-tenant WAL** (`wal.log`) fsynced before commit. Crash recovery
-  replays WAL into segments.
+  replays missing payloads into segments, preserves lifecycle metadata, queues
+  indexing, and reports bad records while continuing with later records.
+  Deleted chunks stay deleted. Shutdown finalizes every nonempty segment,
+  including small segments. Writer open packs small sealed segments in size
+  tiers: two segments in the same power-of-two tier combine until they reach
+  half the configured segment capacity. Each copied chunk advances at least
+  one tier; healthy segments at or above half capacity are left alone. With
+  no deletes, there is at most one small segment per tier after open, plus
+  the segment sealed by the next short write. For 300 one-chunk lifetimes at
+  the default capacity, at most 10 directories remain after shutdown.
+
+Segment packing copies live payload bytes without changing index state or
+lifecycle metadata. It syncs the replacement and its parent directory, commits
+and checkpoints the new SQLite locations, then removes the source directories.
+If the checkpoint is blocked, both copies remain. The next writer removes
+unreferenced directories and reclaims deleted or purged payload bytes. A
+read-only open never packs or removes segments.
+
+A WAL with corrupt or failed records is retained for repair. Other records and
+tenants still load. Purge refuses to discard that tenant's WAL while those
+records remain unresolved.
+
+Digest identities include their tenant. Replacing a digest and updating its
+projection links affect only that tenant's artifact.
+Legacy digest rows remain stored; refreshing a digest writes its tenant-scoped
+identity and does not delete the old row.
+
+Outcome ranking reads only matching candidate chunks from episodes created
+within the last 90 days and excludes expired episodes. Retrieval episodes
+normally expire after 90 days; applied purge removes expired episodes, their
+items, and their outcome events within the selected tenant and project.
 
 ### Concurrency and the warm worker
 

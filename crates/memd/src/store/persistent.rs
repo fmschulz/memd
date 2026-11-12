@@ -77,17 +77,6 @@ pub struct PersistentStoreConfig {
     pub writer_lock_timeout_cap: Option<Duration>,
     /// Maximum chunks per segment before rotation
     pub segment_max_chunks: u32,
-    /// Minimum chunks in an active segment for graceful shutdown / Drop
-    /// to finalize it. Active segments below this threshold are left
-    /// unfinalized between invocations and recovered via WAL replay on
-    /// the next startup; they continue to grow across runs until they
-    /// cross either this threshold (on a graceful exit) or
-    /// `segment_max_chunks` (on rotation). Prevents the "5,000 tiny
-    /// segments" pathology on CLI workloads where each invocation
-    /// wrote 1-2 chunks. The WAL durability barrier inside
-    /// `recover_from_wal` ignores this gate so recovered chunks always
-    /// land in a finalized segment before WAL truncation.
-    pub min_finalize_chunks: u32,
     /// WAL checkpoint interval (chunks)
     pub wal_checkpoint_interval: u32,
     /// Enable dense vector search
@@ -177,14 +166,6 @@ impl Default for PersistentStoreConfig {
             read_only: false,
             writer_lock_timeout_cap: None,
             segment_max_chunks: 10_000,
-            // 256 ≈ minutes of typical write rate. Below this we leave
-            // the active segment unfinalized between graceful shutdowns
-            // so consecutive CLI runs don't each create a near-empty
-            // segment dir. Tuned to keep finalized segments large
-            // enough that segment lookup cost stays bounded, while not
-            // delaying durability for any meaningful workload — the WAL
-            // already persists every chunk synchronously.
-            min_finalize_chunks: 256,
             // Safety valve (v0.3.1): the WAL-checkpoint-then-truncate
             // path has a known soundness gap — a checkpoint can be
             // appended after metadata/index updates, and recovery only
@@ -296,6 +277,8 @@ pub(crate) enum CandidatePersistenceStage {
 
 /// Per-tenant storage state
 struct TenantStore {
+    /// Avoid reusing coordinates still held by deleted metadata after cleanup.
+    segment_id_floor: u64,
     tenant_id: String,
     base_dir: PathBuf,
     read_only: bool,
@@ -305,22 +288,14 @@ struct TenantStore {
     segments: RwLock<HashMap<u64, SegmentReader>>,
     /// WAL writer (absent in read-only mode)
     wal: Mutex<Option<WalWriter>>,
+    /// Source records skipped during replay must survive future checkpoints.
+    wal_recovery_incomplete: AtomicBool,
     /// In-memory payloads from WAL Add records not yet finalized.
     wal_overlay: RwLock<HashMap<ChunkId, Vec<u8>>>,
     /// Counter for WAL checkpoint
     writes_since_checkpoint: Mutex<u32>,
     /// Max chunks per segment (for rotation)
     segment_max_chunks: u32,
-    /// Min active-segment chunk count below which shutdown/Drop will
-    /// skip finalization. See `PersistentStoreConfig::min_finalize_chunks`.
-    min_finalize_chunks: u32,
-    /// Mirror of `PersistentStoreConfig::wal_checkpoint_interval` so
-    /// `finalize_active_segment_if_above_threshold` can disable the
-    /// gate whenever checkpointing is on. With checkpointing enabled,
-    /// the WAL may have been truncated past the unfinalized segment's
-    /// records, so the segment MUST be finalized on shutdown or its
-    /// chunks become unrecoverable.
-    wal_checkpoint_interval: u32,
 }
 
 struct ActiveSegment {
@@ -820,6 +795,7 @@ impl PersistentStore {
         };
 
         // Initialize sparse index if hybrid search enabled
+        let mut sparse_rebuild_pending = false;
         let sparse_index = if config.enable_hybrid_search {
             let sparse_path = config.data_dir.join("sparse_index");
             if config.read_only {
@@ -835,7 +811,12 @@ impl PersistentStore {
                     }
                 }
             } else {
-                match Bm25Index::with_path(Some(sparse_path)) {
+                let opened =
+                    super::sparse_revision::prepare(&config.data_dir).and_then(|pending| {
+                        sparse_rebuild_pending = pending;
+                        Bm25Index::with_path(Some(sparse_path))
+                    });
+                match opened {
                     Ok(index) => Some(Arc::new(index)),
                     Err(e) => {
                         warn!(
@@ -913,6 +894,10 @@ impl PersistentStore {
         // Recover existing tenants
         store.discover_and_recover_tenants()?;
 
+        if sparse_rebuild_pending {
+            store.rebuild_sparse_index()?;
+        }
+
         // Baseline the external-mutation probe only after startup recovery.
         // Recovery can replay WAL records, update metadata, and finalize
         // segments using the store's own connections; snapshotting before that
@@ -935,6 +920,7 @@ impl PersistentStore {
 
         let async_indexer = store.start_async_indexer_if_enabled();
         store.async_indexer = async_indexer;
+        store.recover_pending_indexes_synchronously()?;
 
         if !store.config.read_only
             && (store.config.backfill_hnsw_on_startup
@@ -1113,6 +1099,85 @@ impl PersistentStore {
             self.tenants.as_ref(),
         )
         .await
+    }
+
+    /// Rebuild only the lexical index, without re-embedding unchanged vectors.
+    fn rebuild_sparse_index(&self) -> Result<()> {
+        let Some(sparse) = self.sparse_index.as_ref() else {
+            return Ok(());
+        };
+        let processor = crate::text::TextProcessor::new();
+        let mut complete = true;
+        let tenants: Vec<_> = self.tenants.read().values().cloned().collect();
+        for tenant in tenants {
+            let tenant_id = TenantId::new(&tenant.tenant_id)?;
+            let mut offset = 0;
+            loop {
+                let rows = self.metadata.list(&tenant_id, 256, offset)?;
+                if rows.is_empty() {
+                    break;
+                }
+                offset += rows.len();
+                let mut batch = Vec::new();
+                for meta in rows {
+                    if matches!(
+                        meta.status,
+                        ChunkStatus::Candidate | ChunkStatus::Deleted | ChunkStatus::Error
+                    ) {
+                        continue;
+                    }
+                    let payload = match tenant.read_payload_fallback(
+                        &meta.chunk_id,
+                        meta.segment_id,
+                        meta.ordinal,
+                    ) {
+                        Ok(Some(payload)) => payload,
+                        Ok(None) => {
+                            warn!(tenant_id = %tenant_id, chunk_id = %meta.chunk_id,
+                                "skipping missing payload during sparse rebuild");
+                            continue;
+                        }
+                        Err(MemdError::IoError(error))
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidData
+                            ) =>
+                        {
+                            warn!(tenant_id = %tenant_id, chunk_id = %meta.chunk_id, error = %error,
+                                "skipping missing or corrupt payload during sparse rebuild");
+                            continue;
+                        }
+                        Err(error) => {
+                            complete = false;
+                            warn!(tenant_id = %tenant_id, chunk_id = %meta.chunk_id, error = %error,
+                                "skipping unreadable chunk during sparse rebuild; next writer will retry");
+                            continue;
+                        }
+                    };
+                    let chunk: MemoryChunk = match serde_json::from_slice(&payload) {
+                        Ok(chunk) => chunk,
+                        Err(error) => {
+                            warn!(tenant_id = %tenant_id, chunk_id = %meta.chunk_id, error = %error,
+                                "skipping undecodable payload during sparse rebuild");
+                            continue;
+                        }
+                    };
+                    let sentences = processor
+                        .process_chunk(&chunk.text)
+                        .into_iter()
+                        .map(|sentence| sentence.text)
+                        .collect();
+                    batch.push((tenant_id.clone(), meta.chunk_id, sentences));
+                }
+                sparse.insert_batch(&batch)?;
+            }
+        }
+        sparse.commit()?;
+        if complete {
+            super::sparse_revision::mark_current(&self.config.data_dir)?;
+            info!("sparse index rebuilt for the current analyzer revision");
+        }
+        Ok(())
     }
 
     /// True when any tenant has active metadata rows but an empty sparse
@@ -1531,8 +1596,6 @@ impl PersistentStore {
             self.config.data_dir.join("tenants").join(tenant_id),
             &self.metadata,
             self.config.segment_max_chunks,
-            self.config.min_finalize_chunks,
-            self.config.wal_checkpoint_interval,
             self.config.read_only,
         )?;
 
@@ -1684,9 +1747,7 @@ impl PersistentStore {
 
         let tenants = self.tenants.read();
         for (tenant_id, tenant) in tenants.iter() {
-            // Gated: skip if active segment is below min_finalize_chunks.
-            // Recovered on next start via WAL replay.
-            if let Err(e) = tenant.finalize_active_segment_if_above_threshold() {
+            if let Err(e) = tenant.finalize_active_segment() {
                 warn!(tenant_id, error = %e, "failed to finalize segment on shutdown");
             }
         }

@@ -577,7 +577,7 @@ pub async fn handle_artifact_create<S: Store>(
                 .or_else(|| task_id.clone())
                 .unwrap_or_else(|| "tenant".to_string());
             let (artifact_id, synthetic_task_id, digest_key) =
-                crate::task_memory::stable_digest_identity(&role, &digest_scope);
+                crate::task_memory::stable_digest_identity(&tenant_id, &role, &digest_scope);
             let mut artifact =
                 TaskArtifact::new_digest(tenant_id.clone(), synthetic_task_id, digest_key, role);
             artifact.artifact_id = artifact_id;

@@ -6,6 +6,53 @@ use crate::store::OutcomePrior;
 use crate::types::ChunkStatus;
 use std::collections::HashSet;
 
+#[cfg(test)]
+mod pagination_tests {
+    use super::*;
+    use crate::store::persistent::{PersistentStore, PersistentStoreConfig};
+    use crate::types::MemoryChunk;
+
+    #[tokio::test]
+    async fn takeaway_scan_continues_after_unreadable_payload_in_full_metadata_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PersistentStore::open(PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            segment_max_chunks: 2_000,
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            ..Default::default()
+        })
+        .unwrap();
+        let tenant = TenantId::new("takeaway_scan_pages").unwrap();
+        let chunks = (0..=READABLE_SCAN_PAGE_SIZE)
+            .map(|index| {
+                let mut chunk = MemoryChunk::new(
+                    tenant.clone(),
+                    format!("Decision: keep project scopes explicit for row {index}."),
+                    crate::types::ChunkType::Decision,
+                );
+                chunk.timestamp_created = (READABLE_SCAN_PAGE_SIZE - index) as i64;
+                chunk
+            })
+            .collect();
+        let ids = store.add_batch(chunks).await.unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("metadata.db")).unwrap();
+        conn.execute(
+            "UPDATE chunks SET segment_id = 99999 WHERE chunk_id = ?1",
+            [ids[0].to_string()],
+        )
+        .unwrap();
+        let (project, global, _) = scan_takeaway_candidates(&store, &tenant, None)
+            .await
+            .unwrap();
+        assert!(global.is_empty());
+        assert_eq!(project.len(), READABLE_SCAN_PAGE_SIZE);
+        assert!(project
+            .iter()
+            .any(|row| row.chunk_id == ids.last().unwrap().to_string()));
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct Takeaway {
     pub(super) chunk_id: String,
@@ -93,11 +140,28 @@ pub(super) async fn scan_takeaway_candidates<S: Store>(
     let mut raw_rank = 0usize;
     while offset < READABLE_SCAN_MAX_METADATA_ROWS {
         let limit = READABLE_SCAN_PAGE_SIZE.min(READABLE_SCAN_MAX_METADATA_ROWS - offset);
-        let chunks = store.list_chunks(tenant, limit, offset).await?;
-        if chunks.is_empty() {
+        let (chunks, fetched) = if let Some(persistent) = store.as_persistent() {
+            use crate::store::metadata::MetadataStore;
+            let metadata_rows = persistent.metadata().list(tenant, limit, offset)?;
+            let fetched = metadata_rows.len();
+            let mut chunks = Vec::with_capacity(fetched);
+            for meta in metadata_rows {
+                if let Some(chunk) = persistent
+                    .get_chunk_for_retrieval(tenant, &meta.chunk_id, "memory_md_scan")
+                    .await?
+                {
+                    chunks.push(chunk);
+                }
+            }
+            (chunks, fetched)
+        } else {
+            let chunks = store.list_chunks(tenant, limit, offset).await?;
+            let fetched = chunks.len();
+            (chunks, fetched)
+        };
+        if fetched == 0 {
             break;
         }
-        let fetched = chunks.len();
         for chunk in chunks {
             raw_rank += 1;
             let is_project = chunk.project_id.as_option() == active_project

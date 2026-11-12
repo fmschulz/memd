@@ -13,6 +13,7 @@ pub mod outcome;
 pub mod persistent;
 pub mod segment;
 pub mod shared_add;
+mod sparse_revision;
 pub mod supersession;
 pub mod tenant;
 pub mod tombstone;

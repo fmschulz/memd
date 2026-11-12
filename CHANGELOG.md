@@ -15,6 +15,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Short writer lifetimes now pack small sealed payload segments in size tiers at writer open, bounding segment growth and amortizing payload copies. Replacement files and metadata are made durable before obsolete directories and purged plaintext are removed.
+
+- BM25 uses the same lowercase-and-stem analyzer for indexed text and queries. The first writer rebuilds older sparse indexes once; read-only commands leave the index and its revision marker unchanged.
+- WAL recovery preserves lifecycle metadata and leaves new or physically repaired chunks pending until indexing succeeds. It skips deleted or purged chunks and reports bad records while loading later records. Shutdown seals small segments so reopening does not copy them again or leak unfinished directories.
+- Purge aborts on transient payload read errors. Metadata scans continue past unreadable rows, and cleanup previews that include unreadable rows use the same selection and counts as their purge commands.
+- Digest identities include the tenant, and artifact writes cannot replace another tenant's digest or change its projection links.
+- Outcome priors use an indexed 90-day episode window and filter candidate chunk IDs in SQL. Applied purge removes expired retrieval episodes together with their items and outcome events.
+- Soft deletion records its time, and purge counts the grace period from deletion. Older deleted rows with no recorded deletion time receive a full grace period at their first writable open.
 - Embeddings: the attention mask was passed to the model as `token_type_ids` and padding tokens were attended, so a text's vector depended on the other texts in its batch. Token type ids are now zero and the mask is applied. Because new vectors differ from stored ones, a store records its embedder revision in `<data_dir>/embedding_revision`; the first writable open after the upgrade discards the dense indexes, re-embeds every chunk from its segments in the background, saves the rebuilt indexes and then marks the store current. A command that exits during the rebuild waits up to 10 seconds for it; what is indexed by then is saved and the next writer continues from there. Until the rebuild has finished, chunks that are not yet re-embedded are found through the sparse index only.
 - Reranking: relevance is normalised to the best candidate before the recency, project, type and query-text bonuses are added. Raw fused scores (at most about 0.033) were smaller than a single bonus, so a fresh but weaker result could outrank a clearly more relevant one. Reported `score` values are on a new scale.
 - `memd add`: a text longer than one chunk was stored with the spaces and line breaks between sentences removed. Chunks are now exact slices of the source text. Chunks stored earlier keep the fused text until they are added again.

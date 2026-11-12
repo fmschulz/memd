@@ -98,6 +98,16 @@ impl SqliteMetadataStore {
 
         Self::ensure_index_columns(&conn)?;
 
+        // A previous lifecycle update does not establish when a legacy row
+        // was deleted. Give unknown deletion times a full grace period once.
+        conn.execute(
+            "UPDATE chunks SET
+                 deleted_at_ms = CAST(ROUND(unixepoch('subsec') * 1000) AS INTEGER),
+                 lifecycle_updated_at_ms = CAST(ROUND(unixepoch('subsec') * 1000) AS INTEGER)
+             WHERE status = 'deleted' AND deleted_at_ms IS NULL",
+            [],
+        )?;
+
         // Critical: tenant_id index for isolation queries
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_chunks_tenant
@@ -850,6 +860,13 @@ impl SqliteMetadataStore {
         // partial indexes below because the rebuild drops all indexes
         // along with the old table.
         Self::migrate_chunks_unique_to_tenant_scoped(conn)?;
+
+        Self::ensure_index_column(
+            conn,
+            &column_names,
+            "deleted_at_ms",
+            "ALTER TABLE chunks ADD COLUMN deleted_at_ms INTEGER",
+        )?;
 
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_chunks_expiry

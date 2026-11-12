@@ -154,6 +154,7 @@ pub(super) async fn run_purge<S: Store>(store: &S, options: PurgeOptions) -> Res
             "archive_required_for_apply": !candidates.is_empty(),
             "soft_deleted_before_purge": 0,
             "hard_deleted_metadata_rows": 0,
+            "expired_retrieval_episodes_pruned": 0,
             "sparse_pruned_chunks": 0,
             "segment_rewrite": null,
             "archive_verification": null,
@@ -193,6 +194,9 @@ pub(super) async fn run_purge<S: Store>(store: &S, options: PurgeOptions) -> Res
         }
     }
 
+    // Refuse unresolved recovery before changing any candidate. Clearing the
+    // old Adds here also prevents them from resurrecting rows after hard purge.
+    persistent.checkpoint_tenant_wal(&tenant_id)?;
     let mut warnings = Vec::new();
     let mut soft_deleted = 0usize;
     for candidate in &candidates {
@@ -246,6 +250,9 @@ pub(super) async fn run_purge<S: Store>(store: &S, options: PurgeOptions) -> Res
     let hard_deleted = persistent
         .metadata()
         .hard_delete_chunks(&tenant_id, &candidate_ids)?;
+    let expired_retrieval_episodes_pruned = persistent
+        .metadata()
+        .prune_expired_retrieval_episodes(&tenant_id, options.project_id.as_deref(), now_ms)?;
 
     let segment_rewrite = if options.rewrite_segments && hard_deleted > 0 {
         match persistent.rewrite_segments_for_tenant(&tenant_id) {
@@ -300,6 +307,7 @@ pub(super) async fn run_purge<S: Store>(store: &S, options: PurgeOptions) -> Res
         "archive_path": archive_path,
         "soft_deleted_before_purge": soft_deleted,
         "hard_deleted_metadata_rows": hard_deleted,
+        "expired_retrieval_episodes_pruned": expired_retrieval_episodes_pruned,
         "sparse_pruned_chunks": sparse_pruned,
         "compaction": compaction,
         "segment_rewrite": segment_rewrite,
@@ -555,7 +563,7 @@ pub(super) fn render_purge_archive_inspection(
     }
 }
 
-async fn list_unreadable_active_candidates(
+pub(super) async fn list_unreadable_active_candidates(
     store: &PersistentStore,
     tenant_id: &TenantId,
     project_id: Option<&str>,
@@ -583,7 +591,7 @@ async fn list_unreadable_active_candidates(
                 continue;
             }
             if store
-                .get_chunk_for_retrieval(tenant_id, &metadata.chunk_id, "purge_unreadable_active")
+                .get_chunk_for_purge(tenant_id, &metadata.chunk_id)
                 .await?
                 .is_none()
             {
@@ -613,9 +621,15 @@ async fn build_archive_records(
             None
         } else {
             store
-                .get_chunk_for_retrieval(tenant_id, &metadata.chunk_id, "purge_archive")
+                .get_chunk_for_purge(tenant_id, &metadata.chunk_id)
                 .await?
         };
+        if candidate.reason == "unreadable_active_payload" && payload.is_some() {
+            return Err(MemdError::ValidationError(format!(
+                "purge candidate {} became readable; rerun the preview before applying",
+                metadata.chunk_id
+            )));
+        }
         records.push(PurgeArchiveRecord {
             metadata: metadata.clone(),
             payload,
@@ -804,6 +818,312 @@ fn render_purge_archive_markdown(report: &PurgeArchiveInspection) -> String {
 #[cfg(test)]
 mod archive_inspection_tests {
     use super::*;
+    use crate::store::persistent::PersistentStoreConfig;
+    use crate::types::ChunkType;
+
+    fn purge_store() -> (PersistentStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PersistentStore::open(PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            ..Default::default()
+        })
+        .unwrap();
+        (store, dir)
+    }
+
+    #[tokio::test]
+    async fn purge_refuses_unresolved_wal_before_mutating_candidates() {
+        use crate::store::wal::{WalRecord, WalWriter};
+        use crate::types::{ChunkId, ChunkStatus};
+
+        let (store, dir) = purge_store();
+        let tenant = TenantId::new("purge_unresolved").unwrap();
+        let id = store
+            .add(MemoryChunk::new(
+                tenant.clone(),
+                "candidate must remain active on refusal",
+                ChunkType::Doc,
+            ))
+            .await
+            .unwrap();
+        drop(store);
+        let wal_path = dir.path().join("tenants/purge_unresolved/wal.log");
+        WalWriter::open_or_create(&wal_path)
+            .unwrap()
+            .append_batch(&[WalRecord::add(
+                tenant.to_string(),
+                ChunkId::new().to_string(),
+                1,
+                b"invalid payload".to_vec(),
+            )])
+            .unwrap();
+        let store = PersistentStore::open(PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            ..Default::default()
+        })
+        .unwrap();
+        // Make a real active candidate whose payload is definitively absent.
+        let conn = rusqlite::Connection::open(dir.path().join("metadata.db")).unwrap();
+        conn.execute(
+            "UPDATE chunks SET ordinal = 999 WHERE chunk_id = ?1",
+            [id.to_string()],
+        )
+        .unwrap();
+        let result = run_purge(
+            &store,
+            PurgeOptions {
+                tenant_id: tenant.to_string(),
+                project_id: None,
+                older_than_days: 1,
+                limit: 10,
+                include_unreadable_active: true,
+                archive: Some(dir.path().join("refused.json")),
+                apply: true,
+                vacuum_metadata: false,
+                rewrite_segments: false,
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            store.metadata().get(&tenant, &id).unwrap().unwrap().status,
+            ChunkStatus::Final
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn purge_read_errors_abort_without_classifying_or_deleting_live_rows() {
+        let (store, dir) = purge_store();
+        let tenant = TenantId::new("purge_io_error").unwrap();
+        let id = store
+            .add(MemoryChunk::new(
+                tenant.clone(),
+                "live row must survive a failed read",
+                ChunkType::Doc,
+            ))
+            .await
+            .unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("metadata.db")).unwrap();
+        conn.execute(
+            "UPDATE chunks SET segment_id = 99999 WHERE chunk_id = ?1",
+            [id.to_string()],
+        )
+        .unwrap();
+        let segment = dir
+            .path()
+            .join("tenants")
+            .join(tenant.as_str())
+            .join("segments/seg_099999");
+        std::fs::create_dir_all(&segment).unwrap();
+        // ELOOP is an operational read failure, not evidence of a missing payload.
+        std::os::unix::fs::symlink("payload.bin", segment.join("payload.bin")).unwrap();
+        let archive = dir.path().join("must-not-exist.json");
+        for apply in [false, true] {
+            let result = run_purge(
+                &store,
+                PurgeOptions {
+                    tenant_id: tenant.to_string(),
+                    project_id: None,
+                    older_than_days: 1,
+                    limit: 10,
+                    include_unreadable_active: true,
+                    archive: Some(archive.clone()),
+                    apply,
+                    vacuum_metadata: false,
+                    rewrite_segments: false,
+                },
+            )
+            .await;
+            assert!(
+                result.is_err(),
+                "a read failure must abort preview and apply: {result:?}"
+            );
+            assert!(store.metadata().get(&tenant, &id).unwrap().is_some());
+            assert!(!archive.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_scan_continues_past_a_page_with_unreadable_payload() {
+        let (store, dir) = purge_store();
+        let tenant = TenantId::new("purge_scan_pages").unwrap();
+        let mut ids = Vec::new();
+        for timestamp in [30, 20, 10] {
+            let mut chunk = MemoryChunk::new(
+                tenant.clone(),
+                format!("payload {timestamp}"),
+                ChunkType::Doc,
+            );
+            chunk.timestamp_created = timestamp;
+            ids.push(store.add(chunk).await.unwrap());
+        }
+        let conn = rusqlite::Connection::open(dir.path().join("metadata.db")).unwrap();
+        conn.execute(
+            "UPDATE chunks SET segment_id = 99999 WHERE chunk_id = ?1",
+            [ids[0].to_string()],
+        )
+        .unwrap();
+        let rows = super::super::audit::collect_scanned_chunks(&store, &tenant, None, 2)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2, "later metadata pages must still be scanned");
+    }
+
+    #[tokio::test]
+    async fn purge_preview_matches_applied_hidden_and_unreadable_rows() {
+        let (store, dir) = purge_store();
+        let tenant = TenantId::new("purge_combined_selection").unwrap();
+        let mut ids = Vec::new();
+        for text in [
+            "expired hidden row",
+            "missing active row",
+            "healthy live row",
+        ] {
+            ids.push(
+                store
+                    .add(MemoryChunk::new(tenant.clone(), text, ChunkType::Doc))
+                    .await
+                    .unwrap(),
+            );
+        }
+        let conn = rusqlite::Connection::open(dir.path().join("metadata.db")).unwrap();
+        conn.execute(
+            "UPDATE chunks SET status = 'expired', lifecycle_updated_at_ms = 1 WHERE chunk_id = ?1",
+            [ids[0].to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE chunks SET segment_id = 99999 WHERE chunk_id = ?1",
+            [ids[1].to_string()],
+        )
+        .unwrap();
+        let archive = dir.path().join("combined.json");
+        let mut reports = Vec::new();
+        for apply in [false, true] {
+            reports.push(
+                run_purge(
+                    &store,
+                    PurgeOptions {
+                        tenant_id: tenant.to_string(),
+                        project_id: None,
+                        older_than_days: 1,
+                        limit: 2,
+                        include_unreadable_active: true,
+                        archive: Some(archive.clone()),
+                        apply,
+                        vacuum_metadata: false,
+                        rewrite_segments: false,
+                    },
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        assert_eq!(reports[0]["candidate_count"], 2);
+        assert_eq!(reports[0]["candidate_ids"], reports[1]["candidate_ids"]);
+        assert_eq!(reports[1]["hard_deleted_metadata_rows"], 2);
+        let archived: Value = serde_json::from_slice(&std::fs::read(archive).unwrap()).unwrap();
+        assert_eq!(archived["record_count"], 2);
+        assert!(store.metadata().get(&tenant, &ids[0]).unwrap().is_none());
+        assert!(store.metadata().get(&tenant, &ids[1]).unwrap().is_none());
+        assert!(store.get(&tenant, &ids[2]).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn purge_archive_refuses_an_unreadable_candidate_that_became_readable() {
+        let (store, _dir) = purge_store();
+        let tenant = TenantId::new("purge_recovered_payload").unwrap();
+        let id = store
+            .add(MemoryChunk::new(
+                tenant.clone(),
+                "healthy recovered payload",
+                ChunkType::Doc,
+            ))
+            .await
+            .unwrap();
+        let candidate = PurgeCandidate {
+            metadata: store.metadata().get(&tenant, &id).unwrap().unwrap(),
+            reason: "unreadable_active_payload",
+        };
+        let error = build_archive_records(&store, &tenant, &[candidate])
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("became readable"));
+        assert!(store.get(&tenant, &id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn purge_prunes_expired_episodes_only_on_apply_and_in_scope() {
+        use crate::store::{RankingPolicyMode, RetrievalEpisode, RetrievalEpisodeId};
+        let (store, dir) = purge_store();
+        let tenant = TenantId::new("purge_episode_retention").unwrap();
+        let now = now_ms() as i64;
+        for (owner, project, expiry) in [
+            (tenant.clone(), "selected", now - 1),
+            (tenant.clone(), "other", now - 1),
+            (
+                TenantId::new("another_tenant").unwrap(),
+                "selected",
+                now - 1,
+            ),
+            (tenant.clone(), "selected", now + 86_400_000),
+        ] {
+            let episode = RetrievalEpisode {
+                episode_id: RetrievalEpisodeId::new(),
+                tenant_id: owner,
+                project_id: Some(project.to_string()),
+                query_hash: crate::store::stable_query_hash("retention"),
+                query_mode: "generic".to_string(),
+                requested_k: 1,
+                fetched_k: 0,
+                rendered_k: 0,
+                policy_version: "outcome-v1".to_string(),
+                policy_mode: RankingPolicyMode::Shadow,
+                task_id: None,
+                thread_id: None,
+                created_at_ms: now - 100,
+                expires_at_ms: expiry,
+            };
+            store
+                .metadata()
+                .insert_retrieval_episode(&episode, &[])
+                .unwrap();
+        }
+        let conn = rusqlite::Connection::open(dir.path().join("metadata.db")).unwrap();
+        for (apply, expected) in [(false, 4), (true, 3)] {
+            let report = run_purge(
+                &store,
+                PurgeOptions {
+                    tenant_id: tenant.to_string(),
+                    project_id: Some("selected".to_string()),
+                    older_than_days: 1,
+                    limit: 2,
+                    include_unreadable_active: false,
+                    archive: None,
+                    apply,
+                    vacuum_metadata: false,
+                    rewrite_segments: false,
+                },
+            )
+            .await
+            .unwrap();
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM retrieval_episodes", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, expected);
+            assert_eq!(
+                report["expired_retrieval_episodes_pruned"],
+                if apply { 1 } else { 0 }
+            );
+        }
+    }
 
     #[test]
     fn inspect_purge_archive_reports_valid_archive() {
