@@ -22,7 +22,6 @@ use memd::config::Config;
 use memd::mcp::*;
 use memd::store::persistent::{PersistentStore, PersistentStoreConfig};
 use memd::types::{ChunkId, TenantId};
-use memd::MetricsCollector;
 
 pub struct TestServer<S> {
     _config: Config,
@@ -124,8 +123,6 @@ async fn dispatch_operation<S: memd::store::Store>(
     name: &str,
     args: serde_json::Value,
 ) -> Result<serde_json::Value, McpError> {
-    let metrics = MetricsCollector::default();
-
     match name {
         "memory.search" => handle_memory_search(store, parse_params(name, args)?).await,
         "memory.add" => handle_memory_add(store, None, parse_params(name, args)?).await,
@@ -137,11 +134,8 @@ async fn dispatch_operation<S: memd::store::Store>(
             handle_memory_record_outcome(store, parse_params(name, args)?).await
         }
         "memory.stats" => handle_memory_stats(store, None, parse_params(name, args)?).await,
-        "memory.health" => handle_memory_health(store, &metrics, parse_params(name, args)?).await,
-        "memory.metrics" => {
-            let params: MetricsParams = parse_params(name, args)?;
-            handle_memory_metrics(&metrics, store.get_index_stats(None), params)
-        }
+        "memory.health" => handle_memory_health(store, parse_params(name, args)?).await,
+
         "memory.compact" => handle_memory_compact(store, parse_params(name, args)?).await,
         "memory.dream" => handle_memory_dream(store, None, parse_params(name, args)?).await,
         "memory.supersede" => handle_memory_supersede(store, None, parse_params(name, args)?).await,

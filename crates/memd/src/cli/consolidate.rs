@@ -991,7 +991,7 @@ fn spawn_background(lock_root: Option<&Path>, options: &ConsolidateOptions) -> R
         .into_iter()
         .flatten()
         .collect();
-    let result = spawn_background_inner(&options, &held);
+    let result = spawn_background_inner(lock_root, &options, &held);
     drop(held);
     // Explicit: closes only the parent's descriptors, after the child has been
     // spawned and inherited its own copies, which is what keeps the flocks held.
@@ -1001,12 +1001,38 @@ fn spawn_background(lock_root: Option<&Path>, options: &ConsolidateOptions) -> R
 }
 
 fn spawn_background_inner(
+    data_dir: Option<&Path>,
     options: &ConsolidateOptions,
     #[cfg_attr(not(unix), allow(unused_variables))] locks: &[&std::fs::File],
 ) -> Result<Value> {
     let exe = std::env::current_exe()
         .map_err(|e| MemdError::ProtocolError(format!("cannot resolve current executable: {e}")))?;
     let mut command = std::process::Command::new(exe);
+    configure_background_command(&mut command, options, data_dir);
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+        inherit_lock_fds(&mut command, locks);
+    }
+    let child = command.spawn().map_err(|e| {
+        MemdError::ProtocolError(format!("failed to spawn background consolidate: {e}"))
+    })?;
+    Ok(json!({ "spawned_background": true, "pid": child.id() }))
+}
+
+fn configure_background_command(
+    command: &mut std::process::Command,
+    options: &ConsolidateOptions,
+    data_dir: Option<&Path>,
+) {
+    if let Some(data_dir) = data_dir {
+        command.arg("--data-dir").arg(data_dir);
+    }
     command.arg("consolidate");
     if let Some(tenant) = &options.tenant_id {
         command.arg("--tenant-id").arg(tenant);
@@ -1028,20 +1054,6 @@ fn spawn_background_inner(
     if options.legacy_immediate {
         command.arg("--legacy-immediate");
     }
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-        inherit_lock_fds(&mut command, locks);
-    }
-    let child = command.spawn().map_err(|e| {
-        MemdError::ProtocolError(format!("failed to spawn background consolidate: {e}"))
-    })?;
-    Ok(json!({ "spawned_background": true, "pid": child.id() }))
 }
 
 fn now_ms() -> i64 {
@@ -1062,6 +1074,31 @@ mod tests {
     use crate::types::lifecycle::LifecycleDelta;
     use crate::types::{ChunkStatus, ChunkType, ProjectId};
     use tempfile::tempdir;
+
+    #[test]
+    fn audit_background_consolidation_keeps_data_dir() {
+        let options = ConsolidateOptions {
+            tenant_id: Some("audit".into()),
+            project_id: None,
+            project_dir: "/tmp/project".into(),
+            max_region: 50,
+            dry_run: false,
+            background: true,
+            force: false,
+            promote: false,
+            legacy_immediate: false,
+        };
+        let mut command = std::process::Command::new("memd");
+        configure_background_command(&mut command, &options, Some(Path::new("/tmp/custom-store")));
+        let args = command
+            .get_args()
+            .map(|value| value.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &args[..3],
+            &["--data-dir", "/tmp/custom-store", "consolidate"]
+        );
+    }
 
     /// Serialises tests that set the process-global `MOCK_RESPONSE_ENV`.
     static MOCK_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

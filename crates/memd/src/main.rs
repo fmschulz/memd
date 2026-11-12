@@ -160,6 +160,11 @@ async fn main() {
         eprintln!("error: invalid configuration: {}", e);
         std::process::exit(1);
     }
+    // Pin the effective model in the process environment so detached children
+    // and warm workers inherit the same explicit config-file selection.
+    if std::env::var("MEMD_CONSOLIDATION_MODEL").map_or(true, |value| value.trim().is_empty()) {
+        std::env::set_var("MEMD_CONSOLIDATION_MODEL", &config.consolidation_model);
+    }
     configure_operation_routing(
         config.server.allow_cross_tenant_project_fallback,
         config.server.project_aliases.clone(),

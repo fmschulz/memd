@@ -889,17 +889,6 @@ pub struct HealthParams {
     pub include_examples: bool,
     #[serde(default = "default_duplicate_limit")]
     pub duplicate_limit: usize,
-    #[serde(default = "default_true")]
-    pub include_recent: bool,
-}
-
-/// Parameters for memory.metrics
-#[derive(Debug, Deserialize, Default)]
-pub struct MetricsParams {
-    #[serde(default)]
-    pub tenant_id: Option<String>,
-    #[serde(default = "default_true")]
-    pub include_recent: bool,
 }
 
 fn default_verify_k() -> usize {
@@ -1606,14 +1595,6 @@ pub struct ChunkTypeHealthResult {
     pub all: HashMap<String, usize>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
-pub struct LatencyHealthResult {
-    pub recent_search_count: usize,
-    pub p50_total_ms: u64,
-    pub p95_total_ms: u64,
-    pub p99_total_ms: u64,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MemoryHealthResult {
     pub scope: HealthScopeResult,
@@ -1622,7 +1603,6 @@ pub struct MemoryHealthResult {
     pub duplicates: DuplicateHealth,
     pub index_coverage: IndexCoverageHealth,
     pub payload: PayloadHealth,
-    pub latency: LatencyHealthResult,
     #[serde(default)]
     pub warnings: Vec<String>,
 }

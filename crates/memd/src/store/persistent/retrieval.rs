@@ -94,8 +94,6 @@ impl PersistentStore {
             "search_with_scores_real called"
         );
 
-        let total_start = Instant::now();
-
         // Over-fetch so the deleted/hidden-chunk drop below still yields `k`
         // live results. HNSW has no per-chunk delete, so tombstoned chunks stay
         // indexed, resolve to None in get_chunk_for_retrieval, and are dropped
@@ -110,11 +108,10 @@ impl PersistentStore {
                 ranking_time_ms: Some(ranking_time_ms),
                 ..SearchContext::default()
             });
-            let (hybrid_results, timing) = hybrid
+            let (hybrid_results, _timing) = hybrid
                 .search_with_timing(tenant_id, query, fetch_k, search_context.clone())
                 .await?;
 
-            let fetch_start = Instant::now();
             let mut chunk_by_id: HashMap<ChunkId, MemoryChunk> =
                 HashMap::with_capacity(hybrid_results.len());
             let mut rerank_meta = Vec::with_capacity(hybrid_results.len());
@@ -166,15 +163,6 @@ impl PersistentStore {
             // Truncate to the requested `k` after the deleted-chunk drop, so
             // the over-fetch absorbs tombstones instead of returning extras.
             results.truncate(k);
-            let fetch_time = fetch_start.elapsed();
-
-            // Record query metrics (use dense time as embed time, sparse time as search time)
-            self.metrics.record_query(QueryMetrics::from_timings(
-                timing.dense_time,
-                timing.sparse_time + timing.fusion_time,
-                fetch_time,
-                total_start.elapsed(),
-            ));
 
             return Ok(results);
         }
@@ -182,7 +170,7 @@ impl PersistentStore {
         // Fallback to dense-only if hybrid not available
         if let Some(ref searcher) = self.dense_searcher {
             debug!("using DENSE-ONLY search path");
-            let (dense_results, embed_time, search_time) = searcher
+            let (dense_results, _embed_time, _search_time) = searcher
                 .search_with_timing(tenant_id, query, fetch_k)
                 .await?;
 
@@ -191,7 +179,6 @@ impl PersistentStore {
                 "dense search returned results"
             );
 
-            let fetch_start = Instant::now();
             let mut results = Vec::with_capacity(dense_results.len());
             for result in dense_results {
                 if results.len() >= k {
@@ -207,15 +194,6 @@ impl PersistentStore {
                 }
             }
             warn!(final_count = results.len(), "chunks fetched successfully");
-            let fetch_time = fetch_start.elapsed();
-
-            // Record metrics
-            self.metrics.record_query(QueryMetrics::from_timings(
-                embed_time,
-                search_time,
-                fetch_time,
-                total_start.elapsed(),
-            ));
 
             return Ok(results);
         }

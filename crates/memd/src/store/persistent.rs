@@ -43,7 +43,7 @@ use super::{
 use crate::embeddings::{CandleModel, EmbeddingModel};
 use crate::error::{MemdError, Result};
 use crate::index::{Bm25Index, SparseIndex};
-use crate::metrics::{IndexStats, MetricsCollector, QueryMetrics};
+use crate::metrics::IndexStats;
 use crate::retrieval::RerankerMode;
 use crate::types::lifecycle::{LifecycleDelta, ResolvedChunk};
 use crate::types::{ChunkId, ChunkStatus, MemoryChunk, TenantId};
@@ -244,8 +244,6 @@ pub struct PersistentStore {
     sparse_index: Option<Arc<Bm25Index>>,
     /// Hybrid searcher (replaces dense_searcher usage in search)
     hybrid_searcher: Option<Arc<HybridSearcher>>,
-    /// Metrics collector for query latency
-    metrics: Arc<MetricsCollector>,
     /// Compaction runner (None if compaction disabled)
     compaction_runner: Option<CompactionRunner>,
     /// Optional async index worker handle
@@ -879,7 +877,6 @@ impl PersistentStore {
             dense_searcher,
             sparse_index,
             hybrid_searcher,
-            metrics: Arc::new(MetricsCollector::default()),
             compaction_runner,
             async_indexer: None,
             write_epoch,
@@ -1244,16 +1241,6 @@ impl PersistentStore {
                 );
             }
         });
-    }
-
-    /// Get reference to metrics collector
-    pub fn metrics(&self) -> &MetricsCollector {
-        &self.metrics
-    }
-
-    /// Get shared metrics collector
-    pub fn metrics_arc(&self) -> Arc<MetricsCollector> {
-        Arc::clone(&self.metrics)
     }
 
     /// Re-baseline the external-mutation probe after this process finished a

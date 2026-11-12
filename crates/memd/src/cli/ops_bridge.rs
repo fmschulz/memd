@@ -2,7 +2,6 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::maintenance::DreamParams;
-use crate::metrics::MetricsCollector;
 use crate::ops::error::OperationError as McpError;
 use crate::ops::{
     handle_artifact_create, handle_artifact_find_decisions, handle_artifact_find_evidence,
@@ -15,21 +14,19 @@ use crate::ops::{
     handle_memory_consolidate_episode, handle_memory_delete, handle_memory_dream,
     handle_memory_export_markdown, handle_memory_export_omf, handle_memory_feedback,
     handle_memory_find_near_duplicates, handle_memory_get, handle_memory_health,
-    handle_memory_import_omf, handle_memory_metrics, handle_memory_preview_omf_import,
-    handle_memory_record_outcome, handle_memory_search, handle_memory_set_expiry,
-    handle_memory_stats, handle_memory_supersede, handle_task_add_evidence, handle_task_finish,
-    handle_task_get, handle_task_progress, handle_task_resume, handle_task_run_finish,
-    handle_task_run_start, handle_task_search, handle_task_start, AddBatchParams, AddParams,
-    ArtifactCreateParams, ArtifactGetParams, ArtifactLibraryParams, ArtifactListThreadParams,
-    ArtifactVerifyParams, CompactParams, ConsolidateEpisodeParams,
-    ContextFindRelevantContextParams, ContextGetFilesForSubsystemParams,
+    handle_memory_import_omf, handle_memory_preview_omf_import, handle_memory_record_outcome,
+    handle_memory_search, handle_memory_set_expiry, handle_memory_stats, handle_memory_supersede,
+    handle_task_add_evidence, handle_task_finish, handle_task_get, handle_task_progress,
+    handle_task_resume, handle_task_run_finish, handle_task_run_start, handle_task_search,
+    handle_task_start, AddBatchParams, AddParams, ArtifactCreateParams, ArtifactGetParams,
+    ArtifactLibraryParams, ArtifactListThreadParams, ArtifactVerifyParams, CompactParams,
+    ConsolidateEpisodeParams, ContextFindRelevantContextParams, ContextGetFilesForSubsystemParams,
     ContextGetHotContextParams, ContextListSubsystemsParams, ContextSearchDocumentsParams,
     ContextSuggestAgentParams, DeleteParams, ExportMarkdownParams, ExportOmfParams, FeedbackParams,
-    FindNearDuplicatesParams, GetParams, HealthParams, ImportOmfParams, MetricsParams,
-    PreviewOmfImportParams, ProjectBriefParams, RecordOutcomeParams, SearchParams, SetExpiryParams,
-    StatsParams, SupersedeParams, TaskAddEvidenceParams, TaskFinishParams, TaskGetParams,
-    TaskProgressParams, TaskResumeParams, TaskRunFinishParams, TaskRunStartParams,
-    TaskSearchParams, TaskStartParams,
+    FindNearDuplicatesParams, GetParams, HealthParams, ImportOmfParams, PreviewOmfImportParams,
+    ProjectBriefParams, RecordOutcomeParams, SearchParams, SetExpiryParams, StatsParams,
+    SupersedeParams, TaskAddEvidenceParams, TaskFinishParams, TaskGetParams, TaskProgressParams,
+    TaskResumeParams, TaskRunFinishParams, TaskRunStartParams, TaskSearchParams, TaskStartParams,
 };
 use crate::store::{Store, TenantManager};
 
@@ -52,7 +49,6 @@ pub(super) async fn cli_call_tool<S: Store>(
             .await
             .map_err(|error| McpError::ToolError(error.to_string()));
     }
-    let metrics = MetricsCollector::default();
 
     match tool {
         "memory.search" => {
@@ -181,14 +177,10 @@ pub(super) async fn cli_call_tool<S: Store>(
             let params: StatsParams = parse_tool_params(tool, arguments)?;
             handle_memory_stats(store, tenant_manager, params).await
         }
-        "memory.metrics" => {
-            let params: MetricsParams = parse_tool_params(tool, arguments)?;
-            let index_stats = store.get_index_stats(None);
-            handle_memory_metrics(&metrics, index_stats, params)
-        }
+
         "memory.health" => {
             let params: HealthParams = parse_tool_params(tool, arguments)?;
-            handle_memory_health(store, &metrics, params).await
+            handle_memory_health(store, params).await
         }
         "memory.compact" => {
             let params: CompactParams = parse_tool_params(tool, arguments)?;

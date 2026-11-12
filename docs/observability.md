@@ -1,7 +1,7 @@
 # Observability
 
 `memd` has four observability surfaces: the usage ledger and `memd report`
-(including the session-start health header), stats/health/metrics operations,
+(including the session-start health header), stats and health operations,
 structured tracing logs, and the per-search exposure log
 `retrieval_exposures.jsonl` in the data directory.
 
@@ -101,8 +101,7 @@ active metadata rows exist whose segment payloads could not be read.
   `total_chunks`, and active/deleted/all chunk-type maps. The legacy
   `chunk_types` field remains the active-count map.
 - `memory.health` is a read-only tenant/project report for duplicate canonical
-  text, index coverage, canonical/artifact payload sizes, recent latency
-  tails, and warnings. When `include_examples` is true, `duplicate_limit`
+  text, index coverage, canonical/artifact payload sizes, and warnings. When `include_examples` is true, `duplicate_limit`
   limits only the number of example groups returned; aggregate duplicate
   counts and ratios still cover the full requested scope.
 - `memory.dream` can turn health findings into a bounded maintenance plan. It
@@ -111,18 +110,10 @@ active metadata rows exist whose segment payloads could not be read.
   append-only segment rewrite remains explicitly blocked until
   recovery-safe rewrite support exists. Non-digest exact duplicates remain
   report-only.
-- `memory.metrics` surfaces per-operation, per-reason rejection counts,
-  HNSW state snapshots, and estimated serialized payload
-  size by operation.
-
-Token usage is estimated from serialized request/response bytes; exact
-whole-agent or provider billing tokens still require agent or API usage
-capture. The sibling `memd-bench` repository owns paired agent experiments.
 
 ## Tracing logs
 
 A `tracing` subscriber emits structured JSON logs when `RUST_LOG` is set.
-Every rejected operation increments `MetricsCollector::record_rejection`.
 
 Deprecation warnings for `artifact.create` (mega-schema),
 `context.search_context_documents`, and the `artifact.verify` alias log at

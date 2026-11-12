@@ -49,10 +49,7 @@ pub use experience::{
 };
 pub use index::{HnswConfig, HnswIndex, SearchResult};
 pub use logging::init_logging;
-pub use metrics::{
-    IndexStats, LatencyStats, MetricsCollector, MetricsSnapshot, QueryMetrics, Timer,
-    TokenUsageStats, ToolTokenAggregate, ToolTokenUsage,
-};
+pub use metrics::IndexStats;
 pub use ops::configure_operation_routing;
 pub use retrieval::{
     ChunkWithMeta, CrossEncoderReranker, FeatureReranker, FusedResult, FusionCandidate,

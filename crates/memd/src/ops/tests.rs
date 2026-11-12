@@ -29,7 +29,6 @@ fn test_render_observed_time_into_text() {
     assert_eq!(chunks[1].0.text, "no event time here");
 }
 use crate::config::ProjectAliasScopeConfig;
-use crate::metrics::{MetricsCollector, QueryMetrics};
 use crate::store::persistent::{PersistentStore, PersistentStoreConfig};
 use crate::store::{MemoryStore, Store};
 use crate::types::lifecycle::MemoryTier;
@@ -1988,17 +1987,14 @@ async fn memory_search_compact_omits_large_fields_but_keeps_trust_metadata() {
 #[tokio::test]
 async fn memory_health_reports_empty_and_duplicate_scopes() {
     let (store, _dir) = make_persistent_store();
-    let metrics = MetricsCollector::new(10);
 
     let empty = handle_memory_health(
         &store,
-        &metrics,
         HealthParams {
             tenant_id: "tenant_empty".to_string(),
             project_id: None,
             include_examples: false,
             duplicate_limit: 10,
-            include_recent: false,
         },
     )
     .await
@@ -2020,20 +2016,14 @@ async fn memory_health_reports_empty_and_duplicate_scopes() {
             .await
             .unwrap();
     }
-    metrics.record_query(QueryMetrics {
-        total_ms: 42,
-        ..Default::default()
-    });
 
     let result = handle_memory_health(
         &store,
-        &metrics,
         HealthParams {
             tenant_id: "tenant_health".to_string(),
             project_id: None,
             include_examples: true,
             duplicate_limit: 5,
-            include_recent: true,
         },
     )
     .await
@@ -2047,8 +2037,6 @@ async fn memory_health_reports_empty_and_duplicate_scopes() {
     assert!((payload.duplicates.duplicate_row_ratio - (1.0 / 3.0)).abs() < 0.001);
     assert_eq!(payload.duplicates.examples.len(), 1);
     assert_eq!(payload.index_coverage.indexed_percentage, 100.0);
-    assert_eq!(payload.latency.recent_search_count, 1);
-    assert_eq!(payload.latency.p95_total_ms, 42);
 }
 
 #[tokio::test]

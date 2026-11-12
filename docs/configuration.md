@@ -9,6 +9,9 @@
 | `MEMD_CROSS_ENCODER_DISABLE` | unset | When `1`, skip ONNX cross-encoder initialization. |
 | `ORT_DYLIB_PATH` | unset | Override ONNX Runtime shared library location. |
 | `MEMD_CONSOLIDATOR` | `auto` | LLM backend for `memd consolidate`: `claude`, `codex`, `auto`, `mock`. |
+| `MEMD_CONSOLIDATION_MODEL` | `sonnet` | Claude consolidation model; overrides `consolidation_model` in the config file. |
+| `MEMD_WARM_START_TIMEOUT_MS` | `600000` | Startup budget for a live worker. On expiry the starter kills and reaps its child before cold fallback. |
+| `MEMD_WARM_CLIENT_TIMEOUT_MS` | `30000` | Deadline for short worker requests. Maintenance, imports, batches, generic operation calls, and reranked searches wait for completion. |
 | `MEMD_WARM_IDLE_TIMEOUT_SECS` | `1800` | Warm worker exits after this many seconds without requests, releasing the writer lock; `0` disables. |
 | `MEMD_WRITER_LOCK_TIMEOUT_MS` | `10000` | Total retry budget for taking the data-dir writer lock on direct writes. |
 | `MEMD_USAGE_LEDGER` | on | `off`, `0`, `false`, or `no` disables usage-event recording. |
@@ -17,12 +20,21 @@
 ## Worker environment
 
 Warm-routed commands execute inside the worker process. Environment variables
-such as `MEMD_CONSOLIDATOR`, `MEMD_USAGE_LEDGER`, and
+such as `MEMD_CONSOLIDATOR`, `MEMD_CONSOLIDATION_MODEL`, `MEMD_USAGE_LEDGER`, and
 `MEMD_USAGE_RETENTION_DAYS` are resolved from the worker's environment, not
 from the invoking shell. To apply a change, restart the worker with
 `memd warm stop`; the next warm-routed command auto-starts a fresh one.
 `MEMD_WRITER_LOCK_TIMEOUT_MS` applies to the process taking the lock, either a
 direct-write CLI process or worker startup.
+
+Long socket paths use a private directory with mode `0700` at
+`$XDG_RUNTIME_DIR/memd-warm`, or a uid-specific directory in the system
+temporary directory when `XDG_RUNTIME_DIR` is unset. Worker counts use this
+same root. Startup rejects a root owned by another user or replaced by a symlink.
+
+Claude consolidation runs in a fresh temporary directory with built-in tools,
+MCP servers, skills, and user/project settings disabled. Memory strings are
+escaped JSON data in the prompt. Tests use a stub CLI and make no model calls.
 
 ## Config file
 
@@ -39,6 +51,10 @@ Full annotated reference:
 # Each tenant gets a subdirectory: {data_dir}/tenants/{tenant_id}/
 # Supports ~ for home directory expansion.
 data_dir = "~/.memd/data"
+
+# Claude consolidation model alias or explicit model name.
+# MEMD_CONSOLIDATION_MODEL takes precedence.
+consolidation_model = "sonnet"
 
 # Logging level: trace, debug, info, warn, error.
 log_level = "info"

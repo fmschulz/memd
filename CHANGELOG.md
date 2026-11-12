@@ -15,6 +15,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- Warm startup waits for live workers up to a configurable budget, reaps timed-out children before fallback, preserves background consolidation's data directory, and uses a private per-user socket root. Long requests wait for completion.
+- Claude consolidation disables tools and project configuration in a fresh temporary directory; its model is configurable and defaults to `sonnet`.
+- Removed the nonfunctional `memory.metrics` operation, health latency block, and orphaned per-call collectors; health keeps measured store state.
+- Claude execution provenance reads `CLAUDE_CODE_SESSION_ID`.
+- Automatic session scope creation skips the home directory and filesystem root; explicit initialization remains available.
+- `memd init` and the installer share one memory policy without a mandatory write before every answer.
+
 - Short writer lifetimes now pack small sealed payload segments in size tiers at writer open, bounding segment growth and amortizing payload copies. Replacement files and metadata are made durable before obsolete directories and purged plaintext are removed.
 
 - BM25 uses the same lowercase-and-stem analyzer for indexed text and queries. The first writer rebuilds older sparse indexes once; read-only commands leave the index and its revision marker unchanged.

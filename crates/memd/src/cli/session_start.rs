@@ -255,6 +255,9 @@ pub(super) async fn run_session_start_inner<S: Store>(
             AutoScopeOutcome::SkippedDisabled => {
                 return Ok(json!({ "skipped": "auto_scope_disabled" }));
             }
+            AutoScopeOutcome::SkippedUnsafeRoot => {
+                return Ok(json!({ "skipped": "unsafe_auto_scope_root" }));
+            }
             AutoScopeOutcome::SkippedMarker => {
                 return Ok(json!({ "skipped": "memd_skip_present" }));
             }
@@ -498,6 +501,7 @@ pub(super) enum AutoScopeOutcome {
     AlreadyExists,
     SkippedDisabled,
     SkippedMarker,
+    SkippedUnsafeRoot,
 }
 
 /// Create a minimal `.memd/project_scope.json` for a repo that has no
@@ -514,6 +518,14 @@ pub(super) fn maybe_auto_create_scope(
     }
     if project_dir.join(".memd-skip").exists() {
         return Ok(AutoScopeOutcome::SkippedMarker);
+    }
+
+    // Compare canonical paths so aliases such as ~/repo/.. and symlinks
+    // cannot create an implicit scope for every descendant of home or /.
+    let canonical = project_dir.canonicalize()?;
+    let home = dirs::home_dir().and_then(|home| home.canonicalize().ok());
+    if canonical.parent().is_none() || home.as_deref() == Some(canonical.as_path()) {
+        return Ok(AutoScopeOutcome::SkippedUnsafeRoot);
     }
 
     let project_id = derive_project_id(project_dir);

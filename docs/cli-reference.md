@@ -29,7 +29,7 @@ For write-quality expectations and cleanup safety, see the
 | `memd cleanup-plan` | Generate a non-destructive cleanup approval report with archive/purge command previews and post-cleanup pass criteria. |
 | `memd purge` | Dry-run or archive-first cleanup of hidden rows; `--apply` verifies the archive before mutation, and `--include-unreadable-active` includes active rows with confirmed missing or corrupt payloads. Transient read errors abort the purge. |
 | `memd purge-archive` | Read-only verification for `memd purge --archive` files: validates format/counts/payload flags, emits SHA-256, and can enforce expected tenant/project. |
-| `memd consolidate` | Call the configured LLM (Claude Haiku or Codex Spark, selected by `MEMD_CONSOLIDATOR`) and stage validated output under a journaled run ID. Candidate summaries remain hidden until review. `--promote` requests promotion in the same run; `--legacy-immediate` is a deprecated alias for one compatibility release. Exact source-set reruns reuse the existing run. |
+| `memd consolidate` | Call the configured LLM (Claude Sonnet or Codex Spark, selected by `MEMD_CONSOLIDATOR`) and stage validated output under a journaled run ID. Candidate summaries remain hidden until review. `--promote` requests promotion in the same run; `--legacy-immediate` is a deprecated alias for one compatibility release. Exact source-set reruns reuse the existing run. |
 | `memd consolidate-review` | List staged runs, inspect a proposal and its sources, accept it for atomic promotion, or reject it while leaving every source active. |
 | `memd session-start` | Resolve an existing project or legacy scope, or auto-create a minimal `.memd/project_scope.json` when neither provides one. Recover consolidation runs idle for at least 30 seconds, refresh `memory.md` synchronously, then attempt background consolidation when at least 10 dirty chunks have accumulated. Recovery promotes only runs with durable promotion intent. A writer-lock failure is reported in `consolidation_recovery` without suppressing context refresh. See [startup scope and output behavior](agent-skill.md#install). |
 | `memd eval-counterfactual` | Replay a JSONL benchmark file; write an overlap@k / rank-shift report under `evals/bench/reports/`. Monitors whether `kind:consolidated` lessons are load-bearing in retrieval. |
@@ -229,7 +229,7 @@ explicitly scoped lines continue.
   identity is required for retrieval or outcome attribution.
 - `memory.search` — hybrid retrieval with optional `mode`, `project_id`,
   compact/token-budgeted output, and event sibling expansion.
-- `memory.get`, `memory.delete`, `memory.stats`, `memory.health`, `memory.metrics`.
+- `memory.get`, `memory.delete`, `memory.stats`, `memory.health`.
 - `memory.compact` — explicit digest refresh; supports `digest_modes` and `force_digest_rebuild`.
 - `memory.dream` — dry-run-first retention and compaction planning; safely
   retires duplicate digest projections on apply and writes a traceable report.

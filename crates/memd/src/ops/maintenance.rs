@@ -56,36 +56,7 @@ pub async fn handle_memory_stats<S: Store>(
     })
 }
 
-fn percentile_u64(sorted: &[u64], p: usize) -> u64 {
-    if sorted.is_empty() {
-        return 0;
-    }
-    let idx = (p * (sorted.len() - 1) / 100).min(sorted.len() - 1);
-    sorted[idx]
-}
-
-fn build_latency_health(metrics: &MetricsCollector, include_recent: bool) -> LatencyHealthResult {
-    if !include_recent {
-        return LatencyHealthResult::default();
-    }
-    let mut totals = metrics
-        .get_recent_queries(1000)
-        .into_iter()
-        .map(|query| query.total_ms)
-        .collect::<Vec<_>>();
-    totals.sort_unstable();
-    LatencyHealthResult {
-        recent_search_count: totals.len(),
-        p50_total_ms: percentile_u64(&totals, 50),
-        p95_total_ms: percentile_u64(&totals, 95),
-        p99_total_ms: percentile_u64(&totals, 99),
-    }
-}
-
-fn warnings_for_health(
-    snapshot: &StoreHealthSnapshot,
-    latency: &LatencyHealthResult,
-) -> Vec<String> {
+fn warnings_for_health(snapshot: &StoreHealthSnapshot) -> Vec<String> {
     let mut warnings = Vec::new();
     if snapshot.counts.total_chunks == 0 {
         warnings.push("no chunks found for requested scope".to_string());
@@ -108,12 +79,6 @@ fn warnings_for_health(
         warnings.push(format!(
             "high p95 canonical text payload ({} bytes)",
             snapshot.payload.p95_canonical_text_bytes
-        ));
-    }
-    if latency.p95_total_ms > 5_000 {
-        warnings.push(format!(
-            "high recent p95 search latency ({} ms)",
-            latency.p95_total_ms
         ));
     }
     warnings
@@ -441,7 +406,6 @@ pub async fn handle_memory_dream<S: Store>(
 /// Handle memory.health tool call
 pub async fn handle_memory_health<S: Store>(
     store: &S,
-    metrics: &MetricsCollector,
     params: HealthParams,
 ) -> Result<Value, McpError> {
     let tenant_id = resolve_tenant_id(&params.tenant_id)?;
@@ -461,8 +425,7 @@ pub async fn handle_memory_health<S: Store>(
         Some(snapshot) => snapshot,
         None => fallback_health_snapshot(store, &tenant_id).await?,
     };
-    let latency = build_latency_health(metrics, params.include_recent);
-    let warnings = warnings_for_health(&snapshot, &latency);
+    let warnings = warnings_for_health(&snapshot);
     let aliases = params
         .project_id
         .as_deref()
@@ -483,45 +446,8 @@ pub async fn handle_memory_health<S: Store>(
         duplicates: snapshot.duplicates,
         index_coverage: snapshot.index_coverage,
         payload: snapshot.payload,
-        latency,
         warnings,
     })
-}
-
-/// Handle memory.metrics tool call
-pub fn handle_memory_metrics(
-    metrics: &MetricsCollector,
-    index_stats: HashMap<String, IndexStats>,
-    params: MetricsParams,
-) -> Result<Value, McpError> {
-    info!(
-        tenant_id = ?params.tenant_id,
-        include_recent = params.include_recent,
-        "memory.metrics"
-    );
-
-    // Filter index stats by tenant if specified. `memory.metrics`
-    // intentionally keeps strict semantics here: if the caller passed a
-    // tenant_id, it must parse — we do NOT fall back to the default so
-    // an empty string doesn't silently show all tenants.
-    let filtered_stats = if let Some(ref tenant_id_str) = params.tenant_id {
-        let tenant_id = validate_tenant_id(tenant_id_str)?;
-        index_stats
-            .into_iter()
-            .filter(|(k, _)| k == tenant_id.as_str())
-            .collect()
-    } else {
-        index_stats
-    };
-
-    let mut snapshot = metrics.snapshot(filtered_stats);
-
-    if !params.include_recent {
-        snapshot.recent_queries.clear();
-        snapshot.token_usage.recent_tool_calls.clear();
-    }
-
-    format_mcp_response(&snapshot)
 }
 
 /// Handle memory.compact tool call

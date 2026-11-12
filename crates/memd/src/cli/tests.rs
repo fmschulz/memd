@@ -1383,7 +1383,15 @@ fn warm_socket_path_uses_short_temp_path_for_long_data_dirs() {
 
     let socket = warm_socket_path(&config);
     assert!(socket.to_string_lossy().len() < 100);
-    assert!(socket.starts_with(std::env::temp_dir().join("memd-warm")));
+    #[cfg(unix)]
+    let fallback_name = format!("memd-warm-{}", unsafe { libc::geteuid() });
+    #[cfg(not(unix))]
+    let fallback_name = "memd-warm";
+    let expected_root = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|value| !value.is_empty())
+        .map(|runtime| PathBuf::from(runtime).join("memd-warm"))
+        .unwrap_or_else(|| std::env::temp_dir().join(fallback_name));
+    assert!(socket.starts_with(expected_root));
 }
 
 #[tokio::test]

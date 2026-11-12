@@ -84,6 +84,8 @@ absent, it uses a valid legacy `.memd/config.json` scope. When neither provides
 a scope, it creates a minimal project scope from `$MEMD_DEFAULT_TENANT` (then
 `$USER`, then `"default"`) and the repo basename. Derived IDs are lowercased,
 separator runs become underscores, and IDs are capped at 64 characters.
+Automatic scope creation skips the home directory itself and `/`, including
+symlink aliases. Explicit `memd init` can still create a scope there.
 Set `MEMD_AUTO_SCOPE=0` to disable scope creation. Add `.memd-skip` in the repo
 root to skip startup even with an existing scope. Invalid or unreadable scopes
 are preserved and reported, and startup stops before refreshing `memory.md`.

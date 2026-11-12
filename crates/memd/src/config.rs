@@ -17,6 +17,10 @@ pub struct Config {
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
 
+    /// Claude consolidation model alias or identifier.
+    #[serde(default = "default_consolidation_model")]
+    pub consolidation_model: String,
+
     /// Logging level: trace, debug, info, warn, error
     #[serde(default = "default_log_level")]
     pub log_level: String,
@@ -32,6 +36,10 @@ pub struct Config {
 
 fn default_data_dir() -> PathBuf {
     PathBuf::from("~/.memd/data")
+}
+
+fn default_consolidation_model() -> String {
+    crate::consolidate::claude_haiku::DEFAULT_MODEL.to_string()
 }
 
 fn default_log_level() -> String {
@@ -91,6 +99,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             data_dir: default_data_dir(),
+            consolidation_model: default_consolidation_model(),
             log_level: default_log_level(),
             log_format: default_log_format(),
             server: ServerConfig::default(),
@@ -112,6 +121,12 @@ impl Config {
 
     /// Validate the configuration values
     pub fn validate(&self) -> Result<()> {
+        if self.consolidation_model.trim().is_empty() {
+            return Err(MemdError::ConfigError(
+                "consolidation_model must not be empty".into(),
+            ));
+        }
+
         // Validate log_level
         let valid_levels = ["trace", "debug", "info", "warn", "error"];
         if !valid_levels.contains(&self.log_level.to_lowercase().as_str()) {

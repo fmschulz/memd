@@ -36,7 +36,7 @@ pub fn capture_execution_context(cwd: &Path) -> ExecutionContext {
     let harness = nonempty_env("AIO_HARNESS").or_else(|| {
         if nonempty_env("CODEX_THREAD_ID").is_some() {
             Some("codex".to_string())
-        } else if nonempty_env("CLAUDE_SESSION_ID").is_some() {
+        } else if nonempty_env("CLAUDE_CODE_SESSION_ID").is_some() {
             Some("claude".to_string())
         } else {
             None
@@ -48,7 +48,7 @@ pub fn capture_execution_context(cwd: &Path) -> ExecutionContext {
             nonempty_env("CODEX_THREAD_ID").or_else(|| nonempty_env("AIO_NATIVE_ID")),
         ),
         Some("claude") => (
-            nonempty_env("CLAUDE_SESSION_ID").or_else(|| nonempty_env("AIO_NATIVE_ID")),
+            nonempty_env("CLAUDE_CODE_SESSION_ID").or_else(|| nonempty_env("AIO_NATIVE_ID")),
             None,
         ),
         _ => (

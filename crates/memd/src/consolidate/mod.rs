@@ -126,8 +126,22 @@ pub(crate) async fn run_cli_capture(
     stdin_data: &str,
     timeout: Duration,
 ) -> Result<String> {
-    let mut child = Command::new(program)
-        .args(args)
+    let mut command = Command::new(program);
+    command.args(args);
+    run_cli_capture_command(command, stdin_data, timeout).await
+}
+
+pub(crate) async fn run_cli_capture_command(
+    mut command: Command,
+    stdin_data: &str,
+    timeout: Duration,
+) -> Result<String> {
+    let program = command
+        .as_std()
+        .get_program()
+        .to_string_lossy()
+        .into_owned();
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

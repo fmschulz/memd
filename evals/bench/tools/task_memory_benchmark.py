@@ -256,17 +256,12 @@ def make_memd_client(
 
 
 def read_chunks_indexed(client: MemdCliClient, tenant_id: str) -> int:
-    payload = client.call_tool(
-        "memory.metrics",
-        {"tenant_id": tenant_id, "include_recent": False},
-    )
-    index = payload.get("index", {})
-    if not isinstance(index, dict):
+    """Read the indexed chunk count from the measured store health state."""
+    payload = client.call_tool("memory.health", {"tenant_id": tenant_id})
+    coverage = payload.get("index_coverage", {})
+    if not isinstance(coverage, dict):
         return 0
-    stats = index.get(tenant_id, {})
-    if not isinstance(stats, dict):
-        return 0
-    return int(stats.get("chunks_indexed", 0))
+    return int(coverage.get("indexed", 0))
 
 
 def wait_for_index_ready(

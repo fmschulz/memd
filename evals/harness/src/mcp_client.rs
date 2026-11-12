@@ -170,7 +170,6 @@ impl McpClient {
             "memory.get",
             "memory.delete",
             "memory.stats",
-            "memory.metrics",
             "memory.compact",
             "memory.health",
             "task.start",

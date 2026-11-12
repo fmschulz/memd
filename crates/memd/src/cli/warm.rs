@@ -2,7 +2,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -239,11 +239,58 @@ pub(super) fn warm_socket_path_for_data_dir(data_dir: &Path) -> PathBuf {
     if data_dir_socket.to_string_lossy().len() < 100 {
         data_dir_socket
     } else {
-        std::env::temp_dir()
-            .join("memd-warm")
-            .join(&hex[..16])
-            .join("memd.sock")
+        warm_fallback_root().join(&hex[..16]).join("memd.sock")
     }
+}
+
+fn warm_fallback_root() -> PathBuf {
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|value| !value.is_empty()) {
+        return PathBuf::from(runtime).join("memd-warm");
+    }
+    #[cfg(unix)]
+    let name = format!("memd-warm-{}", unsafe { libc::geteuid() });
+    #[cfg(not(unix))]
+    let name = "memd-warm";
+    std::env::temp_dir().join(name)
+}
+
+fn prepare_warm_socket_dir(socket: &Path) -> Result<()> {
+    let root = warm_fallback_root();
+    if socket.starts_with(&root) {
+        ensure_private_warm_directory(&root)?;
+    }
+    if let Some(parent) = socket.parent() {
+        ensure_private_warm_directory(parent)?;
+    }
+    Ok(())
+}
+
+fn ensure_private_warm_directory(path: &Path) -> Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)?;
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(MemdError::ValidationError(
+            "warm socket directory must be a real directory".into(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(MemdError::ValidationError(
+                "warm socket directory belongs to another user".into(),
+            ));
+        }
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 fn warm_pid_path(config: &WarmProcessConfig) -> PathBuf {
@@ -1271,10 +1318,10 @@ async fn warm_start(config: &WarmProcessConfig) -> Result<Value> {
     // Backstop ceiling on resident warm workers so a misconfig — notably a
     // disabled idle timeout — cannot accumulate workers until the host OOMs
     // (2026-06-16: 639 workers / 215 GiB). Best-effort: counts live workers
-    // under the shared temp-fallback root + THIS data dir's root (not every
+    // under the per-user temp-fallback root + THIS data dir's root (not every
     // data dir on the host), and count→spawn is not atomic, so concurrent
     // spawns for distinct dirs may briefly overshoot. That is bounded — the
-    // real runaway vector (many ephemeral / long-path dirs → the shared temp
+    // real runaway vector (many ephemeral / long-path dirs → the per-user temp
     // root) is fully counted. On refusal the caller falls back to cold (Auto)
     // or surfaces the error (Required).
     let live = count_live_warm_workers(&config.data_dir);
@@ -1285,16 +1332,14 @@ async fn warm_start(config: &WarmProcessConfig) -> Result<Value> {
             cap, "warm worker cap reached; refusing to spawn (cold fallback)"
         );
         return Err(MemdError::ProtocolError(format!(
-            "warm worker cap reached ({live}/{cap} live under the shared temp root \
+            "warm worker cap reached ({live}/{cap} live under the per-user temp root \
              + this data dir); refusing to spawn. Raise MEMD_WARM_MAX_WORKERS or \
              reap leaked workers (see `memd warm status`)."
         )));
     }
 
     let socket = warm_socket_path(config);
-    if let Some(parent) = socket.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    prepare_warm_socket_dir(&socket)?;
     // Stale sockets are replaced atomically by the next worker bind+rename; client unlink can orphan a live worker that just bound.
 
     let log_path = warm_log_path(config);
@@ -1327,49 +1372,70 @@ async fn warm_start(config: &WarmProcessConfig) -> Result<Value> {
     }
 
     let mut child = command.spawn()?;
-    let pid = child.id();
+    wait_for_warm_child(config, &mut child).await
+}
 
-    let start = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| MemdError::ValidationError(format!("system time before epoch: {e}")))?
-        .as_millis();
-    for _ in 0..300 {
-        match warm_ping(config).await {
-            Ok(result) => {
+async fn wait_for_warm_child(
+    config: &WarmProcessConfig,
+    child: &mut std::process::Child,
+) -> Result<Value> {
+    let socket = warm_socket_path(config);
+    let log_path = warm_log_path(config);
+    let pid = child.id();
+    let start = Instant::now();
+    let timeout = std::env::var("MEMD_WARM_START_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_secs(600));
+    let readiness = async {
+        loop {
+            if let Ok(result) = warm_ping(config).await {
                 let serving_pid = result
                     .get("pid")
                     .and_then(Value::as_u64)
-                    .and_then(|pid| u32::try_from(pid).ok())
+                    .and_then(|value| u32::try_from(value).ok())
                     .unwrap_or(pid);
+                // A concurrent starter may have won. Do not leave our own
+                // child waiting to claim the writer lock after that winner.
+                if serving_pid != pid {
+                    let _ = child.kill();
+                    child.wait()?;
+                }
                 return Ok(json!({
-                    "status": "started",
-                    "pid": serving_pid,
-                    "socket": socket,
-                    "log": log_path,
-                    "startup_ms": SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map_err(|e| MemdError::ValidationError(format!("system time before epoch: {e}")))?
-                        .as_millis()
-                        .saturating_sub(start),
+                    "status": "started", "pid": serving_pid, "socket": socket,
+                    "log": log_path, "startup_ms": start.elapsed().as_millis(),
                     "result": result,
                 }));
             }
-            Err(_) => {
-                if let Some(status) = child.try_wait()? {
-                    return Err(MemdError::ProtocolError(format!(
-                        "warm worker exited before becoming ready: {status}; see {}",
-                        log_path.display()
-                    )));
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+            if let Some(status) = child.try_wait()? {
+                return Err(MemdError::ProtocolError(format!(
+                    "warm worker exited before becoming ready: {status}; see {}",
+                    log_path.display()
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
+    match tokio::time::timeout(timeout, readiness).await {
+        Ok(Ok(result)) => Ok(result),
+        outcome => {
+            // The client may fall back cold only after its worker releases
+            // the writer lock. wait() reaps the process before returning.
+            let _ = child.kill();
+            child.wait()?;
+            match outcome {
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err(MemdError::ProtocolError(format!(
+                    "warm worker did not become ready within {} ms; child stopped; see {}",
+                    timeout.as_millis(),
+                    log_path.display()
+                ))),
+                Ok(Ok(_)) => unreachable!(),
             }
         }
     }
-
-    Err(MemdError::ProtocolError(format!(
-        "warm worker did not become ready within 30s; see {}",
-        log_path.display()
-    )))
 }
 
 async fn warm_ping(config: &WarmProcessConfig) -> Result<Value> {
@@ -1542,6 +1608,18 @@ async fn warm_request(socket: &Path, request: &WarmWireRequest) -> Result<WarmWi
         stream.read_to_end(&mut bytes).await?;
         Ok::<WarmWireResponse, MemdError>(serde_json::from_slice(&bytes)?)
     };
+    // These requests can include LLM work, reranking, bulk writes, index
+    // rewrites, or arbitrary operation calls that legitimately take minutes.
+    let long_running = matches!(request, WarmWireRequest::Command { command } if matches!(
+        command.as_ref(),
+        WarmWireCommand::Consolidate { .. } | WarmWireCommand::ConsolidateReview { .. }
+        | WarmWireCommand::Purge { .. } | WarmWireCommand::ImportOmf { .. }
+        | WarmWireCommand::Batch { .. } | WarmWireCommand::Call { .. }
+        | WarmWireCommand::Search { reranker: SearchRerankerOptions { reranker: super::args::SearchReranker::Auto | super::args::SearchReranker::MemReranker4B, .. }, .. }
+    ));
+    if long_running {
+        return exchange.await;
+    }
     match tokio::time::timeout(timeout, exchange).await {
         Ok(result) => result,
         Err(_elapsed) => Err(MemdError::ProtocolError(format!(
@@ -1589,11 +1667,11 @@ async fn warm_idle_sleep(timeout: Option<Duration>, last_activity: Instant) {
     }
 }
 
-/// Default ceiling on concurrent warm workers, counted under the shared
+/// Default ceiling on concurrent warm workers, counted under the per-user
 /// temp-fallback socket root plus the current data dir's own socket root.
 /// Each worker pins the embedding model in RAM (~400MB on CPU); this bounds
 /// the runaway-accumulation vector (many ephemeral / long-path data dirs all
-/// falling back to the shared temp root) so no env/config — notably a
+/// falling back to the per-user temp root) so no env/config — notably a
 /// disabled idle timeout — can OOM the host. See 2026-06-16: 639 workers /
 /// 215 GiB.
 const DEFAULT_WARM_MAX_WORKERS: usize = 16;
@@ -1612,12 +1690,12 @@ fn parse_max_workers(value: Option<&str>) -> usize {
 }
 
 /// Count live warm workers across the roots where runaway accumulation
-/// concentrates: the shared temp-fallback root (used by long-path / ephemeral
+/// concentrates: the per-user temp-fallback root (used by long-path / ephemeral
 /// data dirs — the incident vector) and this data dir's own socket root.
 /// Reuses the per-worker `memd.pid` files and is strictly read-only, so it
 /// never races the orphan-eviction ownership check.
 fn count_live_warm_workers(data_dir: &Path) -> usize {
-    let temp_root = std::env::temp_dir().join("memd-warm");
+    let temp_root = warm_fallback_root();
     let data_root = data_dir.join("warm");
     let mut total = count_live_workers_under(&temp_root);
     if data_root != temp_root {
@@ -1701,12 +1779,7 @@ pub(super) async fn run_warm_worker<S: Store>(
     use tokio::net::UnixListener;
     use tokio::sync::Semaphore;
 
-    if let Some(parent) = socket.parent() {
-        std::fs::create_dir_all(parent)?;
-        // The socket dir is private to the owning user; this also tightens
-        // pre-existing dirs created by older versions with umask defaults.
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
-    }
+    prepare_warm_socket_dir(socket)?;
     let pid = std::process::id();
     remove_stale_warm_socket_temps(socket);
     let tmp_socket = warm_temp_socket_path(socket, pid);
@@ -1911,6 +1984,212 @@ mod tests {
     use tempfile::tempdir;
 
     static WARM_TIMEOUT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn audit_start_timeout_reaps_child_and_releases_writer_lock() {
+        use std::io::{BufRead, Write};
+        use std::os::fd::AsRawFd;
+        if let Some(path) = std::env::var_os("MEMD_AUDIT_LOCK_CHILD") {
+            let lock = std::fs::File::create(path).unwrap();
+            assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+            println!("memd-lock-ready");
+            std::io::stdout().flush().unwrap();
+            std::thread::sleep(Duration::from_secs(60));
+            return;
+        }
+        let _guard = WARM_TIMEOUT_ENV_LOCK.lock().await;
+        let dir = tempdir().unwrap();
+        let lock_path = dir.path().join("writer.lock");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cli::warm::tests::audit_start_timeout_reaps_child_and_releases_writer_lock",
+                "--nocapture",
+            ])
+            .env("MEMD_AUDIT_LOCK_CHILD", &lock_path)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut reader = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut ready = String::new();
+        loop {
+            ready.clear();
+            assert!(reader.read_line(&mut ready).unwrap() > 0);
+            if ready.contains("memd-lock-ready") {
+                break;
+            }
+        }
+        let lock = std::fs::File::open(lock_path).unwrap();
+        assert_ne!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        std::env::set_var("MEMD_WARM_START_TIMEOUT_MS", "50");
+        let result =
+            wait_for_warm_child(&test_warm_config(dir.path().join("data")), &mut child).await;
+        std::env::remove_var("MEMD_WARM_START_TIMEOUT_MS");
+        assert!(result.is_err());
+        assert!(child.try_wait().unwrap().is_some());
+        assert_eq!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn audit_dead_worker_returns_before_startup_budget() {
+        let dir = tempdir().unwrap();
+        let mut child = Command::new("sh").args(["-c", "exit 9"]).spawn().unwrap();
+        let start = Instant::now();
+        let result =
+            wait_for_warm_child(&test_warm_config(dir.path().join("data")), &mut child).await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("exited before becoming ready"));
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_socket_directory_is_private_and_rejects_symlinks() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = tempdir().unwrap();
+        let private = dir.path().join("private");
+        ensure_private_warm_directory(&private).unwrap();
+        assert_eq!(
+            std::fs::metadata(&private).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let alias = dir.path().join("alias");
+        symlink(&private, &alias).unwrap();
+        assert!(ensure_private_warm_directory(&alias).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn audit_start_waits_for_live_worker_past_thirty_seconds() {
+        let _guard = WARM_TIMEOUT_ENV_LOCK.lock().await;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::UnixListener;
+        let dir = tempdir().unwrap();
+        let config = test_warm_config(dir.path().join("data"));
+        let socket = warm_socket_path(&config);
+        let mut child = Command::new("sleep").arg("60").spawn().unwrap();
+        let server = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(31)).await;
+            std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+            let listener = UnixListener::bind(&socket).unwrap();
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).await.unwrap();
+            let response = WarmWireResponse::ok_result(warm_worker_identity(
+                &socket,
+                None,
+                "all-minilm",
+                "hybrid-feature",
+            ));
+            write_warm_response(&mut stream, response).await;
+        });
+        let result = wait_for_warm_child(&config, &mut child).await;
+        let _ = child.kill();
+        child.wait().unwrap();
+        server.abort();
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn audit_long_commands_outlive_short_request_timeout() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::UnixListener;
+        let _guard = WARM_TIMEOUT_ENV_LOCK.lock().await;
+        std::env::set_var("MEMD_WARM_CLIENT_TIMEOUT_MS", "50");
+        let dir = tempdir().unwrap();
+        let socket = dir.path().join("worker.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                stream.read_to_end(&mut bytes).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                write_warm_response(
+                    &mut stream,
+                    WarmWireResponse::ok_output("done".into(), None),
+                )
+                .await;
+            }
+        });
+        // Batch and arbitrary operations may contain maintenance work too.
+        let commands = [
+            WarmWireCommand::Consolidate {
+                tenant_id: Some("t".into()),
+                project_id: None,
+                project_dir: dir.path().into(),
+                max_region: 50,
+                dry_run: false,
+                background: false,
+                force: false,
+                promote: false,
+                legacy_immediate: false,
+            },
+            WarmWireCommand::Purge {
+                tenant_id: "t".into(),
+                project_id: None,
+                older_than_days: 30,
+                limit: 10,
+                include_unreadable_active: false,
+                archive: None,
+                apply: false,
+                vacuum_metadata: false,
+                rewrite_segments: false,
+            },
+            WarmWireCommand::Batch {
+                jsonl_content: "".into(),
+                continue_on_error: false,
+            },
+        ];
+        let mut results = Vec::new();
+        for command in commands {
+            results.push(
+                warm_request(
+                    &socket,
+                    &WarmWireRequest::Command {
+                        command: Box::new(command),
+                    },
+                )
+                .await,
+            );
+        }
+        std::env::remove_var("MEMD_WARM_CLIENT_TIMEOUT_MS");
+        server.abort();
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_long_socket_path_uses_private_user_root() {
+        let path = warm_socket_path_for_data_dir(&PathBuf::from(format!("/{}", "long".repeat(40))));
+        assert!(
+            !path.starts_with(std::env::temp_dir().join("memd-warm")),
+            "{path:?}"
+        );
+        // The private root contains a per-store hash and the socket.
+        let root = path.parent().unwrap().parent().unwrap();
+        let uid = unsafe { libc::geteuid() };
+        if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
+            assert!(root.starts_with(runtime));
+        } else {
+            assert!(root
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(&uid.to_string()));
+        }
+    }
 
     fn test_warm_config(data_dir: PathBuf) -> WarmProcessConfig {
         WarmProcessConfig {

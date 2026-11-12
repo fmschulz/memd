@@ -124,7 +124,6 @@ use crate::maintenance::{
     DreamReport, DreamScope, DreamStateSnapshot, PhysicalCompactionResult,
     DIGEST_ROLE_DREAM_REPORT,
 };
-use crate::metrics::{IndexStats, MetricsCollector};
 use crate::retrieval::{ContextPacker, PackerConfig, PackerInput};
 use crate::store::metadata::MetadataStore;
 use crate::store::usage::{query_hash_hex, UsageEvent, UsageOp};

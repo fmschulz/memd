@@ -104,7 +104,9 @@ memd consolidate --project-dir .
 ```
 
 The selector reads `MEMD_CONSOLIDATOR`: `claude` runs
-`claude -p --model claude-haiku-4-5-20251001 --output-format json`,
+`claude -p --model sonnet --output-format json --tools ""` with MCP, skills,
+and user/project settings disabled in a fresh temporary directory.
+`MEMD_CONSOLIDATION_MODEL` overrides the `consolidation_model` config key.
 `codex` runs `codex exec --model codex-5.3-spark --json --skip-git-repo-check
 --sandbox read-only`, `auto` picks Codex when `$CODEX_*` is set and falls
 back to `claude` on `PATH`. The whole spawn → stdin write → wait sequence
@@ -172,3 +174,7 @@ with `kind:consolidated` rows filtered out. Higher overlap loss means the
 consolidated lessons change more of the retrieved results.
 
 This command runs on the cold path; stop the warm worker first (`memd warm stop`).
+
+Automatic scope creation skips the home directory itself and `/`, including
+paths that resolve to them through symlinks. Explicit `memd init` may still
+create a scope there. Claude provenance reads `CLAUDE_CODE_SESSION_ID`.
