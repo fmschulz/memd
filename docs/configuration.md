@@ -89,6 +89,19 @@ without loading a dense model and preserves lexical rank by disabling metadata
 and query-text feature reranking. Stored feedback can still adjust the served
 order after lexical retrieval.
 
+## Embedding models
+
+Select the model with `--embedding-model`: `all-minilm` (default, 384 dimensions),
+`bge-small` (BAAI/bge-small-en-v1.5, 384 dimensions), or `bge-base`
+(BAAI/bge-base-en-v1.5, 768 dimensions). BGE uses CLS pooling, unit normalisation,
+and the query-only prefix `Represent this sentence for searching relevant passages: `.
+`bge-small` keeps the `hybrid-feature` search default.
+
+Switching models on an existing store requires a writable open with
+`MEMD_BACKFILL_HNSW_ON_STARTUP=1`. This rebuilds dense indexes from segments;
+equal vector dimensions do not make models interchangeable. Unmarked existing
+384-d stores are read as `all-minilm`, and 768-d stores as `bge-base`.
+
 ## Project alias compatibility
 
 Cross-tenant project aliasing is **off by default**. Enable it only when

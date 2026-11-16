@@ -7,6 +7,15 @@ operations** (`memd call <operation>` and `memd batch --jsonl`).
 
 ## Agent-facing commands
 
+The global `--embedding-model` flag accepts `all-minilm` (default, 384-d),
+`bge-small` (384-d CLS), `bge-base` (768-d CLS), and `qwen3` (unsupported by
+the Candle backend; uses MiniLM). Both BGE models normalise vectors and add the
+retrieval instruction to queries only. The default search variant is
+`hybrid-feature` for `bge-small` and `all-minilm`, and `dense-only` for `bge-base`.
+An explicit `--search-variant` overrides this default. To switch the model on
+an existing store, open a writer with `MEMD_BACKFILL_HNSW_ON_STARTUP=1` to rebuild
+its dense indexes from segments, even when both models have 384 dimensions.
+
 For write-quality expectations and cleanup safety, see the
 [Operational contract](operational-contract.md).
 

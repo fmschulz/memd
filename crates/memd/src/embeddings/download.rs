@@ -232,6 +232,21 @@ const MIN_CANDLE_BGE_CONFIG_SIZE: u64 = 100; // config.json is ~800 bytes
 const MIN_CANDLE_BGE_TOKENIZER_SIZE: u64 = 100_000; // tokenizer.json is ~700KB
 const MIN_CANDLE_BGE_WEIGHTS_SIZE: u64 = 400_000_000; // safetensors is ~438MB
 
+// Same pinned download contract, with a separate cache namespace for BGE-small.
+const CANDLE_BGE_SMALL_CONFIG_URL: &str = "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/config.json";
+const CANDLE_BGE_SMALL_CONFIG_SHA256: &str =
+    "094f8e891b932f2000c92cfc663bac4c62069f5d8af5b5278c4306aef3084750";
+const CANDLE_BGE_SMALL_CONFIG_FILENAME: &str = "bge-small-en-v1.5-config.json";
+const CANDLE_BGE_SMALL_TOKENIZER_URL: &str = "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/tokenizer.json";
+const CANDLE_BGE_SMALL_TOKENIZER_SHA256: &str =
+    "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66";
+const CANDLE_BGE_SMALL_TOKENIZER_FILENAME: &str = "bge-small-en-v1.5-tokenizer.json";
+const CANDLE_BGE_SMALL_WEIGHTS_URL: &str = "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/model.safetensors";
+const CANDLE_BGE_SMALL_WEIGHTS_SHA256: &str =
+    "3c9f31665447c8911517620762200d2245a2518d6e7208acc78cd9db317e21ad";
+const CANDLE_BGE_SMALL_WEIGHTS_FILENAME: &str = "bge-small-en-v1.5.safetensors";
+const MIN_CANDLE_BGE_SMALL_WEIGHTS_SIZE: u64 = 100_000_000;
+
 /// Which BERT-family model the Candle embedder loads.
 ///
 /// Selected through the normal config surface (`--embedding-model bge-base`,
@@ -246,6 +261,8 @@ pub enum CandleModel {
     MiniLm,
     /// BAAI/bge-base-en-v1.5: 768-d, CLS pooling, query prefix at recall
     BgeBase,
+    /// BAAI/bge-small-en-v1.5: 384-d, CLS pooling, query prefix at recall
+    BgeSmall,
 }
 
 impl CandleModel {
@@ -253,7 +270,7 @@ impl CandleModel {
     pub fn pooling_strategy(&self) -> PoolingStrategy {
         match self {
             Self::MiniLm => PoolingStrategy::Mean,
-            Self::BgeBase => PoolingStrategy::Cls,
+            Self::BgeBase | Self::BgeSmall => PoolingStrategy::Cls,
         }
     }
 
@@ -261,7 +278,9 @@ impl CandleModel {
     pub fn query_prefix(&self) -> Option<&'static str> {
         match self {
             Self::MiniLm => None,
-            Self::BgeBase => Some("Represent this sentence for searching relevant passages: "),
+            Self::BgeBase | Self::BgeSmall => {
+                Some("Represent this sentence for searching relevant passages: ")
+            }
         }
     }
 
@@ -270,6 +289,7 @@ impl CandleModel {
         match self {
             Self::MiniLm => "sentence-transformers/all-MiniLM-L6-v2",
             Self::BgeBase => "BAAI/bge-base-en-v1.5",
+            Self::BgeSmall => "BAAI/bge-small-en-v1.5",
         }
     }
 }
@@ -843,6 +863,26 @@ pub fn get_candle_model_paths(model: CandleModel) -> Result<(PathBuf, PathBuf, P
         weights: (&'static str, &'static str, &'static str, u64),
     }
     let spec = match model {
+        CandleModel::BgeSmall => Spec {
+            config: (
+                CANDLE_BGE_SMALL_CONFIG_URL,
+                CANDLE_BGE_SMALL_CONFIG_FILENAME,
+                CANDLE_BGE_SMALL_CONFIG_SHA256,
+                MIN_CANDLE_BGE_CONFIG_SIZE,
+            ),
+            tokenizer: (
+                CANDLE_BGE_SMALL_TOKENIZER_URL,
+                CANDLE_BGE_SMALL_TOKENIZER_FILENAME,
+                CANDLE_BGE_SMALL_TOKENIZER_SHA256,
+                MIN_CANDLE_BGE_TOKENIZER_SIZE,
+            ),
+            weights: (
+                CANDLE_BGE_SMALL_WEIGHTS_URL,
+                CANDLE_BGE_SMALL_WEIGHTS_FILENAME,
+                CANDLE_BGE_SMALL_WEIGHTS_SHA256,
+                MIN_CANDLE_BGE_SMALL_WEIGHTS_SIZE,
+            ),
+        },
         CandleModel::MiniLm => Spec {
             config: (
                 CANDLE_BERT_CONFIG_URL,
@@ -929,6 +969,19 @@ fn verify_file_size(path: &PathBuf, min_size: u64, file_type: &str) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bge_small_pooling_prefix_and_identity() {
+        assert_eq!(
+            CandleModel::BgeSmall.pooling_strategy(),
+            PoolingStrategy::Cls
+        );
+        assert_eq!(
+            CandleModel::BgeSmall.query_prefix(),
+            CandleModel::BgeBase.query_prefix()
+        );
+        assert_eq!(CandleModel::BgeSmall.hf_id(), "BAAI/bge-small-en-v1.5");
+    }
 
     fn loopback_listener_or_skip(test_name: &str) -> Option<std::net::TcpListener> {
         match std::net::TcpListener::bind("127.0.0.1:0") {
@@ -1043,6 +1096,9 @@ mod tests {
             CANDLE_BGE_CONFIG_URL,
             CANDLE_BGE_TOKENIZER_URL,
             CANDLE_BGE_WEIGHTS_URL,
+            CANDLE_BGE_SMALL_CONFIG_URL,
+            CANDLE_BGE_SMALL_TOKENIZER_URL,
+            CANDLE_BGE_SMALL_WEIGHTS_URL,
             EmbeddingModel::AllMiniLmL6V2.model_url(),
             EmbeddingModel::AllMiniLmL6V2.tokenizer_url(),
             EmbeddingModel::Qwen3Embedding0_6B.model_url(),
@@ -1068,6 +1124,9 @@ mod tests {
             CANDLE_BGE_CONFIG_SHA256,
             CANDLE_BGE_TOKENIZER_SHA256,
             CANDLE_BGE_WEIGHTS_SHA256,
+            CANDLE_BGE_SMALL_CONFIG_SHA256,
+            CANDLE_BGE_SMALL_TOKENIZER_SHA256,
+            CANDLE_BGE_SMALL_WEIGHTS_SHA256,
         ];
         for hash in hashes {
             assert_sha256_constant(hash);
@@ -1231,6 +1290,24 @@ mod tests {
         assert_ne!(CANDLE_BERT_TOKENIZER_FILENAME, TOKENIZER_FILENAME);
         assert!(CANDLE_BERT_TOKENIZER_FILENAME.contains("sentence-transformers"));
         assert!(CANDLE_BERT_WEIGHTS_FILENAME.ends_with(".safetensors"));
+        let filenames = [
+            CANDLE_BERT_CONFIG_FILENAME,
+            CANDLE_BERT_TOKENIZER_FILENAME,
+            CANDLE_BERT_WEIGHTS_FILENAME,
+            CANDLE_BGE_CONFIG_FILENAME,
+            CANDLE_BGE_TOKENIZER_FILENAME,
+            CANDLE_BGE_WEIGHTS_FILENAME,
+            CANDLE_BGE_SMALL_CONFIG_FILENAME,
+            CANDLE_BGE_SMALL_TOKENIZER_FILENAME,
+            CANDLE_BGE_SMALL_WEIGHTS_FILENAME,
+        ];
+        assert_eq!(
+            filenames
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            filenames.len()
+        );
     }
 
     #[test]

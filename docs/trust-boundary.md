@@ -40,9 +40,13 @@ for source coverage, command cleanup, and transfer limits.
 
 - The warm worker creates its Unix socket in a `0700` runtime directory and
   chmods the socket file to `0600` before accepting connections.
-- Embedding model and tokenizer downloads for all-MiniLM-L6-v2 and
-  Qwen3-Embedding-0.6B are pinned to immutable Hugging Face commit revisions
+- Embedding model and tokenizer downloads for all-MiniLM-L6-v2,
+  BAAI/bge-small-en-v1.5, BAAI/bge-base-en-v1.5, and Qwen3-Embedding-0.6B
+  are pinned to immutable Hugging Face commit revisions
   and verified against compiled-in SHA-256 digests.
+- Dense indexes record their embedding model. A different model is rejected,
+  including one with the same vector dimension. A writer open with
+  `MEMD_BACKFILL_HNSW_ON_STARTUP=1` opts into rebuilding from segments.
 - Corrupted or tampered embedding model/tokenizer files are rejected and never
   loaded.
 - CLI writers share a data-directory writer lock. This coordinates processes;

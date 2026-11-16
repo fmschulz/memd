@@ -69,6 +69,10 @@ pub struct DenseSearcher {
 }
 
 impl DenseSearcher {
+    pub(crate) fn model(&self) -> CandleModel {
+        self.config.model
+    }
+
     /// Create a new dense searcher with Candle embedder
     pub fn new(config: DenseSearchConfig) -> Result<Self> {
         let embedding_config = EmbeddingConfig {

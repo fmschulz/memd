@@ -23,6 +23,13 @@ through verified task outcomes.
 For low-latency local use, `memd` keeps the store and indexes hot through a
 private CLI-managed warm worker driven by ordinary CLI commands.
 
+`--embedding-model` selects `all-minilm` (default, 384 dimensions), `bge-small`
+(BAAI/bge-small-en-v1.5, 384 dimensions), or `bge-base` (768 dimensions).
+Both BGE models use CLS pooling, unit-normalised vectors, and a query-only
+instruction prefix. Switching models on an existing store requires a writer
+open with `MEMD_BACKFILL_HNSW_ON_STARTUP=1` to rebuild dense vectors from segments,
+including switches between the two 384-dimensional models.
+
 **Full documentation: [fmschulz.github.io/memd](https://fmschulz.github.io/memd/)**
 
 ## What it does

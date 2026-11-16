@@ -478,6 +478,156 @@ impl Embedder for CandleEmbedder {
 mod tests {
     use super::*;
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires pinned MiniLM and BGE-small model files in the model cache"]
+    async fn bge_small_reference_and_same_dimension_rebuild() {
+        use crate::index::EmbeddingCache;
+        use crate::store::Store;
+        use crate::types::{ChunkType, MemoryChunk, TenantId};
+        use crate::{PersistentStore, PersistentStoreConfig};
+
+        let sentence = "the cat sat on the mat";
+        // Independent float64 NumPy BERT forward pass, CLS + L2, pinned
+        // revision 5c38ec7c405ec4b44b94cc5a9bb96e735b38267a.
+        let document_reference = [
+            0.030454374,
+            -0.010436759,
+            0.0030197523,
+            0.061055217,
+            -0.03193069,
+            -0.00399272,
+            0.08802044,
+            0.09531104,
+            0.06485733,
+            0.043397103,
+            -0.020592682,
+            -0.054777026,
+        ];
+        let query_reference = [
+            0.023824256,
+            -0.0016893448,
+            -0.010143985,
+            0.07980437,
+            -0.01056636,
+            -0.00067347835,
+            0.08750715,
+            0.10632792,
+            0.03941586,
+            0.046982303,
+            -0.005884339,
+            -0.051092632,
+        ];
+        let embedder = CandleEmbedder::with_config_and_model(
+            EmbeddingConfig::default(),
+            CandleModel::BgeSmall,
+        )
+        .unwrap();
+        let document = embedder.embed_texts(&[sentence]).await.unwrap().remove(0);
+        let query = embedder.embed_query(sentence).await.unwrap();
+        for (actual, expected) in [(&document, document_reference), (&query, query_reference)] {
+            assert_eq!(actual.len(), 384);
+            assert!((actual.iter().map(|v| v * v).sum::<f32>() - 1.0).abs() < 1e-5);
+            for (value, reference) in actual.iter().zip(expected) {
+                assert!(
+                    (value - reference).abs() < 1e-4,
+                    "got {value}, expected {reference}"
+                );
+            }
+        }
+        let cosine: f32 = document.iter().zip(&query).map(|(a, b)| a * b).sum();
+        assert!((cosine - 0.9492462).abs() < 1e-4, "got {cosine}");
+        drop(embedder);
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = PersistentStoreConfig {
+            data_dir: dir.path().into(),
+            enable_dense_search: true,
+            enable_hybrid_search: false,
+            enable_async_indexing: false,
+            backfill_hnsw_on_startup: false,
+            ..Default::default()
+        };
+        let tenants = [
+            TenantId::new("model_a").unwrap(),
+            TenantId::new("model_b").unwrap(),
+        ];
+        let cache_path = |tenant: &TenantId| {
+            dir.path()
+                .join("tenants")
+                .join(tenant.to_string())
+                .join("warm_index/embeddings.bin")
+        };
+        {
+            let store = PersistentStore::open(config.clone()).unwrap();
+            for tenant in &tenants {
+                store
+                    .add(MemoryChunk::new(tenant.clone(), sentence, ChunkType::Doc))
+                    .await
+                    .unwrap();
+            }
+            store.shutdown().unwrap();
+        }
+        let original = std::fs::read(cache_path(&tenants[0])).unwrap();
+        let mut switched = config.clone();
+        switched.candle_model = CandleModel::BgeSmall;
+        let error = PersistentStore::open(switched.clone())
+            .err()
+            .expect("same-dimension switch must fail");
+        assert!(error.to_string().contains("all-MiniLM-L6-v2"));
+        assert!(error.to_string().contains("bge-small-en-v1.5"));
+        assert_eq!(std::fs::read(cache_path(&tenants[0])).unwrap(), original);
+        switched.read_only = true;
+        assert!(PersistentStore::open(switched.clone()).is_err());
+        switched.read_only = false;
+        switched.backfill_hnsw_on_startup = true;
+        {
+            let store = PersistentStore::open(switched.clone()).unwrap();
+            // shutdown waits for the startup rebuild and saves every tenant.
+            store.shutdown().unwrap();
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("embedding_model"))
+                .unwrap()
+                .trim(),
+            CandleModel::BgeSmall.hf_id()
+        );
+        for tenant in &tenants {
+            let cache = EmbeddingCache::load_from(&cache_path(tenant)).unwrap();
+            let rebuilt = cache.get(0).unwrap();
+            assert_eq!(cache.len(), 1);
+            for (actual, expected) in rebuilt.iter().zip(&document) {
+                assert!(
+                    (actual - expected).abs() < 1e-5,
+                    "old model vector survived the rebuild"
+                );
+            }
+        }
+        assert!(
+            PersistentStore::open(config).is_err(),
+            "reverse switch must fail too"
+        );
+        switched.backfill_hnsw_on_startup = false;
+        {
+            let store = PersistentStore::open(switched).unwrap();
+            // Extend the rebuilt cache, then verify both rows use BGE-small.
+            store
+                .add(MemoryChunk::new(
+                    tenants[0].clone(),
+                    "a feline rested on a rug",
+                    ChunkType::Doc,
+                ))
+                .await
+                .unwrap();
+            store.shutdown().unwrap();
+        }
+        assert_eq!(
+            EmbeddingCache::load_from(&cache_path(&tenants[0]))
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
     #[test]
     fn parse_cuda_index_handles_all_forms() {
         assert_eq!(parse_cuda_index("cuda"), 0);

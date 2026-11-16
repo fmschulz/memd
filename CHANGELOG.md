@@ -6,6 +6,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Added
+
+- `--embedding-model bge-small` selects pinned BAAI/bge-small-en-v1.5 assets: 384-d, CLS pooling, normalised vectors, query-only instruction, and the `hybrid-feature` search default.
+
+### Changed
+
+- Dense indexes record the embedding model and reject switches, including between two 384-d models. Switching an existing store requires `MEMD_BACKFILL_HNSW_ON_STARTUP=1` to rebuild from segments; unmarked 384-d and 768-d stores are treated as MiniLM and BGE-base respectively.
+
 ### Removed
 
 - **Breaking:** removed legacy evaluations, suites with deleted datasets, unpublished cross-system experiments, and unused evaluation symlinks.

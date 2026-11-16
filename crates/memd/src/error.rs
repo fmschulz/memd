@@ -77,6 +77,16 @@ pub enum MemdError {
         model_dim: usize,
     },
 
+    /// Models with equal vector dimensions still have incompatible embeddings.
+    #[error(
+        "dense index at {path} was built with embedding model {store_model}, but the active model is {active_model}. Re-open with the original model, or set MEMD_BACKFILL_HNSW_ON_STARTUP=1 on a writer to discard the dense indexes and re-embed from segments."
+    )]
+    DenseIndexEmbeddingModelMismatch {
+        path: std::path::PathBuf,
+        store_model: String,
+        active_model: String,
+    },
+
     /// Another process currently owns the persistent-store writer lock.
     #[error(
         "writer lock held by another process ({holder}) at {lock_path}; if a memd warm worker is running, route this write through it (--warm auto, the default) or stop it with `memd warm stop`; otherwise stop the other memd process or retry later (MEMD_WRITER_LOCK_TIMEOUT_MS)"

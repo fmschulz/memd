@@ -746,6 +746,15 @@ impl PersistentStore {
         let dense_searcher = if config.enable_dense_search {
             use super::dense::DenseSearchConfig;
 
+            // Fail before initializing an embedder (whose errors may fall back
+            // to BM25), and before revision migration can remove old vectors.
+            embedding_rebuild_pending = embedding_revision::prepare_model(
+                &config.data_dir,
+                config.candle_model,
+                config.read_only,
+                config.backfill_hnsw_on_startup,
+            )?;
+
             let mut dense_config = DenseSearchConfig {
                 model: config.candle_model,
                 ..DenseSearchConfig::default()
@@ -762,7 +771,7 @@ impl PersistentStore {
                     // embedder revision are discarded and rebuilt below.
                     if !config.read_only {
                         match embedding_revision::prepare(&config.data_dir) {
-                            Ok(pending) => embedding_rebuild_pending = pending,
+                            Ok(pending) => embedding_rebuild_pending |= pending,
                             Err(error) => warn!(
                                 error = %error,
                                 "could not check the embedding revision of the dense indexes"
@@ -1775,6 +1784,10 @@ fn finish_embedding_rebuild(dense: Option<&DenseSearcher>, data_dir: &Path, pend
     if let Some(dense) = dense {
         if let Err(error) = dense.save_all() {
             warn!(error = %error, "could not save the rebuilt dense indexes");
+            return;
+        }
+        if let Err(error) = embedding_revision::mark_model_current(data_dir, dense.model()) {
+            warn!(error = %error, "could not record the embedding model");
             return;
         }
     }

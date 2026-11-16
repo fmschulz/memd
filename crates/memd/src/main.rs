@@ -24,6 +24,8 @@ enum ModelChoice {
     /// bge-base-en-v1.5: 768-dim Candle BERT, stronger retrieval (CLS pooling,
     /// dense-only by default)
     BgeBase,
+    /// bge-small-en-v1.5: 384-dim Candle BERT, CLS pooling
+    BgeSmall,
 }
 
 impl From<ModelChoice> for EmbeddingModel {
@@ -33,7 +35,7 @@ impl From<ModelChoice> for EmbeddingModel {
             ModelChoice::Qwen3 => EmbeddingModel::Qwen3Embedding0_6B,
             // EmbeddingModel is the vestigial ONNX-era selector and has no bge
             // variant; the live Candle model is chosen via CandleModel below.
-            ModelChoice::BgeBase => EmbeddingModel::AllMiniLmL6V2,
+            ModelChoice::BgeBase | ModelChoice::BgeSmall => EmbeddingModel::AllMiniLmL6V2,
         }
     }
 }
@@ -45,6 +47,7 @@ impl From<ModelChoice> for CandleModel {
             // run MiniLM there, so preserve that behavior.
             ModelChoice::AllMinilm | ModelChoice::Qwen3 => CandleModel::MiniLm,
             ModelChoice::BgeBase => CandleModel::BgeBase,
+            ModelChoice::BgeSmall => CandleModel::BgeSmall,
         }
     }
 }
@@ -55,6 +58,7 @@ impl ModelChoice {
             ModelChoice::AllMinilm => "all-minilm",
             ModelChoice::Qwen3 => "qwen3",
             ModelChoice::BgeBase => "bge-base",
+            ModelChoice::BgeSmall => "bge-small",
         }
     }
 }
@@ -393,6 +397,38 @@ fn apply_search_variant(search_variant: SearchVariant, config: &mut PersistentSt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bge_small_cli_and_variant_resolution() {
+        let args = Args::try_parse_from([
+            "memd",
+            "--embedding-model",
+            "bge-small",
+            "stats",
+            "--tenant-id",
+            "test",
+        ])
+        .unwrap();
+        assert_eq!(args.embedding_model.cli_value(), "bge-small");
+        assert_eq!(
+            CandleModel::from(args.embedding_model).hf_id(),
+            "BAAI/bge-small-en-v1.5"
+        );
+        assert!(matches!(
+            resolve_search_variant(None, args.embedding_model),
+            SearchVariant::HybridFeature
+        ));
+        assert!(matches!(
+            resolve_search_variant(Some(SearchVariant::DenseOnly), args.embedding_model),
+            SearchVariant::DenseOnly
+        ));
+        assert_eq!(
+            Args::try_parse_from(["memd", "stats", "--tenant-id", "test"])
+                .unwrap()
+                .embedding_model,
+            ModelChoice::AllMinilm
+        );
+    }
 
     #[test]
     fn model_choice_maps_to_candle_model() {

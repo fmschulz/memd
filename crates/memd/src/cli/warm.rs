@@ -2804,6 +2804,30 @@ mod tests {
     }
 
     #[test]
+    fn bge_small_client_rejects_same_dimension_minilm_worker() {
+        let mut config = test_warm_config(PathBuf::from("/tmp/warm-small-test"));
+        config.embedding_model = "bge-small".into();
+        let payload = warm_worker_identity(
+            Path::new("/tmp/memd.sock"),
+            None,
+            "all-minilm",
+            "hybrid-feature",
+        );
+        let error = validate_warm_worker_config(&payload, &config).unwrap_err();
+        assert!(
+            matches!(&error, MemdError::WarmWorkerConfigMismatch { worker_model, cli_model, .. } if worker_model == "all-minilm" && cli_model == "bge-small")
+        );
+        assert!(warm_worker_needs_replacement(&error));
+        let matching = warm_worker_identity(
+            Path::new("/tmp/memd.sock"),
+            None,
+            "bge-small",
+            "hybrid-feature",
+        );
+        validate_warm_worker_config(&matching, &config).unwrap();
+    }
+
+    #[test]
     fn warm_worker_replacement_predicate_rejects_other_errors() {
         assert!(!warm_worker_needs_replacement(&MemdError::ProtocolError(
             "x".to_string()
