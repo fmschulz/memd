@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anndists::dist::distances::DistCosine;
@@ -186,6 +187,10 @@ pub struct HnswIndex {
     config: HnswConfig,
     /// Path for persistence (None = in-memory only)
     persist_path: Option<PathBuf>,
+    /// Whether memory holds a change the files on disk do not. Set by an
+    /// insert, a graph swap, or a load that had to repair what it read;
+    /// cleared by a successful save.
+    dirty: AtomicBool,
 }
 
 impl HnswIndex {
@@ -221,6 +226,7 @@ impl HnswIndex {
         for id in excluded_internal_ids {
             cache.mark_invalid(*id);
         }
+        self.dirty.store(true, Ordering::Release);
     }
 
     /// Create a new empty HNSW index
@@ -239,6 +245,7 @@ impl HnswIndex {
             embedding_cache: RwLock::new(EmbeddingCache::new(config.dimension)),
             config,
             persist_path: None,
+            dirty: AtomicBool::new(false),
         }
     }
 
@@ -298,6 +305,9 @@ impl HnswIndex {
         let mut index = Self::new(config);
         if !read_only {
             index.persist_path = Some(path);
+            // Files that failed to load are replaced by this index at the
+            // next save, as before the dirty flag.
+            *index.dirty.get_mut() = has_mapping;
         }
         Ok(index)
     }
@@ -323,6 +333,7 @@ impl HnswIndex {
             let internal_id = mapping.insert(chunk_id);
             // Store in cache for persistence
             cache.insert(internal_id, embedding)?;
+            self.dirty.store(true, Ordering::Release);
             internal_id
         };
 
@@ -355,6 +366,7 @@ impl HnswIndex {
             }
             let internal_id = mapping.insert(chunk_id);
             cache.insert(internal_id, embedding)?;
+            self.dirty.store(true, Ordering::Release);
             to_insert.push((embedding.as_slice(), internal_id));
         }
         drop(cache);
@@ -463,7 +475,20 @@ impl HnswIndex {
             .as_ref()
             .ok_or_else(|| MemdError::StorageError("no persistence path configured".into()))?;
 
+        // Clear the flag before the snapshot: a change that lands while the
+        // save runs sets it again and the next save writes it.
+        self.dirty.store(false, Ordering::Release);
         self.save_to(path)
+            .inspect_err(|_| self.dirty.store(true, Ordering::Release))
+    }
+
+    /// Save to the persistence path only if the index changed since its last
+    /// save. An index without a persistence path has nothing to save.
+    pub fn save_if_dirty(&self) -> Result<()> {
+        if self.persist_path.is_none() || !self.dirty.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.save()
     }
 
     /// Save index to specific path.
@@ -548,10 +573,14 @@ impl HnswIndex {
         Self::purge_graph_dumps(path)?;
 
         if self.config.persist_graph_dump {
-            // Save HNSW graph using hnsw_rs file_dump
+            // Save HNSW graph using hnsw_rs file_dump. It fails on a graph
+            // without points, and `load_dumped_graph` ignores a dump when the
+            // cache is empty, so an empty graph needs no dump.
             let hnsw = self.hnsw.read();
-            hnsw.file_dump(path, "graph")
-                .map_err(|e| MemdError::StorageError(format!("dump hnsw: {:?}", e)))?;
+            if hnsw.get_nb_point() > 0 {
+                hnsw.file_dump(path, "graph")
+                    .map_err(|e| MemdError::StorageError(format!("dump hnsw: {:?}", e)))?;
+            }
         } else {
             tracing::debug!(
                 path = ?path,
@@ -684,6 +713,9 @@ impl HnswIndex {
         // mapping.json (see save_to).
         let bin_path = path.join("mapping.bin");
         let json_path = path.join("mapping.json");
+        // Set when the load had to repair what it read. The next save then
+        // writes the repair, even if nothing else changes.
+        let mut repaired = false;
         let mapping: IndexMapping = if bin_path.exists() {
             let mut file = File::open(&bin_path)?;
             let mut buf = Vec::new();
@@ -698,6 +730,7 @@ impl HnswIndex {
                 path = ?path,
                 "loading legacy mapping.json; will rewrite as mapping.bin on next save"
             );
+            repaired = true;
             let mut file = File::open(&json_path)?;
             let mut buf = Vec::new();
             file.read_to_end(&mut buf)?;
@@ -729,6 +762,7 @@ impl HnswIndex {
                                  backfill opt-in set — discarding cache and re-embedding from segments"
                             );
                             let _ = std::fs::remove_file(&cache_path);
+                            repaired = true;
                             EmbeddingCache::new(config.dimension)
                         } else {
                             return Err(MemdError::DenseIndexModelMismatch {
@@ -749,6 +783,7 @@ impl HnswIndex {
                         if !read_only {
                             let _ = std::fs::remove_file(&cache_path);
                         }
+                        repaired = true;
                         EmbeddingCache::new(config.dimension)
                     } else {
                         cache
@@ -763,11 +798,13 @@ impl HnswIndex {
                         // Delete corrupted cache so the writer path can rebuild cleanly.
                         let _ = std::fs::remove_file(&cache_path);
                     }
+                    repaired = true;
                     EmbeddingCache::new(config.dimension)
                 }
             }
         } else {
             tracing::info!("No embedding cache found. Will need rebuild from segments.");
+            repaired = true;
             EmbeddingCache::new(config.dimension)
         };
 
@@ -802,6 +839,11 @@ impl HnswIndex {
             }
         };
 
+        // A graph rebuilt from the cache replaces a dump that was missing,
+        // partial or out of step with the cache. Without a save the rebuild
+        // repeats on every load.
+        repaired |= config.persist_graph_dump && expected_points > 0 && !loaded_dump;
+
         let elapsed = start.elapsed();
 
         if loaded_dump {
@@ -826,6 +868,7 @@ impl HnswIndex {
             embedding_cache: RwLock::new(embedding_cache),
             config,
             persist_path: (!read_only).then(|| path.to_path_buf()),
+            dirty: AtomicBool::new(repaired),
         })
     }
 
@@ -1214,6 +1257,135 @@ mod tests {
             let mapping = index.mapping.read();
             assert!(mapping.chunk_to_id.contains_key(&chunk_id_str));
         }
+    }
+
+    fn small_config() -> HnswConfig {
+        HnswConfig {
+            max_elements: 100,
+            dimension: 4,
+            ..Default::default()
+        }
+    }
+
+    /// Removing a file after a save shows whether a later save wrote it again.
+    #[test]
+    fn save_if_dirty_writes_only_after_a_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index");
+        let index = HnswIndex::with_persistence(small_config(), &path).unwrap();
+
+        index.save_if_dirty().unwrap();
+        assert!(!path.join("mapping.bin").exists(), "empty index saved");
+
+        let chunk = ChunkId::new();
+        let mut emb = vec![1.0, 0.0, 0.0, 0.0];
+        normalize(&mut emb);
+        index.insert(&chunk, &emb).unwrap();
+        index.save_if_dirty().unwrap();
+        assert!(path.join("mapping.bin").exists(), "insert was not saved");
+
+        std::fs::remove_file(path.join("mapping.bin")).unwrap();
+        index.save_if_dirty().unwrap();
+        assert!(!path.join("mapping.bin").exists(), "clean index saved");
+
+        // Inserting the vector that is already indexed changes nothing.
+        index.insert(&chunk, &emb).unwrap();
+        index.insert_batch(&[(chunk.clone(), emb.clone())]).unwrap();
+        index.save_if_dirty().unwrap();
+        assert!(!path.join("mapping.bin").exists(), "no-op insert saved");
+
+        // A new vector, a batch insert and a graph swap each make it dirty.
+        let mut other = vec![0.0, 1.0, 0.0, 0.0];
+        normalize(&mut other);
+        index.insert(&ChunkId::new(), &other).unwrap();
+        index.save_if_dirty().unwrap();
+        assert!(path.join("mapping.bin").exists());
+
+        std::fs::remove_file(path.join("mapping.bin")).unwrap();
+        index
+            .insert_batch(&[(ChunkId::new(), vec![0.0, 0.0, 1.0, 0.0])])
+            .unwrap();
+        index.save_if_dirty().unwrap();
+        assert!(path.join("mapping.bin").exists());
+
+        std::fs::remove_file(path.join("mapping.bin")).unwrap();
+        let fresh = Hnsw::new(16, 100, 16, 200, DistCosine {});
+        index.swap_graph(fresh, &HashSet::new());
+        index.save_if_dirty().unwrap();
+        assert!(path.join("mapping.bin").exists(), "graph swap not saved");
+    }
+
+    #[test]
+    fn save_if_dirty_returns_the_save_error_and_stays_dirty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index");
+        let index = HnswIndex::with_persistence(small_config(), &path).unwrap();
+        let mut emb = vec![1.0, 0.0, 0.0, 0.0];
+        normalize(&mut emb);
+        index.insert(&ChunkId::new(), &emb).unwrap();
+
+        std::fs::write(&path, b"not a directory").unwrap();
+        index.save_if_dirty().unwrap_err();
+
+        std::fs::remove_file(&path).unwrap();
+        index.save_if_dirty().unwrap();
+        assert!(path.join("mapping.bin").exists());
+    }
+
+    /// A compaction can leave an index with no live point. Saving it must
+    /// succeed: the dump of an empty graph fails, and the failure would now
+    /// reach the caller.
+    #[test]
+    fn saving_an_index_without_points_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index");
+        let index = HnswIndex::with_persistence(small_config(), &path).unwrap();
+        index.save().unwrap();
+        assert!(path.join("mapping.bin").exists());
+        assert!(path.join("embeddings.bin").exists());
+        assert!(!path.join("graph.hnsw.graph").exists());
+
+        let reloaded = HnswIndex::with_persistence(small_config(), &path).unwrap();
+        assert!(reloaded.is_empty());
+    }
+
+    #[test]
+    fn index_without_a_persistence_path_has_nothing_to_save() {
+        let index = HnswIndex::new(small_config());
+        let mut emb = vec![1.0, 0.0, 0.0, 0.0];
+        normalize(&mut emb);
+        index.insert(&ChunkId::new(), &emb).unwrap();
+        index.save_if_dirty().unwrap();
+    }
+
+    /// A load that found nothing to repair is clean. One that had to rebuild
+    /// the graph from the embedding cache saves again, so the repair sticks.
+    #[test]
+    fn loaded_index_is_saved_again_only_when_the_load_repaired_something() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index");
+        {
+            let index = HnswIndex::with_persistence(small_config(), &path).unwrap();
+            let mut emb = vec![1.0, 0.0, 0.0, 0.0];
+            normalize(&mut emb);
+            index.insert(&ChunkId::new(), &emb).unwrap();
+            index.save_if_dirty().unwrap();
+        }
+
+        let index = HnswIndex::with_persistence(small_config(), &path).unwrap();
+        std::fs::remove_file(path.join("config.json")).unwrap();
+        index.save_if_dirty().unwrap();
+        assert!(!path.join("config.json").exists(), "clean load saved");
+        drop(index);
+
+        std::fs::remove_file(path.join("graph.hnsw.graph")).unwrap();
+        std::fs::remove_file(path.join("graph.hnsw.data")).unwrap();
+        let index = HnswIndex::with_persistence(small_config(), &path).unwrap();
+        index.save_if_dirty().unwrap();
+        assert!(
+            path.join("graph.hnsw.graph").exists(),
+            "the rebuilt graph was not saved again"
+        );
     }
 
     #[test]

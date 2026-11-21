@@ -97,6 +97,14 @@ Select the model with `--embedding-model`: `all-minilm` (default, 384 dimensions
 and the query-only prefix `Represent this sentence for searching relevant passages: `.
 `bge-small` keeps the `hybrid-feature` search default.
 
+The model loads on the first call that embeds text, not when a store opens.
+Commands that never embed, such as `get`, `stats` and `doctor`, do not load it,
+and a missing or broken model file is an error of the call that needed the
+embedding. One copy of the weights serves all concurrent work. Each forward
+pass runs on one thread and a call that embeds many texts runs one pass per
+core, up to 32, with at most 8 texts per pass; `MEMD_EMBED_BATCH_SIZE` can
+lower that limit.
+
 Switching models on an existing store requires a writable open with
 `MEMD_BACKFILL_HNSW_ON_STARTUP=1`. This rebuilds dense indexes from segments;
 equal vector dimensions do not make models interchangeable. Unmarked existing

@@ -1,9 +1,9 @@
 //! Candle-based embedding implementation
 //!
-//! Pure Rust embeddings using Candle framework with model pooling for parallelism.
+//! Pure Rust embeddings using the Candle framework. One copy of the model
+//! serves every batch, and it loads on the first embedding call.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use candle_core::{Device, Tensor};
@@ -18,12 +18,39 @@ use crate::embeddings::traits::{Embedder, EmbeddingConfig, EmbeddingResult, Pool
 use crate::error::{MemdError, Result};
 
 const DEFAULT_MAX_LENGTH: usize = 512;
-const MODEL_POOL_SIZE: usize = 4; // 4 models for parallel inference
-                                  // MAX_CONCURRENT derived from MODEL_POOL_SIZE to avoid duplication
-const MAX_CONCURRENT: usize = MODEL_POOL_SIZE;
+/// Most forward passes that run at the same time. Each runs on one thread,
+/// the weights are shared, and `BertModel::forward` takes `&self`.
+const MAX_INFERENCE_WORKERS: usize = 32;
+/// Most texts in one forward pass. With `MAX_INFERENCE_WORKERS` this bounds
+/// the activation memory of a large call to 256 texts at a time.
+const MAX_FORWARD_ROWS: usize = 8;
 
-// Global counter for round-robin model selection
-static MODEL_COUNTER: AtomicUsize = AtomicUsize::new(0);
+/// Forward passes that run at once on this machine.
+fn inference_workers() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, |cores| cores.get())
+        .min(MAX_INFERENCE_WORKERS)
+}
+
+/// Texts per forward pass for a call that embeds `texts` texts on `workers`
+/// threads. A pass holds at most `configured` and `MAX_FORWARD_ROWS` texts,
+/// and a call is split finely enough that every worker has a pass to run.
+fn forward_batch_size(configured: usize, texts: usize, workers: usize) -> usize {
+    configured
+        .clamp(1, MAX_FORWARD_ROWS)
+        .min(texts.div_ceil(workers.max(1)))
+        .max(1)
+}
+
+/// Run `work` on a fresh pool of one thread and wait for it.
+fn on_one_thread<T: Send>(work: impl FnOnce() -> T + Send) -> Result<T> {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .thread_name(|_| "memd-embed".to_string())
+        .build()
+        .map_err(|e| MemdError::EmbeddingError(format!("Failed to start inference thread: {e}")))?;
+    Ok(pool.install(work))
+}
 
 /// Parse a CUDA ordinal from a `MEMD_EMBED_DEVICE` value such as `cuda:2`,
 /// `gpu:1`, or a bare `3`. Falls back to device 0 when no index is present
@@ -81,99 +108,72 @@ fn normalize(tensor: &Tensor) -> Result<Tensor> {
     Ok(normalized)
 }
 
-/// Candle-based embedder with model pooling
-#[derive(Clone)]
-pub struct CandleEmbedder {
-    /// Pool of BERT models for parallel inference
-    model_pool: Vec<Arc<Mutex<BertModel>>>,
-    /// Shared tokenizer (thread-safe)
-    tokenizer: Arc<Tokenizer>,
-    /// Semaphore to limit concurrent inference
-    semaphore: Arc<Semaphore>,
-    /// Shared device for computation (Arc for thread-safe cloning)
-    device: Arc<Device>,
-    /// Embedding dimension
-    dimension: usize,
-    /// Embedding configuration
-    config: EmbeddingConfig,
-    /// Retrieval query prefix (model-specific; applied to queries only)
-    query_prefix: Option<&'static str>,
-}
-
-impl CandleEmbedder {
-    /// Create a new CandleEmbedder with the default model (all-MiniLM-L6-v2).
-    pub fn new() -> Result<Self> {
-        Self::with_config(EmbeddingConfig::default())
-    }
-
-    /// Create with custom configuration and the default model
-    /// (all-MiniLM-L6-v2). Use `with_config_and_model` to select a model.
-    pub fn with_config(config: EmbeddingConfig) -> Result<Self> {
-        Self::with_config_and_model(config, CandleModel::default())
-    }
-
-    /// Create with custom configuration and an explicit Candle model.
-    ///
-    /// Pooling and the query prefix are properties of the model's training
-    /// recipe, so they override whatever the caller's config carried.
-    pub fn with_config_and_model(mut config: EmbeddingConfig, model: CandleModel) -> Result<Self> {
-        config.pooling = model.pooling_strategy();
-
-        tracing::info!(
-            model = model.hf_id(),
-            pooling = ?config.pooling,
-            "initializing Candle embedder"
-        );
-
-        // Device selection. `MEMD_EMBED_DEVICE` lets a host pin embeddings to
-        // a specific device WITHOUT touching the global `CUDA_VISIBLE_DEVICES`
-        // (which affects every other GPU program on the box — and which
-        // Candle/cudarc does not reliably honor here anyway):
-        //   cpu              → always CPU (best on shared/contended GPU hosts,
-        //                      where grabbing a busy GPU makes embedding — and
-        //                      the warm-worker HNSW backfill — wildly slow)
-        //   cuda | gpu       → CUDA device 0
-        //   cuda:N | gpu:N | N → CUDA device N (e.g. an idle GPU)
-        //   unset | auto     → historical behavior: CUDA 0 if available, else CPU
-        let device = match std::env::var("MEMD_EMBED_DEVICE")
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase())
-        {
-            Some(pref) if pref == "cpu" => {
-                tracing::info!("MEMD_EMBED_DEVICE=cpu — using CPU for embeddings");
-                Device::Cpu
-            }
-            Some(pref) if !pref.is_empty() && pref != "auto" => {
-                let idx = parse_cuda_index(&pref);
-                match Device::new_cuda(idx) {
-                    Ok(dev) => {
-                        tracing::info!(
-                            cuda_index = idx,
-                            "MEMD_EMBED_DEVICE — using CUDA device for embeddings"
-                        );
-                        dev
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            cuda_index = idx,
-                            "MEMD_EMBED_DEVICE requested CUDA device unavailable, falling back to CPU"
-                        );
-                        Device::Cpu
-                    }
-                }
-            }
-            _ => match Device::cuda_if_available(0) {
+/// Pick the compute device.
+///
+/// `MEMD_EMBED_DEVICE` lets a host pin embeddings to a specific device
+/// WITHOUT touching the global `CUDA_VISIBLE_DEVICES` (which affects every
+/// other GPU program on the box, and which Candle/cudarc does not reliably
+/// honor here anyway):
+///   cpu              -> always CPU (best on shared/contended GPU hosts,
+///                       where grabbing a busy GPU makes embedding, and
+///                       the warm-worker HNSW backfill, wildly slow)
+///   cuda | gpu       -> CUDA device 0
+///   cuda:N | gpu:N | N -> CUDA device N (e.g. an idle GPU)
+///   unset | auto     -> historical behavior: CUDA 0 if available, else CPU
+fn select_device() -> Device {
+    match std::env::var("MEMD_EMBED_DEVICE")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+    {
+        Some(pref) if pref == "cpu" => {
+            tracing::info!("MEMD_EMBED_DEVICE=cpu — using CPU for embeddings");
+            Device::Cpu
+        }
+        Some(pref) if !pref.is_empty() && pref != "auto" => {
+            let idx = parse_cuda_index(&pref);
+            match Device::new_cuda(idx) {
                 Ok(dev) => {
-                    tracing::info!("using CUDA device for embeddings");
+                    tracing::info!(
+                        cuda_index = idx,
+                        "MEMD_EMBED_DEVICE — using CUDA device for embeddings"
+                    );
                     dev
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "CUDA not available, falling back to CPU");
+                    tracing::warn!(
+                        error = %e,
+                        cuda_index = idx,
+                        "MEMD_EMBED_DEVICE requested CUDA device unavailable, falling back to CPU"
+                    );
                     Device::Cpu
                 }
-            },
-        };
+            }
+        }
+        _ => match Device::cuda_if_available(0) {
+            Ok(dev) => {
+                tracing::info!("using CUDA device for embeddings");
+                dev
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "CUDA not available, falling back to CPU");
+                Device::Cpu
+            }
+        },
+    }
+}
+
+/// Weights, tokenizer and device, built by the first embedding call.
+struct LoadedModel {
+    model: BertModel,
+    tokenizer: Tokenizer,
+    device: Device,
+}
+
+impl LoadedModel {
+    fn load(model: CandleModel) -> Result<Self> {
+        tracing::info!(model = model.hf_id(), "initializing Candle embedder");
+
+        let device = select_device();
 
         // Download model files from Hugging Face via the memd download helper.
         // Historically this used `hf-hub` 0.3.2, which fed huggingface.co's
@@ -204,6 +204,17 @@ impl CandleEmbedder {
             )));
         }
 
+        // The embedder reports its dimension before it loads, from the model
+        // choice. The config file must agree.
+        if bert_config.hidden_size != model.dimension() {
+            return Err(MemdError::ConfigError(format!(
+                "Model config hidden size {} does not match the {} dimension of {}",
+                bert_config.hidden_size,
+                model.dimension(),
+                model.hf_id()
+            )));
+        }
+
         tracing::info!(
             hidden_size = bert_config.hidden_size,
             num_layers = bert_config.num_hidden_layers,
@@ -228,53 +239,105 @@ impl CandleEmbedder {
             ..Default::default()
         }));
 
-        // Wrap device in Arc for thread-safe sharing
-        let device = Arc::new(device);
+        // SAFETY: Memory-mapped safetensors are read-only and immutable.
+        // The mmap is valid for the lifetime of the loaded weights file.
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&weights_path), DTYPE, &device)
+                .map_err(|e| MemdError::EmbeddingError(format!("Failed to load model: {}", e)))?
+        };
 
-        // Create model pool (load same model multiple times for parallelism)
-        let mut model_pool = Vec::with_capacity(MODEL_POOL_SIZE);
-
-        for i in 0..MODEL_POOL_SIZE {
-            // SAFETY: Memory-mapped safetensors are read-only and immutable.
-            // The mmap is valid for the lifetime of the loaded weights file.
-            // Multiple models can safely share the same mmaped region.
-            let vb = unsafe {
-                VarBuilder::from_mmaped_safetensors(
-                    std::slice::from_ref(&weights_path),
-                    DTYPE,
-                    &device,
-                )
-                .map_err(|e| {
-                    MemdError::EmbeddingError(format!("Failed to load model {}: {}", i, e))
-                })?
-            };
-
-            let model = BertModel::load(vb, &bert_config).map_err(|e| {
-                MemdError::EmbeddingError(format!("Failed to create BERT model {}: {}", i, e))
-            })?;
-
-            model_pool.push(Arc::new(Mutex::new(model)));
-
-            tracing::debug!(model_id = i, "loaded model into pool");
-        }
-
-        let dimension = bert_config.hidden_size;
+        let bert = BertModel::load(vb, &bert_config).map_err(|e| {
+            MemdError::EmbeddingError(format!("Failed to create BERT model: {}", e))
+        })?;
 
         tracing::info!(
-            pool_size = MODEL_POOL_SIZE,
-            dimension = dimension,
+            dimension = bert_config.hidden_size,
             "Candle embedder initialized successfully"
         );
 
         Ok(Self {
-            model_pool,
-            tokenizer: Arc::new(tokenizer),
-            semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT)),
+            model: bert,
+            tokenizer,
             device,
-            dimension,
+        })
+    }
+}
+
+/// The model of one embedder, shared by its clones and loaded on first use.
+struct LazyModel {
+    choice: CandleModel,
+    loaded: OnceLock<LoadedModel>,
+    /// Makes concurrent first calls load once. A failed load leaves the cell
+    /// empty, so the next call tries again.
+    loading: Mutex<()>,
+}
+
+impl LazyModel {
+    fn get(&self) -> Result<&LoadedModel> {
+        if let Some(loaded) = self.loaded.get() {
+            return Ok(loaded);
+        }
+        let _loading = self.loading.lock();
+        if let Some(loaded) = self.loaded.get() {
+            return Ok(loaded);
+        }
+        let loaded = LoadedModel::load(self.choice)?;
+        Ok(self.loaded.get_or_init(|| loaded))
+    }
+}
+
+/// Candle-based embedder. Cloning shares the model.
+#[derive(Clone)]
+pub struct CandleEmbedder {
+    /// The model, loaded by the first `embed_texts` or `embed_query` call
+    model: Arc<LazyModel>,
+    /// Semaphore to limit concurrent inference to one pass per worker
+    semaphore: Arc<Semaphore>,
+    /// Forward passes that may run at once
+    workers: usize,
+    /// Embedding dimension, a property of the model choice
+    dimension: usize,
+    /// Embedding configuration
+    config: EmbeddingConfig,
+    /// Retrieval query prefix (model-specific; applied to queries only)
+    query_prefix: Option<&'static str>,
+}
+
+impl CandleEmbedder {
+    /// Create a new CandleEmbedder with the default model (all-MiniLM-L6-v2).
+    pub fn new() -> Self {
+        Self::with_config(EmbeddingConfig::default())
+    }
+
+    /// Create with custom configuration and the default model
+    /// (all-MiniLM-L6-v2). Use `with_config_and_model` to select a model.
+    pub fn with_config(config: EmbeddingConfig) -> Self {
+        Self::with_config_and_model(config, CandleModel::default())
+    }
+
+    /// Create with custom configuration and an explicit Candle model.
+    ///
+    /// Pooling and the query prefix are properties of the model's training
+    /// recipe, so they override whatever the caller's config carried. This
+    /// does not touch the model files: the first `embed_texts` or
+    /// `embed_query` call loads them, and a load failure is that call's
+    /// error.
+    pub fn with_config_and_model(mut config: EmbeddingConfig, model: CandleModel) -> Self {
+        config.pooling = model.pooling_strategy();
+        let workers = inference_workers();
+
+        Self {
+            model: Arc::new(LazyModel {
+                choice: model,
+                loaded: OnceLock::new(),
+                loading: Mutex::new(()),
+            }),
+            semaphore: Arc::new(Semaphore::new(workers)),
+            workers,
+            dimension: model.dimension(),
             config,
             query_prefix: model.query_prefix(),
-        })
+        }
     }
 
     /// Embed a single text (internal implementation)
@@ -303,12 +366,7 @@ impl CandleEmbedder {
 
         // Clone all needed values from self before entering spawn_blocking
         // This ensures no references to self remain in the closure
-        let model_idx = MODEL_COUNTER.fetch_add(1, Ordering::Relaxed) % MODEL_POOL_SIZE;
-        let model: Arc<Mutex<BertModel>> = Arc::clone(&self.model_pool[model_idx]);
-        let tokenizer = Arc::clone(&self.tokenizer);
-
-        // Clone Arc<Device> for thread-safe sharing (no device recreation)
-        let device = Arc::clone(&self.device);
+        let lazy_model = Arc::clone(&self.model);
         let pooling_strategy = self.config.pooling;
         let should_normalize = self.config.normalize;
 
@@ -319,96 +377,118 @@ impl CandleEmbedder {
         let embeddings = tokio::task::spawn_blocking(move || {
             let _permit = permit; // Hold permit until task completes
 
-            // Convert back to &str for tokenizer
-            let texts_refs: Vec<&str> = texts_owned.iter().map(|s| s.as_str()).collect();
+            // The first call loads the model; a failure is this call's error.
+            let loaded = lazy_model.get()?;
 
-            // Tokenize
-            let encodings = tokenizer
-                .encode_batch(texts_refs, true)
-                .map_err(|e| MemdError::EmbeddingError(format!("Tokenization failed: {}", e)))?;
+            // Tokenizing and the forward pass run on one thread. Candle and
+            // the tokenizer size their rayon use from the pool they run in,
+            // so the forward passes of different batches run side by side
+            // instead of splitting every small matrix over all cores.
+            on_one_thread(|| {
+                let LoadedModel {
+                    model,
+                    tokenizer,
+                    device,
+                } = loaded;
 
-            // Convert to tensors
-            let token_ids: Vec<Vec<u32>> = encodings.iter().map(|e| e.get_ids().to_vec()).collect();
+                // Convert back to &str for tokenizer
+                let texts_refs: Vec<&str> = texts_owned.iter().map(|s| s.as_str()).collect();
 
-            let attention_mask: Vec<Vec<u32>> = encodings
-                .iter()
-                .map(|e| e.get_attention_mask().to_vec())
-                .collect();
+                // Tokenize
+                let encodings = tokenizer.encode_batch(texts_refs, true).map_err(|e| {
+                    MemdError::EmbeddingError(format!("Tokenization failed: {}", e))
+                })?;
 
-            let token_ids_tensor = Tensor::new(token_ids, &device).map_err(|e| {
-                MemdError::EmbeddingError(format!("Failed to create token tensor: {}", e))
-            })?;
+                // Convert to tensors
+                let token_ids: Vec<Vec<u32>> =
+                    encodings.iter().map(|e| e.get_ids().to_vec()).collect();
 
-            let attention_mask_tensor = Tensor::new(attention_mask, &device).map_err(|e| {
-                MemdError::EmbeddingError(format!("Failed to create mask tensor: {}", e))
-            })?;
+                let attention_mask: Vec<Vec<u32>> = encodings
+                    .iter()
+                    .map(|e| e.get_attention_mask().to_vec())
+                    .collect();
 
-            // Run model inference
-            // `BertModel::forward(input_ids, token_type_ids, attention_mask)`:
-            // single-segment input has token type 0 everywhere, and the mask
-            // keeps padding out of self-attention so a text's vector does not
-            // depend on the other texts in its batch. See `EMBEDDING_REVISION`.
-            let token_type_ids = token_ids_tensor.zeros_like().map_err(|e| {
-                MemdError::EmbeddingError(format!("Failed to create token type tensor: {}", e))
-            })?;
-            let model = model.lock();
-            let outputs = model
-                .forward(
-                    &token_ids_tensor,
-                    &token_type_ids,
-                    Some(&attention_mask_tensor),
-                )
-                .map_err(|e| MemdError::EmbeddingError(format!("Model forward failed: {}", e)))?;
+                let token_ids_tensor = Tensor::new(token_ids, device).map_err(|e| {
+                    MemdError::EmbeddingError(format!("Failed to create token tensor: {}", e))
+                })?;
 
-            // Apply pooling strategy
-            let pooled = match pooling_strategy {
-                PoolingStrategy::Mean => mean_pool(&outputs, &attention_mask_tensor)?,
-                PoolingStrategy::Cls => {
-                    // Take CLS token (first token) - select all batches, first sequence position
-                    outputs.narrow(1, 0, 1)?.squeeze(1)?
-                }
-                PoolingStrategy::LastToken => {
-                    // Take last non-padding token for each sequence
-                    let batch_size = outputs.dim(0)?;
-                    let mut last_outputs = Vec::with_capacity(batch_size);
+                let attention_mask_tensor = Tensor::new(attention_mask, device).map_err(|e| {
+                    MemdError::EmbeddingError(format!("Failed to create mask tensor: {}", e))
+                })?;
 
-                    for i in 0..batch_size {
-                        // Get attention mask for this batch item
-                        let mask = attention_mask_tensor.narrow(0, i, 1)?.squeeze(0)?;
-                        let mask_vec = mask.to_vec1::<u32>()?;
-
-                        // Find last non-zero position in attention mask
-                        let last_pos = mask_vec.iter().rposition(|&x| x != 0).unwrap_or(0);
-
-                        // Extract the token at last_pos for batch item i
-                        let batch_item = outputs.narrow(0, i, 1)?;
-                        let last_token =
-                            batch_item.narrow(1, last_pos, 1)?.squeeze(1)?.squeeze(0)?;
-                        last_outputs.push(last_token);
+                // Run model inference
+                // `BertModel::forward(input_ids, token_type_ids, attention_mask)`:
+                // single-segment input has token type 0 everywhere, and the mask
+                // keeps padding out of self-attention so a text's vector does not
+                // depend on the other texts in its batch. See `EMBEDDING_REVISION`.
+                let token_type_ids = token_ids_tensor.zeros_like().map_err(|e| {
+                    MemdError::EmbeddingError(format!("Failed to create token type tensor: {}", e))
+                })?;
+                let outputs = model
+                    .forward(
+                        &token_ids_tensor,
+                        &token_type_ids,
+                        Some(&attention_mask_tensor),
+                    )
+                    .map_err(|e| {
+                        MemdError::EmbeddingError(format!("Model forward failed: {}", e))
+                    })?;
+                // Apply pooling strategy
+                let pooled = match pooling_strategy {
+                    PoolingStrategy::Mean => mean_pool(&outputs, &attention_mask_tensor)?,
+                    PoolingStrategy::Cls => {
+                        // Take CLS token (first token) - select all batches, first sequence position
+                        outputs.narrow(1, 0, 1)?.squeeze(1)?
                     }
+                    PoolingStrategy::LastToken => {
+                        // Take last non-padding token for each sequence
+                        let batch_size = outputs.dim(0)?;
+                        let mut last_outputs = Vec::with_capacity(batch_size);
 
-                    Tensor::stack(&last_outputs, 0)?
-                }
-            };
+                        for i in 0..batch_size {
+                            // Get attention mask for this batch item
+                            let mask = attention_mask_tensor.narrow(0, i, 1)?.squeeze(0)?;
+                            let mask_vec = mask.to_vec1::<u32>()?;
 
-            // Normalize embeddings only if configured to do so
-            let final_embeddings = if should_normalize {
-                normalize(&pooled)?
-            } else {
-                pooled
-            };
+                            // Find last non-zero position in attention mask
+                            let last_pos = mask_vec.iter().rposition(|&x| x != 0).unwrap_or(0);
 
-            // Convert to Vec<Vec<f32>>
-            let embeddings_2d = final_embeddings.to_vec2::<f32>().map_err(|e| {
-                MemdError::EmbeddingError(format!("Failed to convert to vec: {}", e))
-            })?;
+                            // Extract the token at last_pos for batch item i
+                            let batch_item = outputs.narrow(0, i, 1)?;
+                            let last_token =
+                                batch_item.narrow(1, last_pos, 1)?.squeeze(1)?.squeeze(0)?;
+                            last_outputs.push(last_token);
+                        }
 
-            Ok::<Vec<Vec<f32>>, MemdError>(embeddings_2d)
+                        Tensor::stack(&last_outputs, 0)?
+                    }
+                };
+
+                // Normalize embeddings only if configured to do so
+                let final_embeddings = if should_normalize {
+                    normalize(&pooled)?
+                } else {
+                    pooled
+                };
+
+                // Convert to Vec<Vec<f32>>
+                let embeddings_2d = final_embeddings.to_vec2::<f32>().map_err(|e| {
+                    MemdError::EmbeddingError(format!("Failed to convert to vec: {}", e))
+                })?;
+
+                Ok::<Vec<Vec<f32>>, MemdError>(embeddings_2d)
+            })?
         })
         .await
         .map_err(|e| MemdError::EmbeddingError(format!("Task join error: {}", e)))??;
 
         Ok(embeddings)
+    }
+}
+
+impl Default for CandleEmbedder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -431,8 +511,8 @@ impl Embedder for CandleEmbedder {
             return Ok(Vec::new());
         }
 
-        // Split into batches and process chunks in parallel to use the model pool.
-        let batch_size = self.config.batch_size.max(1);
+        // Split into forward passes and run them side by side, one per worker.
+        let batch_size = forward_batch_size(self.config.batch_size, texts.len(), self.workers);
         let chunk_count = texts.chunks(batch_size).len();
         let mut tasks = tokio::task::JoinSet::new();
 
@@ -471,6 +551,10 @@ impl Embedder for CandleEmbedder {
 
     fn config(&self) -> &EmbeddingConfig {
         &self.config
+    }
+
+    fn is_loaded(&self) -> bool {
+        self.model.loaded.get().is_some()
     }
 }
 
@@ -520,8 +604,7 @@ mod tests {
         let embedder = CandleEmbedder::with_config_and_model(
             EmbeddingConfig::default(),
             CandleModel::BgeSmall,
-        )
-        .unwrap();
+        );
         let document = embedder.embed_texts(&[sentence]).await.unwrap().remove(0);
         let query = embedder.embed_query(sentence).await.unwrap();
         for (actual, expected) in [(&document, document_reference), (&query, query_reference)] {
@@ -628,6 +711,34 @@ mod tests {
         );
     }
 
+    /// Building an embedder reads no model file, so it works without the
+    /// model on disk and reports the dimension of the chosen model.
+    #[test]
+    fn construction_reads_no_model_files() {
+        let embedder =
+            CandleEmbedder::with_config_and_model(EmbeddingConfig::default(), CandleModel::BgeBase);
+        assert_eq!(embedder.dimension(), 768);
+        assert_eq!(embedder.config().pooling, PoolingStrategy::Cls);
+        assert!(!embedder.is_loaded());
+    }
+
+    #[test]
+    fn forward_batches_spread_texts_over_the_workers() {
+        // One text is one forward.
+        assert_eq!(forward_batch_size(32, 1, 16), 1);
+        // Fewer texts than the configured size still give each worker a share.
+        assert_eq!(forward_batch_size(32, 32, 16), 2);
+        assert_eq!(forward_batch_size(32, 256, 32), 8);
+        // A big call is capped by the pass limit and by the configured size.
+        assert_eq!(forward_batch_size(32, 100_000, 16), MAX_FORWARD_ROWS);
+        assert_eq!(forward_batch_size(4, 256, 8), 4);
+        // One worker still honors both caps.
+        assert_eq!(forward_batch_size(32, 256, 1), MAX_FORWARD_ROWS);
+        assert_eq!(forward_batch_size(3, 256, 1), 3);
+        // A configured size of zero still makes progress.
+        assert_eq!(forward_batch_size(0, 10, 4), 1);
+    }
+
     #[test]
     fn parse_cuda_index_handles_all_forms() {
         assert_eq!(parse_cuda_index("cuda"), 0);
@@ -642,8 +753,12 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires model download and network access"]
     async fn test_embed_basic() {
-        let embedder = CandleEmbedder::new().unwrap();
+        let embedder = CandleEmbedder::new();
+        // The dimension is known before the model loads; the first call loads.
+        assert_eq!(embedder.dimension(), 384);
+        assert!(!embedder.is_loaded());
         let embeddings = embedder.embed_texts(&["hello world"]).await.unwrap();
+        assert!(embedder.is_loaded());
         assert_eq!(embeddings.len(), 1);
         assert_eq!(embeddings[0].len(), 384);
 
@@ -658,7 +773,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires model download and network access"]
     async fn test_embedding_is_independent_of_batch_neighbours() {
-        let embedder = CandleEmbedder::new().unwrap();
+        let embedder = CandleEmbedder::new();
         let short = "scheduler quota exceeded";
         let long = "The second login node rejects every job above the group quota, \
                     so submit to the debug queue first and check the account limits \
@@ -675,10 +790,43 @@ mod tests {
         );
     }
 
+    /// A vector must not depend on how a call is split into forward passes.
+    /// Texts of mixed length go through one padded forward pass, and one by
+    /// one without any padding; the vectors agree to 1e-6 per component.
+    #[tokio::test]
+    #[ignore = "requires the cached MiniLM model files"]
+    async fn vectors_do_not_depend_on_the_split_into_forward_passes() {
+        let embedder = CandleEmbedder::new();
+        let texts: Vec<String> = (0..20)
+            .map(|i| format!("{} item {i}", "scheduler quota ".repeat(1 + (i * 7) % 12)))
+            .collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+
+        let together = embedder.embed_batch(&refs).await.unwrap();
+        let mut worst = 0.0f32;
+        for (text, joint) in refs.iter().zip(&together) {
+            let alone = embedder.embed_batch(&[*text]).await.unwrap().remove(0);
+            for (a, b) in alone.iter().zip(joint) {
+                worst = worst.max((a - b).abs());
+            }
+        }
+        eprintln!("largest per-component difference: {worst:e}");
+        assert!(worst < 1e-6, "split changed a vector by {worst:e}");
+
+        // `embed_texts` splits the call over its workers and keeps the order.
+        let split = embedder.embed_texts(&refs).await.unwrap();
+        assert_eq!(split.len(), together.len());
+        for (joint, piece) in together.iter().zip(&split) {
+            for (a, b) in joint.iter().zip(piece) {
+                assert!((a - b).abs() < 1e-6, "embed_texts changed a vector");
+            }
+        }
+    }
+
     #[tokio::test]
     #[ignore = "requires model download and network access"]
     async fn test_embed_batch() {
-        let embedder = CandleEmbedder::new().unwrap();
+        let embedder = CandleEmbedder::new();
         let texts = vec!["hello world", "test embedding", "another example"];
         let embeddings = embedder.embed_texts(&texts).await.unwrap();
 
@@ -693,7 +841,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires model download and network access"]
     async fn test_embed_concurrency() {
-        let embedder = Arc::new(CandleEmbedder::new().unwrap());
+        let embedder = Arc::new(CandleEmbedder::new());
         let mut handles = vec![];
 
         for i in 0..20 {
@@ -712,7 +860,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires model download and network access"]
     async fn test_semantic_similarity() {
-        let embedder = CandleEmbedder::new().unwrap();
+        let embedder = CandleEmbedder::new();
 
         let texts = vec![
             "the cat sat on the mat",
@@ -732,6 +880,12 @@ mod tests {
         assert!(
             (similar - 0.5612).abs() < 0.01,
             "paraphrase similarity should match the reference model, got {similar}"
+        );
+        // The value this pair scored before the model was shared and loaded
+        // lazily. A change in how vectors are computed moves it.
+        assert!(
+            (similar - 0.561162).abs() < 1e-5,
+            "paraphrase similarity moved from 0.561162, got {similar}"
         );
         assert!(
             (unrelated + 0.0300).abs() < 0.01,

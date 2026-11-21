@@ -746,8 +746,7 @@ impl PersistentStore {
         let dense_searcher = if config.enable_dense_search {
             use super::dense::DenseSearchConfig;
 
-            // Fail before initializing an embedder (whose errors may fall back
-            // to BM25), and before revision migration can remove old vectors.
+            // Fail before revision migration can remove old vectors.
             embedding_rebuild_pending = embedding_revision::prepare_model(
                 &config.data_dir,
                 config.candle_model,
@@ -765,38 +764,24 @@ impl PersistentStore {
             if config.bounded_search_locks {
                 dense_config.hnsw.search_lock_budget_ms = Some(WORKER_SEARCH_LOCK_BUDGET_MS);
             }
-            match DenseSearcher::new(dense_config) {
-                Ok(searcher) => {
-                    // Before any tenant index loads: vectors from another
-                    // embedder revision are discarded and rebuilt below.
-                    if !config.read_only {
-                        match embedding_revision::prepare(&config.data_dir) {
-                            Ok(pending) => embedding_rebuild_pending |= pending,
-                            Err(error) => warn!(
-                                error = %error,
-                                "could not check the embedding revision of the dense indexes"
-                            ),
-                        }
-                    }
-                    let searcher = searcher
-                        .with_base_path(config.data_dir.clone())
-                        .with_read_only(config.read_only);
-                    Some(Arc::new(searcher))
-                }
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        "failed to initialize dense searcher, falling back to BM25 when available"
-                    );
-                    eprintln!(
-                        "WARNING: Dense searcher initialization failed - embeddings will NOT work!"
-                    );
-                    eprintln!("ERROR: {}", e);
-                    eprintln!("This will cause 0.000 Recall on semantic queries!");
-                    eprintln!("Check that Candle and model files are available.");
-                    None
+            // The model loads on the first embedding call, so a missing or
+            // broken model file is an error of that call, not of this open.
+            let searcher = DenseSearcher::new(dense_config);
+            // Before any tenant index loads: vectors from another
+            // embedder revision are discarded and rebuilt below.
+            if !config.read_only {
+                match embedding_revision::prepare(&config.data_dir) {
+                    Ok(pending) => embedding_rebuild_pending |= pending,
+                    Err(error) => warn!(
+                        error = %error,
+                        "could not check the embedding revision of the dense indexes"
+                    ),
                 }
             }
+            let searcher = searcher
+                .with_base_path(config.data_dir.clone())
+                .with_read_only(config.read_only);
+            Some(Arc::new(searcher))
         } else {
             None
         };
@@ -1732,10 +1717,13 @@ impl PersistentStore {
             }
         }
 
-        // Save dense indices
+        // Save dense indices that changed. A failure does not skip the sparse
+        // commit or the segment finalization below; it is returned at the end.
+        let mut dense_save_error = None;
         if let Some(ref searcher) = self.dense_searcher {
             if let Err(e) = searcher.save_all() {
                 warn!(error = %e, "failed to save dense indices on shutdown");
+                dense_save_error = Some(e);
             }
         }
 
@@ -1752,7 +1740,7 @@ impl PersistentStore {
                 warn!(tenant_id, error = %e, "failed to finalize segment on shutdown");
             }
         }
-        Ok(())
+        dense_save_error.map_or(Ok(()), Err)
     }
 }
 

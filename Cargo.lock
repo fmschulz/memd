@@ -1738,6 +1738,7 @@ dependencies = [
  "ort",
  "parking_lot",
  "proptest",
+ "rayon",
  "regex",
  "roaring",
  "rusqlite",

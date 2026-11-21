@@ -47,6 +47,8 @@ crc32fast.workspace = true
 bincode.workspace = true
 byteorder.workspace = true
 parking_lot.workspace = true
+# Runs each embedding forward pass on its own one-thread pool
+rayon = "1.10"
 # Candle dependencies for embeddings
 candle-core.workspace = true
 candle-nn.workspace = true

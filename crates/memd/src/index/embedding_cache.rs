@@ -7,6 +7,8 @@ use std::path::Path;
 
 const MAGIC: &[u8; 4] = b"MEMB";
 const VERSION: u32 = 1;
+/// Floats per read or write block (64 KiB).
+const IO_BLOCK_FLOATS: usize = 16 * 1024;
 
 /// Cache of embeddings for HNSW index rebuild
 #[derive(Debug)]
@@ -198,38 +200,36 @@ impl EmbeddingCache {
             .write_u32::<LittleEndian>(header_crc)
             .map_err(|e| MemdError::StorageError(format!("Failed to write header CRC: {}", e)))?;
 
-        // Calculate data CRC (includes both valid flags and embeddings)
+        // The data CRC covers the valid flags, then the embeddings, as little
+        // endian bytes in file order. Both are written in blocks, and the CRC
+        // is computed on the same blocks.
         let mut data_hasher = Hasher::new();
 
-        // Include valid flags in CRC
-        for &valid in &self.valid_ids {
-            data_hasher.update(&[if valid { 1 } else { 0 }]);
-        }
+        let flags: Vec<u8> = self
+            .valid_ids
+            .iter()
+            .map(|&valid| u8::from(valid))
+            .collect();
+        data_hasher.update(&flags);
+        writer
+            .write_all(&flags)
+            .map_err(|e| MemdError::StorageError(format!("Failed to write valid flags: {}", e)))?;
 
-        // Include embeddings in CRC
-        for &value in &self.embeddings {
-            data_hasher.update(&value.to_le_bytes());
-        }
-        let data_crc = data_hasher.finalize();
-
-        // Write valid flags
-        for &valid in &self.valid_ids {
-            writer.write_u8(if valid { 1 } else { 0 }).map_err(|e| {
-                MemdError::StorageError(format!("Failed to write valid flag: {}", e))
-            })?;
-        }
-
-        // Write embeddings data
-        for &value in &self.embeddings {
-            let bytes = value.to_le_bytes();
-            writer.write_all(&bytes).map_err(|e| {
-                MemdError::StorageError(format!("Failed to write embedding: {}", e))
+        let mut block = Vec::with_capacity(IO_BLOCK_FLOATS * 4);
+        for values in self.embeddings.chunks(IO_BLOCK_FLOATS) {
+            block.clear();
+            for value in values {
+                block.extend_from_slice(&value.to_le_bytes());
+            }
+            data_hasher.update(&block);
+            writer.write_all(&block).map_err(|e| {
+                MemdError::StorageError(format!("Failed to write embeddings: {}", e))
             })?;
         }
 
         // Write data CRC
         writer
-            .write_u32::<LittleEndian>(data_crc)
+            .write_u32::<LittleEndian>(data_hasher.finalize())
             .map_err(|e| MemdError::StorageError(format!("Failed to write data CRC: {}", e)))?;
 
         // Flush and sync
@@ -325,14 +325,16 @@ impl EmbeddingCache {
             ));
         }
 
-        // Read valid flags
-        let mut valid_ids = vec![false; next_id];
-        for (i, valid) in valid_ids.iter_mut().enumerate() {
-            let flag = reader.read_u8().map_err(|e| {
-                MemdError::StorageError(format!("Failed to read valid flag {}: {}", i, e))
-            })?;
-            *valid = flag != 0;
+        // Read valid flags. Any nonzero byte counts as valid, and the CRC is
+        // computed over the normalized 0/1 flags.
+        let mut flags = vec![0u8; next_id];
+        reader
+            .read_exact(&mut flags)
+            .map_err(|e| MemdError::StorageError(format!("Failed to read valid flags: {}", e)))?;
+        for flag in &mut flags {
+            *flag = u8::from(*flag != 0);
         }
+        let valid_ids: Vec<bool> = flags.iter().map(|&flag| flag != 0).collect();
 
         // Verify count matches actual valid flags
         let actual_count = valid_ids.iter().filter(|&&v| v).count();
@@ -344,34 +346,32 @@ impl EmbeddingCache {
             )));
         }
 
-        // Read embeddings data
+        // Read embeddings data in blocks, hashing each block after the flags.
+        let mut data_hasher = Hasher::new();
+        data_hasher.update(&flags);
         let total_floats = next_id * dimension;
         let mut embeddings = Vec::with_capacity(total_floats);
-
-        for _ in 0..total_floats {
-            let mut bytes = [0u8; 4];
-            reader.read_exact(&mut bytes).map_err(|e| {
+        let mut block = vec![0u8; IO_BLOCK_FLOATS.min(total_floats) * 4];
+        while embeddings.len() < total_floats {
+            let floats = IO_BLOCK_FLOATS.min(total_floats - embeddings.len());
+            let bytes = &mut block[..floats * 4];
+            reader.read_exact(bytes).map_err(|e| {
                 MemdError::StorageError(format!("Failed to read embedding data: {}", e))
             })?;
-            embeddings.push(f32::from_le_bytes(bytes));
+            data_hasher.update(bytes);
+            embeddings.extend(
+                bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| f32::from_le_bytes(*b)),
+            );
         }
 
-        // Verify data CRC (recalculate including valid flags)
+        // Verify data CRC
         let stored_data_crc = reader
             .read_u32::<LittleEndian>()
             .map_err(|e| MemdError::StorageError(format!("Failed to read data CRC: {}", e)))?;
-
-        let mut data_hasher = Hasher::new();
-
-        // Include valid flags in CRC
-        for &valid in &valid_ids {
-            data_hasher.update(&[if valid { 1 } else { 0 }]);
-        }
-
-        // Include embeddings in CRC
-        for &value in &embeddings {
-            data_hasher.update(&value.to_le_bytes());
-        }
 
         let calculated_data_crc = data_hasher.finalize();
 
@@ -622,5 +622,92 @@ mod tests {
         let result = EmbeddingCache::load_from(&cache_path);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("data CRC"));
+    }
+
+    /// The bytes of a cache file as the format defines them: header and its
+    /// CRC, one valid byte per id, little-endian f32 values, and a CRC over
+    /// the flags and values.
+    fn reference_bytes(cache: &EmbeddingCache) -> Vec<u8> {
+        let mut header = Vec::new();
+        header.extend_from_slice(MAGIC);
+        header.extend_from_slice(&VERSION.to_le_bytes());
+        header.extend_from_slice(&(cache.dimension as u32).to_le_bytes());
+        header.extend_from_slice(&(cache.count as u32).to_le_bytes());
+        header.extend_from_slice(&(cache.next_id() as u32).to_le_bytes());
+        let mut data: Vec<u8> = cache
+            .valid_ids
+            .iter()
+            .map(|&valid| u8::from(valid))
+            .collect();
+        for value in &cache.embeddings {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        let mut bytes = header.clone();
+        bytes.extend_from_slice(&crc32fast::hash(&header).to_le_bytes());
+        bytes.extend_from_slice(&data);
+        bytes.extend_from_slice(&crc32fast::hash(&data).to_le_bytes());
+        bytes
+    }
+
+    /// 300 ids of 384 floats is more than any IO buffer holds, with gaps and
+    /// invalidated slots among the valid ones.
+    fn large_sparse_cache() -> EmbeddingCache {
+        let mut cache = EmbeddingCache::new(384);
+        for id in (0..300).filter(|id| id % 7 != 3) {
+            let vector: Vec<f32> = (0..384)
+                .map(|j| ((id * 31 + j * 7) % 1000) as f32 / 7.0 - 50.0)
+                .collect();
+            cache.insert(id, &vector).unwrap();
+        }
+        for id in [0, 11, 299] {
+            cache.mark_invalid(id);
+        }
+        cache
+    }
+
+    #[test]
+    fn saved_bytes_match_the_format_and_load_back_exactly() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("embeddings.bin");
+        let cache = large_sparse_cache();
+        cache.save_to(&path).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), reference_bytes(&cache));
+
+        let loaded = EmbeddingCache::load_from(&path).unwrap();
+        assert_eq!(loaded.len(), cache.len());
+        assert_eq!(loaded.next_id(), cache.next_id());
+        assert_eq!(loaded.valid_ids, cache.valid_ids);
+        assert_eq!(loaded.embeddings, cache.embeddings);
+    }
+
+    #[test]
+    fn empty_cache_round_trips() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("embeddings.bin");
+        let cache = EmbeddingCache::new(384);
+        cache.save_to(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), reference_bytes(&cache));
+        let loaded = EmbeddingCache::load_from(&path).unwrap();
+        assert!(loaded.is_empty());
+        assert_eq!(loaded.dimension(), 384);
+    }
+
+    #[test]
+    fn load_rejects_a_truncated_or_corrupted_large_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("embeddings.bin");
+        large_sparse_cache().save_to(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+
+        std::fs::write(&path, &bytes[..bytes.len() / 2]).unwrap();
+        assert!(EmbeddingCache::load_from(&path).is_err());
+
+        let mut flipped = bytes.clone();
+        let late = flipped.len() - 1000;
+        flipped[late] ^= 0xFF;
+        std::fs::write(&path, flipped).unwrap();
+        let error = EmbeddingCache::load_from(&path).unwrap_err().to_string();
+        assert!(error.contains("data CRC"), "got {error}");
     }
 }

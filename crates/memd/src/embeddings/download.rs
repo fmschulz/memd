@@ -274,6 +274,16 @@ impl CandleModel {
         }
     }
 
+    /// Width of the vectors this model produces. The embedder reports it
+    /// before it loads the model, so it must match the model's config file;
+    /// the loader checks that.
+    pub fn dimension(&self) -> usize {
+        match self {
+            Self::MiniLm | Self::BgeSmall => 384,
+            Self::BgeBase => 768,
+        }
+    }
+
     /// Retrieval query prefix, applied to queries only (never documents).
     pub fn query_prefix(&self) -> Option<&'static str> {
         match self {
@@ -981,6 +991,13 @@ mod tests {
             CandleModel::BgeBase.query_prefix()
         );
         assert_eq!(CandleModel::BgeSmall.hf_id(), "BAAI/bge-small-en-v1.5");
+    }
+
+    #[test]
+    fn candle_model_dimensions() {
+        assert_eq!(CandleModel::MiniLm.dimension(), 384);
+        assert_eq!(CandleModel::BgeSmall.dimension(), 384);
+        assert_eq!(CandleModel::BgeBase.dimension(), 768);
     }
 
     fn loopback_listener_or_skip(test_name: &str) -> Option<std::net::TcpListener> {

@@ -14,6 +14,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 - `memory.md` selects candidates per project scope: every visible fact of the active project is a candidate, however many newer rows other projects hold. Machine-wide candidates are the newest 5,000 visible rows outside the project. Experience-case projections, generated digest projections and rows with a non-visible status are excluded in the metadata query, before any payload read. Dedupe runs after ranking, within the best 200 candidates per section.
 - **Breaking:** the `memory.md` health header prints `facts: <P> visible in project <id>, <T> visible in tenant <tenant>` from SQL counts. "Visible" excludes experience projections and generated digests. The header no longer runs `memd report`: it drops the `chunks`, `retrieval` and `learned` lines, and the `[warn]` self-diagnosis lines no longer appear in `memory.md` (they remain in `memd report`). A truncated project scan (cap 50,000, oldest facts cut first) prints a warning; the machine-wide cap does not, and only the explain output records it. `memory-md --explain-output` adds a `scan` object with the excluded experience projections and generated digests, the rows excluded by status, and the unreadable and truncated counts per section.
+- Commands that never embed (`get`, `stats`, `doctor`) no longer load the embedding model. It loads on the first embedding call, and one copy of the weights serves all concurrent work instead of four. On a 256-chunk store a cold `get` fell from 242 ms to 21 ms and its peak memory from 464 MB to 17 MB. **Behavior change:** a missing or broken model file now fails the call that embeds, not the store open. The old fallback at open (dense search off, BM25 only) is gone; a write whose dense indexing fails is marked for repair, as for any other indexing error.
+- Each embedding forward pass runs on one thread, and a call that embeds many texts runs one pass per core (up to 32, at most 8 texts each). Vectors are bit-identical. Re-embedding 257 chunks finished in 4.3 s on 32 cores where the old build indexed 65 in 10 s, and ingesting one chunk per call takes about a third less time.
+- A writer saves a dense index at shutdown only when it changed, and once. A failed save now reaches the caller of `shutdown` and `save_all` instead of only the log. Saving an index without points no longer fails, and `embeddings.bin` is read and written in blocks with the same bytes as before.
+- Reading a chunk from the active segment reads only that record with a positioned read instead of the whole payload file.
 - Dense indexes record the embedding model and reject switches, including between two 384-d models. Switching an existing store requires `MEMD_BACKFILL_HNSW_ON_STARTUP=1` to rebuild from segments; unmarked 384-d and 768-d stores are treated as MiniLM and BGE-base respectively.
 
 ### Removed
@@ -41,7 +45,6 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Cleanup throwaway names match whole tokens, keeping names such as `retrieval` and `latest` out of name-based cleanup candidates.
 - Warm status and stop propagate protocol, timeout and permission errors instead of reporting a stopped worker.
 - Warm worker PID checks use portable Unix signal-zero semantics, including macOS.
-- Dense initialization failure uses the available BM25 index rather than scanning only recent rows.
 - Context packing skips chunks that exceed the remaining token budget and continues with smaller chunks.
 
 - Warm startup waits for live workers up to a configurable budget, reaps timed-out children before fallback, preserves background consolidation's data directory, and uses a private per-user socket root. Long requests wait for completion.

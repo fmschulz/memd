@@ -2432,3 +2432,78 @@ async fn shutdown_lets_a_pending_embedding_rebuild_finish() {
     );
     assert!(!store.embedding_rebuild_pending.load(Ordering::Acquire));
 }
+
+/// A command that never embeds must not pay for the embedding model. Opening
+/// a store with dense search on, then reading a chunk and the metadata, leaves
+/// the model unloaded.
+#[tokio::test]
+async fn open_and_read_commands_do_not_load_the_embedding_model() {
+    let dir = tempdir().unwrap();
+    let tenant = TenantId::new("cold_open").unwrap();
+    let writer_config = PersistentStoreConfig {
+        data_dir: dir.path().into(),
+        enable_dense_search: false,
+        enable_hybrid_search: false,
+        enable_async_indexing: false,
+        backfill_hnsw_on_startup: false,
+        ..Default::default()
+    };
+    let chunk_id = {
+        let store = PersistentStore::open(writer_config.clone()).unwrap();
+        store
+            .add(MemoryChunk::new(
+                tenant.clone(),
+                "cold open note",
+                ChunkType::Doc,
+            ))
+            .await
+            .unwrap()
+    };
+
+    let store = PersistentStore::open(PersistentStoreConfig {
+        enable_dense_search: true,
+        ..writer_config
+    })
+    .unwrap();
+    let dense = store
+        .dense_searcher
+        .clone()
+        .expect("dense search is enabled");
+    assert_eq!(dense.dimension(), 384, "the dimension needs no model load");
+    assert!(!dense.embedder_loaded(), "open loaded the embedding model");
+
+    let chunk = store.get(&tenant, &chunk_id).await.unwrap().unwrap();
+    assert_eq!(chunk.text, "cold open note");
+    assert_eq!(store.stats(&tenant).await.unwrap().active_chunks, 1);
+    assert!(
+        !dense.embedder_loaded(),
+        "a read loaded the embedding model"
+    );
+}
+
+/// The dense index is derived from the segments, so a failed save does not
+/// stop the rest of shutdown. The caller still gets the error.
+#[tokio::test]
+async fn shutdown_returns_a_failed_dense_save_after_finishing_the_rest() {
+    let (mut store, dir) = make_test_store();
+    let tenant = make_tenant();
+    store.dense_searcher = Some(Arc::new(
+        DenseSearcher::with_embedder(Arc::new(MockEmbedder::new()), DenseSearchConfig::default())
+            .with_base_path(dir.path().to_path_buf()),
+    ));
+    Store::add(&store, make_chunk(&tenant, "alpha scheduler quota"))
+        .await
+        .unwrap();
+
+    // A file where the tenant's index directory must go makes the save fail.
+    let tenant_dir = dir.path().join("tenants").join(tenant.to_string());
+    fs::write(tenant_dir.join("warm_index"), b"not a directory").unwrap();
+
+    store
+        .shutdown()
+        .expect_err("a failed dense save must reach the caller");
+    let sealed = fs::read_dir(tenant_dir.join("segments"))
+        .unwrap()
+        .any(|entry| entry.unwrap().path().join("meta").exists());
+    assert!(sealed, "the failed save skipped sealing the segment");
+}

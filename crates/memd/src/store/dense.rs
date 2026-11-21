@@ -73,8 +73,11 @@ impl DenseSearcher {
         self.config.model
     }
 
-    /// Create a new dense searcher with Candle embedder
-    pub fn new(config: DenseSearchConfig) -> Result<Self> {
+    /// Create a new dense searcher with Candle embedder.
+    ///
+    /// The embedder loads its model on the first embedding call, so opening a
+    /// store for a command that never embeds costs no model load.
+    pub fn new(mut config: DenseSearchConfig) -> Self {
         let embedding_config = EmbeddingConfig {
             batch_size: embedding_batch_size(),
             ..EmbeddingConfig::default()
@@ -82,19 +85,18 @@ impl DenseSearcher {
         let embedder = Arc::new(CandleEmbedder::with_config_and_model(
             embedding_config,
             config.model,
-        )?);
+        ));
 
         // Update HNSW config dimension to match model
-        let mut updated_config = config.clone();
-        updated_config.hnsw.dimension = embedder.dimension();
+        config.hnsw.dimension = embedder.dimension();
 
-        Ok(Self {
+        Self {
             embedder,
             indices: RwLock::new(HashMap::new()),
             base_path: None,
             read_only: false,
-            config: updated_config,
-        })
+            config,
+        }
     }
 
     /// Create with custom embedder (for testing with MockEmbedder)
@@ -332,24 +334,36 @@ impl DenseSearcher {
         })
     }
 
-    /// Save all indices
+    /// Save every index that changed since its last save.
+    ///
+    /// A failed save does not stop the other tenants. The first error is
+    /// returned once all of them have been tried, and the failed index stays
+    /// dirty so the next call tries it again.
     pub fn save_all(&self) -> Result<()> {
         if self.read_only {
             tracing::debug!("read-only dense searcher skips save_all");
             return Ok(());
         }
         let indices = self.indices.read();
+        let mut first_error = None;
         for (tenant_id, index) in indices.iter() {
-            if let Err(e) = index.save() {
+            if let Err(e) = index.save_if_dirty() {
                 tracing::warn!(tenant_id, error = %e, "failed to save index");
+                first_error.get_or_insert(e);
             }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     /// Get embedding dimension
     pub fn dimension(&self) -> usize {
         self.embedder.dimension()
+    }
+
+    /// Whether the embedding model is in memory. A command that never embeds
+    /// leaves it unloaded.
+    pub fn embedder_loaded(&self) -> bool {
+        self.embedder.is_loaded()
     }
 
     /// Get the number of indexed chunks for a tenant
@@ -530,5 +544,118 @@ impl Drop for DenseSearcher {
                 tracing::warn!(error = %e, "failed to save indices on drop");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embeddings::MockEmbedder;
+    use std::path::Path;
+
+    fn searcher(base: &Path) -> DenseSearcher {
+        DenseSearcher::with_embedder(Arc::new(MockEmbedder::new()), DenseSearchConfig::default())
+            .with_base_path(base.to_path_buf())
+    }
+
+    fn rows(texts: &[&str]) -> Vec<(ChunkId, String)> {
+        texts
+            .iter()
+            .map(|text| (ChunkId::new(), (*text).to_string()))
+            .collect()
+    }
+
+    fn warm_index(base: &Path, tenant: &TenantId) -> PathBuf {
+        base.join("tenants")
+            .join(tenant.to_string())
+            .join("warm_index")
+    }
+
+    /// The saved files tell whether a save ran: a file removed after a save
+    /// comes back only if another save writes it.
+    #[tokio::test]
+    async fn save_all_writes_only_what_changed_and_only_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let tenant = TenantId::new("dirty_flag").unwrap();
+        let warm = warm_index(dir.path(), &tenant);
+        let cache = warm.join("embeddings.bin");
+        let searcher = searcher(dir.path());
+
+        // An index that holds nothing new is not written.
+        searcher.ensure_index_loaded(&tenant).unwrap();
+        searcher.save_all().unwrap();
+        assert!(!warm.join("mapping.bin").exists(), "unchanged index saved");
+
+        searcher
+            .index_batch(&tenant, &rows(&["alpha", "beta"]))
+            .await
+            .unwrap();
+        searcher.save_all().unwrap();
+        for name in ["mapping.bin", "embeddings.bin", "config.json"] {
+            assert!(warm.join(name).exists(), "{name} missing after save");
+        }
+
+        // The second save finds nothing new.
+        std::fs::remove_file(&cache).unwrap();
+        searcher.save_all().unwrap();
+        assert!(!cache.exists(), "a saved index was saved again");
+
+        // One more chunk makes the index dirty again, and it saves once. Drop
+        // is not a second save.
+        searcher
+            .index_batch(&tenant, &rows(&["gamma"]))
+            .await
+            .unwrap();
+        searcher.save_all().unwrap();
+        assert!(cache.exists(), "a changed index was not saved");
+        std::fs::remove_file(&cache).unwrap();
+        drop(searcher);
+        assert!(!cache.exists(), "drop saved an index that was clean");
+    }
+
+    #[tokio::test]
+    async fn save_all_returns_the_save_error_and_keeps_the_index_dirty() {
+        let dir = tempfile::tempdir().unwrap();
+        let tenant = TenantId::new("save_error").unwrap();
+        let warm = warm_index(dir.path(), &tenant);
+        let searcher = searcher(dir.path());
+        searcher
+            .index_batch(&tenant, &rows(&["alpha"]))
+            .await
+            .unwrap();
+
+        // A file where the index directory must go makes the save fail.
+        std::fs::create_dir_all(warm.parent().unwrap()).unwrap();
+        std::fs::write(&warm, b"not a directory").unwrap();
+        searcher
+            .save_all()
+            .expect_err("a failed save must not report success");
+
+        // The failed save did not clear the change: the next save writes it.
+        std::fs::remove_file(&warm).unwrap();
+        searcher.save_all().unwrap();
+        assert!(warm.join("mapping.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn save_all_reports_a_failure_after_saving_the_other_tenants() {
+        let dir = tempfile::tempdir().unwrap();
+        let broken = TenantId::new("save_broken").unwrap();
+        let healthy = TenantId::new("save_healthy").unwrap();
+        let searcher = searcher(dir.path());
+        for tenant in [&broken, &healthy] {
+            searcher
+                .index_batch(tenant, &rows(&["alpha"]))
+                .await
+                .unwrap();
+        }
+        let warm = warm_index(dir.path(), &broken);
+        std::fs::create_dir_all(warm.parent().unwrap()).unwrap();
+        std::fs::write(&warm, b"not a directory").unwrap();
+
+        assert!(searcher.save_all().is_err());
+        assert!(warm_index(dir.path(), &healthy)
+            .join("mapping.bin")
+            .exists());
     }
 }

@@ -69,6 +69,13 @@ pub trait Embedder: Send + Sync {
 
     /// Get the configuration
     fn config(&self) -> &EmbeddingConfig;
+
+    /// Whether the model is in memory. An embedder that loads its model on
+    /// first use reports `false` until then; the default is for embedders
+    /// that have nothing to load.
+    fn is_loaded(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

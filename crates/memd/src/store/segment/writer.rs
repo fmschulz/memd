@@ -5,6 +5,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 use crate::error::{MemdError, Result};
@@ -62,8 +63,12 @@ impl SegmentWriter {
 
         // Open payload.bin for writing
         let payload_path = dir.join("payload.bin");
+        // Opened for reading too: `read_chunk` reads records back through
+        // this handle with positioned reads, which leave the write position
+        // alone.
         let payload_file = OpenOptions::new()
             .create(true)
+            .read(true)
             .write(true)
             .truncate(true)
             .open(&payload_path)
@@ -270,43 +275,32 @@ impl SegmentWriter {
     /// This is used by PersistentStore to read chunks that haven't been
     /// finalized yet. Returns None if ordinal is out of bounds.
     ///
-    /// Note: This flushes the buffer before reading to ensure data is on disk.
-    /// CRC verification is performed.
+    /// Reads only the record's bytes, with a positioned read on the payload
+    /// handle the writer keeps. The write buffer is flushed first, but only
+    /// when the record still sits in it. CRC verification is performed.
     pub fn read_chunk(&mut self, ordinal: u32) -> Result<Option<Vec<u8>>> {
-        let idx = ordinal as usize;
-        if idx >= self.index_records.len() {
+        let Some(&record) = self.index_records.get(ordinal as usize) else {
             return Ok(None);
+        };
+
+        // Bytes before `flushed` are in the file; the rest are in the buffer.
+        let flushed = self.payload_len - self.payload_writer.buffer().len() as u64;
+        if record.offset + u64::from(record.length) > flushed {
+            self.payload_writer
+                .flush()
+                .map_err(|e| MemdError::StorageError(format!("flush for read: {}", e)))?;
         }
 
-        // Flush the buffer to ensure data is written to disk
+        let mut data = vec![0u8; record.length as usize];
         self.payload_writer
-            .flush()
-            .map_err(|e| MemdError::StorageError(format!("flush for read: {}", e)))?;
-
-        let record = &self.index_records[idx];
-        let payload_path = self.dir.join("payload.bin");
-
-        // Read from the file
-        let payload_data = std::fs::read(&payload_path).map_err(|e| {
-            MemdError::StorageError(format!("read payload for chunk {}: {}", ordinal, e))
-        })?;
-
-        let start = record.offset as usize;
-        let end = start + record.length as usize;
-
-        if end > payload_data.len() {
-            return Err(MemdError::StorageError(format!(
-                "chunk {} offset out of bounds: {} > {}",
-                ordinal,
-                end,
-                payload_data.len()
-            )));
-        }
-
-        let data = &payload_data[start..end];
+            .get_ref()
+            .read_exact_at(&mut data, record.offset)
+            .map_err(|e| {
+                MemdError::StorageError(format!("read payload for chunk {}: {}", ordinal, e))
+            })?;
 
         // Verify CRC
-        let computed_crc = crc32fast::hash(data);
+        let computed_crc = crc32fast::hash(&data);
         if computed_crc != record.crc32 {
             return Err(MemdError::StorageError(format!(
                 "chunk {} CRC mismatch: expected {:08x}, got {:08x}",
@@ -314,7 +308,7 @@ impl SegmentWriter {
             )));
         }
 
-        Ok(Some(data.to_vec()))
+        Ok(Some(data))
     }
 }
 
@@ -449,5 +443,81 @@ mod tests {
         assert_eq!(original_meta.id, decoded_meta.id);
         assert_eq!(original_meta.chunk_count, decoded_meta.chunk_count);
         assert_eq!(original_meta.finalized, decoded_meta.finalized);
+    }
+
+    fn payloads(count: usize) -> Vec<Vec<u8>> {
+        (0..count)
+            .map(|i| format!("record {i} {}", "x".repeat(i * 7)).into_bytes())
+            .collect()
+    }
+
+    /// Reading the active segment returns the bytes that were appended, for
+    /// the first, a middle and the last record, while later appends sit in the
+    /// write buffer and after they have been flushed.
+    #[test]
+    fn read_chunk_returns_appended_bytes_around_buffered_appends() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut writer = SegmentWriter::create(temp_dir.path(), 1).unwrap();
+        let records = payloads(60);
+
+        // Each record is readable right after its append, with no flush call.
+        for (i, record) in records[..20].iter().enumerate() {
+            assert_eq!(writer.append_chunk(record).unwrap() as usize, i);
+            assert_eq!(
+                writer.read_chunk(i as u32).unwrap().as_deref(),
+                Some(&record[..])
+            );
+        }
+        // Reading flushed everything so far. Later appends are buffered again
+        // and an older record is still read correctly beside them.
+        for record in &records[20..40] {
+            writer.append_chunk(record).unwrap();
+        }
+        assert_eq!(
+            writer.read_chunk(5).unwrap().as_deref(),
+            Some(&records[5][..])
+        );
+        assert_eq!(
+            writer.read_chunk(39).unwrap().as_deref(),
+            Some(&records[39][..])
+        );
+        for record in &records[40..] {
+            writer.append_chunk(record).unwrap();
+        }
+
+        for ordinal in [0usize, 30, 59] {
+            assert_eq!(
+                writer.read_chunk(ordinal as u32).unwrap().as_deref(),
+                Some(&records[ordinal][..]),
+                "record {ordinal}"
+            );
+        }
+        assert_eq!(writer.read_chunk(60).unwrap(), None);
+
+        // The bytes on disk are the same once the segment is sealed.
+        let payload_path = temp_dir.path().join("seg_000001/payload.bin");
+        writer.finalize().unwrap();
+        assert_eq!(fs::read(payload_path).unwrap(), records.concat());
+    }
+
+    #[test]
+    fn read_chunk_detects_a_corrupted_payload() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut writer = SegmentWriter::create(temp_dir.path(), 1).unwrap();
+        writer.append_chunk(b"first record").unwrap();
+        writer.append_chunk(b"second record").unwrap();
+        writer.flush_payload().unwrap();
+
+        let payload_path = temp_dir.path().join("seg_000001/payload.bin");
+        let mut bytes = fs::read(&payload_path).unwrap();
+        bytes["first record".len()] ^= 0xFF;
+        fs::write(&payload_path, bytes).unwrap();
+
+        assert_eq!(
+            writer.read_chunk(0).unwrap().as_deref(),
+            Some(&b"first record"[..])
+        );
+        let error = writer.read_chunk(1).unwrap_err().to_string();
+        assert!(error.contains("CRC mismatch"), "got {error}");
     }
 }

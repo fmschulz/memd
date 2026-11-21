@@ -24,6 +24,11 @@ Persistent mode writes to:
 
 Default data dir: `~/.memd/data`. Override with `--data-dir`.
 
+A writer saves a tenant's `warm_index` once, at shutdown, and only if that
+index changed since it was loaded or last saved. A failed save is reported to
+the caller. The chunks stay safe in the segments, and the cache-aware backfill
+re-indexes anything the files lack.
+
 `embedding_revision` records which revision of the embedder produced the
 vectors under `warm_index/`. When a release changes how vectors are computed,
 the first writable open discards the dense indexes and re-embeds every chunk
