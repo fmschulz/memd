@@ -138,11 +138,15 @@ pub(super) fn reject_if_any_symlink_inside_outdir(
     Ok(())
 }
 
+/// Absolute project directory with `.` and `..` resolved textually, so every
+/// walk from it follows the path it names.
 pub(super) fn absolutize_project_dir(path: &Path) -> Result<PathBuf> {
-    if path.is_absolute() {
-        return Ok(path.to_path_buf());
-    }
-    Ok(std::env::current_dir()?.join(path))
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    Ok(normalize_absolute(&absolute))
 }
 
 pub(super) fn resolve_data_dir(explicit: Option<&Path>) -> Result<PathBuf> {

@@ -77,17 +77,21 @@ fields remain absent.
 `session-start` reads `.memd/project_scope.json` first, then a valid legacy
 `.memd/config.json` scope when the project scope is absent. Inside a git
 repository, a directory with neither uses the nearest scope in its ancestors, up
-to the repository root, and creates no file. Each ancestor counts if it holds a
-project scope or a valid legacy scope. A linked worktree also uses the scope of
-its main checkout. If no scope exists, session-start creates one at the
-repository root (the main checkout for a linked worktree), named after the
-repository. A `.memd-skip` file at that root skips startup for the whole
-repository. A nested clone or submodule is its own repository and keeps its own
+to the repository root, and creates no scope file. Each ancestor counts if it
+holds a project scope or a valid legacy scope. A linked worktree also uses the
+scope of its main checkout, which its main repository must confirm. If no scope
+exists, session-start creates one at the repository root (the main checkout for
+a linked worktree), named after the repository. If that root is not writable,
+the scope goes to the session directory instead. A `.memd-skip` file at that
+root skips startup for the whole repository, even for a subdirectory with its
+own scope. A nested clone or submodule is its own repository and keeps its own
 scope. The home directory and `/` never count as a repository root. Outside a
 repository, or at its root, a missing scope is created in the directory itself
 using `$MEMD_DEFAULT_TENANT` (then `$USER`, then `"default"`) as `tenant_id` and
-the directory basename as `project_id`. The JSON result adds `scope_dir` when
-the scope came from another directory. Derived IDs use lowercase ASCII letters, digits, and underscores;
+the directory basename as `project_id`. `memory.md` is still written to the
+session directory. The JSON result adds `scope_dir` when the scope came from
+another directory, and consolidation uses that directory's watermark. Derived
+IDs use lowercase ASCII letters, digits, and underscores;
 separator runs collapse, leading and trailing separators are removed, and IDs
 are capped at 64 characters. Empty IDs fall back to `default` for the tenant
 and `project` for the project.
@@ -97,8 +101,8 @@ Automatic scope creation leaves agent rules and tenant guardrails unchanged.
 with an existing scope. Invalid or unreadable scopes are preserved and reported
 without refreshing `memory.md`. A valid legacy configuration with neither scope
 field, such as a wiki-only configuration, allows automatic scope creation.
-A legacy project without a tenant is invalid. Concurrent first starts can
-briefly report an incomplete scope; retry after the first process exits.
+A legacy project without a tenant is invalid. Concurrent first starts publish
+the scope file whole, so no reader sees a partial file.
 Run `memd init` explicitly when you want the full guardrail suite.
 
 ### Write-time priority

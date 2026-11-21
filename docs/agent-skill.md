@@ -80,14 +80,27 @@ What `make install` does:
 7. Prints a verification recipe.
 
 `memd session-start` reads `.memd/project_scope.json` first. When that file is
-absent, it uses a valid legacy `.memd/config.json` scope. When neither provides
-a scope, it creates a minimal project scope from `$MEMD_DEFAULT_TENANT` (then
-`$USER`, then `"default"`) and the repo basename. Derived IDs are lowercased,
+absent, it uses a valid legacy `.memd/config.json` scope. When neither exists in
+a directory inside a git repository, it uses the nearest scope in the ancestors
+up to the repository root and creates no scope file. A linked worktree also
+uses the scope of its main checkout, which its main repository must confirm. A
+nested clone or a submodule is its own repository. When the repository has no
+scope, session-start creates a minimal one at the repository root (the main
+checkout for a linked worktree), not in the subdirectory. The scope comes from
+`$MEMD_DEFAULT_TENANT` (then `$USER`, then `"default"`) and the repository
+basename. If the root is not writable, the scope goes to the session directory
+and keeps the repository's name. Outside a repository, the directory itself
+gets the scope. `memory.md` is always written to the session directory. The
+result reports `scope_dir` when the scope came from another directory. The
+consolidation watermark lives in the scope directory, so one repository has one
+watermark. Derived IDs are lowercased,
 separator runs become underscores, and IDs are capped at 64 characters.
 Automatic scope creation skips the home directory itself and `/`, including
-symlink aliases. Explicit `memd init` can still create a scope there.
+symlink aliases, and a repository rooted there is ignored. Explicit
+`memd init` can still create a scope there.
 Set `MEMD_AUTO_SCOPE=0` to disable scope creation. Add `.memd-skip` in the repo
-root to skip startup even with an existing scope. Invalid or unreadable scopes
+root (or main checkout) to skip startup for the whole repository, even for a
+subdirectory with its own scope. Invalid or unreadable scopes
 are preserved and reported, and startup stops before refreshing `memory.md`.
 A valid `.memd/config.json` with neither `tenant_id` nor `project_id`, such as
 a wiki-only configuration, allows automatic scope creation. A legacy file with
@@ -105,9 +118,8 @@ guarantee recovery after a system crash. A process killed before replacement can
 leave its temporary output file behind.
 
 An asynchronous host hook can still leave a reader with the prior file; check
-its generation date when freshness matters. Concurrent first starts can briefly
-report a scope as invalid while another process finishes creating it; retry
-startup after the first process exits.
+its generation date when freshness matters. Concurrent first starts publish the
+scope file whole, so a reader sees either no file or the complete file.
 
 For a repo-local install (writes `.memd/` plus per-repo `AGENTS.md` and
 `CLAUDE.md` guardrail blocks):

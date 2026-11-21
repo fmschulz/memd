@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use super::args::{CliCommand, ProjectScopeConfig};
+use super::paths::normalize_absolute;
 use crate::error::{MemdError, Result};
 
 #[derive(Default)]
@@ -22,45 +23,94 @@ impl OperationScopeCache {
     }
 }
 
+/// Find the project scope that governs `start`.
+///
+/// Walks from `start` up to `$HOME`. A directory with no scope file of its own
+/// that is a linked worktree also offers the scope of its main checkout,
+/// before the walk continues upward, so a worktree outside the main checkout
+/// shares the repository's scope.
 pub(super) fn find_project_scope(start: &Path) -> Result<Option<ProjectScopeConfig>> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let mut current = start.to_path_buf();
+    let mut current = normalize_absolute(start);
 
     for _ in 0..64 {
-        let scope_path = current.join(".memd").join("project_scope.json");
-        let text = match std::fs::read_to_string(&scope_path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if home.as_deref().is_some_and(|home| current == home) {
-                    break;
-                }
-                if !current.pop() {
-                    break;
-                }
-                continue;
+        if let Some(scope) = read_scope_file_at(&current)? {
+            return Ok(Some(scope));
+        }
+        if let Some(main_checkout) = main_checkout_of_linked_worktree(&current) {
+            if let Some(scope) = read_scope_file_at(&main_checkout)? {
+                return Ok(Some(scope));
             }
-            Err(error) => {
-                return Err(MemdError::ValidationError(format!(
-                "unable to read {}: {error}; fix its permissions or pass --tenant-id explicitly",
-                scope_path.display()
-            )))
-            }
-        };
-        // A scope file that exists but cannot be read or parsed must stop the
-        // walk: silently falling through to a parent scope would route
-        // flagless writes into the wrong tenant/project.
-        return serde_json::from_str::<ProjectScopeConfig>(&text)
-            .map(Some)
-            .map_err(|err| {
-                MemdError::ValidationError(format!(
-                    "malformed {}: {err}; repair this scope file or run memd init with explicit --tenant-id and --project-id for {}",
-                    scope_path.display(),
-                    current.display()
-                ))
-            });
+        }
+        if home.as_deref().is_some_and(|home| current == home) {
+            break;
+        }
+        if !current.pop() {
+            break;
+        }
     }
 
     Ok(None)
+}
+
+/// Read `dir/.memd/project_scope.json`. A missing file is `None`. A file that
+/// exists but cannot be read or parsed is an error, because silently falling
+/// through to a parent scope would route flagless writes into the wrong
+/// tenant or project.
+fn read_scope_file_at(dir: &Path) -> Result<Option<ProjectScopeConfig>> {
+    let scope_path = dir.join(".memd").join("project_scope.json");
+    let text = match std::fs::read_to_string(&scope_path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(MemdError::ValidationError(format!(
+                "unable to read {}: {error}; fix its permissions or pass --tenant-id explicitly",
+                scope_path.display()
+            )))
+        }
+    };
+    serde_json::from_str::<ProjectScopeConfig>(&text)
+        .map(Some)
+        .map_err(|err| {
+            MemdError::ValidationError(format!(
+                "malformed {}: {err}; repair this scope file or run memd init with explicit --tenant-id and --project-id for {}",
+                scope_path.display(),
+                dir.display()
+            ))
+        })
+}
+
+/// The main checkout directory when `project_dir` is a linked git worktree.
+///
+/// A linked worktree has a `.git` file holding `gitdir: <admin dir>`. The admin
+/// dir has a `commondir` file that points at the main `.git` directory, whose
+/// parent is the main checkout. The admin dir also records the worktree's
+/// `.git` file in its `gitdir` file. That back-pointer must resolve to this
+/// directory's `.git`, so a crafted `.git` file cannot claim another
+/// repository. This reads files only and never runs `git`. Plain repos,
+/// submodules (no `commondir`), bare-repo worktrees (common dir not named
+/// `.git`), forged pointers, and unreadable files all return `None`.
+pub(super) fn main_checkout_of_linked_worktree(project_dir: &Path) -> Option<PathBuf> {
+    let dot_git = project_dir.join(".git");
+    if !dot_git.is_file() {
+        return None;
+    }
+    let pointer = std::fs::read_to_string(&dot_git).ok()?;
+    let gitdir = pointer
+        .lines()
+        .find_map(|line| line.strip_prefix("gitdir:"))?;
+    let admin_dir = project_dir.join(gitdir.trim());
+    let back_pointer = std::fs::read_to_string(admin_dir.join("gitdir")).ok()?;
+    let recorded = admin_dir.join(back_pointer.trim()).canonicalize().ok()?;
+    if recorded != dot_git.canonicalize().ok()? {
+        return None;
+    }
+    let commondir = std::fs::read_to_string(admin_dir.join("commondir")).ok()?;
+    let common_dir = admin_dir.join(commondir.trim()).canonicalize().ok()?;
+    if common_dir.file_name()? != ".git" {
+        return None;
+    }
+    common_dir.parent().map(Path::to_path_buf)
 }
 
 fn scope_missing_error(cwd: &Path) -> MemdError {
@@ -508,5 +558,99 @@ mod tests {
         )
         .unwrap();
         assert_eq!(explicit["tenant_id"], "explicit_tenant");
+    }
+
+    /// A main checkout with a scope and a linked worktree next to it, laid out
+    /// as `git worktree add ../wt` does, back-pointer included.
+    fn sibling_worktree(root: &Path) -> (PathBuf, PathBuf) {
+        let main = root.join("main-repo");
+        let admin = main.join(".git/worktrees/wt");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(admin.join("commondir"), "../..\n").unwrap();
+        let worktree = root.join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            admin.join("gitdir"),
+            format!("{}/.git\n", worktree.display()),
+        )
+        .unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", admin.display()),
+        )
+        .unwrap();
+        std::fs::create_dir_all(main.join(".memd")).unwrap();
+        std::fs::write(
+            main.join(".memd/project_scope.json"),
+            r#"{
+              "tenant_id": "main_tenant",
+              "project_id": "main_project",
+              "interface": "cli",
+              "cli_command": "memd",
+              "agent_context_output": ".memd/context.md",
+              "project_dir": "."
+            }"#,
+        )
+        .unwrap();
+        (main, worktree)
+    }
+
+    #[test]
+    fn resolve_required_uses_the_main_checkout_scope_in_a_linked_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_main, worktree) = sibling_worktree(dir.path());
+        let sub = worktree.join("src/deep");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        for start in [&worktree, &sub] {
+            let (tenant, project) = resolve_required(start, None, None).unwrap();
+            assert_eq!(tenant, "main_tenant");
+            assert_eq!(project.as_deref(), Some("main_project"));
+        }
+    }
+
+    #[test]
+    fn worktree_scope_file_wins_over_the_main_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_main, worktree) = sibling_worktree(dir.path());
+        std::fs::create_dir_all(worktree.join(".memd")).unwrap();
+        std::fs::write(
+            worktree.join(".memd/project_scope.json"),
+            r#"{"tenant_id":"wt_tenant","project_id":"wt_project","interface":"cli","cli_command":"memd","agent_context_output":".memd/context.md","project_dir":"."}"#,
+        )
+        .unwrap();
+
+        let (tenant, _) = resolve_required(&worktree, None, None).unwrap();
+        assert_eq!(tenant, "wt_tenant");
+    }
+
+    #[test]
+    fn malformed_main_checkout_scope_stops_the_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        let (main, worktree) = sibling_worktree(dir.path());
+        std::fs::write(main.join(".memd/project_scope.json"), b"{not json").unwrap();
+
+        let error = resolve_required(&worktree, None, None).unwrap_err();
+        assert!(error.to_string().contains("malformed"), "{error}");
+    }
+
+    #[test]
+    fn independent_clone_and_forged_pointer_do_not_inherit_a_main_checkout_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let (main, _worktree) = sibling_worktree(dir.path());
+
+        let clone = dir.path().join("clone");
+        std::fs::create_dir_all(clone.join(".git")).unwrap();
+        assert!(resolve_required(&clone, None, None).is_err());
+
+        let forged = dir.path().join("forged");
+        std::fs::create_dir_all(&forged).unwrap();
+        std::fs::write(
+            forged.join(".git"),
+            format!("gitdir: {}/.git/worktrees/wt\n", main.display()),
+        )
+        .unwrap();
+        assert_eq!(main_checkout_of_linked_worktree(&forged), None);
+        assert!(resolve_required(&forged, None, None).is_err());
     }
 }
