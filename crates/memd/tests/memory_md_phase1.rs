@@ -345,6 +345,7 @@ async fn run_memory_md_with_global<S: Store>(
             output: PathBuf::from("memory.md"),
             project_limit: 10,
             global_limit,
+            lesson_limit: 3,
             candidate_k: 40,
             explain_output: None,
         },

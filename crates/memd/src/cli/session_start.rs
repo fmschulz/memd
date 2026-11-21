@@ -385,6 +385,7 @@ pub(super) async fn run_session_start_inner<S: Store>(
             // Machine-wide takeaways are capped by default so they
             // cannot dominate project startup context.
             global_limit: 2,
+            lesson_limit: 3,
             candidate_k: 40,
             explain_output: None,
             // A session below the scope directory shows the repository's

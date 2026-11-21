@@ -197,7 +197,7 @@ pub(super) async fn scan_takeaway_candidates_capped<S: Store>(
     Ok(outcome)
 }
 
-fn digest_scope(tenant: &TenantId, active_project: Option<&str>) -> DigestScope {
+pub(super) fn digest_scope(tenant: &TenantId, active_project: Option<&str>) -> DigestScope {
     let mut project_ids = Vec::new();
     if let Some(project) = active_project {
         project_ids.push(project.to_string());
@@ -596,20 +596,32 @@ const REPO_NOVELTY_STOPWORDS: &[&str] = &[
 /// `USER_PRESERVE_PRIORITY_THRESHOLD` always survive; neither is ever
 /// suppressed. Pure set intersection against the prebuilt index — no
 /// file reads here.
+///
+/// Takeaways are tested in the order given (callers rank first). Testing
+/// stops once `keep` takeaways have passed, which bounds the work on a large
+/// pool; the untested tail stays in the list for the caller's window cut.
 pub(super) fn suppress_repo_covered(
     takeaways: &mut Vec<Takeaway>,
     index: &[RepoDoc],
+    keep: usize,
 ) -> HashMap<String, String> {
     let mut suppressed = HashMap::new();
     if index.is_empty() {
         return suppressed;
     }
+    let mut kept = 0usize;
     for takeaway in takeaways.iter() {
+        if kept >= keep {
+            break;
+        }
         if user_priority_at_least(&takeaway.tags, USER_PRESERVE_PRIORITY_THRESHOLD) {
+            kept += 1;
             continue;
         }
         if let Some(path) = repo_doc_covering(&takeaway.text, index) {
             suppressed.insert(takeaway.chunk_id.clone(), format!("covered_by_repo:{path}"));
+        } else {
+            kept += 1;
         }
     }
     takeaways.retain(|takeaway| !suppressed.contains_key(&takeaway.chunk_id));

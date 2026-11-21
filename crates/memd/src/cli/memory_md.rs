@@ -29,13 +29,14 @@ mod digest_scope_tests;
 #[cfg(test)]
 mod tests;
 
+use crate::experience::{recent_lessons, RecentLesson};
 pub(super) use action::explicit_agent_action;
 use collect::{collect_project_state, memory_state_from_scan};
 use evaluate::evaluate_agent_usefulness;
 pub(super) use evaluate::run_memory_md_eval;
 use rank::build_repo_index;
 use rank::{
-    dedupe_ranked_window, filter_startup_takeaways, recompute_union_priorities,
+    dedupe_ranked_window, digest_scope, filter_startup_takeaways, recompute_union_priorities,
     reconcile_candidate_explanations, scan_takeaway_candidates, sort_takeaways,
     suppress_finishes_covered_by_libraries, suppress_repo_covered,
     suppress_unrelated_machine_takeaways, ScanOutcome, ScopedSuppressionReasons,
@@ -80,6 +81,8 @@ pub(super) struct MemoryMdOptions {
     pub(super) output: PathBuf,
     pub(super) project_limit: usize,
     pub(super) global_limit: usize,
+    /// Current lessons of the project to show; 0 turns the block off.
+    pub(super) lesson_limit: usize,
     pub(super) candidate_k: usize,
     pub(super) explain_output: Option<PathBuf>,
     /// Directory whose docs the repo-novelty gate reads; defaults to
@@ -126,6 +129,7 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
     let candidate_k = options.candidate_k;
     let project_limit = options.project_limit.min(10);
     let global_limit = options.global_limit.min(10);
+    let lesson_limit = options.lesson_limit.min(10);
 
     // Aggregate retrieval hits once per refresh; the same `HitStats`
     // map is shared with every `priority_score` call so we don't
@@ -157,6 +161,8 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
     let (mut project_explanations, mut global_explanations): (Vec<_>, Vec<_>) = scan_explanations
         .into_iter()
         .partition(|explanation| explanation.section == "project");
+    let lessons =
+        recent_project_lessons(store, &tenant, project_id.as_deref(), lesson_limit).await?;
     let ranking_now_ms = now_ms() as i64;
     let candidate_chunk_ids = project_takeaways
         .iter()
@@ -204,10 +210,6 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
         }
     }
     union_suppressed.extend(suppress_unrelated_machine_takeaways(&mut global_takeaways));
-    union_suppressed.extend(dedupe_ranked_window(
-        &mut project_takeaways,
-        &mut global_takeaways,
-    ));
     let output_path = if options.output.is_absolute() {
         options.output
     } else {
@@ -220,14 +222,21 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
         None => project_dir.clone(),
     };
     let repo_index = build_repo_index(&repo_dir, &output_path);
+    // Rank, drop covered candidates, then cut to the dedupe window: covered
+    // candidates must not use up the window's places.
     for (section, takeaways) in [
         ("project", &mut project_takeaways),
         ("machine_wide", &mut global_takeaways),
     ] {
-        for (chunk_id, reason) in suppress_repo_covered(takeaways, &repo_index) {
+        sort_takeaways(takeaways);
+        for (chunk_id, reason) in suppress_repo_covered(takeaways, &repo_index, DEDUPE_WINDOW) {
             union_suppressed.insert((section.to_string(), chunk_id), reason);
         }
     }
+    union_suppressed.extend(dedupe_ranked_window(
+        &mut project_takeaways,
+        &mut global_takeaways,
+    ));
     sort_takeaways(&mut project_takeaways);
     sort_takeaways(&mut global_takeaways);
     project_takeaways.truncate(project_limit);
@@ -248,7 +257,16 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
     );
     let agent_usefulness =
         evaluate_agent_usefulness(&project_state, &project_takeaways, &global_takeaways);
-    let rendered = render_memory_md(&project_state, &project_takeaways, &global_takeaways);
+    let shown_lessons = lessons
+        .iter()
+        .filter(|lesson| lesson.skipped.is_none())
+        .collect::<Vec<_>>();
+    let rendered = render_memory_md(
+        &project_state,
+        &project_takeaways,
+        &shown_lessons,
+        &global_takeaways,
+    );
     atomic_replace(&output_path, rendered.as_bytes())?;
 
     let explain_output = if let Some(path) = options.explain_output {
@@ -271,6 +289,7 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
                 "project": project_scan,
                 "machine_wide": machine_scan,
             },
+            "lessons": lessons,
             "agent_usefulness": agent_usefulness.clone(),
             "project": project_explanations,
             "machine_wide": global_explanations,
@@ -290,10 +309,29 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
         "explain_output": explain_output,
         "project_takeaways": project_takeaways.len(),
         "global_takeaways": global_takeaways.len(),
+        "project_lessons": shown_lessons.len(),
         "candidate_k": candidate_k,
         "project_state": project_state,
         "agent_usefulness": agent_usefulness
     }))
+}
+
+/// The current lessons of the active project (and its aliases), newest first.
+/// A store without task artifacts has none.
+async fn recent_project_lessons<S: Store>(
+    store: &S,
+    tenant: &TenantId,
+    project_id: Option<&str>,
+    limit: usize,
+) -> Result<Vec<RecentLesson>> {
+    let Some(project_id) = project_id.filter(|_| limit > 0) else {
+        return Ok(Vec::new());
+    };
+    let scope = digest_scope(tenant, Some(project_id));
+    match recent_lessons(store, tenant, &scope.project_ids, limit).await {
+        Err(error) if is_unsupported_store_capability(&error) => Ok(Vec::new()),
+        result => result,
+    }
 }
 
 pub(super) fn read_project_scope(project_dir: &Path) -> Result<Option<ProjectScopeConfig>> {

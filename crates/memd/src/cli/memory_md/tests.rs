@@ -658,7 +658,7 @@ fn render_memory_md_caps_long_takeaway_text() {
         occurrences: 1,
     };
     let state = make_project_state();
-    let rendered = render_memory_md(&state, &[takeaway], &[]);
+    let rendered = render_memory_md(&state, &[takeaway], &[], &[]);
     assert!(rendered.contains("## Project Fact Library"));
     assert!(rendered.contains("chunk-a"));
     assert!(rendered.contains("..."));
@@ -680,7 +680,7 @@ fn render_memory_md_omits_empty_global_section() {
         occurrences: 1,
     };
     let state = make_project_state();
-    let rendered = render_memory_md(&state, &[takeaway], &[]);
+    let rendered = render_memory_md(&state, &[takeaway], &[], &[]);
     assert!(rendered.contains("## Project Fact Library"));
     assert!(!rendered.contains("## Machine-Wide Fact Library"));
 }
@@ -713,7 +713,7 @@ fn render_memory_md_groups_takeaways_by_signal_category() {
     command.priority = 60.0;
 
     let state = make_project_state();
-    let rendered = render_memory_md(&state, &[command, fix, decision], &[]);
+    let rendered = render_memory_md(&state, &[command, fix, decision], &[], &[]);
 
     assert!(rendered.contains("### Decisions"));
     assert!(rendered.contains("### Validated Fixes"));
@@ -1179,7 +1179,7 @@ fn repo_coverage_threshold_is_sixty_percent_of_takeaway_tokens() {
         make_takeaway("pinned", covered, vec!["priority:9"], "summary"),
     ];
 
-    let suppressed = suppress_repo_covered(&mut takeaways, &index);
+    let suppressed = suppress_repo_covered(&mut takeaways, &index, usize::MAX);
 
     assert_eq!(
         suppressed.get("covered").map(String::as_str),

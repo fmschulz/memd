@@ -2,10 +2,12 @@ use super::action::*;
 use super::rank::*;
 use super::state::*;
 use super::*;
+use crate::experience::{LessonEvidence, RecentLesson};
 
 pub(super) fn render_memory_md(
     project_state: &ProjectState,
     project_takeaways: &[Takeaway],
+    lessons: &[&RecentLesson],
     global_takeaways: &[Takeaway],
 ) -> String {
     let mut out = String::new();
@@ -19,10 +21,57 @@ pub(super) fn render_memory_md(
     out.push('\n');
 
     render_section(&mut out, "Project Fact Library", project_takeaways);
+    render_lessons(&mut out, lessons);
     if !global_takeaways.is_empty() {
         render_section(&mut out, "Machine-Wide Fact Library", global_takeaways);
     }
     out
+}
+
+/// The shown lessons of the project, each rendered from the lesson itself:
+/// guidance, then when it applies and how it was checked. Nothing renders
+/// without a lesson.
+pub(super) fn render_lessons(out: &mut String, lessons: &[&RecentLesson]) {
+    if lessons.is_empty() {
+        return;
+    }
+    out.push_str("## Recent Lessons\n\n");
+    for (index, recent) in lessons.iter().enumerate() {
+        let lesson = &recent.lesson;
+        out.push_str(&format!(
+            "{}. {}\n",
+            index + 1,
+            summarize_text(&lesson.guidance, 320)
+        ));
+        let mut parts = Vec::new();
+        if !lesson.symptom_terms.is_empty() {
+            parts.push(format!("when: {}", lesson.symptom_terms.join(", ")));
+        }
+        let applicability = &lesson.applicability;
+        let mut applies = Vec::new();
+        match (&applicability.tool, &applicability.version) {
+            (Some(tool), Some(version)) => applies.push(format!("tool {tool} {version}")),
+            (Some(tool), None) => applies.push(format!("tool {tool}")),
+            (None, Some(version)) => applies.push(format!("version {version}")),
+            (None, None) => {}
+        }
+        if let Some(machine) = &applicability.machine {
+            applies.push(format!("machine {machine}"));
+        }
+        if !applies.is_empty() {
+            parts.push(format!("applies to: {}", applies.join(", ")));
+        }
+        parts.push(format!(
+            "evidence: {}",
+            match lesson.evidence {
+                LessonEvidence::Observed => "observed",
+                LessonEvidence::Executed => "executed",
+            }
+        ));
+        parts.push(format!("case: `{}`", recent.problem_id));
+        out.push_str(&format!("   - {}\n", parts.join("; ")));
+    }
+    out.push_str("\nMore lessons: memd experience find \"<error words>\"\n\n");
 }
 
 pub(super) fn render_latest_project_state(out: &mut String, state: &ProjectState) {

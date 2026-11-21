@@ -367,6 +367,74 @@ fn regression_store_outcome_priors_exclude_expired_episodes_and_old_history() {
     }
 }
 
+/// A candidate pool above SQLite's bind limit (32,766) must not fail the
+/// lookup, with or without outcome records.
+#[test]
+fn outcome_priors_accept_more_chunk_ids_than_the_bind_limit() {
+    let store = SqliteMetadataStore::open_in_memory().unwrap();
+    let tenant = TenantId::new("prior_many").unwrap();
+    let chunk = ChunkId::new();
+    store
+        .insert(&create_test_metadata(tenant.as_str(), &chunk))
+        .unwrap();
+    let mut requested = (0..40_000).map(|_| ChunkId::new()).collect::<Vec<_>>();
+    let now = 20_000_000_000;
+    assert!(store
+        .outcome_priors(&tenant, None, &requested, now)
+        .unwrap()
+        .is_empty());
+
+    let episode = RetrievalEpisode {
+        episode_id: RetrievalEpisodeId::new(),
+        tenant_id: tenant.clone(),
+        project_id: None,
+        query_hash: crate::store::stable_query_hash("many"),
+        query_mode: "generic".to_string(),
+        requested_k: 1,
+        fetched_k: 1,
+        rendered_k: 1,
+        policy_version: "outcome-v1".to_string(),
+        policy_mode: RankingPolicyMode::Shadow,
+        task_id: None,
+        thread_id: None,
+        created_at_ms: now - 10,
+        expires_at_ms: now + 10,
+    };
+    let item = RetrievalEpisodeItem {
+        episode_id: episode.episode_id.clone(),
+        chunk_id: chunk.clone(),
+        origin_tenant_id: tenant.clone(),
+        origin_project_id: None,
+        original_rank: 0,
+        original_score: 0.5,
+        lane_scores_json: "{}".to_string(),
+        outcome_adjustment: 0.0,
+        served_rank: Some(0),
+        shadow_rank: Some(0),
+        rendered: true,
+        source_dedup_group: None,
+    };
+    store.insert_retrieval_episode(&episode, &[item]).unwrap();
+    let outcome = OutcomeEvent::new(
+        episode.episode_id,
+        OutcomeKind::Passed,
+        OutcomeVerifier::AutomatedTest,
+        vec![chunk.clone()],
+        vec![],
+        Some("artifact:test".to_string()),
+        now - 1,
+    );
+    store.insert_outcome_event(&tenant, &outcome).unwrap();
+    requested.insert(35_000, chunk.clone());
+
+    let priors = store
+        .outcome_priors(&tenant, None, &requested, now)
+        .unwrap();
+    assert_eq!(priors.len(), 1);
+    assert_eq!(priors[0].chunk_id, chunk);
+    assert_eq!(priors[0].eligible_episode_count, 1);
+}
+
 #[test]
 fn regression_store_outcome_priors_time_window_uses_scope_index() {
     let store = SqliteMetadataStore::open_in_memory().unwrap();

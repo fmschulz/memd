@@ -98,6 +98,11 @@ lineage, and high-confidence topic duplicates are collapsed across that union.
 If the active project's item competes with a machine-wide match, the project
 item is retained.
 
+After the project facts, `memory.md` shows up to 3 current lessons of the
+active project (`## Recent Lessons`, set by `--lesson-limit`). They come from
+the experience store, not from the fact scan; `--explain-output` lists each
+lesson candidate and the reason it was skipped.
+
 `## Memory health` prints one line,
 `facts: <P> visible in project <id>, <T> visible in tenant <tenant>`. Both
 numbers are SQL counts of rows with a visible status that are neither

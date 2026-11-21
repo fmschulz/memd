@@ -33,7 +33,7 @@ For write-quality expectations and cleanup safety, see the
 | `memd export`, `memd export-markdown`, `memd export-omf`, `memd import-omf` | Portable local memory operations. |
 | `memd init` | Write `.memd/` scope files and CLI guardrail blocks. |
 | `memd doctor` | Diagnose binary discovery (incl. PATH-binary version skew), the resolved `--data-dir`, warm-worker reachability and worker-vs-CLI version skew, global agent rules, Claude Code SessionStart hook, and current project scope; `--strict` exits 2 when any check fails. |
-| `memd memory-md` | Refresh project-root `memory.md` with ranked fact libraries for session-start use. |
+| `memd memory-md` | Refresh project-root `memory.md` with ranked fact libraries and up to 3 recent lessons (`--lesson-limit`) for session-start use. |
 | `memd eval-memory-md` | Gate startup-memory quality with `--min-useful-ratio` and `--max-generated-wrappers`; evaluate into `memory-eval.md`. |
 | `memd eval-retrieval` | Gate retrieval quality with precision, hit-rate, recall, and MRR thresholds. |
 | `memd audit` | Report tenant/project storage shape, generated-wrapper noise, alias groups, unreadable active rows, and routine progress summaries that still lack an expiry; `--strict` exits 2 when `unreadable_active_chunks > 0`. |
@@ -56,7 +56,17 @@ list of every physical chunk created by document splitting.
   health state, and agent-usefulness metrics. Its `scan` object counts, for the
   project and machine-wide sections, the visible, read and unreadable rows, the
   excluded experience projections and generated digests, the rows excluded by status, and whether a
-  cap truncated the scan.
+  cap truncated the scan. Its `lessons` array lists each lesson candidate with
+  the problem ID, lesson artifact ID, event time and skip reason (`superseded`,
+  `conflict`, `over_limit`, `unresolvable`; null when shown).
+- `memory-md --lesson-limit <n>` (default 3, maximum 10, 0 turns the block off)
+  sets the `Recent Lessons` block, which follows the project facts. It lists
+  the newest current lessons of the active project (and its aliases): a
+  superseded lesson, a case with conflicting lessons and lessons of other
+  projects are left out. It does not use `--project-limit` places and skips the
+  repository-coverage and dedupe gates. The command result reports
+  `project_lessons`. Recall lessons of other projects with
+  `memd experience find`.
 - `memory-md` renders a generation date and scope before the fact libraries.
   `Memory health` prints `facts: <P> visible in project <id>, <T> visible in
   tenant <tenant>` ("visible" skips superseded, deleted and other non-visible

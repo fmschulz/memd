@@ -246,6 +246,7 @@ pub async fn run_cli<S: Store>(
             output,
             project_limit,
             global_limit,
+            lesson_limit,
             candidate_k,
             explain_output,
         } => {
@@ -259,6 +260,7 @@ pub async fn run_cli<S: Store>(
                     output,
                     project_limit,
                     global_limit,
+                    lesson_limit,
                     candidate_k,
                     explain_output,
                     repo_dir: None,

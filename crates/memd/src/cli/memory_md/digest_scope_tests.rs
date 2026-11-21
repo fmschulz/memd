@@ -4,7 +4,7 @@
 use super::collect::memory_state_from_scan;
 use super::rank::{scan_takeaway_candidates_capped, ScanCaps, Takeaway};
 use super::*;
-use crate::experience::{record_case, CaseFile, ExperienceContext};
+use crate::experience::{record_case, CaseFile, ExperienceContext, NoteOutcome};
 use crate::store::metadata::MetadataStore;
 use crate::store::persistent::{PersistentStore, PersistentStoreConfig};
 use crate::store::Store;
@@ -42,13 +42,36 @@ fn fact(project: Option<&str>, text: &str, tags: &[&str], timestamp: i64) -> Mem
 }
 
 async fn record_experience(store: &PersistentStore, project: &str, problem: &str, id: &str) {
+    record_lesson(
+        store,
+        project,
+        problem,
+        &format!("Apply the {project} workaround before launching."),
+        json!({}),
+        1_800_000_000_000,
+        id,
+    )
+    .await;
+}
+
+/// Record one experience case through the real code path.
+async fn record_lesson<S: Store + ?Sized>(
+    store: &S,
+    project: &str,
+    problem: &str,
+    fix: &str,
+    applies_when: Value,
+    observed_at_ms: i64,
+    id: &str,
+) -> NoteOutcome {
     let case = CaseFile::parse(
         json!({
             "problem": problem,
             "symptoms": ["slow startup"],
             "failed": ["restarted the daemon"],
-            "fix": format!("Apply the {project} workaround before launching."),
+            "fix": fix,
             "check": {"method": "observed", "result": "startup took under a second"},
+            "applies_when": applies_when,
         })
         .to_string()
         .as_bytes(),
@@ -56,20 +79,26 @@ async fn record_experience(store: &PersistentStore, project: &str, problem: &str
     .unwrap();
     record_case(
         store,
-        ExperienceContext {
-            tenant_id: TenantId::new(TENANT).unwrap(),
-            project_id: ProjectId::from(project),
-            agent_id: Some("digest-test".to_string()),
-            session_id: None,
-            observed_at_ms: Some(1_800_000_000_000),
-            provenance: Default::default(),
-        },
+        experience_context(project, observed_at_ms),
         case,
         Some(id),
     )
     .await
-    .unwrap();
+    .unwrap()
 }
+
+fn experience_context(project: &str, observed_at_ms: i64) -> ExperienceContext {
+    ExperienceContext {
+        tenant_id: TenantId::new(TENANT).unwrap(),
+        project_id: ProjectId::from(project),
+        agent_id: Some("digest-test".to_string()),
+        session_id: None,
+        observed_at_ms: Some(observed_at_ms),
+        provenance: Default::default(),
+    }
+}
+
+mod lesson_block_tests;
 
 /// Store a generated digest artifact with its retrieval projection, as the
 /// digest writers do.
@@ -91,6 +120,7 @@ async fn record_generated_digest(store: &PersistentStore, project: &str, role: &
         .unwrap();
 }
 
+/// Digest without the lessons block, for tests of fact selection.
 async fn run_digest(store: &PersistentStore, project_dir: &Path, project: &str) -> (String, Value) {
     run_digest_in(store, project_dir, None, project).await
 }
@@ -101,8 +131,21 @@ async fn run_digest_in(
     repo_dir: Option<PathBuf>,
     project: &str,
 ) -> (String, Value) {
+    let (_, memory_md, explain) = refresh_digest(store, project_dir, repo_dir, project, 0).await;
+    (memory_md, explain)
+}
+
+/// Run one refresh. Returns the command result, `memory.md` and the explain
+/// report.
+async fn refresh_digest<S: Store>(
+    store: &S,
+    project_dir: &Path,
+    repo_dir: Option<PathBuf>,
+    project: &str,
+    lesson_limit: usize,
+) -> (Value, String, Value) {
     let explain = project_dir.join("explain.json");
-    refresh_memory_md_with_health(
+    let result = refresh_memory_md_with_health(
         store,
         None,
         MemoryMdOptions {
@@ -112,6 +155,7 @@ async fn run_digest_in(
             output: PathBuf::from("memory.md"),
             project_limit: 10,
             global_limit: 10,
+            lesson_limit,
             candidate_k: 40,
             explain_output: Some(explain.clone()),
             repo_dir,
@@ -120,6 +164,7 @@ async fn run_digest_in(
     .await
     .unwrap();
     (
+        result,
         fs::read_to_string(project_dir.join("memory.md")).unwrap(),
         serde_json::from_str(&fs::read_to_string(explain).unwrap()).unwrap(),
     )
@@ -520,4 +565,36 @@ async fn repo_dir_docs_suppress_covered_facts() {
         .any(|row| row["filter_reason"]
             .as_str()
             .is_some_and(|reason| reason.starts_with("covered_by_repo:tasks/todo.md"))));
+}
+
+/// Repository coverage runs before the dedupe window: covered candidates do
+/// not use up the 200 places, so an uncovered fact below them still shows.
+#[tokio::test]
+async fn covered_candidates_do_not_fill_the_dedupe_window() {
+    let data = tempfile::tempdir().unwrap();
+    let project_dir = tempfile::tempdir().unwrap();
+    let store = open_store(data.path());
+    let covered = (0..DEDUPE_WINDOW + 5)
+        .map(|index| {
+            format!(
+                "Decision: covered fact number {index} keeps token{index}a token{index}b token{index}c token{index}d token{index}e."
+            )
+        })
+        .collect::<Vec<_>>();
+    fs::create_dir_all(project_dir.path().join("tasks")).unwrap();
+    fs::write(project_dir.path().join("tasks/todo.md"), covered.join("\n")).unwrap();
+    let uncovered =
+        "Validation: cargo test passed after the zebra migration frobnicates quokka entries.";
+    let mut chunks = covered
+        .iter()
+        .enumerate()
+        .map(|(index, text)| fact(Some("alpha"), text, &["kind:decision"], 100 + index as i64))
+        .collect::<Vec<_>>();
+    chunks.push(fact(Some("alpha"), uncovered, &[], 1));
+    store.add_batch(chunks).await.unwrap();
+
+    let (memory_md, _) = run_digest(&store, project_dir.path(), "alpha").await;
+
+    assert!(memory_md.contains(uncovered), "{memory_md}");
+    assert!(!memory_md.contains("covered fact number"), "{memory_md}");
 }

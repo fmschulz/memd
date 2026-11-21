@@ -3,6 +3,7 @@
 mod bundle;
 mod note;
 mod recall;
+mod recent;
 mod validation;
 
 use std::collections::{BTreeMap, HashSet};
@@ -20,6 +21,7 @@ use crate::types::{ProjectId, PromotionState, TenantId};
 pub use bundle::{export_bundle, import_bundle, ExperienceBundleV1, ImportReport};
 pub use note::{record_case, CaseCheck, CaseFile, CheckMethod, NoteOutcome, MAX_CASE_BYTES};
 pub use recall::{retrieve_lessons, ApplicableLesson, LessonQuery, LessonRecall, RecallAbstention};
+pub use recent::{recent_lessons, LessonSkip, RecentLesson, LESSON_WINDOW};
 pub(crate) use validation::{
     attempt_ordinal, current_attempt, current_lesson_heads, event_time, problem_id, required_event,
     sort_artifacts, validate_artifact_shape, validate_case, validation,

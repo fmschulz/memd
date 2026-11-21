@@ -32,6 +32,14 @@ duplicates; the agent still decides where a fact belongs. Add
 `--explain-output <path>` to audit the selection, including the counts of
 excluded rows.
 
+After the project facts, a `Recent Lessons` block lists up to 3 current
+lessons of the project, newest first (`--lesson-limit N`, maximum 10, 0 turns
+it off). Each shows the guidance, when it applies (symptom terms, tool,
+version, machine), the evidence label (`observed` or `executed`), and the case
+ID. A superseded lesson, a case with conflicting lessons, and lessons of other
+projects do not appear. For a symptom not listed, run
+`memd experience find "<error words>"`.
+
 Explicit priority, durable categories, freshness, and verified outcomes affect
 ranking. Retrieval exposure alone is not proof of usefulness. Source inspection,
 task state, and next actions belong in repository files, not this digest.

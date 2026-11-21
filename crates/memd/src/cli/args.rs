@@ -384,6 +384,11 @@ pub enum CliCommand {
         #[arg(long, default_value_t = 2)]
         global_limit: usize,
 
+        /// Maximum current lessons of the project to show in the
+        /// `Recent Lessons` block, capped at 10. 0 turns the block off.
+        #[arg(long, default_value_t = 3)]
+        lesson_limit: usize,
+
         /// Unused since scan-first selection considers every stored
         /// chunk; kept for CLI compatibility.
         #[arg(long, default_value_t = 40)]

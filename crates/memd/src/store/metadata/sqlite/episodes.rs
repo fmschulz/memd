@@ -1,6 +1,8 @@
 use super::*;
 
 const OUTCOME_PRIOR_WINDOW_MS: i64 = 90 * 24 * 60 * 60 * 1_000;
+/// Chunk ids bound per priors statement, well under SQLite's 32,766 limit.
+const OUTCOME_PRIOR_BATCH: usize = 500;
 
 pub(super) fn outcome_priors_query(chunk_count: usize) -> String {
     let placeholders = vec!["?"; chunk_count].join(",");
@@ -455,33 +457,61 @@ impl SqliteMetadataStore {
             return Ok(Vec::new());
         }
         let conn = self.pool.get();
-        let sql = outcome_priors_query(requested.len());
-        let mut parameters = vec![
-            rusqlite::types::Value::Text(scope_tenant_id.as_str().to_string()),
-            scope_project_id
-                .map(|project| rusqlite::types::Value::Text(project.to_string()))
-                .unwrap_or(rusqlite::types::Value::Null),
-            rusqlite::types::Value::Integer(now_ms),
-            rusqlite::types::Value::Integer(now_ms.saturating_sub(OUTCOME_PRIOR_WINDOW_MS)),
-        ];
-        parameters.extend(
-            requested
-                .iter()
-                .map(|chunk| rusqlite::types::Value::Text(chunk.to_string())),
-        );
-        let mut statement = conn.prepare(&sql)?;
-        let rows = statement.query_map(rusqlite::params_from_iter(parameters), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, i64>(7)?,
-            ))
-        })?;
+        let scope_project = scope_project_id
+            .map(|project| rusqlite::types::Value::Text(project.to_string()))
+            .unwrap_or(rusqlite::types::Value::Null);
+        // Cheap first check: no eligible outcome in this scope means no priors.
+        let has_outcomes: bool = conn.query_row(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM retrieval_episodes e
+                 JOIN outcome_events o ON o.episode_id = e.episode_id
+                 WHERE o.ranking_eligible = 1
+                   AND e.tenant_id = ?1
+                   AND e.project_id IS ?2)",
+            rusqlite::params![scope_tenant_id.as_str(), scope_project],
+            |row| row.get(0),
+        )?;
+        if !has_outcomes {
+            return Ok(Vec::new());
+        }
+        // Bind at most OUTCOME_PRIOR_BATCH ids per statement (SQLite allows
+        // 32,766 variables). A chunk id lives in exactly one batch, so the
+        // newest-first dedupe below sees every row of an episode/chunk pair
+        // in one batch and the merged result equals one big statement.
+        let requested = requested.into_iter().collect::<Vec<_>>();
+        let mut rows = Vec::new();
+        for batch in requested.chunks(OUTCOME_PRIOR_BATCH) {
+            let sql = outcome_priors_query(batch.len());
+            let mut parameters = vec![
+                rusqlite::types::Value::Text(scope_tenant_id.as_str().to_string()),
+                scope_project.clone(),
+                rusqlite::types::Value::Integer(now_ms),
+                rusqlite::types::Value::Integer(now_ms.saturating_sub(OUTCOME_PRIOR_WINDOW_MS)),
+            ];
+            parameters.extend(
+                batch
+                    .iter()
+                    .map(|chunk| rusqlite::types::Value::Text(chunk.to_string())),
+            );
+            let mut statement = conn.prepare(&sql)?;
+            let batch_rows =
+                statement.query_map(rusqlite::params_from_iter(parameters), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, i64>(7)?,
+                    ))
+                })?;
+            for row in batch_rows {
+                rows.push(row?);
+            }
+        }
         let mut priors = HashMap::<ChunkId, OutcomePrior>::new();
         let mut seen_episode_chunks = HashSet::<(String, ChunkId)>::new();
         for row in rows {
@@ -494,7 +524,7 @@ impl SqliteMetadataStore {
                 used_json,
                 harmful_json,
                 timestamp_ms,
-            ) = row?;
+            ) = row;
             let Ok(chunk_id) = ChunkId::parse(&chunk_id) else {
                 continue;
             };
