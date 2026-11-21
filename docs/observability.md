@@ -111,7 +111,8 @@ it drops when a fact is superseded or deleted. `<T>` is a SQL row count of the
 same kind of rows for the tenant. A projection long enough to split is stored
 as several rows, and since this version every row links to its artifact, so the
 SQL excludes all of them. Rows written before this version have no link on
-their continuation rows, so `<T>` can include those rows; `<P>` never does. The section also lists warnings for scope drift, a
+their continuation rows, so `<T>` can include those rows; `<P>` does not, except on a
+truncated project scan, where the SQL count stands in for `<P>`. The section also lists warnings for scope drift, a
 truncated project scan (the cap cuts the oldest facts first), and unreadable
 payloads. The machine-wide cap is a designed bound and prints no warning; the
 explain output keeps its `truncated` flag. The section does not run
