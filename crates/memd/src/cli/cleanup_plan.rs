@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use super::args::{ExportFormat, ProjectScopeConfig};
 use super::paths::absolutize_project_dir;
+use super::scope::{foreign_scope_entry, owned_by_current_user, Owns};
 use crate::error::Result;
 use crate::store::metadata::MetadataStore;
 use crate::store::{Store, StoreStats, TenantManager};
@@ -398,7 +399,8 @@ pub(super) async fn run_cleanup_plan<S: Store>(
         })
         .count();
 
-    let verification_project_scope = read_project_scope_for_verification(&options.project_dir);
+    let verification_project_scope =
+        read_project_scope_for_verification(&options.project_dir, &owned_by_current_user);
     let has_retrieval_queries = retrieval_queries_available(&options.project_dir);
 
     Ok(CleanupPlanReport {
@@ -1300,8 +1302,17 @@ fn post_cleanup_verification_commands(
     }
 }
 
-fn read_project_scope_for_verification(project_dir: &Path) -> Option<ProjectScopeConfig> {
+/// The scope of `project_dir`, for the flags of the verification commands. A
+/// file, or a `.memd` directory, that the current user does not own counts as
+/// missing.
+fn read_project_scope_for_verification(
+    project_dir: &Path,
+    owns: &Owns,
+) -> Option<ProjectScopeConfig> {
     let project_dir = absolutize_project_dir(project_dir).ok()?;
+    if foreign_scope_entry(&project_dir, "project_scope.json", owns).is_some() {
+        return None;
+    }
     let path = project_dir.join(".memd/project_scope.json");
     let text = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
@@ -1974,6 +1985,22 @@ mod tests {
     use super::*;
     use crate::store::StoreStats;
     use crate::types::{ChunkType, ProjectId};
+
+    #[test]
+    fn verification_flags_ignore_a_scope_that_another_user_owns() {
+        use crate::cli::scope::tests::{owned_below, write_scope_file};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        write_scope_file(&root, "intruder", "stolen");
+
+        let own = read_project_scope_for_verification(&root, &owned_by_current_user);
+        assert_eq!(own.unwrap().tenant_id, "intruder");
+        for foreign in [root.join(".memd/project_scope.json"), root.join(".memd")] {
+            let owns = owned_below(&root, &[&foreign]);
+            assert!(read_project_scope_for_verification(&root, &owns).is_none());
+        }
+    }
 
     #[tokio::test]
     async fn cleanup_scan_continues_past_a_page_with_unreadable_payload() {

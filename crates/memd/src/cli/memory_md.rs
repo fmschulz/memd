@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use super::args::ProjectScopeConfig;
 use super::paths::absolutize_project_dir;
+use super::scope::{find_project_scope, foreign_scope_entry, Owns};
 use crate::error::{MemdError, Result};
 use crate::hit_stats::{
     aggregate_hits_at_data_dir, aggregate_hits_in, HitStats, DEFAULT_SUMMARY_TTL_MS,
@@ -110,7 +111,14 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
     options: MemoryMdOptions,
 ) -> Result<Value> {
     let project_dir = absolutize_project_dir(&options.project_dir)?;
-    let scope = read_project_scope(&project_dir)?;
+    // The scope fills what the caller left out. The lookup is the one every
+    // other command uses, so a subdirectory of a repository and a linked
+    // worktree find the repository's scope.
+    let scope = if options.tenant_id.is_some() && options.project_id.is_some() {
+        None
+    } else {
+        find_project_scope(&project_dir)?
+    };
     let generated_unix_ms = now_ms();
     let tenant_id = options
         .tenant_id
@@ -334,7 +342,15 @@ async fn recent_project_lessons<S: Store>(
     }
 }
 
-pub(super) fn read_project_scope(project_dir: &Path) -> Result<Option<ProjectScopeConfig>> {
+/// Read `project_dir/.memd/project_scope.json`. A missing file is `None`, and
+/// so is one that the current user does not own.
+pub(super) fn read_project_scope(
+    project_dir: &Path,
+    owns: &Owns,
+) -> Result<Option<ProjectScopeConfig>> {
+    if foreign_scope_entry(project_dir, "project_scope.json", owns).is_some() {
+        return Ok(None);
+    }
     let path = project_dir.join(".memd/project_scope.json");
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,

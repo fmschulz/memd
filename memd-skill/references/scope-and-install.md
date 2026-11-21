@@ -30,9 +30,10 @@ project or legacy scope. When neither exists, the first flagless `memd add` (or
 creates it only for a project that already has stored facts or an experience
 case. Read commands never create a scope: with none in reach they use the planned
 scope (the ids the first write would publish) and return an empty result for a
-project without content. Where no scope may be planned (home or `/`, `.memd-skip`,
-`MEMD_AUTO_SCOPE=0`) they fail and say why. A scope above a git repository never
-applies to it. Let memd write this file; partial JSON fails to parse. See
+project without content. Where no scope may be planned (home or `/`, a directory
+of another user, `.memd-skip`, `MEMD_AUTO_SCOPE=0`) they fail and say why. A scope
+above a git repository never applies to it. A repository, a scope file and a
+`.memd` directory count only when the current user owns them. Let memd write this file; partial JSON fails to parse. See
 [Automatic session-start](session-start.md#automatic-session-start).
 Run `memd init` only when you want the full guardrail suite for a repo.
 

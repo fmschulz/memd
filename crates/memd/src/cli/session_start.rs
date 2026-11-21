@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -28,8 +29,8 @@ use super::provenance::capture_execution_context;
 use crate::store::metadata::{DigestScope, MetadataStore};
 
 use super::scope::{
-    canonical_home, enclosing_repository, is_unsafe_scope_root, main_checkout_of_linked_worktree,
-    Repository,
+    canonical_home, enclosing_repository, foreign_scope_entry, is_unsafe_scope_root,
+    main_checkout_of_linked_worktree, owned_by_current_user, Owns, Repository,
 };
 use crate::error::{MemdError, Result};
 use crate::store::{Store, TenantManager};
@@ -65,7 +66,7 @@ pub(super) struct SessionStartOptions {
 
 /// Resolved inputs for the auto-scope decision. Extracted so unit
 /// tests can drive the logic without mutating process env.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(super) struct AutoScopeInputs {
     /// Default tenant id to assign when scope is auto-created. Comes
     /// from `MEMD_DEFAULT_TENANT`, then `USER`, then "default".
@@ -77,6 +78,10 @@ pub(super) struct AutoScopeInputs {
     /// background consolidation. Tests set this so they cannot spawn a
     /// model process.
     pub(super) consolidate: bool,
+    /// Tells whether the current user owns a path. A repository and a scope
+    /// directory that another user owns are not trusted. Tests pass their own
+    /// rule, because a test cannot change the owner of a file.
+    pub(super) owns: Arc<Owns>,
 }
 
 impl AutoScopeInputs {
@@ -116,6 +121,7 @@ impl AutoScopeInputs {
             default_tenant,
             enabled,
             consolidate: true,
+            owns: Arc::new(owned_by_current_user),
         }
     }
 }
@@ -242,7 +248,11 @@ pub(super) async fn run_session_start_inner<S: Store>(
 
     // A `.memd-skip` marker at the repository root opts out the whole
     // repository, whatever scope files its subdirectories hold.
-    let repository = locate_repository(&project_dir, canonical_home().as_deref());
+    let repository = locate_repository(
+        &project_dir,
+        canonical_home().as_deref(),
+        auto_inputs.owns.as_ref(),
+    );
     if repository.as_ref().is_some_and(Repository::opted_out) {
         return Ok(json!({ "skipped": "memd_skip_present" }));
     }
@@ -256,33 +266,33 @@ pub(super) async fn run_session_start_inner<S: Store>(
     // project that would be created are derived, and the files follow once the
     // project has stored content.
     let mut scope_dir: PathBuf;
-    let (tenant_id, project_id, new_scope) = match look_up_scope(&project_dir, repository.as_ref())
-    {
-        ScopeLookup::Found {
-            scope_dir: found_dir,
-            ids: (tenant_id, project_id),
-        } => {
-            scope_dir = found_dir;
-            (tenant_id, project_id, None)
-        }
-        ScopeLookup::Missing {
-            scope_dir: new_dir,
-            id_source,
-        } => match plan_new_scope(&new_dir, &id_source, &auto_inputs)? {
-            Ok(plan) => {
-                scope_dir = new_dir;
-                (
-                    plan.tenant_id.clone(),
-                    Some(plan.project_id.clone()),
-                    Some(plan),
-                )
+    let (tenant_id, project_id, new_scope) =
+        match look_up_scope(&project_dir, repository.as_ref(), auto_inputs.owns.as_ref()) {
+            ScopeLookup::Found {
+                scope_dir: found_dir,
+                ids: (tenant_id, project_id),
+            } => {
+                scope_dir = found_dir;
+                (tenant_id, project_id, None)
             }
-            Err(skipped) => return Ok(skipped_response(&skipped)),
-        },
-        ScopeLookup::Invalid { path, error } => {
-            return Ok(invalid_scope_response(&path, &error));
-        }
-    };
+            ScopeLookup::Missing {
+                scope_dir: new_dir,
+                id_source,
+            } => match plan_new_scope(&new_dir, &id_source, &auto_inputs)? {
+                Ok(plan) => {
+                    scope_dir = new_dir;
+                    (
+                        plan.tenant_id.clone(),
+                        Some(plan.project_id.clone()),
+                        Some(plan),
+                    )
+                }
+                Err(skipped) => return Ok(skipped_response(&skipped)),
+            },
+            ScopeLookup::Invalid { path, error } => {
+                return Ok(invalid_scope_response(&path, &error));
+            }
+        };
 
     // Reconcile staged candidates before generating agent-facing context.
     // Recovery is intentionally a session-start stage rather than a store-open
@@ -363,7 +373,7 @@ pub(super) async fn run_session_start_inner<S: Store>(
                 write_scope_with_fallback(&plan, &scope_dir, &project_dir)?;
             scope_dir = written_dir;
             auto_scoped = outcome == AutoScopeOutcome::Created;
-            match read_scope_at(&scope_dir) {
+            match read_scope_at(&scope_dir, auto_inputs.owns.as_ref()) {
                 Ok(Some(ids)) => ids,
                 Ok(None) => return Ok(json!({ "skipped": "no_scope" })),
                 Err(invalid) => return Ok(invalid_scope_response(&invalid.0, &invalid.1)),
@@ -482,21 +492,28 @@ pub(super) async fn run_session_start_inner<S: Store>(
 type ScopeIds = (String, Option<String>);
 
 /// Read the scope that `dir` holds: `.memd/project_scope.json` first, then a
-/// valid legacy `.memd/config.json`. An invalid or unreadable file is an error
-/// that carries its path (boxed to keep the `Result` small).
-fn read_scope_at(dir: &Path) -> std::result::Result<Option<ScopeIds>, Box<(PathBuf, MemdError)>> {
+/// valid legacy `.memd/config.json`. A `.memd` directory or file that the
+/// current user does not own counts as missing. An invalid or unreadable file
+/// is an error that carries its path (boxed to keep the `Result` small).
+fn read_scope_at(
+    dir: &Path,
+    owns: &Owns,
+) -> std::result::Result<Option<ScopeIds>, Box<(PathBuf, MemdError)>> {
     let scope_path = dir.join(".memd/project_scope.json");
     if let Some(scope) =
-        validated_project_scope(dir).map_err(|error| Box::new((scope_path, error)))?
+        validated_project_scope(dir, owns).map_err(|error| Box::new((scope_path, error)))?
     {
         return Ok(Some((scope.tenant_id, scope.project_id)));
+    }
+    if foreign_scope_entry(dir, "config.json", owns).is_some() {
+        return Ok(None);
     }
     let legacy_path = dir.join(".memd/config.json");
     read_legacy_scope(&legacy_path).map_err(|error| Box::new((legacy_path, error)))
 }
 
-fn validated_project_scope(project_dir: &Path) -> Result<Option<ProjectScopeConfig>> {
-    let scope = read_project_scope(project_dir)?;
+fn validated_project_scope(project_dir: &Path, owns: &Owns) -> Result<Option<ProjectScopeConfig>> {
+    let scope = read_project_scope(project_dir, owns)?;
     if let Some(scope) = &scope {
         TenantId::validate(&scope.tenant_id)?;
         ProjectId::validate_opt(scope.project_id.as_deref())?;
@@ -576,6 +593,7 @@ pub(super) enum AutoScopeOutcome {
     SkippedDisabled,
     SkippedMarker,
     SkippedUnsafeRoot,
+    SkippedNotOwner,
 }
 
 /// Create a minimal `.memd/project_scope.json` in `scope_dir` for a repo that
@@ -628,7 +646,8 @@ impl NewScope {
 
 /// Decide whether a scope may be created in `scope_dir`, and derive it, without
 /// writing anything. The refusal is a `Skipped*` outcome: auto-scope is off,
-/// a `.memd-skip` marker is present, or `scope_dir` is an unsafe root.
+/// a `.memd-skip` marker is present, `scope_dir` is an unsafe root, or the
+/// current user does not own `scope_dir`.
 fn plan_new_scope(
     scope_dir: &Path,
     id_source: &Path,
@@ -647,6 +666,11 @@ fn plan_new_scope(
     if is_unsafe_scope_root(&canonical, canonical_home().as_deref()) {
         return Ok(Err(AutoScopeOutcome::SkippedUnsafeRoot));
     }
+    // A directory that another user owns (such as /tmp) must not get a scope
+    // that covers a project of someone else.
+    if !(inputs.owns)(&canonical) {
+        return Ok(Err(AutoScopeOutcome::SkippedNotOwner));
+    }
 
     Ok(Ok(NewScope {
         tenant_id: inputs.default_tenant.clone(),
@@ -659,6 +683,7 @@ fn skipped_response(outcome: &AutoScopeOutcome) -> Value {
     match outcome {
         AutoScopeOutcome::SkippedDisabled => json!({ "skipped": "auto_scope_disabled" }),
         AutoScopeOutcome::SkippedUnsafeRoot => json!({ "skipped": "unsafe_auto_scope_root" }),
+        AutoScopeOutcome::SkippedNotOwner => json!({ "skipped": "scope_dir_not_owned" }),
         AutoScopeOutcome::SkippedMarker => json!({ "skipped": "memd_skip_present" }),
         AutoScopeOutcome::Created | AutoScopeOutcome::AlreadyExists => {
             json!({ "skipped": "no_scope" })
@@ -754,8 +779,8 @@ pub(super) type PlannedScope = (ScopeIds, Option<PendingScope>);
 /// The plan carries the tenant and project, and the pending scope to publish
 /// after a write succeeded (`None` when a scope, including a legacy
 /// `.memd/config.json`, already exists). A refusal (`Err`) is a `Skipped*`
-/// outcome: auto-scope is off, a `.memd-skip` marker is present, or the root
-/// is unsafe (home or `/`).
+/// outcome: auto-scope is off, a `.memd-skip` marker is present, the root is
+/// unsafe (home or `/`), or another user owns the directory.
 pub(super) fn plan_scope_for_first_write(
     start: &Path,
     inputs: &AutoScopeInputs,
@@ -764,23 +789,28 @@ pub(super) fn plan_scope_for_first_write(
     if project_dir.join(".memd-skip").exists() {
         return Ok(Err(AutoScopeOutcome::SkippedMarker));
     }
-    let repository = locate_repository(&project_dir, canonical_home().as_deref());
+    let repository = locate_repository(
+        &project_dir,
+        canonical_home().as_deref(),
+        inputs.owns.as_ref(),
+    );
     if repository.as_ref().is_some_and(Repository::opted_out) {
         return Ok(Err(AutoScopeOutcome::SkippedMarker));
     }
-    let (scope_dir, id_source) = match look_up_scope(&project_dir, repository.as_ref()) {
-        ScopeLookup::Found { ids, .. } => return Ok(Ok((ids, None))),
-        ScopeLookup::Invalid { path, error } => {
-            return Err(MemdError::ValidationError(format!(
-                "invalid scope file {}: {error}",
-                path.display()
-            )))
-        }
-        ScopeLookup::Missing {
-            scope_dir,
-            id_source,
-        } => (scope_dir, id_source),
-    };
+    let (scope_dir, id_source) =
+        match look_up_scope(&project_dir, repository.as_ref(), inputs.owns.as_ref()) {
+            ScopeLookup::Found { ids, .. } => return Ok(Ok((ids, None))),
+            ScopeLookup::Invalid { path, error } => {
+                return Err(MemdError::ValidationError(format!(
+                    "invalid scope file {}: {error}",
+                    path.display()
+                )))
+            }
+            ScopeLookup::Missing {
+                scope_dir,
+                id_source,
+            } => (scope_dir, id_source),
+        };
     let plan = match plan_new_scope(&scope_dir, &id_source, inputs)? {
         Ok(plan) => plan,
         Err(refusal) => return Ok(Err(refusal)),
@@ -802,6 +832,7 @@ pub(super) fn refusal_reason(outcome: &AutoScopeOutcome) -> &'static str {
         AutoScopeOutcome::SkippedUnsafeRoot => {
             "the project root is the home directory or /, which never gets an automatic scope"
         }
+        AutoScopeOutcome::SkippedNotOwner => "the directory belongs to another user",
         AutoScopeOutcome::Created | AutoScopeOutcome::AlreadyExists => "no scope is planned",
     }
 }
@@ -936,8 +967,8 @@ fn is_unwritable(error: &std::io::Error) -> bool {
 /// The repository whose scope covers the session directory. A directory that
 /// is itself a root is covered only by its main checkout, when it is a linked
 /// worktree. A nested clone or a submodule is its own repository (`None`).
-fn locate_repository(project_dir: &Path, home: Option<&Path>) -> Option<Repository> {
-    enclosing_repository(project_dir, home).filter(|repository| {
+fn locate_repository(project_dir: &Path, home: Option<&Path>, owns: &Owns) -> Option<Repository> {
+    enclosing_repository(project_dir, home, owns).filter(|repository| {
         repository.repo_root != project_dir || repository.main_checkout.is_some()
     })
 }
@@ -961,8 +992,9 @@ enum ScopeLookup {
 /// Look up the scope of `project_dir`: its own scope first (project scope,
 /// then legacy scope), then, inside a repository, the nearest one between its
 /// parent and the repository root, then the main checkout's. The nearest valid
-/// scope wins; an invalid one stops the walk.
-fn look_up_scope(project_dir: &Path, repository: Option<&Repository>) -> ScopeLookup {
+/// scope wins; an invalid one stops the walk. A scope that the current user
+/// does not own is not read.
+fn look_up_scope(project_dir: &Path, repository: Option<&Repository>, owns: &Owns) -> ScopeLookup {
     let directories = std::iter::once(project_dir).chain(repository.into_iter().flat_map(|r| {
         project_dir
             .ancestors()
@@ -971,7 +1003,7 @@ fn look_up_scope(project_dir: &Path, repository: Option<&Repository>) -> ScopeLo
             .chain(r.main_checkout.as_deref())
     }));
     for dir in directories {
-        match read_scope_at(dir) {
+        match read_scope_at(dir, owns) {
             Ok(Some(ids)) => {
                 return ScopeLookup::Found {
                     scope_dir: dir.to_path_buf(),
@@ -1052,6 +1084,7 @@ mod tests {
             default_tenant: "ignored".to_string(),
             enabled: false,
             consolidate: false,
+            owns: Arc::new(owned_by_current_user),
         }
     }
 
@@ -1060,6 +1093,7 @@ mod tests {
             default_tenant: tenant.to_string(),
             enabled: true,
             consolidate: false,
+            owns: Arc::new(owned_by_current_user),
         }
     }
 
@@ -1564,6 +1598,125 @@ mod tests {
         assert_eq!(names, ["project_scope.json"], "no temporary file remains");
     }
 
+    /// Inputs for a user who owns nothing: another user owns every directory.
+    fn inputs_owning_nothing() -> AutoScopeInputs {
+        AutoScopeInputs {
+            owns: Arc::new(|_| false),
+            ..enabled_inputs("alice")
+        }
+    }
+
+    #[test]
+    fn a_scope_is_not_planned_in_a_directory_that_another_user_owns() {
+        let dir = tempdir().unwrap();
+
+        let refused = plan_new_scope(dir.path(), dir.path(), &inputs_owning_nothing()).unwrap();
+        assert_eq!(refused.unwrap_err(), AutoScopeOutcome::SkippedNotOwner);
+        let outcome =
+            maybe_auto_create_scope(dir.path(), dir.path(), &inputs_owning_nothing()).unwrap();
+        assert_eq!(outcome, AutoScopeOutcome::SkippedNotOwner);
+        assert!(!dir.path().join(".memd").exists());
+
+        // The current user owns the directory: the plan is made.
+        let plan = plan_new_scope(dir.path(), dir.path(), &enabled_inputs("alice")).unwrap();
+        assert!(plan.is_ok());
+    }
+
+    #[test]
+    fn a_scope_that_another_user_owns_is_not_read_from_a_directory() {
+        use crate::cli::scope::tests::owned_below;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let project = root.join("project");
+        write_scope(&project, "intruder", "stolen");
+        let scope_file = project.join(".memd/project_scope.json");
+        let legacy_file = project.join(".memd/config.json");
+        std::fs::write(&legacy_file, r#"{"tenant_id":"legacy","project_id":"old"}"#).unwrap();
+
+        // The current user owns everything: the project scope wins.
+        let own = read_scope_at(&project, &owned_by_current_user).unwrap();
+        assert_eq!(own.unwrap().0, "intruder");
+        // Another user owns the scope file: the legacy file is next, and when
+        // another user owns that one too, the directory has no scope.
+        let owns = owned_below(&root, &[&scope_file]);
+        assert_eq!(read_scope_at(&project, &owns).unwrap().unwrap().0, "legacy");
+        let owns = owned_below(&root, &[&scope_file, &legacy_file]);
+        assert!(read_scope_at(&project, &owns).unwrap().is_none());
+        // Another user owns the `.memd` directory, which nobody can read: the
+        // directory has no scope, and the read does not fail.
+        let memd = project.join(".memd");
+        std::fs::set_permissions(&memd, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let owns = owned_below(&root, &[&memd]);
+        let foreign_memd = read_scope_at(&project, &owns);
+        std::fs::set_permissions(&memd, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(foreign_memd.unwrap().is_none());
+    }
+
+    #[test]
+    fn a_first_write_does_not_adopt_a_scope_file_that_another_user_owns() {
+        use crate::cli::scope::tests::owned_below;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let project = root.join("project");
+        write_scope(&project, "intruder", "stolen");
+        let scope_file = project.join(".memd/project_scope.json");
+
+        // The current user owns the file: its ids are used, nothing is planned.
+        let ((tenant, _), pending) = plan_scope_for_first_write(&project, &enabled_inputs("alice"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(tenant, "intruder");
+        assert!(pending.is_none());
+        // Another user owns it: the ids come from the plan for this directory.
+        let inputs = AutoScopeInputs {
+            owns: Arc::new(owned_below(&root, &[&scope_file])),
+            ..enabled_inputs("alice")
+        };
+        let ((tenant, project_id), pending) = plan_scope_for_first_write(&project, &inputs)
+            .unwrap()
+            .unwrap();
+        assert_eq!(tenant, "alice");
+        assert_eq!(project_id.as_deref(), Some("project"));
+        assert_eq!(pending.unwrap().scope_dir(), project);
+    }
+
+    #[test]
+    fn the_refusal_of_a_foreign_directory_has_a_json_value_and_a_reason() {
+        assert_eq!(
+            skipped_response(&AutoScopeOutcome::SkippedNotOwner),
+            json!({ "skipped": "scope_dir_not_owned" })
+        );
+        assert_eq!(
+            refusal_reason(&AutoScopeOutcome::SkippedNotOwner),
+            "the directory belongs to another user"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_start_in_a_directory_that_another_user_owns_skips_and_writes_nothing() {
+        let store = MemoryStore::new();
+        let dir = tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let result = run_session_start_inner(
+            &store,
+            SessionStartOptions {
+                project_dir: project.clone(),
+            },
+            inputs_owning_nothing(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["skipped"], "scope_dir_not_owned");
+        assert!(!project.join(".memd").exists());
+        assert!(!project.join("memory.md").exists());
+    }
+
     fn write_scope(dir: &Path, tenant: &str, project: &str) {
         std::fs::create_dir_all(dir.join(".memd")).unwrap();
         let scope = ProjectScopeConfig {
@@ -1601,8 +1754,9 @@ mod tests {
     /// The tenant and project a start in `dir` would use.
     fn ids_a_start_would_use(dir: &Path) -> Option<ScopeIds> {
         let dir = absolutize_project_dir(dir).unwrap();
-        let repository = locate_repository(&dir, canonical_home().as_deref());
-        match look_up_scope(&dir, repository.as_ref()) {
+        let repository =
+            locate_repository(&dir, canonical_home().as_deref(), &owned_by_current_user);
+        match look_up_scope(&dir, repository.as_ref(), &owned_by_current_user) {
             ScopeLookup::Found { ids, .. } => Some(ids),
             ScopeLookup::Missing { id_source, .. } => {
                 Some(("alice".to_string(), Some(derive_project_id(&id_source))))
@@ -1954,10 +2108,10 @@ mod tests {
         let sub = home.join("notes");
         std::fs::create_dir_all(&sub).unwrap();
 
-        assert!(locate_repository(&sub, Some(&home)).is_none());
-        let repository = locate_repository(&sub, None).unwrap();
+        assert!(locate_repository(&sub, Some(&home), &owned_by_current_user).is_none());
+        let repository = locate_repository(&sub, None, &owned_by_current_user).unwrap();
         assert!(matches!(
-            look_up_scope(&sub, Some(&repository)),
+            look_up_scope(&sub, Some(&repository), &owned_by_current_user),
             ScopeLookup::Found { .. }
         ));
     }
@@ -2348,7 +2502,7 @@ mod tests {
         std::fs::create_dir_all(plain.join("sub")).unwrap();
 
         // A linked worktree uses its own root, not the main checkout.
-        let repository = locate_repository(&sub, None);
+        let repository = locate_repository(&sub, None, &owned_by_current_user);
         assert_eq!(
             repo_dir_for(&sub, repository.as_ref()).as_deref(),
             Some(worktree.as_path())
@@ -2358,11 +2512,11 @@ mod tests {
             repo_dir_for(&sub, repository.as_ref()).as_deref()
         );
         // At the worktree root itself there is no separate repository dir.
-        let at_root = locate_repository(&worktree, None);
+        let at_root = locate_repository(&worktree, None, &owned_by_current_user);
         assert_eq!(repo_dir_for(&worktree, at_root.as_ref()), None);
         // A plain repository below its root, and outside any repository.
         let sub_plain = plain.join("sub");
-        let repository = locate_repository(&sub_plain, None);
+        let repository = locate_repository(&sub_plain, None, &owned_by_current_user);
         assert_eq!(
             repo_dir_for(&sub_plain, repository.as_ref()).as_deref(),
             Some(plain.as_path())

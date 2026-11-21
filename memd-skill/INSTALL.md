@@ -181,8 +181,10 @@ memd memory-md \
   --output memory.md
 ```
 
-When `.memd/project_scope.json` exists, `memd memory-md --project-dir .
---output memory.md` can infer the tenant and project scope.
+When a scope exists, `memd memory-md --project-dir . --output memory.md` infers
+the tenant and project from it. It finds the scope the way the other commands
+do, so it also works from a subdirectory of a repository and from a linked
+worktree.
 
 Keep repeated retrieval hot with the private CLI warm worker:
 

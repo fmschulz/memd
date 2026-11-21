@@ -468,7 +468,7 @@ fn check_project_scope_with(
 ) -> Value {
     use super::scope::{locate_project_scope, LocatedScope};
 
-    let located = match locate_project_scope(project_dir) {
+    let located = match locate_project_scope(project_dir, inputs.owns.as_ref()) {
         Ok(located) => located,
         Err(error) => {
             return json!({
@@ -499,7 +499,22 @@ fn check_project_scope_with(
             "reason": format!("unreadable: {}", invalid.error),
             "fix": "fix the permissions of .memd/project_scope.json or remove it",
         }),
-        LocatedScope::Missing => planned_project_scope(project_dir, inputs),
+        LocatedScope::Missing { not_owned } => {
+            let mut report = planned_project_scope(project_dir, inputs);
+            if !not_owned.is_empty() {
+                let ignored = not_owned
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let ignored = format!("ignored, because another user owns it: {ignored}");
+                report["note"] = match report["note"].as_str() {
+                    Some(note) => json!(format!("{note}; {ignored}")),
+                    None => json!(ignored),
+                };
+            }
+            report
+        }
     }
 }
 
@@ -1011,6 +1026,7 @@ mod tests {
             default_tenant: "doc".to_string(),
             enabled,
             consolidate: false,
+            owns: std::sync::Arc::new(super::super::scope::owned_by_current_user),
         }
     }
 
@@ -1062,6 +1078,35 @@ mod tests {
         assert_eq!(v["tenant_id"], "alice");
         assert_eq!(v["project_id"], "demo");
         assert!(v.get("note").is_none());
+    }
+
+    #[test]
+    fn project_scope_names_a_scope_file_ignored_because_another_user_owns_it() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let shared = root.join("shared");
+        let project = shared.join("My-Project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(shared.join(".memd")).unwrap();
+        let file = shared.join(".memd/project_scope.json");
+        std::fs::write(&file, scope_json("alice", "demo")).unwrap();
+        // Another user owns the file. The current user owns what is below `root`.
+        let (root_dir, foreign) = (root.clone(), file.clone());
+        let inputs = super::super::session_start::AutoScopeInputs {
+            owns: std::sync::Arc::new(move |path| path.starts_with(&root_dir) && path != foreign),
+            ..doctor_inputs(true)
+        };
+
+        let v = check_project_scope_with(&project, &inputs);
+
+        assert_eq!(v["ok"], true);
+        let note = v["note"].as_str().unwrap_or("");
+        assert!(
+            note.contains(&file.display().to_string()),
+            "note was: {note}"
+        );
+        assert!(note.contains("another user owns"), "note was: {note}");
+        assert!(v.get("tenant_id").is_some_and(|tenant| tenant != "alice"));
     }
 
     #[test]

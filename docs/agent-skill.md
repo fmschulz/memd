@@ -89,6 +89,14 @@ its main checkout). Outside a repository the lookup is unchanged. A linked
 worktree uses the scope of its main checkout, which its main repository must
 confirm. A nested clone or a submodule is its own repository.
 
+memd trusts a directory, its `.git` entry, a `.memd` directory and a scope file
+only when the current user owns them, as git does. Another user's `/tmp/.git`
+does not make `/tmp` a repository: the search goes on upward, and a project
+below `/tmp` is a project outside a repository. A scope file or `.memd`
+directory that another user owns is ignored by every command, and `memd doctor`
+names the ignored path. No scope is planned in a directory that another user
+owns.
+
 A project gets files only once it has content: at least one visible fact or one
 experience case. When no scope exists, session-start derives the scope it would
 create, writes nothing, and checks the store. With content, it creates the scope
@@ -112,7 +120,8 @@ get|find|export` in a directory with no scope uses the planned scope: the ids a
 first write would publish. It runs normally, so a project without content
 returns an empty result with exit 0, and rows that another checkout stored under
 the same tenant and project are found. Where no scope may be planned (the home
-directory or `/`, a `.memd-skip` marker, `MEMD_AUTO_SCOPE=0`) the command fails
+directory or `/`, a directory of another user, a `.memd-skip` marker,
+`MEMD_AUTO_SCOPE=0`) the command fails
 and the message says why and names `--tenant-id`. `delete`, `outcome`,
 `import-omf` and `experience check` change the store without starting a
 project, so they still need an existing scope or `--tenant-id`. `audit`,

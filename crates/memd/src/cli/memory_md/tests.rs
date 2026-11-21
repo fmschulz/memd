@@ -1294,3 +1294,87 @@ fn lesson_fields_are_capped_per_field() {
     );
     assert!(detail.contains("evidence: executed"));
 }
+
+/// `memd memory-md` with no flags: the tenant and project come from the scope.
+async fn memory_md_without_flags(project_dir: &Path) -> Result<Value> {
+    refresh_memory_md_with_health(
+        &crate::store::MemoryStore::new(),
+        None,
+        MemoryMdOptions {
+            tenant_id: None,
+            project_id: None,
+            project_dir: project_dir.to_path_buf(),
+            output: PathBuf::from("memory.md"),
+            project_limit: 10,
+            global_limit: 2,
+            lesson_limit: 3,
+            candidate_k: 40,
+            explain_output: None,
+            repo_dir: None,
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn memory_md_without_a_tenant_uses_the_scope_of_the_repository_above() {
+    use crate::cli::scope::tests::write_scope_file;
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().canonicalize().unwrap().join("repo");
+    let sub = repo.join("src/deep");
+    fs::create_dir_all(&sub).unwrap();
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    write_scope_file(&repo, "scoped_tenant", "scoped_project");
+
+    let result = memory_md_without_flags(&sub).await.unwrap();
+
+    assert_eq!(result["tenant_id"], "scoped_tenant");
+    assert_eq!(result["project_id"], "scoped_project");
+}
+
+#[tokio::test]
+async fn memory_md_without_a_tenant_uses_the_scope_of_the_main_checkout_in_a_linked_worktree() {
+    use crate::cli::scope::tests::sibling_worktree;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (_main, worktree) = sibling_worktree(&dir.path().canonicalize().unwrap());
+    let sub = worktree.join("src");
+    fs::create_dir_all(&sub).unwrap();
+
+    for start in [&worktree, &sub] {
+        let result = memory_md_without_flags(start).await.unwrap();
+        assert_eq!(result["tenant_id"], "main_tenant");
+        assert_eq!(result["project_id"], "main_project");
+    }
+}
+
+#[tokio::test]
+async fn memory_md_without_a_tenant_or_scope_fails_with_the_existing_message() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let error = memory_md_without_flags(dir.path()).await.unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "validation error: memory-md requires --tenant-id or .memd/project_scope.json"
+    );
+}
+
+#[test]
+fn a_project_scope_that_another_user_owns_is_not_read() {
+    use crate::cli::scope::owned_by_current_user;
+    use crate::cli::scope::tests::{owned_below, write_scope_file};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    write_scope_file(&root, "intruder", "stolen");
+    let file = root.join(".memd/project_scope.json");
+
+    let own = read_project_scope(&root, &owned_by_current_user).unwrap();
+    assert_eq!(own.unwrap().tenant_id, "intruder");
+    for foreign in [file, root.join(".memd")] {
+        let owns = owned_below(&root, &[&foreign]);
+        assert!(read_project_scope(&root, &owns).unwrap().is_none());
+    }
+}

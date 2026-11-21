@@ -14,6 +14,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::paths::absolutize_project_dir;
+use super::scope::{foreign_scope_entry, owned_by_current_user, Owns};
 use crate::consolidate::journal::LineageRelation;
 use crate::consolidate::prompt::{
     build_consolidation_prompt, parse_consolidation_response, RegionChunk,
@@ -513,7 +514,7 @@ pub(super) fn resolve_scope(
     if let Some(tenant_id) = tenant_arg {
         return Ok((tenant_id, project_arg));
     }
-    let scope = read_scope_file(project_dir);
+    let scope = read_scope_file(project_dir, &owned_by_current_user);
     let tenant_id = scope
         .as_ref()
         .and_then(|s| s.tenant_id.clone())
@@ -535,10 +536,14 @@ struct ScopeFile {
 }
 
 /// Read `{tenant_id, project_id}` from `.memd/project_scope.json` or
-/// `.memd/config.json`, ignoring any other fields.
-fn read_scope_file(project_dir: &Path) -> Option<ScopeFile> {
-    for name in [".memd/project_scope.json", ".memd/config.json"] {
-        let path = project_dir.join(name);
+/// `.memd/config.json`, ignoring any other fields. A file, or a `.memd`
+/// directory, that the current user does not own counts as missing.
+fn read_scope_file(project_dir: &Path, owns: &Owns) -> Option<ScopeFile> {
+    for name in ["project_scope.json", "config.json"] {
+        if foreign_scope_entry(project_dir, name, owns).is_some() {
+            continue;
+        }
+        let path = project_dir.join(".memd").join(name);
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -1589,6 +1594,29 @@ mod tests {
         let (tenant, project) = resolve_scope(dir.path(), None, None).unwrap();
         assert_eq!(tenant, "ct");
         assert_eq!(project.as_deref(), Some("cp"));
+    }
+
+    #[test]
+    fn read_scope_file_ignores_a_scope_that_another_user_owns() {
+        use crate::cli::scope::tests::owned_below;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join(".memd")).unwrap();
+        let scope_file = root.join(".memd/project_scope.json");
+        let legacy_file = root.join(".memd/config.json");
+        std::fs::write(&scope_file, r#"{"tenant_id":"intruder"}"#).unwrap();
+        std::fs::write(&legacy_file, r#"{"tenant_id":"legacy"}"#).unwrap();
+        let tenant = |owns: &Owns| read_scope_file(&root, owns).and_then(|scope| scope.tenant_id);
+
+        // The current user owns both files: the project scope wins.
+        assert_eq!(tenant(&owned_by_current_user).as_deref(), Some("intruder"));
+        // Another user owns the project scope: the legacy file is next.
+        let owns = owned_below(&root, &[&scope_file]);
+        assert_eq!(tenant(&owns).as_deref(), Some("legacy"));
+        // Another user owns the `.memd` directory: there is no scope.
+        let owns = owned_below(&root, &[&root.join(".memd")]);
+        assert_eq!(tenant(&owns), None);
     }
 
     #[tokio::test]

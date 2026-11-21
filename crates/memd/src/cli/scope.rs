@@ -7,6 +7,30 @@ use super::paths::absolutize_project_dir;
 use super::session_start::PendingScope;
 use crate::error::{MemdError, Result};
 
+/// Tells whether the current user owns the entry at a path. memd trusts a
+/// repository, a scope file and a scope directory only when it does, as git
+/// does since CVE-2022-24765: another user's `/tmp/.git` must not make `/tmp`
+/// a project. A test cannot change the owner of a file, so callers take the
+/// rule as a parameter and a test passes its own.
+pub(super) type Owns = dyn Fn(&Path) -> bool + Send + Sync;
+
+/// True when the effective user of this process owns the entry at `path`. The
+/// entry itself counts: a symlink is not followed. A missing entry is not owned.
+#[cfg(unix)]
+pub(super) fn owned_by_current_user(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: `geteuid` has no preconditions and cannot fail.
+    let euid = unsafe { libc::geteuid() };
+    path.symlink_metadata()
+        .is_ok_and(|metadata| metadata.uid() == euid)
+}
+
+/// Other platforms have no owner test: every entry counts as owned.
+#[cfg(not(unix))]
+pub(super) fn owned_by_current_user(_path: &Path) -> bool {
+    true
+}
+
 #[derive(Default)]
 pub(super) struct OperationScopeCache {
     loaded: bool,
@@ -36,39 +60,48 @@ impl OperationScopeCache {
 /// repository, such as one in the home directory, never becomes the project
 /// of a repository. Outside any repository the walk runs to `$HOME`.
 pub(super) fn find_project_scope(start: &Path) -> Result<Option<ProjectScopeConfig>> {
-    find_project_scope_with_home(start, canonical_home().as_deref())
+    find_project_scope_with_home(start, canonical_home().as_deref(), &owned_by_current_user)
 }
 
 fn find_project_scope_with_home(
     start: &Path,
     home: Option<&Path>,
+    owns: &Owns,
 ) -> Result<Option<ProjectScopeConfig>> {
-    match locate_project_scope_with_home(start, home)? {
+    match locate_project_scope_with_home(start, home, owns)? {
         LocatedScope::Found { scope, .. } => Ok(Some(scope)),
-        LocatedScope::Missing => Ok(None),
+        LocatedScope::Missing { .. } => Ok(None),
         LocatedScope::Invalid(invalid) => Err(invalid.error),
     }
 }
 
 /// [`find_project_scope`] that also says which scope file it found, or which
 /// invalid one stopped the walk.
-pub(super) fn locate_project_scope(start: &Path) -> Result<LocatedScope> {
-    locate_project_scope_with_home(start, canonical_home().as_deref())
+pub(super) fn locate_project_scope(start: &Path, owns: &Owns) -> Result<LocatedScope> {
+    locate_project_scope_with_home(start, canonical_home().as_deref(), owns)
 }
 
-fn locate_project_scope_with_home(start: &Path, home: Option<&Path>) -> Result<LocatedScope> {
+fn locate_project_scope_with_home(
+    start: &Path,
+    home: Option<&Path>,
+    owns: &Owns,
+) -> Result<LocatedScope> {
     let start = absolutize_project_dir(start)?;
-    let repository = enclosing_repository(&start, home);
+    let repository = enclosing_repository(&start, home, owns);
+    let mut not_owned = Vec::new();
 
     for dir in start.ancestors() {
-        let own = read_scope_file_at(dir);
+        let own = read_scope_file_at(dir, owns, &mut not_owned);
         let main_checkout = match &own {
             Ok(None) => main_checkout_of_linked_worktree(dir),
             _ => None,
         };
         let found = match own {
             Ok(Some(found)) => Some(found),
-            Ok(None) => match main_checkout.as_deref().map(read_scope_file_at) {
+            Ok(None) => match main_checkout
+                .as_deref()
+                .map(|main| read_scope_file_at(main, owns, &mut not_owned))
+            {
                 Some(Ok(found)) => found,
                 Some(Err(invalid)) => return Ok(LocatedScope::Invalid(invalid)),
                 None => None,
@@ -83,7 +116,7 @@ fn locate_project_scope_with_home(start: &Path, home: Option<&Path>) -> Result<L
         }
     }
 
-    Ok(LocatedScope::Missing)
+    Ok(LocatedScope::Missing { not_owned })
 }
 
 /// The canonical home directory, when it resolves.
@@ -124,31 +157,68 @@ impl Repository {
 }
 
 /// The repository that encloses `dir`, if any: the nearest `.git` file or
-/// directory at or above `dir` marks its root. A repository whose root, or
-/// main checkout, is unsafe (home or `/`) is ignored. `home` must be
+/// directory at or above `dir` marks its root. The current user must own the
+/// directory and its `.git` entry. An ancestor whose `.git` fails that test
+/// counts as having no `.git`, and the search goes on upward. A repository
+/// whose root, or main checkout, is unsafe (home or `/`), or whose main
+/// checkout the current user does not own, is ignored. `home` must be
 /// canonical. Reads files only and never runs `git`.
-pub(super) fn enclosing_repository(dir: &Path, home: Option<&Path>) -> Option<Repository> {
+pub(super) fn enclosing_repository(
+    dir: &Path,
+    home: Option<&Path>,
+    owns: &Owns,
+) -> Option<Repository> {
     let repo_root = dir
         .ancestors()
-        .find(|dir| dir.join(".git").symlink_metadata().is_ok())?;
+        .find(|dir| dir.join(".git").symlink_metadata().is_ok() && owns_checkout(dir, owns))?;
     let repository = Repository {
         repo_root: repo_root.to_path_buf(),
         main_checkout: main_checkout_of_linked_worktree(repo_root),
     };
+    let main_checkout_trusted = repository
+        .main_checkout
+        .as_deref()
+        .is_none_or(|main| owns_checkout(main, owns));
     let unsafe_root = repository
         .root()
         .canonicalize()
         .map_or(true, |canonical| is_unsafe_scope_root(&canonical, home));
-    (!unsafe_root).then_some(repository)
+    (main_checkout_trusted && !unsafe_root).then_some(repository)
 }
 
-/// Read `dir/.memd/project_scope.json`. A missing file is `None`. A file that
-/// exists but cannot be read or parsed is an error, because silently falling
-/// through to a parent scope would route flagless writes into the wrong
-/// tenant or project.
+/// True when the current user owns the directory and its `.git` entry.
+fn owns_checkout(dir: &Path, owns: &Owns) -> bool {
+    owns(dir) && owns(&dir.join(".git"))
+}
+
+/// The `.memd` directory of `dir`, or its file `name`, when it exists and the
+/// current user does not own it. A reader treats that entry as missing and
+/// never opens it. Every reader of a scope file calls this before it reads. The
+/// directory comes first, because a foreign `.memd` with mode 700 would fail the
+/// read of the file inside it.
+pub(super) fn foreign_scope_entry(dir: &Path, name: &str, owns: &Owns) -> Option<PathBuf> {
+    let memd_dir = dir.join(".memd");
+    let file = memd_dir.join(name);
+    [memd_dir, file]
+        .into_iter()
+        .find(|entry| entry.symlink_metadata().is_ok() && !owns(entry))
+}
+
+/// Read `dir/.memd/project_scope.json`. A missing file is `None`. So is a file,
+/// or a `.memd` directory, that the current user does not own (see
+/// [`foreign_scope_entry`]): it is pushed to `not_owned` and never read. A file
+/// that the user owns and that cannot be read or parsed is an error, because
+/// silently falling through to a parent scope would route flagless writes into
+/// the wrong tenant or project.
 fn read_scope_file_at(
     dir: &Path,
+    owns: &Owns,
+    not_owned: &mut Vec<PathBuf>,
 ) -> std::result::Result<Option<(PathBuf, ProjectScopeConfig)>, Box<ScopeFileError>> {
+    if let Some(entry) = foreign_scope_entry(dir, "project_scope.json", owns) {
+        not_owned.push(entry);
+        return Ok(None);
+    }
     let scope_path = dir.join(".memd").join("project_scope.json");
     let text = match std::fs::read_to_string(&scope_path) {
         Ok(text) => text,
@@ -198,7 +268,11 @@ pub(super) enum LocatedScope {
         path: PathBuf,
         scope: ProjectScopeConfig,
     },
-    Missing,
+    /// No scope file. `not_owned` lists the entries the walk ignored because
+    /// another user owns them.
+    Missing {
+        not_owned: Vec<PathBuf>,
+    },
     Invalid(Box<ScopeFileError>),
 }
 
@@ -291,7 +365,8 @@ fn plan_scope(
 /// [`resolve_required`] for a command that writes. When no tenant is given and
 /// no scope exists, the first write plans the scope the way `session-start`
 /// would (at the repository root, else in the directory; unsafe roots,
-/// `.memd-skip` and `MEMD_AUTO_SCOPE=0` honoured) and writes under it. Nothing
+/// directories of another user, `.memd-skip` and `MEMD_AUTO_SCOPE=0` honoured)
+/// and writes under it. Nothing
 /// is created here: the caller publishes the returned [`PendingScope`] once
 /// the command succeeded. When planning is refused, the error says why.
 fn resolve_for_write(
@@ -528,7 +603,9 @@ fn resolve_command_scope_at(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
     use crate::cli::{CliQueryMode, ExportFormat, SearchReranker, WarmMode};
     use crate::types::TenantId;
@@ -790,7 +867,7 @@ mod tests {
 
     /// A main checkout with a scope and a linked worktree next to it, laid out
     /// as `git worktree add ../wt` does, back-pointer included.
-    fn sibling_worktree(root: &Path) -> (PathBuf, PathBuf) {
+    pub(in crate::cli) fn sibling_worktree(root: &Path) -> (PathBuf, PathBuf) {
         let main = root.join("main-repo");
         let admin = main.join(".git/worktrees/wt");
         std::fs::create_dir_all(&admin).unwrap();
@@ -924,7 +1001,7 @@ mod tests {
         assert_eq!(main_checkout_of_linked_worktree(&link_dir), None);
     }
 
-    fn write_scope_file(dir: &Path, tenant: &str, project: &str) {
+    pub(in crate::cli) fn write_scope_file(dir: &Path, tenant: &str, project: &str) {
         std::fs::create_dir_all(dir.join(".memd")).unwrap();
         std::fs::write(
             dir.join(".memd/project_scope.json"),
@@ -948,18 +1025,24 @@ mod tests {
         std::fs::create_dir_all(&plain).unwrap();
 
         // Inside the repository the home scope is out of reach.
-        assert!(find_project_scope_with_home(&sub, Some(&home))
-            .unwrap()
-            .is_none());
-        assert!(find_project_scope_with_home(&repo, Some(&home))
-            .unwrap()
-            .is_none());
+        assert!(
+            find_project_scope_with_home(&sub, Some(&home), &owned_by_current_user)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            find_project_scope_with_home(&repo, Some(&home), &owned_by_current_user)
+                .unwrap()
+                .is_none()
+        );
         // Outside any repository the walk still reaches home.
-        let scope = find_project_scope_with_home(&plain, Some(&home)).unwrap();
+        let scope =
+            find_project_scope_with_home(&plain, Some(&home), &owned_by_current_user).unwrap();
         assert_eq!(scope.unwrap().tenant_id, "home_tenant");
         // The repository's own scope is still found.
         write_scope_file(&repo, "repo_tenant", "repo_project");
-        let scope = find_project_scope_with_home(&sub, Some(&home)).unwrap();
+        let scope =
+            find_project_scope_with_home(&sub, Some(&home), &owned_by_current_user).unwrap();
         assert_eq!(scope.unwrap().tenant_id, "repo_tenant");
     }
 
@@ -972,19 +1055,25 @@ mod tests {
         let clone = root.join("outer-dir/clone");
         std::fs::create_dir_all(clone.join(".git")).unwrap();
         std::fs::create_dir_all(clone.join("sub")).unwrap();
-        assert!(find_project_scope_with_home(&clone.join("sub"), None)
-            .unwrap()
-            .is_none());
-        assert!(find_project_scope_with_home(&clone, None)
-            .unwrap()
-            .is_none());
+        assert!(
+            find_project_scope_with_home(&clone.join("sub"), None, &owned_by_current_user)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            find_project_scope_with_home(&clone, None, &owned_by_current_user)
+                .unwrap()
+                .is_none()
+        );
 
         let (main, worktree) = sibling_worktree(&root.join("wt-parent"));
         std::fs::remove_file(main.join(".memd/project_scope.json")).unwrap();
         std::fs::create_dir_all(worktree.join("sub")).unwrap();
-        assert!(find_project_scope_with_home(&worktree.join("sub"), None)
-            .unwrap()
-            .is_none());
+        assert!(
+            find_project_scope_with_home(&worktree.join("sub"), None, &owned_by_current_user)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1000,7 +1089,9 @@ mod tests {
         std::os::unix::fs::symlink(repo.join("sub"), root.join("a/link")).unwrap();
 
         // `/a/link/../src` is `/b/repo/src`, not `/a/src`.
-        let scope = find_project_scope_with_home(&root.join("a/link/../src"), None).unwrap();
+        let scope =
+            find_project_scope_with_home(&root.join("a/link/../src"), None, &owned_by_current_user)
+                .unwrap();
         assert_eq!(scope.unwrap().tenant_id, "repo_tenant");
     }
 
@@ -1022,6 +1113,7 @@ mod tests {
             default_tenant: "writer".to_string(),
             enabled,
             consolidate: false,
+            owns: std::sync::Arc::new(owned_by_current_user),
         }
     }
 
@@ -1127,6 +1219,7 @@ mod tests {
             default_tenant: "other".to_string(),
             enabled: true,
             consolidate: false,
+            owns: std::sync::Arc::new(owned_by_current_user),
         };
         let first_plan = resolve_command_scope_at(&sub, &mut first, &inputs(true))
             .unwrap()
@@ -1309,5 +1402,244 @@ mod tests {
 
         assert!(pending.is_none());
         assert!(!repo.join(".memd").exists());
+    }
+
+    /// An owner rule for a test, which cannot change the owner of a file. The
+    /// current user owns the paths below `root`, except the `foreign` entries,
+    /// which another user owns. Everything above `root` (such as `/tmp`)
+    /// belongs to someone else, so the test does not depend on the machine.
+    pub(in crate::cli) fn owned_below(
+        root: &Path,
+        foreign: &[&Path],
+    ) -> impl Fn(&Path) -> bool + Send + Sync + 'static {
+        let root = root.to_path_buf();
+        let foreign: Vec<PathBuf> = foreign.iter().map(|entry| entry.to_path_buf()).collect();
+        move |path| path.starts_with(&root) && !foreign.iter().any(|entry| entry == path)
+    }
+
+    fn inputs_with_owner(
+        owns: impl Fn(&Path) -> bool + Send + Sync + 'static,
+    ) -> super::super::session_start::AutoScopeInputs {
+        super::super::session_start::AutoScopeInputs {
+            owns: std::sync::Arc::new(owns),
+            ..inputs(true)
+        }
+    }
+
+    /// A shared directory such as `/tmp`, with a `.git` entry, and a project
+    /// below it that has no repository of its own.
+    fn shared_directory_with_a_git_entry(root: &Path) -> (PathBuf, PathBuf) {
+        let shared = root.join("shared");
+        let project = shared.join("My-Project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(shared.join(".git")).unwrap();
+        (shared, project)
+    }
+
+    #[test]
+    fn the_owner_rule_trusts_entries_the_current_user_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+
+        assert!(owned_by_current_user(dir.path()));
+        assert!(owned_by_current_user(&file));
+        assert!(owned_by_current_user(&link));
+        assert!(!owned_by_current_user(&dir.path().join("missing")));
+    }
+
+    #[test]
+    fn a_git_entry_that_another_user_owns_is_not_a_repository_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (shared, project) = shared_directory_with_a_git_entry(&root);
+
+        // The current user owns the directory and its `.git`: a repository.
+        let repository = enclosing_repository(&project, Some(&root), &owned_by_current_user);
+        assert_eq!(repository.unwrap().repo_root, shared);
+        // Another user owns the `.git` entry, or the directory: no repository.
+        for foreign in [shared.join(".git"), shared.clone()] {
+            let owns = owned_below(&root, &[&foreign]);
+            assert!(
+                enclosing_repository(&project, Some(&root), &owns).is_none(),
+                "{} belongs to another user",
+                foreign.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_project_below_a_foreign_git_entry_plans_its_own_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (shared, project) = shared_directory_with_a_git_entry(&root);
+
+        // When the current user owns the `.git` entry, the shared directory
+        // is the repository, so a flagless add plans the scope there, named
+        // after it.
+        let mut command = add_command();
+        let owner = inputs_with_owner(owned_below(&root, &[]));
+        let pending = resolve_command_scope_at(&project, &mut command, &owner)
+            .unwrap()
+            .expect("a flagless first write plans a scope");
+        assert_eq!(pending.scope_dir(), shared);
+
+        // With the `.git` entry owned by another user, the project is outside
+        // a repository: the scope goes to the project, named after it.
+        let mut command = add_command();
+        let owner = inputs_with_owner(owned_below(&root, &[&shared.join(".git")]));
+        let pending = resolve_command_scope_at(&project, &mut command, &owner)
+            .unwrap()
+            .expect("a flagless first write plans a scope");
+        assert_eq!(pending.scope_dir(), project);
+        let CliCommand::Add {
+            tenant_id,
+            project_id,
+            ..
+        } = command
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(tenant_id.as_deref(), Some("writer"));
+        assert_eq!(project_id.as_deref(), Some("my_project"));
+
+        assert!(pending.publish().unwrap());
+        assert!(project.join(".memd/project_scope.json").exists());
+        assert!(!shared.join(".memd").exists());
+    }
+
+    #[test]
+    fn a_foreign_git_entry_nearer_the_start_is_skipped_for_the_repository_above() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let outer = root.join("outer");
+        let inner = outer.join("inner");
+        let project = inner.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(outer.join(".git")).unwrap();
+        std::fs::create_dir_all(inner.join(".git")).unwrap();
+        write_scope_file(&outer, "outer_tenant", "outer_project");
+
+        // The current user owns both: the nearer `.git` is the boundary.
+        let nearest = enclosing_repository(&project, Some(&root), &owned_by_current_user);
+        assert_eq!(nearest.unwrap().repo_root, inner);
+        assert!(
+            find_project_scope_with_home(&project, Some(&root), &owned_by_current_user)
+                .unwrap()
+                .is_none()
+        );
+
+        // Another user owns the nearer `.git`: it counts as no `.git` at all,
+        // so the search goes on upward and returns the repository above.
+        let owns = owned_below(&root, &[&inner.join(".git")]);
+        let repository = enclosing_repository(&project, Some(&root), &owns).unwrap();
+        assert_eq!(repository.repo_root, outer);
+        let scope = find_project_scope_with_home(&project, Some(&root), &owns).unwrap();
+        assert_eq!(scope.unwrap().tenant_id, "outer_tenant");
+    }
+
+    #[test]
+    fn a_linked_worktree_whose_main_checkout_is_not_owned_has_no_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (main, worktree) = sibling_worktree(&root);
+
+        let repository = enclosing_repository(&worktree, Some(&root), &owned_by_current_user);
+        assert_eq!(repository.unwrap().main_checkout, Some(main.clone()));
+        // The worktree is the current user's, the main checkout is not: the
+        // repository is ignored, as for an unsafe root.
+        for foreign in [main.clone(), main.join(".git")] {
+            let owns = owned_below(&root, &[&foreign]);
+            assert!(
+                enclosing_repository(&worktree, Some(&root), &owns).is_none(),
+                "{} belongs to another user",
+                foreign.display()
+            );
+        }
+        // A worktree `.git` file that another user owns is not trusted either.
+        let owns = owned_below(&root, &[&worktree.join(".git")]);
+        assert!(enclosing_repository(&worktree, Some(&root), &owns).is_none());
+    }
+
+    #[test]
+    fn a_scope_file_that_another_user_owns_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let shared = root.join("shared");
+        let project = shared.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        write_scope_file(&shared, "shared_tenant", "shared_project");
+        let file = shared.join(".memd/project_scope.json");
+
+        // The current user owns the file: found.
+        match locate_project_scope_with_home(&project, Some(&root), &owned_by_current_user) {
+            Ok(LocatedScope::Found { path, scope }) => {
+                assert_eq!(path, file);
+                assert_eq!(scope.tenant_id, "shared_tenant");
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+
+        // Another user owns the file, or its `.memd` directory: missing, and
+        // the result names the entry that was ignored. A file that cannot be
+        // read makes no difference, because the owner is checked first.
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        for foreign in [file.clone(), shared.join(".memd")] {
+            let owns = owned_below(&root, &[&foreign]);
+            let located = locate_project_scope_with_home(&project, Some(&root), &owns);
+            let Ok(LocatedScope::Missing { not_owned }) = located else {
+                panic!("{} belongs to another user: {located:?}", foreign.display());
+            };
+            assert_eq!(not_owned, [foreign]);
+        }
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        // The walk goes on past the ignored file to a scope the user owns.
+        write_scope_file(&root, "own_tenant", "own_project");
+        let owns = owned_below(&root, &[&file]);
+        let scope = find_project_scope_with_home(&project, Some(&root), &owns).unwrap();
+        assert_eq!(scope.unwrap().tenant_id, "own_tenant");
+    }
+
+    #[test]
+    fn a_foreign_memd_directory_without_access_does_not_fail_the_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let shared = root.join("shared");
+        let project = shared.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        write_scope_file(&shared, "shared_tenant", "shared_project");
+        let memd = shared.join(".memd");
+
+        // A `.memd` directory with mode 700 that another user owns would
+        // make the read fail with "unable to read" if it were read.
+        std::fs::set_permissions(&memd, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let owns = owned_below(&root, &[&memd]);
+        let found = find_project_scope_with_home(&project, Some(&root), &owns);
+        std::fs::set_permissions(&memd, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(found.unwrap().is_none());
+    }
+
+    #[test]
+    fn flagless_commands_in_a_directory_that_another_user_owns_fail_and_write_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let nothing_is_owned = inputs_with_owner(|_| false);
+
+        for mut command in [add_command(), search_command()] {
+            let error =
+                resolve_command_scope_at(&project, &mut command, &nothing_is_owned).unwrap_err();
+            let message = error.to_string();
+            assert!(
+                message.contains("the directory belongs to another user"),
+                "{message}"
+            );
+            assert!(message.contains("--tenant-id"), "{message}");
+        }
+        assert!(!project.join(".memd").exists());
     }
 }
