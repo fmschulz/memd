@@ -291,3 +291,26 @@ async fn an_unfinished_case_under_another_id_is_not_finished() {
     assert!(!note.replay);
     assert_eq!(experience_tasks(&store).await.len(), 2);
 }
+
+/// A note without an ID is another submission than an unfinished case that
+/// carries one: the residue keeps its ID and the note adds its own case.
+#[tokio::test]
+async fn an_unfinished_case_with_an_id_is_not_finished_by_a_note_without_one() {
+    let data = tempfile::tempdir().unwrap();
+    let store = open(data.path());
+    let uri = format!("{SHARED_ID_PREFIX}EXP-1");
+    crash_after(&store, 0, Some(&uri), "Startup is slow", false).await;
+
+    let note = record_case(
+        &store,
+        context(T0, None),
+        case("Startup is slow"),
+        None,
+        true,
+    )
+    .await
+    .unwrap();
+
+    assert!(!note.replay);
+    assert_eq!(experience_tasks(&store).await.len(), 2);
+}

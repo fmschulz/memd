@@ -251,7 +251,8 @@ pub struct NoteOutcome {
 /// instead of starting a second case. The lookup reads the artifact tables,
 /// because a compact case has no row before its lesson. An unfinished case
 /// matches when its problem, symptoms, attempts and check are a prefix of the
-/// file's; with `shared_id` it must also carry `agentdash:<id>`. The call
+/// file's, and it carries the same `agentdash:<id>`, or none when the call has
+/// no `shared_id`. The call
 /// reuses the stored records, writes the missing ones, and returns
 /// `replay: false` with the rows of this call only. A stored case that does
 /// not match (other content under the same ID) is left alone and the call adds
@@ -359,10 +360,10 @@ fn unfinished_prefix(
     {
         return None;
     }
-    if let Some(uri) = context.provenance.uri.as_deref() {
-        if problem.provenance.uri.as_deref() != Some(uri) {
-            return None;
-        }
+    // The same ID on both sides, or none on both: a note without an ID is not
+    // the submission that left a case with one.
+    if problem.provenance.uri != context.provenance.uri {
+        return None;
     }
     let actions = case
         .failed

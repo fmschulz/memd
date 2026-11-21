@@ -87,8 +87,8 @@ A call that stops half way leaves an unfinished case: a problem, perhaps
 attempts and a check, but no lesson. The same submission finishes it. Memd
 looks the case up in the artifact tables, not through a row, because a compact
 case has no row before its lesson. The stored problem, symptoms, attempts and
-check must be the start of the file's, and with `--shared-id` they must carry
-`agentdash:ID`. Memd reuses them, writes the missing records, and returns
+check must be the start of the file's, and they must carry the same
+`agentdash:ID` as the call, or none when the call has no `--shared-id`. Memd reuses them, writes the missing records, and returns
 `"replay": false` with the rows of that call only. If the stored records differ
 from the file, as when another case reuses the ID, memd leaves them alone and
 adds a new case, as before. `experience get`, replay, corrections, `experience find`,
