@@ -77,8 +77,20 @@ fi
 
 PROJ_DIR="${TMP_DIR}/proj"
 mkdir -p "${PROJ_DIR}"
+# A project without stored content gets no scope file and no memory.md.
 memd --data-dir "${DATA_DIR}" session-start --project-dir "${PROJ_DIR}" >/dev/null
+test ! -e "${PROJ_DIR}/.memd"
+# The first write creates the scope; session-start then writes memory.md.
+(
+  cd "${PROJ_DIR}"
+  MEMD_DEFAULT_TENANT="${TENANT}" memd --data-dir "${DATA_DIR}" add \
+    --chunk-type summary \
+    --tags kind:verify,source:skill \
+    --text "scope check ${MARKER}" >/dev/null
+)
 test -f "${PROJ_DIR}/.memd/project_scope.json"
+memd --data-dir "${DATA_DIR}" session-start --project-dir "${PROJ_DIR}" >/dev/null
+test -s "${PROJ_DIR}/memory.md"
 
 # `memd doctor --strict` should run and exit 0 on a wired host with a project scope.
 memd doctor --strict --format json --project-dir "${PROJ_DIR}" >"${TMP_DIR}/doctor.json"

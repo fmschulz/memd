@@ -275,7 +275,8 @@ That verifier checks:
 - both blocks describe the CLI contract
 - `~/.cursor/rules/memd.mdc` exists and carries the CLI contract
 - the Claude `SessionStart` hook is wired in `~/.claude/settings.json`
-- `memd session-start` creates a project scope in a temp project
+- `memd session-start` writes nothing for a temp project without content
+- the first `memd add` there creates the project scope, and the next `memd session-start` writes `memory.md`
 - `memd doctor --strict --format json` passes against a temp project scope
 - `memd add` stores a test memory
 - `memd memory-md` renders `Project Fact Library` and `Memory health` headers
