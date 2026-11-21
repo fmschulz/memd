@@ -54,13 +54,8 @@ pub async fn handle_memory_search<S: Store>(
         params.ranking_time_ms,
     )
     .await?;
-    let exact_candidates = exact_lexical_candidates_for_project_scopes(
-        store,
-        &project_scopes,
-        &params.query,
-        params.k.min(fetch_k),
-    )
-    .await?;
+    let exact_candidates =
+        exact_lexical_candidates_for_project_scopes(store, &project_scopes, &params.query).await?;
     let preferred = summary_preferred_results_for_project_scopes(
         store,
         &project_scopes,

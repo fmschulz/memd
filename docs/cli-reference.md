@@ -241,6 +241,13 @@ explicitly scoped lines continue.
   identity is required for retrieval or outcome attribution.
 - `memory.search` — hybrid retrieval with optional `mode`, `project_id`,
   compact/token-budgeted output, and event sibling expansion.
+  A query term with a digit, `-` or `_` (`cve-2026-111497`, `job_2807`) also
+  gets an exact lookup in the keyword index. The term must match whole tokens:
+  `873` does not match `18735`. When at most 8 chunks in the search scope hold
+  the term, all of them get a +20 score boost, whatever `k` is. When more
+  chunks hold it, the term is common (`read-only`), and it gets no boost. Only
+  chunk text is matched, not tags. A generic search never rebuilds digests;
+  `mode` values such as `brief_project` or `find_failures` still refresh theirs.
 - `memory.get`, `memory.delete`, `memory.stats`, `memory.health`.
 - `memory.compact` — explicit digest refresh; supports `digest_modes` and `force_digest_rebuild`.
 - `memory.dream` — dry-run-first retention and compaction planning; safely

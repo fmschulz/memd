@@ -705,6 +705,20 @@ pub trait Store: Send + Sync {
             "compaction metrics not available".into(),
         ))
     }
+
+    /// Chunk ids whose indexed text holds any of `terms` as whole tokens,
+    /// best keyword match first, limited to `project_id` when given and to
+    /// readable chunks. Returns at most `limit` ids, or `None` when the store
+    /// has no keyword index; callers then scan chunks themselves.
+    async fn exact_term_chunk_ids(
+        &self,
+        _tenant_id: &TenantId,
+        _project_id: Option<&str>,
+        _terms: &[String],
+        _limit: usize,
+    ) -> Result<Option<Vec<ChunkId>>> {
+        Ok(None)
+    }
 }
 
 pub use dense::{DenseSearchConfig, DenseSearchResult, DenseSearcher};

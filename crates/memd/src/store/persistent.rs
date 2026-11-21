@@ -2224,6 +2224,40 @@ impl Store for PersistentStore {
     fn get_compaction_metrics(&self, tenant_id: &TenantId) -> Result<CompactionMetrics> {
         PersistentStore::get_compaction_metrics(self, tenant_id)
     }
+
+    async fn exact_term_chunk_ids(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        terms: &[String],
+        limit: usize,
+    ) -> Result<Option<Vec<ChunkId>>> {
+        // A dense-only configuration opens the index but never fills it.
+        let Some(sparse) = self
+            .hybrid_searcher
+            .as_ref()
+            .filter(|hybrid| hybrid.sparse_enabled())
+            .and_then(|hybrid| hybrid.sparse_index())
+        else {
+            return Ok(None);
+        };
+        // Scope and visibility come from metadata rows, so no payload is read.
+        let ids = sparse.chunks_with_terms(tenant_id, terms, limit, |chunk_id| {
+            Ok(self.metadata.get(tenant_id, chunk_id)?.is_some_and(|meta| {
+                // Count only rows a default search can show, so superseded
+                // versions of one fact do not make its identifier look common.
+                !matches!(
+                    meta.status,
+                    ChunkStatus::Candidate
+                        | ChunkStatus::Deleted
+                        | ChunkStatus::Error
+                        | ChunkStatus::Superseded
+                        | ChunkStatus::Expired
+                ) && (project_id.is_none() || meta.project_id.as_deref() == project_id)
+            }))
+        })?;
+        Ok(Some(ids))
+    }
 }
 
 fn current_time_ms() -> i64 {

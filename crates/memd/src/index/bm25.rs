@@ -14,11 +14,11 @@ use tantivy::directory::error::{DeleteError, LockError, OpenReadError, OpenWrite
 use tantivy::directory::{
     Directory, DirectoryLock, FileHandle, Lock, MmapDirectory, WatchCallback, WatchHandle, WritePtr,
 };
-use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
+use tantivy::query::{BooleanQuery, Occur, PhraseQuery, Query, QueryParser, TermQuery};
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING,
 };
-use tantivy::tokenizer::TextAnalyzer;
+use tantivy::tokenizer::{TextAnalyzer, TokenStream};
 use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, Term};
 
 use crate::error::{MemdError, Result};
@@ -43,6 +43,10 @@ const SPARSE_CHUNK_OVERFETCH: usize = 8;
 /// above `sparse_k` (200) times the typical sentences-per-turn, so it never
 /// limits the distinct-chunk yield on conversational corpora.
 const SPARSE_FETCH_CEILING: usize = 1024;
+
+/// Most sentence documents an exact-term lookup scores. A term in more
+/// sentences than this is common, and callers treat it as such anyway.
+const EXACT_TERM_FETCH_BOUND: usize = 5_000;
 
 /// Directory for a read-only index handle.
 ///
@@ -397,6 +401,90 @@ impl Bm25Index {
             .map_err(|e| MemdError::StorageError(format!("reload merged index: {e}")))?;
         Ok(())
     }
+
+    /// Chunks of `tenant_id` with a sentence that holds any of `terms` as
+    /// whole tokens, best BM25 match first.
+    ///
+    /// Each term goes through the index analyzer. One token becomes a term
+    /// query. Several tokens (`ai-local`, `cve-2026-111497`) become a phrase
+    /// query, so the tokens must be adjacent and whole: `873` does not match
+    /// `18735`. Scoring reads at most `EXACT_TERM_FETCH_BOUND` sentences.
+    /// `accept` filters each distinct chunk before it counts; the scan stops
+    /// after `max_chunks` accepted chunks.
+    pub fn chunks_with_terms(
+        &self,
+        tenant_id: &TenantId,
+        terms: &[String],
+        max_chunks: usize,
+        mut accept: impl FnMut(&ChunkId) -> Result<bool>,
+    ) -> Result<Vec<ChunkId>> {
+        if max_chunks == 0 {
+            return Ok(Vec::new());
+        }
+        let mut analyzer = self
+            .index
+            .tokenizers()
+            .get("code")
+            .ok_or_else(|| MemdError::StorageError("code tokenizer not registered".into()))?;
+        let mut alternatives: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+        for term in terms {
+            let mut tokens = Vec::new();
+            let mut stream = analyzer.token_stream(term);
+            while stream.advance() {
+                tokens.push(Term::from_field_text(self.text_field, &stream.token().text));
+            }
+            let query: Box<dyn Query> = match tokens.len() {
+                0 => continue,
+                1 => Box::new(TermQuery::new(
+                    tokens.remove(0),
+                    IndexRecordOption::WithFreqsAndPositions,
+                )),
+                _ => Box::new(PhraseQuery::new(tokens)),
+            };
+            alternatives.push((Occur::Should, query));
+        }
+        if alternatives.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.commit_if_dirty()?;
+        self.reader
+            .reload()
+            .map_err(|e| MemdError::StorageError(format!("reload reader: {}", e)))?;
+        let searcher = self.reader.searcher();
+        let tenant_query: Box<dyn Query> = Box::new(TermQuery::new(
+            Term::from_field_text(self.tenant_field, tenant_id.as_str()),
+            IndexRecordOption::Basic,
+        ));
+        let combined = BooleanQuery::new(vec![
+            (Occur::Must, tenant_query),
+            (Occur::Must, Box::new(BooleanQuery::new(alternatives))),
+        ]);
+        let top_docs = searcher
+            .search(&combined, &TopDocs::with_limit(EXACT_TERM_FETCH_BOUND))
+            .map_err(|e| MemdError::StorageError(format!("exact term search: {}", e)))?;
+
+        let mut seen: HashSet<ChunkId> = HashSet::new();
+        let mut chunks = Vec::new();
+        for (_, doc_address) in top_docs {
+            let doc = searcher
+                .doc::<tantivy::TantivyDocument>(doc_address)
+                .map_err(|e| MemdError::StorageError(format!("retrieve doc: {}", e)))?;
+            let chunk_id_str = doc
+                .get_first(self.chunk_field)
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| MemdError::StorageError("missing chunk_id".into()))?;
+            let chunk_id = ChunkId::parse(chunk_id_str)?;
+            if !seen.insert(chunk_id.clone()) || !accept(&chunk_id)? {
+                continue;
+            }
+            chunks.push(chunk_id);
+            if chunks.len() >= max_chunks {
+                break;
+            }
+        }
+        Ok(chunks)
+    }
 }
 
 impl Default for Bm25Index {
@@ -644,6 +732,53 @@ mod tests {
             index.search(&other, "other", 10).unwrap()[0].chunk_id,
             chunk_id
         );
+    }
+
+    #[test]
+    fn chunks_with_terms_match_whole_token_runs_in_one_tenant() {
+        let index = Bm25Index::new().unwrap();
+        let tenant = create_test_tenant();
+        let other = TenantId::new("other_terms").unwrap();
+        let mut ids = Vec::new();
+        for text in [
+            "Ticket 873 reopened.",
+            "Build 18735 failed.",
+            "Use the ai-local profile.",
+            "Thai-localization strings.",
+            "Patched cve-2026-111497 today. Second sentence mentions cve-2026-111497 again.",
+        ] {
+            let id = ChunkId::new();
+            index.insert(&tenant, &id, &[text.to_string()]).unwrap();
+            ids.push(id);
+        }
+        index
+            .insert(
+                &other,
+                &ChunkId::new(),
+                &["Ticket 873 elsewhere.".to_string()],
+            )
+            .unwrap();
+        let find = |terms: &[&str], max: usize, deny: Option<&ChunkId>| {
+            let terms = terms
+                .iter()
+                .map(|term| term.to_string())
+                .collect::<Vec<_>>();
+            index
+                .chunks_with_terms(&tenant, &terms, max, |id| Ok(Some(id) != deny))
+                .unwrap()
+        };
+
+        assert_eq!(find(&["873"], 10, None), vec![ids[0].clone()]);
+        assert_eq!(find(&["ai-local"], 10, None), vec![ids[2].clone()]);
+        assert_eq!(find(&["cve-2026-111497"], 10, None), vec![ids[4].clone()]);
+        let mut both = find(&["873", "ai-local"], 10, None);
+        both.sort();
+        let mut want = vec![ids[0].clone(), ids[2].clone()];
+        want.sort();
+        assert_eq!(both, want);
+        assert!(find(&["873", "ai-local"], 1, None).len() == 1);
+        assert!(find(&["873"], 10, Some(&ids[0])).is_empty());
+        assert!(find(&["---"], 10, None).is_empty());
     }
 
     fn create_test_tenant() -> TenantId {

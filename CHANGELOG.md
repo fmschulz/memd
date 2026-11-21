@@ -24,6 +24,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 ### Fixed
 
 - `memd session-start` in a subdirectory of a git repository uses the nearest scope up to the repository root, or creates the scope at the root, instead of creating an empty scope named after the subdirectory. A linked worktree uses the scope of its main checkout. Legacy `.memd/config.json` scopes count, a nested clone or submodule keeps its own scope, and a `.memd-skip` at the repository root skips the whole repository. The home directory and `/` are never a repository root. The result reports `scope_dir` when the scope came from another directory.
+- `memory.search` answers exact code-like terms (digits, `-`, `_`) from the keyword index instead of loading up to 50,000 chunks (issue 13). Terms match whole tokens, so `873` no longer boosts `18735`, and tags are not matched. A term rescues and boosts only when at most `EXACT_RESCUE_MAX_MATCHES` (8) chunks in the search scope hold it, whatever `k` is; common terms such as `read-only` get no +20 boost, and the rescue no longer depends on `k`. Stores without a keyword index keep a scan with the same rules.
+- A generic project-scoped `memory.search` no longer rebuilds or persists digests; typed modes still refresh the digest they serve.
 - OMF imports publish all rows, lifecycle metadata and translated supersession edges atomically, map duplicate items into the graph, restore soft-deleted content, and preserve explicit null retention fields.
 - Artifact claim support requires textual evidence; recency, positive markers and unrelated validation alone do not count.
 - Project briefs count tasks with a finish time as completed, regardless of their status label.

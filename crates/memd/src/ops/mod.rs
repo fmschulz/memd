@@ -26,6 +26,9 @@ const EXACT_RESCUE_PAGE_SIZE: usize = 500;
 const EXACT_RESCUE_PROJECT_SCAN_LIMIT: usize = 50_000;
 const EXACT_RESCUE_GLOBAL_SCAN_LIMIT: usize = 10_000;
 const EXACT_RESCUE_SCORE_BOOST: f32 = 20.0;
+/// A code-like term rescues and boosts only when at most this many chunks in
+/// the search scope hold it. A term in more chunks is common, not an identifier.
+const EXACT_RESCUE_MAX_MATCHES: usize = 8;
 const LEXICAL_OVERLAP_PROJECT_SCAN_LIMIT: usize = 500;
 const LEXICAL_OVERLAP_SCORE_BOOST: f32 = 16.0;
 const LEXICAL_OVERLAP_MAX_CANDIDATES: usize = 100;
@@ -146,6 +149,7 @@ use crate::task_memory::{
     DIGEST_ROLE_FAILURE_LIBRARY, DIGEST_ROLE_HIGHLIGHT_LIBRARY, DIGEST_ROLE_PROJECT_BRIEF,
     DIGEST_ROLE_TASK_RESUME,
 };
+use crate::text::CodeTokenizer;
 use crate::types::{
     ChunkId, ChunkStatus, ChunkType, LifecycleDelta, MemoryChunk, ProjectId, Source, TenantId,
     VisibilityPolicy,
@@ -2372,9 +2376,19 @@ fn is_lexical_overlap_stopword(term: &str) -> bool {
     )
 }
 
-fn chunk_contains_exact_rescue_term(chunk: &MemoryChunk, terms: &[String]) -> bool {
-    let haystack = format!("{} {}", chunk.text, chunk.tags.join(" ")).to_ascii_lowercase();
-    terms.iter().any(|term| haystack.contains(term))
+/// True when the chunk text holds the analyzer tokens of a term, whole and in
+/// order. This is the match the keyword index makes, so a scan and the index
+/// agree: `873` does not match `18735`.
+fn chunk_holds_term_tokens(
+    tokenizer: &CodeTokenizer,
+    chunk: &MemoryChunk,
+    term_tokens: &[String],
+) -> bool {
+    !term_tokens.is_empty()
+        && tokenizer
+            .tokenize(&chunk.text)
+            .windows(term_tokens.len())
+            .any(|window| window == term_tokens)
 }
 
 fn chunk_lexical_overlap_count(chunk: &MemoryChunk, terms: &[String]) -> usize {
@@ -2409,81 +2423,121 @@ fn should_run_lexical_overlap_rescue(scored: &[(MemoryChunk, f32)], query: &str,
         .any(|(chunk, _)| chunk_lexical_overlap_count(chunk, &terms) >= min_overlap)
 }
 
-fn retain_exact_rescue_candidate(
-    candidates: &mut Vec<(MemoryChunk, f32)>,
-    chunk: MemoryChunk,
-    query: &str,
-    limit: usize,
-) {
-    let score = score_candidate_chunk(query, &chunk);
-    if score <= 0.0 {
-        return;
-    }
-    candidates.push((chunk, score));
-    candidates.sort_by(compare_scored_chunks);
-    candidates.truncate(limit);
+fn chunk_in_scope(scope: &ProjectSearchScope, chunk: &MemoryChunk) -> bool {
+    scope
+        .project_id
+        .as_deref()
+        .is_none_or(|project_id| chunk.project_id.as_option() == Some(project_id))
 }
 
-async fn exact_lexical_candidates_for_project_scopes<S: Store>(
+/// Scan a scope for chunks that hold `term`, for stores without a keyword
+/// index. Stops once `found` holds more than `EXACT_RESCUE_MAX_MATCHES`.
+async fn scan_exact_term_matches<S: Store>(
     store: &S,
-    scopes: &[ProjectSearchScope],
-    query: &str,
-    limit: usize,
-) -> Result<Vec<(MemoryChunk, f32)>, McpError> {
-    let terms = exact_rescue_terms(query);
-    if terms.is_empty() || limit == 0 {
-        return Ok(Vec::new());
-    }
-
-    let mut candidates = Vec::new();
-    for scope in scopes {
-        let scan_limit = if scope.project_id.is_some() {
-            EXACT_RESCUE_PROJECT_SCAN_LIMIT
-        } else {
-            EXACT_RESCUE_GLOBAL_SCAN_LIMIT
-        };
-        let mut offset = 0usize;
-        let mut scanned = 0usize;
-        loop {
-            if scanned >= scan_limit {
-                break;
-            }
-            let page_limit = EXACT_RESCUE_PAGE_SIZE.min(scan_limit.saturating_sub(scanned));
-            if page_limit == 0 {
-                break;
-            }
-            let chunks = store
-                .list_chunks_for_project(
-                    &scope.tenant_id,
-                    scope.project_id.as_deref(),
-                    page_limit,
-                    offset,
-                )
-                .await
-                .map_err(|e| McpError::ToolError(e.to_string()))?;
-            if chunks.is_empty() {
-                break;
-            }
-            scanned = scanned.saturating_add(page_limit);
-            offset = offset.saturating_add(page_limit);
-
-            for chunk in chunks {
-                if let Some(project_id) = scope.project_id.as_deref() {
-                    if chunk.project_id.as_option() != Some(project_id) {
-                        continue;
-                    }
-                }
-                if chunk_contains_exact_rescue_term(&chunk, &terms) {
-                    retain_exact_rescue_candidate(&mut candidates, chunk, query, limit);
+    scope: &ProjectSearchScope,
+    term: &str,
+    found: &mut Vec<MemoryChunk>,
+) -> Result<(), McpError> {
+    let tokenizer = CodeTokenizer::new();
+    let term_tokens = tokenizer.tokenize(term);
+    let scan_limit = if scope.project_id.is_some() {
+        EXACT_RESCUE_PROJECT_SCAN_LIMIT
+    } else {
+        EXACT_RESCUE_GLOBAL_SCAN_LIMIT
+    };
+    let mut offset = 0usize;
+    while offset < scan_limit {
+        let page_limit = EXACT_RESCUE_PAGE_SIZE.min(scan_limit - offset);
+        let chunks = store
+            .list_chunks_for_project(
+                &scope.tenant_id,
+                scope.project_id.as_deref(),
+                page_limit,
+                offset,
+            )
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        if chunks.is_empty() {
+            break;
+        }
+        offset += page_limit;
+        for chunk in chunks {
+            if chunk_in_scope(scope, &chunk)
+                && chunk_holds_term_tokens(&tokenizer, &chunk, &term_tokens)
+                && !found.iter().any(|seen| seen.chunk_id == chunk.chunk_id)
+            {
+                found.push(chunk);
+                if found.len() > EXACT_RESCUE_MAX_MATCHES {
+                    return Ok(());
                 }
             }
         }
     }
+    Ok(())
+}
 
-    Ok(candidates
-        .into_iter()
-        .map(|(chunk, score)| (chunk, score + EXACT_RESCUE_SCORE_BOOST))
-        .collect())
+/// Chunks of the search scopes that hold `term`, or none when the term is
+/// common there (more than `EXACT_RESCUE_MAX_MATCHES` chunks). A common term
+/// is no identifier, and the hybrid search already scores it.
+async fn rare_exact_term_matches<S: Store>(
+    store: &S,
+    scopes: &[ProjectSearchScope],
+    term: &str,
+) -> Result<Vec<MemoryChunk>, McpError> {
+    let mut found: Vec<MemoryChunk> = Vec::new();
+    for scope in scopes {
+        let ids = store
+            .exact_term_chunk_ids(
+                &scope.tenant_id,
+                scope.project_id.as_deref(),
+                &[term.to_string()],
+                EXACT_RESCUE_MAX_MATCHES + 1 - found.len(),
+            )
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        match ids {
+            Some(ids) => {
+                for id in ids {
+                    let chunk = store
+                        .get(&scope.tenant_id, &id)
+                        .await
+                        .map_err(|e| McpError::ToolError(e.to_string()))?;
+                    if let Some(chunk) = chunk.filter(|chunk| chunk_in_scope(scope, chunk)) {
+                        if !found.iter().any(|seen| seen.chunk_id == chunk.chunk_id) {
+                            found.push(chunk);
+                        }
+                    }
+                }
+            }
+            None => scan_exact_term_matches(store, scope, term, &mut found).await?,
+        }
+        if found.len() > EXACT_RESCUE_MAX_MATCHES {
+            return Ok(Vec::new());
+        }
+    }
+    Ok(found)
+}
+
+/// Candidates for code-like query terms (digits, `-`, `_`) that are rare in the
+/// search scope. Every chunk of a rare term is a candidate and gets
+/// `EXACT_RESCUE_SCORE_BOOST`, so the result does not depend on `k`.
+async fn exact_lexical_candidates_for_project_scopes<S: Store>(
+    store: &S,
+    scopes: &[ProjectSearchScope],
+    query: &str,
+) -> Result<Vec<(MemoryChunk, f32)>, McpError> {
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::new();
+    for term in exact_rescue_terms(query) {
+        for chunk in rare_exact_term_matches(store, scopes, &term).await? {
+            if seen.insert(chunk.chunk_id.clone()) {
+                let score = score_candidate_chunk(query, &chunk);
+                candidates.push((chunk, score + EXACT_RESCUE_SCORE_BOOST));
+            }
+        }
+    }
+    candidates.sort_by(compare_scored_chunks);
+    Ok(candidates)
 }
 
 async fn lexical_overlap_candidates_for_project_scopes<S: Store>(
@@ -3284,13 +3338,16 @@ async fn candidate_chunk_ids_for_mode<S: Store>(
     mode: QueryMode,
     filters: &TaskSearchFilters,
     limit: usize,
+    refresh_digests: bool,
 ) -> Result<Vec<ChunkId>, McpError> {
     let mut filters_list = Vec::new();
     match mode {
         QueryMode::Generic => {}
         QueryMode::BriefProject => {
             if let Some(project_id) = filters.project_id.as_deref() {
-                let _ = ensure_project_brief_digest(store, tenant_id, project_id, true).await?;
+                if refresh_digests {
+                    ensure_project_brief_digest(store, tenant_id, project_id, true).await?;
+                }
                 filters_list.push(TaskSearchFilters {
                     artifact_kind: Some(ArtifactKind::Digest),
                     artifact_role: Some(DIGEST_ROLE_PROJECT_BRIEF.to_string()),
@@ -3305,7 +3362,9 @@ async fn candidate_chunk_ids_for_mode<S: Store>(
         }
         QueryMode::ResumeTask => {
             if let Some(task_id) = filters.task_id.as_deref() {
-                let _ = ensure_task_resume_digest(store, tenant_id, task_id).await?;
+                if refresh_digests {
+                    ensure_task_resume_digest(store, tenant_id, task_id).await?;
+                }
                 filters_list.push(TaskSearchFilters {
                     artifact_kind: Some(ArtifactKind::Digest),
                     artifact_role: Some(DIGEST_ROLE_TASK_RESUME.to_string()),
@@ -3319,8 +3378,10 @@ async fn candidate_chunk_ids_for_mode<S: Store>(
             }
         }
         QueryMode::FindFailures => {
-            let _ = ensure_failure_library_digest(store, tenant_id, filters.project_id.as_deref())
-                .await?;
+            if refresh_digests {
+                ensure_failure_library_digest(store, tenant_id, filters.project_id.as_deref())
+                    .await?;
+            }
             filters_list.push(TaskSearchFilters {
                 artifact_kind: Some(ArtifactKind::Digest),
                 artifact_role: Some(DIGEST_ROLE_FAILURE_LIBRARY.to_string()),
@@ -3340,8 +3401,10 @@ async fn candidate_chunk_ids_for_mode<S: Store>(
             }
         }
         QueryMode::FindDecisions => {
-            let _ = ensure_decision_library_digest(store, tenant_id, filters.project_id.as_deref())
-                .await?;
+            if refresh_digests {
+                ensure_decision_library_digest(store, tenant_id, filters.project_id.as_deref())
+                    .await?;
+            }
             filters_list.push(TaskSearchFilters {
                 artifact_kind: Some(ArtifactKind::Digest),
                 artifact_role: Some(DIGEST_ROLE_DECISION_LIBRARY.to_string()),
@@ -3361,8 +3424,10 @@ async fn candidate_chunk_ids_for_mode<S: Store>(
             }
         }
         QueryMode::FindEvidence => {
-            let _ = ensure_evidence_library_digest(store, tenant_id, filters.project_id.as_deref())
-                .await?;
+            if refresh_digests {
+                ensure_evidence_library_digest(store, tenant_id, filters.project_id.as_deref())
+                    .await?;
+            }
             filters_list.push(TaskSearchFilters {
                 artifact_kind: Some(ArtifactKind::Digest),
                 artifact_role: Some(DIGEST_ROLE_EVIDENCE_LIBRARY.to_string()),
@@ -3378,9 +3443,10 @@ async fn candidate_chunk_ids_for_mode<S: Store>(
             }
         }
         QueryMode::FindHighlights => {
-            let _ =
+            if refresh_digests {
                 ensure_highlight_library_digest(store, tenant_id, filters.project_id.as_deref())
                     .await?;
+            }
             filters_list.push(TaskSearchFilters {
                 artifact_kind: Some(ArtifactKind::Digest),
                 artifact_role: Some(DIGEST_ROLE_HIGHLIGHT_LIBRARY.to_string()),
@@ -3426,7 +3492,7 @@ async fn candidate_chunk_ids_for_tenants_and_mode<S: Store>(
                 }
             }
         }
-        let ids = candidate_chunk_ids_for_mode(store, tenant, mode, filters, limit).await?;
+        let ids = candidate_chunk_ids_for_mode(store, tenant, mode, filters, limit, true).await?;
         for id in ids {
             if seen.insert(id.clone()) {
                 out.push(id);
@@ -3473,6 +3539,10 @@ async fn summary_preferred_results_for_project_scopes<S: Store>(
     ranking_time_ms: Option<i64>,
 ) -> Result<Vec<(MemoryChunk, f32)>, McpError> {
     let has_project_scope = scopes.iter().any(|scope| scope.project_id.is_some());
+    // A generic search reads the digests that exist and never rebuilds them
+    // (it drops digest chunks from its results anyway); a typed mode refreshes
+    // the digest it serves.
+    let refresh_digests = mode != QueryMode::Generic;
     let modes = if mode != QueryMode::Generic {
         vec![mode]
     } else if has_project_scope {
@@ -3505,6 +3575,7 @@ async fn summary_preferred_results_for_project_scopes<S: Store>(
                     ..Default::default()
                 },
                 limit.saturating_mul(4),
+                refresh_digests,
             )
             .await?;
             for id in ids {

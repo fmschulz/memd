@@ -235,6 +235,11 @@ struct SearchMissStore {
     chunks: Mutex<Vec<MemoryChunk>>,
     outcome_times: Mutex<Vec<i64>>,
     usage_events: Mutex<Vec<crate::store::usage::UsageEvent>>,
+    /// Calls to `list_chunks_for_project`, the paging scan of the exact rescue.
+    project_scans: std::sync::atomic::AtomicUsize,
+    /// Ids a keyword index would answer for an exact-term lookup. `None`
+    /// models a store without a keyword index.
+    indexed_hits: Mutex<Option<Vec<ChunkId>>>,
 }
 
 impl SearchMissStore {
@@ -243,6 +248,8 @@ impl SearchMissStore {
             chunks: Mutex::new(chunks),
             outcome_times: Mutex::new(Vec::new()),
             usage_events: Mutex::new(Vec::new()),
+            project_scans: std::sync::atomic::AtomicUsize::new(0),
+            indexed_hits: Mutex::new(None),
         }
     }
 }
@@ -391,6 +398,45 @@ impl Store for SearchMissStore {
             .take(limit)
             .cloned()
             .collect())
+    }
+
+    async fn list_chunks_for_project(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> crate::error::Result<Vec<MemoryChunk>> {
+        self.project_scans
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(self
+            .chunks
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|chunk| {
+                &chunk.tenant_id == tenant_id
+                    && (project_id.is_none() || chunk.project_id.as_option() == project_id)
+            })
+            .skip(offset)
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
+    async fn exact_term_chunk_ids(
+        &self,
+        _tenant_id: &TenantId,
+        _project_id: Option<&str>,
+        _terms: &[String],
+        limit: usize,
+    ) -> crate::error::Result<Option<Vec<ChunkId>>> {
+        Ok(self
+            .indexed_hits
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|ids| ids.iter().take(limit).cloned().collect()))
     }
 
     async fn delete(
@@ -3232,7 +3278,6 @@ async fn memory_search_rescues_exact_code_token_when_indexes_miss() {
             project_id: Some("virosync".to_string()),
         }],
         "repeat_spike",
-        5,
     )
     .await
     .unwrap();
@@ -3269,7 +3314,6 @@ async fn exact_code_token_rescue_ranks_the_bounded_scan_before_truncating() {
             project_id: Some("rescue-rank".to_string()),
         }],
         "cache-key atlas.",
-        3,
     )
     .await
     .unwrap();
@@ -3296,7 +3340,6 @@ async fn exact_code_token_rescue_preserves_dotted_identifiers() {
             project_id: Some("rescue-version".to_string()),
         }],
         "v1.3",
-        3,
     )
     .await
     .unwrap();
@@ -3307,6 +3350,512 @@ async fn exact_code_token_rescue_preserves_dotted_identifiers() {
 #[test]
 fn exact_code_token_rescue_rejects_punctuation_only_terms() {
     assert!(exact_rescue_terms("--- ___").is_empty());
+}
+
+/// A persistent store with the BM25 keyword index and no embedding model.
+fn make_sparse_persistent_store() -> (PersistentStore, TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PersistentStore::open(PersistentStoreConfig {
+        data_dir: dir.path().to_path_buf(),
+        enable_dense_search: false,
+        enable_hybrid_search: true,
+        hybrid_config: Some(crate::store::HybridConfig {
+            dense_k: 0,
+            enable_sparse: true,
+            enable_rerank: false,
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .unwrap();
+    (store, dir)
+}
+
+fn rescue_scope(tenant: &TenantId, project: &str) -> Vec<ProjectSearchScope> {
+    vec![ProjectSearchScope {
+        tenant_id: tenant.clone(),
+        project_id: Some(project.to_string()),
+    }]
+}
+
+fn project_chunk(tenant: &TenantId, project: &str, text: &str, created: i64) -> MemoryChunk {
+    let mut chunk = MemoryChunk::new(tenant.clone(), text, ChunkType::Summary)
+        .with_project(ProjectId::new(Some(project.to_string())));
+    chunk.timestamp_created = created;
+    chunk
+}
+
+#[tokio::test]
+async fn exact_rescue_matches_whole_tokens_not_substrings() {
+    let tenant = TenantId::new("rescue_tokens").unwrap();
+    let hit_text = "Ticket 873 was reopened after the deploy.";
+    let hit = project_chunk(&tenant, "p", hit_text, 1);
+    let near_a = project_chunk(&tenant, "p", "Build 18735 failed on the runner.", 2);
+    let near_b = project_chunk(&tenant, "p", "Ticket 8730 was closed as a duplicate.", 3);
+
+    let fallback = SearchMissStore::new(vec![hit.clone(), near_a.clone(), near_b.clone()]);
+    let (persistent, _dir) = make_sparse_persistent_store();
+    for chunk in [hit, near_a, near_b] {
+        persistent.add(chunk).await.unwrap();
+    }
+
+    let scope = rescue_scope(&tenant, "p");
+    let from_fallback = exact_lexical_candidates_for_project_scopes(&fallback, &scope, "873")
+        .await
+        .unwrap();
+    let from_index = exact_lexical_candidates_for_project_scopes(&persistent, &scope, "873")
+        .await
+        .unwrap();
+    for (name, rescued) in [
+        ("fallback scan", from_fallback),
+        ("keyword index", from_index),
+    ] {
+        let texts = rescued
+            .iter()
+            .map(|(chunk, _)| chunk.text.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(rescued.len(), 1, "{name} rescued {texts:?}");
+        assert_eq!(rescued[0].0.text, hit_text, "{name}");
+        assert!(rescued[0].1 >= EXACT_RESCUE_SCORE_BOOST, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn exact_rescue_hyphenated_term_needs_the_whole_token_run() {
+    let tenant = TenantId::new("rescue_hyphen").unwrap();
+    let hit = project_chunk(
+        &tenant,
+        "p",
+        "Use the ai-local profile for offline runs.",
+        1,
+    );
+    let near = project_chunk(&tenant, "p", "Thai-localization strings were updated.", 2);
+    let (persistent, _dir) = make_sparse_persistent_store();
+    let hit_id = persistent.add(hit).await.unwrap();
+    persistent.add(near).await.unwrap();
+
+    let rescued = exact_lexical_candidates_for_project_scopes(
+        &persistent,
+        &rescue_scope(&tenant, "p"),
+        "ai-local",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rescued.len(), 1);
+    assert_eq!(rescued[0].0.chunk_id, hit_id);
+}
+
+#[tokio::test]
+async fn exact_rescue_finds_identifiers_beyond_the_first_scan_pages() {
+    let tenant = TenantId::new("rescue_deep").unwrap();
+    let (store, _dir) = make_sparse_persistent_store();
+    let targets = [
+        ("cve-2026-111497", "Patched cve-2026-111497 in the parser."),
+        ("job_2807", "Slurm job_2807 timed out on the node."),
+        ("ai-local", "Switched the agent to the ai-local profile."),
+    ];
+    let mut expected = Vec::new();
+    for (index, (_, text)) in targets.iter().enumerate() {
+        let chunk = project_chunk(&tenant, "deep", text, index as i64);
+        expected.push(store.add(chunk).await.unwrap());
+    }
+    // The same identifiers in another project and tenant must not leak in.
+    store
+        .add(project_chunk(
+            &tenant,
+            "other",
+            "Also cve-2026-111497 here.",
+            5,
+        ))
+        .await
+        .unwrap();
+    store
+        .add(project_chunk(
+            &TenantId::new("rescue_deep_foreign").unwrap(),
+            "deep",
+            "Foreign job_2807 note.",
+            5,
+        ))
+        .await
+        .unwrap();
+    let newer = (0..EXACT_RESCUE_PAGE_SIZE + 100)
+        .map(|index| {
+            project_chunk(
+                &tenant,
+                "deep",
+                &format!("Newer filler note number {index} about unrelated work."),
+                1_000 + index as i64,
+            )
+        })
+        .collect::<Vec<_>>();
+    store.add_batch(newer).await.unwrap();
+
+    for ((term, _), want) in targets.iter().zip(&expected) {
+        let rescued = exact_lexical_candidates_for_project_scopes(
+            &store,
+            &rescue_scope(&tenant, "deep"),
+            term,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rescued.len(), 1, "{term}");
+        assert_eq!(&rescued[0].0.chunk_id, want, "{term}");
+    }
+}
+
+#[tokio::test]
+async fn exact_rescue_answers_from_the_index_without_paging_the_project() {
+    let tenant = TenantId::new("rescue_probe").unwrap();
+    let target = project_chunk(&tenant, "p", "Patched cve-2026-111497 in the parser.", 0);
+    let target_id = target.chunk_id.clone();
+    let mut chunks = (0..3 * EXACT_RESCUE_PAGE_SIZE)
+        .map(|index| {
+            project_chunk(
+                &tenant,
+                "p",
+                &format!("Filler note {index}."),
+                10 + index as i64,
+            )
+        })
+        .collect::<Vec<_>>();
+    chunks.push(target);
+    let store = SearchMissStore::new(chunks);
+    *store.indexed_hits.lock().unwrap() = Some(vec![target_id.clone()]);
+
+    let rescued = exact_lexical_candidates_for_project_scopes(
+        &store,
+        &rescue_scope(&tenant, "p"),
+        "cve-2026-111497",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rescued.len(), 1);
+    assert_eq!(rescued[0].0.chunk_id, target_id);
+    assert_eq!(
+        store
+            .project_scans
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "an indexed store must not page the project"
+    );
+}
+
+#[tokio::test]
+async fn exact_rescue_falls_back_to_a_scan_on_the_in_memory_store() {
+    let store = make_store();
+    let tenant = TenantId::new("rescue_memory").unwrap();
+    let hit = project_chunk(
+        &tenant,
+        "p",
+        "Use the ai-local profile for offline runs.",
+        1,
+    );
+    let hit_id = store.add(hit).await.unwrap();
+    store
+        .add(project_chunk(
+            &tenant,
+            "p",
+            "Thai-localization strings were updated.",
+            2,
+        ))
+        .await
+        .unwrap();
+
+    let rescued = exact_lexical_candidates_for_project_scopes(
+        &store,
+        &rescue_scope(&tenant, "p"),
+        "ai-local",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rescued.len(), 1);
+    assert_eq!(rescued[0].0.chunk_id, hit_id);
+}
+
+async fn search_ids(
+    store: &PersistentStore,
+    tenant: &TenantId,
+    query: &str,
+    k: usize,
+) -> Vec<(String, f32)> {
+    let result = handle_memory_search(
+        store,
+        SearchParams {
+            tenant_id: tenant.to_string(),
+            query: query.to_string(),
+            project_id: Some("p".to_string()),
+            k,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let payload: SearchResult = parse_tool_payload(&result);
+    payload
+        .results
+        .into_iter()
+        .map(|result| (result.chunk_id, result.score))
+        .collect()
+}
+
+#[tokio::test]
+async fn exact_rescue_ignores_a_term_that_is_common_in_scope() {
+    let tenant = TenantId::new("rescue_common").unwrap();
+    let (store, _dir) = make_sparse_persistent_store();
+    for index in 0..30 {
+        let padding = "filler ".repeat(index % 7);
+        store
+            .add(project_chunk(
+                &tenant,
+                "p",
+                &format!("The read-only mode applies to case {index} {padding}."),
+                index as i64,
+            ))
+            .await
+            .unwrap();
+    }
+    for index in 0..10 {
+        store
+            .add(project_chunk(
+                &tenant,
+                "p",
+                &format!("Mode switching note {index} for the agent."),
+                100 + index as i64,
+            ))
+            .await
+            .unwrap();
+    }
+    let scope = rescue_scope(&tenant, "p");
+    assert!(
+        exact_lexical_candidates_for_project_scopes(&store, &scope, "read-only mode")
+            .await
+            .unwrap()
+            .is_empty(),
+        "a term in more than EXACT_RESCUE_MAX_MATCHES chunks must not rescue"
+    );
+
+    let query = "read-only mode";
+    let served = search_ids(&store, &tenant, query, 10).await;
+    let raw = store
+        .search_with_scores(&tenant, query, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(chunk, _)| chunk.chunk_id.to_string())
+        .collect::<Vec<_>>();
+    assert!(served
+        .iter()
+        .all(|(_, score)| *score < EXACT_RESCUE_SCORE_BOOST));
+    assert_eq!(
+        served.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
+        raw,
+        "the served order must be the keyword search order"
+    );
+}
+
+#[tokio::test]
+async fn exact_rescue_scan_applies_the_same_commonness_limit() {
+    let tenant = TenantId::new("rescue_scan_limit").unwrap();
+    let scope = rescue_scope(&tenant, "p");
+    for (count, rescued) in [
+        (EXACT_RESCUE_MAX_MATCHES, EXACT_RESCUE_MAX_MATCHES),
+        (EXACT_RESCUE_MAX_MATCHES + 1, 0),
+    ] {
+        let chunks = (0..count)
+            .map(|index| project_chunk(&tenant, "p", &format!("Follow-up item {index}."), 1))
+            .collect::<Vec<_>>();
+        let store = SearchMissStore::new(chunks);
+        let found = exact_lexical_candidates_for_project_scopes(&store, &scope, "follow-up")
+            .await
+            .unwrap();
+        assert_eq!(found.len(), rescued, "{count} chunks hold the term");
+    }
+}
+
+#[tokio::test]
+async fn exact_rescue_boosts_every_chunk_of_a_rare_term_whatever_k_is() {
+    let tenant = TenantId::new("rescue_rare").unwrap();
+    let (store, _dir) = make_sparse_persistent_store();
+    let mut rare = Vec::new();
+    for (index, text) in [
+        "Slurm job_2807 timed out after the node drained.",
+        "Retry of job_2807 finished with a timeout warning.",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        rare.push(
+            store
+                .add(project_chunk(&tenant, "p", text, index as i64))
+                .await
+                .unwrap(),
+        );
+    }
+    for index in 0..40 {
+        store
+            .add(project_chunk(
+                &tenant,
+                "p",
+                &format!("Timeout settings review {index} for the scheduler and the node."),
+                10 + index as i64,
+            ))
+            .await
+            .unwrap();
+    }
+    let scope = rescue_scope(&tenant, "p");
+    let rescued = exact_lexical_candidates_for_project_scopes(&store, &scope, "job_2807 timeout")
+        .await
+        .unwrap();
+    let mut ids = rescued
+        .iter()
+        .map(|(chunk, _)| chunk.chunk_id.clone())
+        .collect::<Vec<_>>();
+    ids.sort();
+    let mut want = rare.clone();
+    want.sort();
+    assert_eq!(ids, want);
+    assert!(rescued
+        .iter()
+        .all(|(_, score)| *score >= EXACT_RESCUE_SCORE_BOOST));
+
+    let at_5 = search_ids(&store, &tenant, "job_2807 timeout", 5).await;
+    let at_20 = search_ids(&store, &tenant, "job_2807 timeout", 20).await;
+    for (k, served) in [(5, &at_5), (20, &at_20)] {
+        let boosted = served
+            .iter()
+            .filter(|(_, score)| *score >= EXACT_RESCUE_SCORE_BOOST)
+            .count();
+        assert_eq!(boosted, 2, "k={k}");
+    }
+    let head = |list: &[(String, f32)]| {
+        list.iter()
+            .take(5)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(head(&at_5), head(&at_20), "the head must not depend on k");
+}
+
+#[tokio::test]
+async fn generic_project_search_does_not_write_digests() {
+    let (store, _dir) = make_sparse_persistent_store();
+    let tenant = TenantId::new("generic_no_digest").unwrap();
+    let project = "proj_generic";
+    handle_task_finish(
+        &store,
+        None,
+        TaskFinishParams {
+            tenant_id: tenant.to_string(),
+            task_id: "task-generic".to_string(),
+            project_id: Some(project.to_string()),
+            agent_id: Some("agent-1".to_string()),
+            session_id: None,
+            status: Some("completed".to_string()),
+            goal: Some("Tune the aligner".to_string()),
+            scientific_question: None,
+            dataset_refs: vec![],
+            entity_refs: vec![],
+            what_worked: vec!["Stricter quality control stabilized the hit list".to_string()],
+            what_failed: vec!["The first alignment preset over-trimmed reads".to_string()],
+            validation: vec![],
+            uncertainty: vec![],
+            followups: vec![],
+            confidence: None,
+            provenance: None,
+        },
+    )
+    .await
+    .unwrap();
+    let mut decision = TaskArtifact::new_decision(tenant.clone(), "task-generic");
+    decision.project_id = ProjectId::new(Some(project.to_string()));
+    decision.summary = Some("Adopt the splice-aware aligner preset".to_string());
+    let projections = build_task_projections(&decision);
+    store
+        .add_task_artifact(decision, projections)
+        .await
+        .unwrap();
+
+    let digest_links = || async {
+        let mut links = Vec::new();
+        for role in [
+            DIGEST_ROLE_PROJECT_BRIEF,
+            DIGEST_ROLE_FAILURE_LIBRARY,
+            DIGEST_ROLE_DECISION_LIBRARY,
+            DIGEST_ROLE_EVIDENCE_LIBRARY,
+            DIGEST_ROLE_HIGHLIGHT_LIBRARY,
+        ] {
+            links.extend(
+                store
+                    .search_task_projection_chunk_ids(
+                        &tenant,
+                        &TaskSearchFilters {
+                            artifact_kind: Some(ArtifactKind::Digest),
+                            artifact_role: Some(role.to_string()),
+                            project_id: Some(project.to_string()),
+                            ..Default::default()
+                        },
+                        50,
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        links
+    };
+    let chunk_count = || async {
+        store
+            .list_chunks_for_project(&tenant, Some(project), 1_000, 0)
+            .await
+            .unwrap()
+            .len()
+    };
+    let tasks_before = store
+        .list_tasks(&tenant, Some(project), 100)
+        .await
+        .unwrap()
+        .len();
+    let chunks_before = chunk_count().await;
+    assert!(digest_links().await.is_empty());
+
+    let result = handle_memory_search(
+        &store,
+        SearchParams {
+            tenant_id: tenant.to_string(),
+            query: "aligner preset over-trimmed reads".to_string(),
+            project_id: Some(project.to_string()),
+            k: 10,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let payload: SearchResult = parse_tool_payload(&result);
+
+    assert!(digest_links().await.is_empty(), "a search wrote a digest");
+    assert_eq!(chunk_count().await, chunks_before);
+    assert_eq!(
+        store
+            .list_tasks(&tenant, Some(project), 100)
+            .await
+            .unwrap()
+            .len(),
+        tasks_before
+    );
+    let texts = payload
+        .results
+        .iter()
+        .map(|result| result.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(texts.contains("over-trimmed reads"), "{texts}");
+    assert!(texts.contains("splice-aware aligner preset"), "{texts}");
+    assert!(payload
+        .results
+        .iter()
+        .all(|result| !result.tags.iter().any(|tag| tag == "task:kind:digest")));
 }
 
 #[tokio::test]
