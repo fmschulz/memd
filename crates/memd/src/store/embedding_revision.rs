@@ -71,13 +71,15 @@ fn split_model_marker(recorded: &str) -> (&str, &str) {
 }
 
 /// The model of an unmarked dense index, from its vector width. Before model
-/// markers existed, these were the only two live models.
+/// markers existed, these were the only two live models. Only the validated
+/// file header is read, so the cost does not grow with the index; the loader
+/// validates the vectors when the index loads.
 fn legacy_model(index: &Path) -> Result<Option<CandleModel>> {
     let cache_path = index.join("embeddings.bin");
     if !cache_path.exists() {
         return Ok(None);
     }
-    match EmbeddingCache::load_from(&cache_path)?.dimension() {
+    match EmbeddingCache::read_dimension(&cache_path)? {
         384 => Ok(Some(CandleModel::MiniLm)),
         768 => Ok(Some(CandleModel::BgeBase)),
         dimension => Err(MemdError::ValidationError(format!(
@@ -481,6 +483,75 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         seed_model_vectors(dir.path(), 100);
         assert!(recorded_embedding_model(dir.path()).is_err());
+    }
+
+    /// Bytes of the fixed `embeddings.bin` header: magic, version, dimension,
+    /// count, next id and the header CRC.
+    const CACHE_HEADER_LEN: u64 = 24;
+
+    fn cache_file(index: &Path) -> PathBuf {
+        index.join("embeddings.bin")
+    }
+
+    /// The model is read from the header, so a body that fails the data CRC
+    /// does not stop the discovery. The index loader validates the body.
+    #[test]
+    fn unmarked_store_resolves_its_model_from_the_header_when_the_body_is_damaged() {
+        for damage in ["truncated", "corrupt"] {
+            for (dimension, model) in [(384, CandleModel::MiniLm), (768, CandleModel::BgeBase)] {
+                let dir = tempfile::tempdir().unwrap();
+                let index = seed_model_vectors(dir.path(), dimension);
+                let path = cache_file(&index);
+                if damage == "truncated" {
+                    let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+                    file.set_len(CACHE_HEADER_LEN + 3).unwrap();
+                } else {
+                    let mut bytes = fs::read(&path).unwrap();
+                    let last = bytes.len() - 1;
+                    bytes[last] ^= 0xFF;
+                    fs::write(&path, bytes).unwrap();
+                }
+                let damaged = fs::read(&path).unwrap();
+
+                assert_eq!(
+                    recorded_embedding_model(dir.path()).unwrap(),
+                    Some(model),
+                    "{damage} body, {dimension}-d"
+                );
+                // A writer open applies the same rule, so it marks the store.
+                assert!(!prepare_loadable(dir.path(), model, false, false).unwrap());
+                assert_eq!(model_marker(dir.path()).trim(), model.hf_id());
+                assert_eq!(
+                    fs::read(&path).unwrap(),
+                    damaged,
+                    "the cache is not touched"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unmarked_store_with_a_bad_cache_header_is_an_error() {
+        for fault in ["magic", "version", "header crc", "short"] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = seed_model_vectors(dir.path(), 384);
+            let path = cache_file(&index);
+            let mut bytes = fs::read(&path).unwrap();
+            match fault {
+                "magic" => bytes[0] ^= 0xFF,
+                "version" => bytes[4] ^= 0xFF,
+                "header crc" => bytes[8] ^= 0xFF,
+                _ => bytes.truncate(10),
+            }
+            fs::write(&path, bytes).unwrap();
+
+            assert!(
+                recorded_embedding_model(dir.path()).is_err(),
+                "{fault} fault must not resolve a model"
+            );
+            assert!(prepare_loadable(dir.path(), CandleModel::MiniLm, false, false).is_err());
+            assert!(!dir.path().join(MODEL_MARKER_FILE).exists());
+        }
     }
 
     #[test]

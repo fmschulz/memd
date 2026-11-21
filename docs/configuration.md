@@ -98,7 +98,9 @@ order after lexical retrieval.
    (BAAI/bge-base-en-v1.5, 768 dimensions);
 2. otherwise the model the store records in its `embedding_model` marker. An
    unmarked store with dense vectors is read by vector width: 384-d is
-   `all-minilm`, 768-d is `bge-base`;
+   `all-minilm`, 768-d is `bge-base`. The width comes from the 24-byte header
+   of `embeddings.bin`, so the lookup costs the same for any index size. The
+   index loader validates the vectors when it loads them;
 3. otherwise `bge-small`, for a new store that has neither.
 
 A new store therefore uses `bge-small` and records it. An existing store keeps

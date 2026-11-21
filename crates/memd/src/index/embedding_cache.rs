@@ -10,6 +10,84 @@ const VERSION: u32 = 1;
 /// Floats per read or write block (64 KiB).
 const IO_BLOCK_FLOATS: usize = 16 * 1024;
 
+/// The validated fixed header of an embeddings file.
+struct Header {
+    dimension: usize,
+    count: usize,
+    next_id: usize,
+}
+
+/// Read and validate the fixed header: exactly 24 bytes (magic, version,
+/// dimension, count, next id and the header CRC, 4 bytes each).
+fn read_header(reader: &mut impl Read) -> Result<Header> {
+    let mut magic_buf = [0u8; 4];
+    reader
+        .read_exact(&mut magic_buf)
+        .map_err(|e| MemdError::StorageError(format!("Failed to read magic: {}", e)))?;
+
+    if &magic_buf != MAGIC {
+        return Err(MemdError::ValidationError(
+            "Embedding cache corrupted: invalid magic bytes. \
+            Delete warm_index/embeddings.bin to rebuild."
+                .to_string(),
+        ));
+    }
+
+    let version = reader
+        .read_u32::<LittleEndian>()
+        .map_err(|e| MemdError::StorageError(format!("Failed to read version: {}", e)))?;
+
+    if version != VERSION {
+        return Err(MemdError::ValidationError(format!(
+            "Embedding cache version {} not supported (expected {}). \
+            Delete warm_index/embeddings.bin to rebuild.",
+            version, VERSION
+        )));
+    }
+
+    let dimension = reader
+        .read_u32::<LittleEndian>()
+        .map_err(|e| MemdError::StorageError(format!("Failed to read dimension: {}", e)))?
+        as usize;
+
+    let count = reader
+        .read_u32::<LittleEndian>()
+        .map_err(|e| MemdError::StorageError(format!("Failed to read count: {}", e)))?
+        as usize;
+
+    let next_id = reader
+        .read_u32::<LittleEndian>()
+        .map_err(|e| MemdError::StorageError(format!("Failed to read next_id: {}", e)))?
+        as usize;
+
+    let stored_header_crc = reader
+        .read_u32::<LittleEndian>()
+        .map_err(|e| MemdError::StorageError(format!("Failed to read header CRC: {}", e)))?;
+
+    // Verify header CRC
+    let mut header_hasher = Hasher::new();
+    header_hasher.update(&magic_buf);
+    header_hasher.update(&version.to_le_bytes());
+    header_hasher.update(&(dimension as u32).to_le_bytes());
+    header_hasher.update(&(count as u32).to_le_bytes());
+    header_hasher.update(&(next_id as u32).to_le_bytes());
+    let calculated_header_crc = header_hasher.finalize();
+
+    if stored_header_crc != calculated_header_crc {
+        return Err(MemdError::ValidationError(
+            "Embedding cache corrupted: header CRC mismatch. \
+            Delete warm_index/embeddings.bin to rebuild."
+                .to_string(),
+        ));
+    }
+
+    Ok(Header {
+        dimension,
+        count,
+        next_id,
+    })
+}
+
 /// Cache of embeddings for HNSW index rebuild
 #[derive(Debug)]
 pub struct EmbeddingCache {
@@ -256,6 +334,17 @@ impl EmbeddingCache {
         Ok(())
     }
 
+    /// The vector width recorded in the header of an embeddings file.
+    ///
+    /// Reads and validates the fixed header only (magic, version, header CRC):
+    /// no valid flags, no vector data, no data CRC. The cost does not grow
+    /// with the cache. `load_from` validates the body where the index loads.
+    pub fn read_dimension(path: &Path) -> Result<usize> {
+        let mut file = File::open(path)
+            .map_err(|e| MemdError::StorageError(format!("Failed to open cache file: {}", e)))?;
+        Ok(read_header(&mut file)?.dimension)
+    }
+
     /// Load embeddings from binary file
     pub fn load_from(path: &Path) -> Result<Self> {
         let file = File::open(path)
@@ -263,67 +352,11 @@ impl EmbeddingCache {
 
         let mut reader = BufReader::new(file);
 
-        // Read and validate header
-        let mut magic_buf = [0u8; 4];
-        reader
-            .read_exact(&mut magic_buf)
-            .map_err(|e| MemdError::StorageError(format!("Failed to read magic: {}", e)))?;
-
-        if &magic_buf != MAGIC {
-            return Err(MemdError::ValidationError(
-                "Embedding cache corrupted: invalid magic bytes. \
-                Delete warm_index/embeddings.bin to rebuild."
-                    .to_string(),
-            ));
-        }
-
-        let version = reader
-            .read_u32::<LittleEndian>()
-            .map_err(|e| MemdError::StorageError(format!("Failed to read version: {}", e)))?;
-
-        if version != VERSION {
-            return Err(MemdError::ValidationError(format!(
-                "Embedding cache version {} not supported (expected {}). \
-                Delete warm_index/embeddings.bin to rebuild.",
-                version, VERSION
-            )));
-        }
-
-        let dimension = reader
-            .read_u32::<LittleEndian>()
-            .map_err(|e| MemdError::StorageError(format!("Failed to read dimension: {}", e)))?
-            as usize;
-
-        let count = reader
-            .read_u32::<LittleEndian>()
-            .map_err(|e| MemdError::StorageError(format!("Failed to read count: {}", e)))?
-            as usize;
-
-        let next_id = reader
-            .read_u32::<LittleEndian>()
-            .map_err(|e| MemdError::StorageError(format!("Failed to read next_id: {}", e)))?
-            as usize;
-
-        let stored_header_crc = reader
-            .read_u32::<LittleEndian>()
-            .map_err(|e| MemdError::StorageError(format!("Failed to read header CRC: {}", e)))?;
-
-        // Verify header CRC
-        let mut header_hasher = Hasher::new();
-        header_hasher.update(&magic_buf);
-        header_hasher.update(&version.to_le_bytes());
-        header_hasher.update(&(dimension as u32).to_le_bytes());
-        header_hasher.update(&(count as u32).to_le_bytes());
-        header_hasher.update(&(next_id as u32).to_le_bytes());
-        let calculated_header_crc = header_hasher.finalize();
-
-        if stored_header_crc != calculated_header_crc {
-            return Err(MemdError::ValidationError(
-                "Embedding cache corrupted: header CRC mismatch. \
-                Delete warm_index/embeddings.bin to rebuild."
-                    .to_string(),
-            ));
-        }
+        let Header {
+            dimension,
+            count,
+            next_id,
+        } = read_header(&mut reader)?;
 
         // Read valid flags. Any nonzero byte counts as valid, and the CRC is
         // computed over the normalized 0/1 flags.
@@ -395,6 +428,9 @@ impl EmbeddingCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bytes of the fixed header, as `read_header` documents them.
+    const HEADER_LEN: usize = 24;
 
     #[test]
     fn test_new_cache() {
@@ -709,5 +745,79 @@ mod tests {
         std::fs::write(&path, flipped).unwrap();
         let error = EmbeddingCache::load_from(&path).unwrap_err().to_string();
         assert!(error.contains("data CRC"), "got {error}");
+    }
+
+    /// Counts the bytes taken from the inner reader.
+    struct CountingReader<R> {
+        inner: R,
+        bytes_read: usize,
+    }
+
+    impl<R: Read> Read for CountingReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.bytes_read += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn header_reader_takes_the_header_and_no_vector_data() {
+        let bytes = reference_bytes(&large_sparse_cache());
+        assert!(
+            bytes.len() > 100 * HEADER_LEN,
+            "the body must dwarf the header"
+        );
+        let mut reader = CountingReader {
+            inner: std::io::Cursor::new(bytes),
+            bytes_read: 0,
+        };
+        let header = read_header(&mut reader).unwrap();
+        assert_eq!(header.dimension, 384);
+        assert_eq!(reader.bytes_read, HEADER_LEN);
+    }
+
+    #[test]
+    fn read_dimension_needs_only_a_valid_header() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("embeddings.bin");
+        large_sparse_cache().save_to(&path).unwrap();
+        assert_eq!(EmbeddingCache::read_dimension(&path).unwrap(), 384);
+        let bytes = std::fs::read(&path).unwrap();
+
+        // A body that fails the data CRC or ends early still has a valid header.
+        let mut corrupt = bytes.clone();
+        let last = corrupt.len() - 1;
+        corrupt[last] ^= 0xFF;
+        std::fs::write(&path, &corrupt).unwrap();
+        assert!(EmbeddingCache::load_from(&path).is_err());
+        assert_eq!(EmbeddingCache::read_dimension(&path).unwrap(), 384);
+
+        std::fs::write(&path, &bytes[..HEADER_LEN + 5]).unwrap();
+        assert!(EmbeddingCache::load_from(&path).is_err());
+        assert_eq!(EmbeddingCache::read_dimension(&path).unwrap(), 384);
+    }
+
+    #[test]
+    fn read_dimension_rejects_a_bad_header() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("embeddings.bin");
+        large_sparse_cache().save_to(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+
+        for (offset, expected) in [(0, "magic"), (4, "version"), (8, "header CRC")] {
+            let mut bad = bytes.clone();
+            bad[offset] ^= 0xFF;
+            std::fs::write(&path, &bad).unwrap();
+            let error = EmbeddingCache::read_dimension(&path)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{expected}: got {error}");
+        }
+
+        std::fs::write(&path, &bytes[..10]).unwrap();
+        assert!(EmbeddingCache::read_dimension(&path).is_err());
+        std::fs::remove_file(&path).unwrap();
+        assert!(EmbeddingCache::read_dimension(&path).is_err());
     }
 }
