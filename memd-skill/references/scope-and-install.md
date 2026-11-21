@@ -28,7 +28,10 @@ Automatic session startup does not require `memd init`. It reuses a valid
 project or legacy scope. When neither exists, the first flagless `memd add` (or
 `memd experience note`) creates `.memd/project_scope.json`; `memd session-start`
 creates it only for a project that already has stored facts or an experience
-case. Read commands never create a scope. A scope above a git repository never
+case. Read commands never create a scope: with none in reach they use the planned
+scope (the ids the first write would publish) and return an empty result for a
+project without content. Where no scope may be planned (home or `/`, `.memd-skip`,
+`MEMD_AUTO_SCOPE=0`) they fail and say why. A scope above a git repository never
 applies to it. Let memd write this file; partial JSON fails to parse. See
 [Automatic session-start](session-start.md#automatic-session-start).
 Run `memd init` only when you want the full guardrail suite for a repo.

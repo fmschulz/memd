@@ -104,8 +104,20 @@ The first write creates the scope. A flagless `memd add`, `memd experience note`
 or `memd experience record` in a directory with no scope plans the scope by the
 same rule, stores the fact, and publishes the scope file only after the store
 succeeded. A failed command (a missing case file, a rejected write, a store that
-will not open) leaves no `.memd` directory. Read commands (`search`, `agent-context`, `get` without ids) never create
-a scope; their "no scope" error says so and names `--tenant-id`.
+will not open) leaves no `.memd` directory.
+
+Read commands never create a file. A flagless `memd search`, `agent-context`,
+`export-markdown`, `export-omf`, `get`, `stats`, `export` or `experience
+get|find|export` in a directory with no scope uses the planned scope: the ids a
+first write would publish. It runs normally, so a project without content
+returns an empty result with exit 0, and rows that another checkout stored under
+the same tenant and project are found. Where no scope may be planned (the home
+directory or `/`, a `.memd-skip` marker, `MEMD_AUTO_SCOPE=0`) the command fails
+and the message says why and names `--tenant-id`. `delete`, `outcome`,
+`import-omf` and `experience check` change the store without starting a
+project, so they still need an existing scope or `--tenant-id`. `audit`,
+`report` and `consolidate-review` are unchanged: with no scope they run
+store-wide.
 
 The scope comes from `$MEMD_DEFAULT_TENANT` (then `$USER`, then `"default"`) and
 the repository basename. If the root is not writable, the scope goes to the

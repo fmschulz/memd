@@ -192,7 +192,68 @@ fn missing_scope_fails_with_actionable_error() {
 }
 
 #[test]
-fn search_without_scope_fails_and_creates_nothing() {
+fn flagless_search_without_scope_returns_nothing_and_creates_nothing() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let data_dir = tmp.path().join("data");
+    let project_dir = tmp.path().join("scoped_project");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let output = assert_success(
+        search(&home, &data_dir, &project_dir, "anything"),
+        "search without scope",
+    );
+
+    let results: Value = serde_json::from_slice(&output.stdout).expect("search JSON");
+    let hits = results
+        .get("results")
+        .and_then(Value::as_array)
+        .or_else(|| results.as_array())
+        .expect("search results array");
+    assert!(hits.is_empty(), "{results}");
+    assert!(!project_dir.join(".memd").exists());
+}
+
+#[test]
+fn flagless_search_finds_a_fact_stored_under_the_planned_ids_elsewhere() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let data_dir = tmp.path().join("data");
+    let writer_dir = tmp.path().join("other_checkout");
+    let project_dir = tmp.path().join("scoped_project");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&writer_dir).unwrap();
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let token = format!("planned_scope_token_{}", nonce());
+    // Another checkout writes under the tenant and project that the reading
+    // directory derives (`scope_tenant`, `scoped_project`).
+    let text = format!("Validated that a flagless read finds rows under the planned ids {token}.");
+    assert_success(
+        add_text(
+            &home,
+            &data_dir,
+            &writer_dir,
+            &text,
+            &[
+                "--tenant-id",
+                "scope_tenant",
+                "--project-id",
+                "scoped_project",
+            ],
+        ),
+        "add from the other checkout",
+    );
+
+    let output = assert_success(search(&home, &data_dir, &project_dir, &token), "search");
+
+    assert!(String::from_utf8_lossy(&output.stdout).contains(&token));
+    assert!(!project_dir.join(".memd").exists());
+    assert!(!writer_dir.join(".memd").exists());
+}
+
+#[test]
+fn flagless_search_fails_with_the_reason_when_no_scope_may_be_planned() {
     let tmp = tempdir().unwrap();
     let home = tmp.path().join("home");
     let data_dir = tmp.path().join("data");
@@ -201,15 +262,24 @@ fn search_without_scope_fails_and_creates_nothing() {
     std::fs::create_dir_all(&project_dir).unwrap();
 
     let output = assert_failure(
-        search(&home, &data_dir, &project_dir, "anything"),
-        "search without scope",
+        command(&home, &data_dir, &project_dir)
+            .env("MEMD_AUTO_SCOPE", "0")
+            .args(["search", "--warm", "off", "--query", "anything"])
+            .output()
+            .expect("run memd search"),
+        "search with automatic scope off",
     );
-
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("the first `memd add` creates the scope"),
-        "{stderr}"
+    assert!(stderr.contains("MEMD_AUTO_SCOPE=0"), "{stderr}");
+    assert!(stderr.contains("--tenant-id"), "{stderr}");
+
+    std::fs::write(project_dir.join(".memd-skip"), "").unwrap();
+    let output = assert_failure(
+        search(&home, &data_dir, &project_dir, "anything"),
+        "search below a skip marker",
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(".memd-skip"), "{stderr}");
     assert!(!project_dir.join(".memd").exists());
 }
 

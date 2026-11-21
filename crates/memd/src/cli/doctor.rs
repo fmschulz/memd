@@ -452,32 +452,105 @@ fn session_start_hook_wired(settings: &Value) -> bool {
 }
 
 fn check_project_scope(project_dir: &Path) -> Value {
-    let scope_path = project_dir.join(".memd").join("project_scope.json");
-    if !scope_path.exists() {
-        return json!({
+    check_project_scope_with(
+        project_dir,
+        &super::session_start::AutoScopeInputs::from_env(),
+    )
+}
+
+/// Report the scope that the other commands would use for `project_dir`: the
+/// scope file `find_project_scope` resolves (an ancestor inside the repository,
+/// or the main checkout of a linked worktree, counts), else the scope a first
+/// `memd add` would create, else why none can be planned. Writes nothing.
+fn check_project_scope_with(
+    project_dir: &Path,
+    inputs: &super::session_start::AutoScopeInputs,
+) -> Value {
+    use super::scope::{locate_project_scope, LocatedScope};
+
+    let located = match locate_project_scope(project_dir) {
+        Ok(located) => located,
+        Err(error) => {
+            return json!({
+                "ok": false,
+                "path": project_dir.display().to_string(),
+                "reason": error.to_string(),
+                "fix": "pass an existing --project-dir",
+            })
+        }
+    };
+    match located {
+        LocatedScope::Found { path, scope } => json!({
             "ok": true,
-            "path": scope_path.display().to_string(),
-            "note": "none yet (the first memd add creates it at the repository root)",
+            "path": path.display().to_string(),
+            "tenant_id": scope.tenant_id,
+            "project_id": scope.project_id,
             "fix": "",
-        });
-    }
-    let text = std::fs::read_to_string(&scope_path).unwrap_or_default();
-    let parsed: Option<Value> = serde_json::from_str(&text).ok();
-    let Some(parsed) = parsed else {
-        return json!({
+        }),
+        LocatedScope::Invalid(invalid) if invalid.malformed => json!({
             "ok": false,
-            "path": scope_path.display().to_string(),
+            "path": invalid.path.display().to_string(),
             "reason": "malformed JSON",
             "fix": "repair or remove .memd/project_scope.json; the next memd add creates a new one",
-        });
-    };
-    json!({
-        "ok": true,
-        "path": scope_path.display().to_string(),
-        "tenant_id": parsed.get("tenant_id"),
-        "project_id": parsed.get("project_id"),
-        "fix": "",
-    })
+        }),
+        LocatedScope::Invalid(invalid) => json!({
+            "ok": false,
+            "path": invalid.path.display().to_string(),
+            "reason": format!("unreadable: {}", invalid.error),
+            "fix": "fix the permissions of .memd/project_scope.json or remove it",
+        }),
+        LocatedScope::Missing => planned_project_scope(project_dir, inputs),
+    }
+}
+
+/// The scope report for a directory with no scope file.
+fn planned_project_scope(
+    project_dir: &Path,
+    inputs: &super::session_start::AutoScopeInputs,
+) -> Value {
+    let default_path = project_dir.join(".memd").join("project_scope.json");
+    match super::session_start::plan_scope_for_first_write(project_dir, inputs) {
+        Ok(Ok(((tenant_id, project_id), Some(pending)))) => json!({
+            "ok": true,
+            "path": pending.scope_dir().join(".memd").join("project_scope.json").display().to_string(),
+            "note": format!(
+                "none yet; the first memd add creates it at {} as tenant {}, project {}",
+                pending.scope_dir().display(),
+                tenant_id,
+                project_id.as_deref().unwrap_or("?"),
+            ),
+            "tenant_id": tenant_id,
+            "project_id": project_id,
+            "fix": "",
+        }),
+        Ok(Ok(((tenant_id, project_id), None))) => json!({
+            "ok": true,
+            "path": project_dir.join(".memd").join("config.json").display().to_string(),
+            "note": format!(
+                "legacy scope in .memd/config.json: tenant {}, project {}",
+                tenant_id,
+                project_id.as_deref().unwrap_or("?"),
+            ),
+            "tenant_id": tenant_id,
+            "project_id": project_id,
+            "fix": "",
+        }),
+        Ok(Err(refusal)) => json!({
+            "ok": true,
+            "path": default_path.display().to_string(),
+            "note": format!(
+                "none, and none can be planned here: {}",
+                super::session_start::refusal_reason(&refusal)
+            ),
+            "fix": "",
+        }),
+        Err(error) => json!({
+            "ok": false,
+            "path": default_path.display().to_string(),
+            "reason": error.to_string(),
+            "fix": "repair or remove the invalid scope file named in the reason",
+        }),
+    }
 }
 
 async fn enrich_project_scope_memory<S: Store>(store: &S, project_scope: &mut Value) {
@@ -915,7 +988,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(".memd")).unwrap();
         std::fs::write(
             dir.path().join(".memd/project_scope.json"),
-            r#"{"tenant_id":"alice","project_id":"demo"}"#,
+            scope_json("alice", "demo"),
         )
         .unwrap();
         let v = check_project_scope(dir.path());
@@ -924,13 +997,97 @@ mod tests {
         assert_eq!(v["project_id"], "demo");
     }
 
+    /// A complete scope file, as `memd init` and session-start write it. The
+    /// doctor reads it the way every other command does, so a file with only
+    /// the two ids is reported as malformed.
+    fn scope_json(tenant: &str, project: &str) -> String {
+        format!(
+            r#"{{"tenant_id":"{tenant}","project_id":"{project}","interface":"cli","cli_command":"memd","agent_context_output":".memd/context.md","project_dir":"."}}"#
+        )
+    }
+
+    fn doctor_inputs(enabled: bool) -> super::super::session_start::AutoScopeInputs {
+        super::super::session_start::AutoScopeInputs {
+            default_tenant: "doc".to_string(),
+            enabled,
+            consolidate: false,
+        }
+    }
+
+    fn repository_with_subdirectory(root: &Path) -> (PathBuf, PathBuf) {
+        let repo = root.canonicalize().unwrap().join("My-Repo");
+        let sub = repo.join("crates/x");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(&sub).unwrap();
+        (repo, sub)
+    }
+
     #[test]
-    fn project_scope_reports_missing_as_fresh_with_helpful_note() {
+    fn project_scope_reports_missing_as_fresh_with_the_planned_ids() {
         let dir = tempdir().unwrap();
-        let v = check_project_scope(dir.path());
+        let (repo, sub) = repository_with_subdirectory(dir.path());
+        let v = check_project_scope_with(&sub, &doctor_inputs(true));
         assert_eq!(v["ok"], true);
         let note = v["note"].as_str().unwrap_or("");
-        assert!(note.contains("memd add"), "note was: {note}");
+        assert_eq!(
+            note,
+            format!(
+                "none yet; the first memd add creates it at {} as tenant doc, project my_repo",
+                repo.display()
+            )
+        );
+        assert_eq!(
+            v["path"],
+            repo.join(".memd/project_scope.json").display().to_string()
+        );
+        assert!(!repo.join(".memd").exists(), "doctor writes nothing");
+    }
+
+    #[test]
+    fn project_scope_in_a_subdirectory_reports_the_repository_scope_file() {
+        let dir = tempdir().unwrap();
+        let (repo, sub) = repository_with_subdirectory(dir.path());
+        std::fs::create_dir_all(repo.join(".memd")).unwrap();
+        std::fs::write(
+            repo.join(".memd/project_scope.json"),
+            scope_json("alice", "demo"),
+        )
+        .unwrap();
+        let v = check_project_scope_with(&sub, &doctor_inputs(true));
+        assert_eq!(v["ok"], true);
+        assert_eq!(
+            v["path"],
+            repo.join(".memd/project_scope.json").display().to_string()
+        );
+        assert_eq!(v["tenant_id"], "alice");
+        assert_eq!(v["project_id"], "demo");
+        assert!(v.get("note").is_none());
+    }
+
+    #[test]
+    fn project_scope_says_why_none_can_be_planned() {
+        let dir = tempdir().unwrap();
+        let (_repo, sub) = repository_with_subdirectory(dir.path());
+        let v = check_project_scope_with(&sub, &doctor_inputs(false));
+        assert_eq!(v["ok"], true);
+        let note = v["note"].as_str().unwrap_or("");
+        assert!(note.contains("MEMD_AUTO_SCOPE=0"), "note was: {note}");
+        assert!(note.contains("none can be planned"), "note was: {note}");
+    }
+
+    #[test]
+    fn malformed_repository_scope_is_reported_with_its_path() {
+        let dir = tempdir().unwrap();
+        let (repo, sub) = repository_with_subdirectory(dir.path());
+        std::fs::create_dir_all(repo.join(".memd")).unwrap();
+        std::fs::write(repo.join(".memd/project_scope.json"), "{not json").unwrap();
+        let v = check_project_scope_with(&sub, &doctor_inputs(true));
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["reason"], "malformed JSON");
+        assert_eq!(
+            v["path"],
+            repo.join(".memd/project_scope.json").display().to_string()
+        );
     }
 
     #[test]
@@ -965,7 +1122,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(".memd")).unwrap();
         std::fs::write(
             dir.path().join(".memd/project_scope.json"),
-            r#"{"tenant_id":"fschulz","project_id":"bester_hosting"}"#,
+            scope_json("fschulz", "bester_hosting"),
         )
         .unwrap();
         let store = MemoryStore::new();
@@ -1007,7 +1164,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(".memd")).unwrap();
         std::fs::write(
             dir.path().join(".memd/project_scope.json"),
-            r#"{"tenant_id":"fschulz","project_id":"bester_hosting"}"#,
+            scope_json("fschulz", "bester_hosting"),
         )
         .unwrap();
         let store = MemoryStore::new();
@@ -1056,7 +1213,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(".memd")).unwrap();
         std::fs::write(
             dir.path().join(".memd/project_scope.json"),
-            r#"{"tenant_id":"fschulz","project_id":"bester_hosting"}"#,
+            scope_json("fschulz", "bester_hosting"),
         )
         .unwrap();
         let store = MemoryStore::new();

@@ -711,6 +711,11 @@ pub struct PendingScope {
 }
 
 impl PendingScope {
+    /// The directory that would hold `.memd/project_scope.json`.
+    pub(super) fn scope_dir(&self) -> &Path {
+        &self.scope_dir
+    }
+
     /// Publish the scope file. Returns true when this call created it, false
     /// when a concurrent first write published one first (that file stays).
     pub fn publish(self) -> Result<bool> {
@@ -736,27 +741,35 @@ fn write_scope_with_fallback(
     }
 }
 
-/// The first write in a directory with no scope: plan the scope the way
-/// session-start does, without writing it. Returns the tenant and project to
-/// write under, and the pending scope to publish after the write succeeded
-/// (`None` when a scope, including a legacy `.memd/config.json`, already
-/// exists). The outer `None` means creation is refused (auto-scope off,
-/// `.memd-skip`, unsafe root), and the caller reports the usual "no scope"
-/// error.
+/// A scope planned for a directory with none of its own.
+pub(super) type PlannedScope = (ScopeIds, Option<PendingScope>);
+
+/// Plan the scope of a directory that has none, the way session-start does,
+/// without writing anything. Commands that start a project (the first write)
+/// and commands that only read share this plan, so both use the same tenant
+/// and project: the repository root or main checkout, else the directory
+/// itself; the tenant from `MEMD_DEFAULT_TENANT`, then `USER`; the project from
+/// the repository name.
+///
+/// The plan carries the tenant and project, and the pending scope to publish
+/// after a write succeeded (`None` when a scope, including a legacy
+/// `.memd/config.json`, already exists). A refusal (`Err`) is a `Skipped*`
+/// outcome: auto-scope is off, a `.memd-skip` marker is present, or the root
+/// is unsafe (home or `/`).
 pub(super) fn plan_scope_for_first_write(
     start: &Path,
     inputs: &AutoScopeInputs,
-) -> Result<Option<(ScopeIds, Option<PendingScope>)>> {
+) -> Result<std::result::Result<PlannedScope, AutoScopeOutcome>> {
     let project_dir = absolutize_project_dir(start)?;
     if project_dir.join(".memd-skip").exists() {
-        return Ok(None);
+        return Ok(Err(AutoScopeOutcome::SkippedMarker));
     }
     let repository = locate_repository(&project_dir, canonical_home().as_deref());
     if repository.as_ref().is_some_and(Repository::opted_out) {
-        return Ok(None);
+        return Ok(Err(AutoScopeOutcome::SkippedMarker));
     }
     let (scope_dir, id_source) = match look_up_scope(&project_dir, repository.as_ref()) {
-        ScopeLookup::Found { ids, .. } => return Ok(Some((ids, None))),
+        ScopeLookup::Found { ids, .. } => return Ok(Ok((ids, None))),
         ScopeLookup::Invalid { path, error } => {
             return Err(MemdError::ValidationError(format!(
                 "invalid scope file {}: {error}",
@@ -768,8 +781,9 @@ pub(super) fn plan_scope_for_first_write(
             id_source,
         } => (scope_dir, id_source),
     };
-    let Ok(plan) = plan_new_scope(&scope_dir, &id_source, inputs)? else {
-        return Ok(None);
+    let plan = match plan_new_scope(&scope_dir, &id_source, inputs)? {
+        Ok(plan) => plan,
+        Err(refusal) => return Ok(Err(refusal)),
     };
     let ids = (plan.tenant_id.clone(), Some(plan.project_id.clone()));
     let pending = PendingScope {
@@ -777,7 +791,19 @@ pub(super) fn plan_scope_for_first_write(
         scope_dir,
         project_dir,
     };
-    Ok(Some((ids, Some(pending))))
+    Ok(Ok((ids, Some(pending))))
+}
+
+/// Why a scope cannot be planned, for an error message.
+pub(super) fn refusal_reason(outcome: &AutoScopeOutcome) -> &'static str {
+    match outcome {
+        AutoScopeOutcome::SkippedDisabled => "automatic scope creation is off (MEMD_AUTO_SCOPE=0)",
+        AutoScopeOutcome::SkippedMarker => "a .memd-skip marker opts this project out",
+        AutoScopeOutcome::SkippedUnsafeRoot => {
+            "the project root is the home directory or /, which never gets an automatic scope"
+        }
+        AutoScopeOutcome::Created | AutoScopeOutcome::AlreadyExists => "no scope is planned",
+    }
 }
 
 /// Write `contents` to a temporary file in `dir`, then hard-link it to `name`.

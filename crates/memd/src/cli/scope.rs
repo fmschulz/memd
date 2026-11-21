@@ -43,24 +43,47 @@ fn find_project_scope_with_home(
     start: &Path,
     home: Option<&Path>,
 ) -> Result<Option<ProjectScopeConfig>> {
+    match locate_project_scope_with_home(start, home)? {
+        LocatedScope::Found { scope, .. } => Ok(Some(scope)),
+        LocatedScope::Missing => Ok(None),
+        LocatedScope::Invalid(invalid) => Err(invalid.error),
+    }
+}
+
+/// [`find_project_scope`] that also says which scope file it found, or which
+/// invalid one stopped the walk.
+pub(super) fn locate_project_scope(start: &Path) -> Result<LocatedScope> {
+    locate_project_scope_with_home(start, canonical_home().as_deref())
+}
+
+fn locate_project_scope_with_home(start: &Path, home: Option<&Path>) -> Result<LocatedScope> {
     let start = absolutize_project_dir(start)?;
     let repository = enclosing_repository(&start, home);
 
     for dir in start.ancestors() {
-        if let Some(scope) = read_scope_file_at(dir)? {
-            return Ok(Some(scope));
-        }
-        if let Some(main_checkout) = main_checkout_of_linked_worktree(dir) {
-            if let Some(scope) = read_scope_file_at(&main_checkout)? {
-                return Ok(Some(scope));
-            }
+        let own = read_scope_file_at(dir);
+        let main_checkout = match &own {
+            Ok(None) => main_checkout_of_linked_worktree(dir),
+            _ => None,
+        };
+        let found = match own {
+            Ok(Some(found)) => Some(found),
+            Ok(None) => match main_checkout.as_deref().map(read_scope_file_at) {
+                Some(Ok(found)) => found,
+                Some(Err(invalid)) => return Ok(LocatedScope::Invalid(invalid)),
+                None => None,
+            },
+            Err(invalid) => return Ok(LocatedScope::Invalid(invalid)),
+        };
+        if let Some((path, scope)) = found {
+            return Ok(LocatedScope::Found { path, scope });
         }
         if home == Some(dir) || repository.as_ref().is_some_and(|r| r.repo_root == dir) {
             break;
         }
     }
 
-    Ok(None)
+    Ok(LocatedScope::Missing)
 }
 
 /// The canonical home directory, when it resolves.
@@ -123,27 +146,60 @@ pub(super) fn enclosing_repository(dir: &Path, home: Option<&Path>) -> Option<Re
 /// exists but cannot be read or parsed is an error, because silently falling
 /// through to a parent scope would route flagless writes into the wrong
 /// tenant or project.
-fn read_scope_file_at(dir: &Path) -> Result<Option<ProjectScopeConfig>> {
+fn read_scope_file_at(
+    dir: &Path,
+) -> std::result::Result<Option<(PathBuf, ProjectScopeConfig)>, Box<ScopeFileError>> {
     let scope_path = dir.join(".memd").join("project_scope.json");
     let text = match std::fs::read_to_string(&scope_path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err(MemdError::ValidationError(format!(
+            let message = format!(
                 "unable to read {}: {error}; fix its permissions or pass --tenant-id explicitly",
                 scope_path.display()
-            )))
+            );
+            return Err(Box::new(ScopeFileError {
+                path: scope_path,
+                malformed: false,
+                error: MemdError::ValidationError(message),
+            }));
         }
     };
-    serde_json::from_str::<ProjectScopeConfig>(&text)
-        .map(Some)
-        .map_err(|err| {
-            MemdError::ValidationError(format!(
+    match serde_json::from_str::<ProjectScopeConfig>(&text) {
+        Ok(scope) => Ok(Some((scope_path, scope))),
+        Err(err) => {
+            let message = format!(
                 "malformed {}: {err}; repair this scope file or run memd init with explicit --tenant-id and --project-id for {}",
                 scope_path.display(),
                 dir.display()
-            ))
-        })
+            );
+            Err(Box::new(ScopeFileError {
+                path: scope_path,
+                malformed: true,
+                error: MemdError::ValidationError(message),
+            }))
+        }
+    }
+}
+
+/// A scope file that exists but cannot be read or parsed.
+#[derive(Debug)]
+pub(super) struct ScopeFileError {
+    pub(super) path: PathBuf,
+    /// True when the file was read but is not valid scope JSON.
+    pub(super) malformed: bool,
+    pub(super) error: MemdError,
+}
+
+/// Where [`locate_project_scope`] found the scope that governs a directory.
+#[derive(Debug)]
+pub(super) enum LocatedScope {
+    Found {
+        path: PathBuf,
+        scope: ProjectScopeConfig,
+    },
+    Missing,
+    Invalid(Box<ScopeFileError>),
 }
 
 /// The main checkout directory when `project_dir` is a linked git worktree.
@@ -188,7 +244,7 @@ pub(super) fn main_checkout_of_linked_worktree(project_dir: &Path) -> Option<Pat
 
 fn scope_missing_error(cwd: &Path) -> MemdError {
     MemdError::ValidationError(format!(
-        "no --tenant-id given and no .memd/project_scope.json found upward from {}; the first `memd add` creates the scope, or pass --tenant-id",
+        "no --tenant-id given and no .memd/project_scope.json found upward from {}; this command needs an existing scope: the first `memd add` creates it, or pass --tenant-id",
         cwd.display()
     ))
 }
@@ -214,13 +270,30 @@ pub(super) fn resolve_required(
     Ok((tenant_id, project_id))
 }
 
+/// Plan the scope of a directory that has none. The commands that write and the
+/// commands that read share this plan, so both use the same ids; a writer
+/// publishes the pending scope afterwards, a reader ignores it. A refusal
+/// becomes an error that says why.
+fn plan_scope(
+    start: &Path,
+    inputs: &super::session_start::AutoScopeInputs,
+) -> Result<(String, Option<String>, Option<PendingScope>)> {
+    match super::session_start::plan_scope_for_first_write(start, inputs)? {
+        Ok(((tenant_id, project_id), pending)) => Ok((tenant_id, project_id, pending)),
+        Err(refusal) => Err(MemdError::ValidationError(format!(
+            "no --tenant-id given and no .memd/project_scope.json found upward from {}; no scope can be planned here: {}; pass --tenant-id",
+            start.display(),
+            super::session_start::refusal_reason(&refusal)
+        ))),
+    }
+}
+
 /// [`resolve_required`] for a command that writes. When no tenant is given and
 /// no scope exists, the first write plans the scope the way `session-start`
 /// would (at the repository root, else in the directory; unsafe roots,
 /// `.memd-skip` and `MEMD_AUTO_SCOPE=0` honoured) and writes under it. Nothing
 /// is created here: the caller publishes the returned [`PendingScope`] once
-/// the command succeeded. When planning is refused, the usual "no scope" error
-/// follows.
+/// the command succeeded. When planning is refused, the error says why.
 fn resolve_for_write(
     start: &Path,
     tenant: Option<String>,
@@ -228,14 +301,29 @@ fn resolve_for_write(
     inputs: &super::session_start::AutoScopeInputs,
 ) -> Result<(String, Option<String>, Option<PendingScope>)> {
     if tenant.is_none() && find_project_scope(start)?.is_none() {
-        if let Some(((tenant_id, scope_project), pending)) =
-            super::session_start::plan_scope_for_first_write(start, inputs)?
-        {
-            return Ok((tenant_id, project.or(scope_project), pending));
-        }
+        let (tenant_id, scope_project, pending) = plan_scope(start, inputs)?;
+        return Ok((tenant_id, project.or(scope_project), pending));
     }
     let (tenant_id, project_id) = resolve_required(start, tenant, project)?;
     Ok((tenant_id, project_id, None))
+}
+
+/// [`resolve_required`] for a command that only reads. With no scope in reach
+/// it uses the planned scope (the ids a first write would publish) and creates
+/// nothing, so a read in a project without content finds nothing instead of
+/// failing, and finds the rows that another checkout stored under the same
+/// ids. When planning is refused, the error says why.
+fn resolve_for_read(
+    start: &Path,
+    tenant: Option<String>,
+    project: Option<String>,
+    inputs: &super::session_start::AutoScopeInputs,
+) -> Result<(String, Option<String>)> {
+    if tenant.is_none() && find_project_scope(start)?.is_none() {
+        let (tenant_id, scope_project, _unpublished) = plan_scope(start, inputs)?;
+        return Ok((tenant_id, project.or(scope_project)));
+    }
+    resolve_required(start, tenant, project)
 }
 
 pub(super) fn resolve_optional(
@@ -344,7 +432,9 @@ fn resolve_command_scope_at(
     let cwd = cwd.to_path_buf();
     let mut pending = None;
     match cmd {
-        // The first write creates the scope; reads never do.
+        // The first write publishes the scope once it succeeded. Reads use the
+        // planned scope and never create a file. Commands that change the
+        // store but start no project need an existing scope.
         CliCommand::Add {
             tenant_id,
             project_id,
@@ -367,6 +457,8 @@ fn resolve_command_scope_at(
                 let (tenant, project, plan) = resolve_for_write(&cwd, tenant, project, inputs)?;
                 pending = plan;
                 (tenant, project)
+            } else if command.reads_only() {
+                resolve_for_read(&cwd, tenant, project, inputs)?
             } else {
                 resolve_required(&cwd, tenant, project)?
             };
@@ -394,15 +486,18 @@ fn resolve_command_scope_at(
             ..
         } => {
             let (resolved_tenant, resolved_project) =
-                resolve_required(&cwd, tenant_id.take(), project_id.take())?;
+                resolve_for_read(&cwd, tenant_id.take(), project_id.take(), inputs)?;
             *tenant_id = Some(resolved_tenant);
             *project_id = resolved_project;
         }
         CliCommand::Get { tenant_id, .. }
-        | CliCommand::Delete { tenant_id, .. }
-        | CliCommand::Outcome { tenant_id, .. }
         | CliCommand::Stats { tenant_id }
-        | CliCommand::Export { tenant_id, .. }
+        | CliCommand::Export { tenant_id, .. } => {
+            let (resolved_tenant, _) = resolve_for_read(&cwd, tenant_id.take(), None, inputs)?;
+            *tenant_id = Some(resolved_tenant);
+        }
+        CliCommand::Delete { tenant_id, .. }
+        | CliCommand::Outcome { tenant_id, .. }
         | CliCommand::ImportOmf { tenant_id, .. } => {
             let (resolved_tenant, _) = resolve_required(&cwd, tenant_id.take(), None)?;
             *tenant_id = Some(resolved_tenant);
@@ -560,7 +655,7 @@ mod tests {
         assert_eq!(
             message,
             format!(
-                "no --tenant-id given and no .memd/project_scope.json found upward from {}; the first `memd add` creates the scope, or pass --tenant-id",
+                "no --tenant-id given and no .memd/project_scope.json found upward from {}; this command needs an existing scope: the first `memd add` creates it, or pass --tenant-id",
                 dir.path().display()
             )
         );
@@ -1052,23 +1147,137 @@ mod tests {
         assert!(text.contains("\"writer\""), "{text}");
     }
 
+    fn search_command() -> CliCommand {
+        CliCommand::Search {
+            tenant_id: None,
+            query: Some("scope fallback".to_string()),
+            query_positional: None,
+            k: 2,
+            project_id: None,
+            task_id: None,
+            thread_id: None,
+            compact: false,
+            dedupe_by_source: false,
+            token_budget: None,
+            mode: CliQueryMode::Generic,
+            no_text: false,
+            include_artifact: false,
+            include_superseded: false,
+            format: ExportFormat::Json,
+            output: None,
+            reranker: SearchReranker::None,
+            reranker_model: "model".to_string(),
+            reranker_device: "cpu".to_string(),
+            reranker_batch_size: 1,
+            reranker_timeout_seconds: 1,
+            reranker_python: "python3".to_string(),
+            warm: WarmMode::Off,
+        }
+    }
+
+    fn resolved_ids(command: CliCommand) -> (Option<String>, Option<String>) {
+        match command {
+            CliCommand::Search {
+                tenant_id,
+                project_id,
+                ..
+            } => (tenant_id, project_id),
+            CliCommand::Stats { tenant_id } => (tenant_id, None),
+            _ => panic!("unexpected command"),
+        }
+    }
+
     #[test]
-    fn flagless_search_in_an_unscoped_repository_fails_and_creates_nothing() {
+    fn flagless_search_in_an_unscoped_repository_uses_the_planned_scope_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (repo, sub) = unscoped_repository(dir.path());
+        let mut command = search_command();
+
+        let pending = resolve_command_scope_at(&sub, &mut command, &inputs(true)).unwrap();
+
+        assert!(pending.is_none(), "a read publishes nothing");
+        let (tenant, project) = resolved_ids(command);
+        assert_eq!(tenant.as_deref(), Some("writer"));
+        assert_eq!(project.as_deref(), Some("my_repo"));
+        assert!(!repo.join(".memd").exists());
+        assert!(!sub.join(".memd").exists());
+    }
+
+    #[test]
+    fn reads_that_need_only_a_tenant_use_the_planned_scope_too() {
         let dir = tempfile::tempdir().unwrap();
         let (repo, sub) = unscoped_repository(dir.path());
         let mut command = CliCommand::Stats { tenant_id: None };
 
+        resolve_command_scope_at(&sub, &mut command, &inputs(true)).unwrap();
+
+        assert_eq!(resolved_ids(command).0.as_deref(), Some("writer"));
+        assert!(!repo.join(".memd").exists());
+    }
+
+    #[test]
+    fn commands_that_change_the_store_still_need_an_existing_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let (repo, sub) = unscoped_repository(dir.path());
+        let mut command = CliCommand::Delete {
+            tenant_id: None,
+            chunk_id: "0".to_string(),
+            warm: WarmMode::Off,
+        };
+
         let error = resolve_command_scope_at(&sub, &mut command, &inputs(true)).unwrap_err();
 
         let message = error.to_string();
-        assert!(
-            message.contains("the first `memd add` creates the scope"),
-            "{message}"
-        );
+        assert!(message.contains("needs an existing scope"), "{message}");
         assert!(message.contains("--tenant-id"), "{message}");
-        assert!(!message.contains("session-start"), "{message}");
         assert!(!repo.join(".memd").exists());
+    }
+
+    #[test]
+    fn skip_marker_and_disabled_auto_scope_make_a_read_fail_with_the_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let (repo, sub) = unscoped_repository(dir.path());
+
+        let mut disabled = search_command();
+        let error = resolve_command_scope_at(&sub, &mut disabled, &inputs(false)).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("MEMD_AUTO_SCOPE=0"), "{message}");
+        assert!(message.contains("--tenant-id"), "{message}");
+
+        std::fs::write(repo.join(".memd-skip"), "").unwrap();
+        let mut skipped = search_command();
+        let error = resolve_command_scope_at(&sub, &mut skipped, &inputs(true)).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains(".memd-skip"), "{message}");
+        assert!(!repo.join(".memd/project_scope.json").exists());
         assert!(!sub.join(".memd").exists());
+    }
+
+    #[test]
+    fn subdirectory_and_linked_worktree_plan_the_ids_of_the_repository_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (main, worktree) = sibling_worktree(&root);
+        std::fs::remove_dir_all(main.join(".memd")).unwrap();
+        let sub = main.join("review/deep");
+        let worktree_sub = worktree.join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(&worktree_sub).unwrap();
+
+        let mut ids = Vec::new();
+        for start in [&main, &sub, &worktree, &worktree_sub] {
+            let mut command = search_command();
+            resolve_command_scope_at(start, &mut command, &inputs(true)).unwrap();
+            ids.push(resolved_ids(command));
+        }
+
+        assert_eq!(
+            ids[0],
+            (Some("writer".to_string()), Some("main_repo".to_string()))
+        );
+        assert!(ids.iter().all(|planned| *planned == ids[0]), "{ids:?}");
+        assert!(!main.join(".memd").exists());
+        assert!(!worktree.join(".memd").exists());
     }
 
     #[test]
