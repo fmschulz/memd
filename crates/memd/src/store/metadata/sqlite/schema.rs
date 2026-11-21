@@ -888,6 +888,13 @@ impl SqliteMetadataStore {
              ON chunks(tenant_id, project_id, canonical_text) WHERE canonical_text IS NOT NULL",
             [],
         )?;
+        // Rows still waiting for keyword indexing: empty in steady state, so
+        // the exact-term lookup reads almost nothing to find them.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunks_unindexed
+             ON chunks(tenant_id, timestamp_created) WHERE index_state != 'indexed'",
+            [],
+        )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_chunks_content_hash
              ON chunks(tenant_id, project_id, chunk_type, hash, timestamp_created DESC)

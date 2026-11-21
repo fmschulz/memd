@@ -908,6 +908,44 @@ impl Store for MemoryStore {
         Ok(chunks.into_iter().skip(offset).take(limit).collect())
     }
 
+    /// List one project directly. The default pages the whole tenant for every
+    /// page, which makes a project scan quadratic.
+    async fn list_chunks_for_project(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<MemoryChunk>> {
+        if project_id.is_none() {
+            return self.list_chunks(tenant_id, limit, offset).await;
+        }
+        let tenant_str = tenant_id.to_string();
+        let store = self.chunks.read().unwrap();
+        let mut chunks: Vec<&MemoryChunk> = store
+            .get(&tenant_str)
+            .map(|tenant_chunks| {
+                tenant_chunks
+                    .values()
+                    .filter(|chunk| {
+                        chunk.project_id.as_option() == project_id
+                            && !matches!(
+                                chunk.status,
+                                ChunkStatus::Candidate | ChunkStatus::Deleted | ChunkStatus::Error
+                            )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        chunks.sort_by_key(|chunk| std::cmp::Reverse(chunk.timestamp_created));
+        Ok(chunks
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
     fn run_compaction_if_needed(&self, _tenant_id: &TenantId) -> Result<Option<CompactionResult>> {
         Ok(None)
     }

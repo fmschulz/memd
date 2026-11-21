@@ -728,6 +728,29 @@ pub trait Store: Send + Sync {
     ) -> Result<ExactTermLookup> {
         Ok(ExactTermLookup::NoIndex)
     }
+
+    /// Readable, searchable chunks of the scope that the keyword index may not
+    /// hold yet: rows whose indexing is pending or failed. `Unknown` when more
+    /// than `limit` rows are in that state. Stores without a keyword index, and
+    /// stores whose writes are indexed at once, have none.
+    async fn unindexed_chunks(
+        &self,
+        _tenant_id: &TenantId,
+        _project_id: Option<&str>,
+        _limit: usize,
+    ) -> Result<UnindexedChunks> {
+        Ok(UnindexedChunks::Chunks(Vec::new()))
+    }
+}
+
+/// Answer of [`Store::unindexed_chunks`].
+#[derive(Debug, Clone)]
+pub enum UnindexedChunks {
+    /// More rows wait for indexing than the limit; the exact lookup cannot know
+    /// which of them hold a term.
+    Unknown,
+    /// Every readable row that waits for indexing.
+    Chunks(Vec<MemoryChunk>),
 }
 
 /// Answer of [`Store::exact_term_chunk_ids`].

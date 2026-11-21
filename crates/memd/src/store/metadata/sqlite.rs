@@ -33,6 +33,8 @@ use crate::types::{
 };
 
 mod chunks;
+#[cfg(test)]
+pub(crate) use chunks::LIST_UNINDEXED_SQL;
 mod consolidation;
 mod episodes;
 mod feedback;

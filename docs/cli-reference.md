@@ -273,9 +273,13 @@ explicitly scoped lines continue.
   get a +20 score boost; this rescue does not depend on `k`. When more chunks
   hold it, or the index read 1,000 sentences before the count was certain, the
   term is common (`read-only`) and gets no boost. Only chunk text is matched,
-  not tags. Superseded, expired, deleted and candidate chunks do not count. The
-  keyword index is rebuilt once, from stored payloads, by the first writer that
-  opens a store after a tokenizer change. A generic search never rebuilds
+  not tags. Superseded, expired, deleted and candidate chunks do not count.
+  Rows still waiting for keyword indexing (up to 200 per scope) are tested too
+  and counted with the indexed ones; more waiting rows than that mean no term
+  is boosted. A term that the sentence splitter cuts, such as `api?job_id=2807`
+  as one term, cannot match: each sentence is its own index document, and a fix
+  needs a chunk-level field. The keyword index is rebuilt once, from stored
+  payloads, by the first writer that opens a store after a tokenizer change. A generic search never rebuilds
   digests; `mode` values such as `brief_project` or `find_failures` still
   refresh theirs.
 - `memory.get`, `memory.delete`, `memory.stats`, `memory.health`.

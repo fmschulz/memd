@@ -29,6 +29,9 @@ const EXACT_RESCUE_SCORE_BOOST: f32 = 20.0;
 /// A code-like term rescues and boosts only when at most this many chunks in
 /// the search scope hold it. A term in more chunks is common, not an identifier.
 const EXACT_RESCUE_MAX_MATCHES: usize = 8;
+/// Most rows waiting for keyword indexing that one exact lookup reads. More
+/// rows than this leave the answer unknown.
+const EXACT_RESCUE_UNINDEXED_LIMIT: usize = 200;
 /// Most code-like terms of one query that get a lookup or a scan.
 const EXACT_RESCUE_MAX_TERMS: usize = 8;
 const LEXICAL_OVERLAP_PROJECT_SCAN_LIMIT: usize = 500;
@@ -137,7 +140,7 @@ use crate::store::{
     score_candidate_chunk, DuplicateHealth, ExactTermLookup, FeedbackEntry, HealthCounts,
     IndexCoverageHealth, OutcomeEvent, OutcomeKind, OutcomeVerifier, PayloadHealth,
     RankingPolicyMode, RelevanceLabel, RetrievalEpisode, RetrievalEpisodeId, RetrievalEpisodeItem,
-    Store, StoreHealthSnapshot, StoreStats, TenantManager, OUTCOME_POLICY_VERSION,
+    Store, StoreHealthSnapshot, StoreStats, TenantManager, UnindexedChunks, OUTCOME_POLICY_VERSION,
 };
 use crate::task_memory::{
     build_library_digest_artifact, build_project_brief_digest_artifact, build_project_brief_view,
@@ -2309,8 +2312,11 @@ async fn search_with_scores_for_project_scopes<S: Store>(
 
 /// Code-like query terms (digits, `-`, `_`), first `EXACT_RESCUE_MAX_TERMS` in
 /// query order. Case stays as typed: the keyword analyzer splits camelCase, so
-/// `parseJob_2807` must reach it unchanged. Only the duplicate check ignores case.
+/// `parseJob_2807` must reach it unchanged. A term is a duplicate only when the
+/// analyzer gives the same tokens, so `parsejob_2807` and `parseJob_2807` stay
+/// two terms while `Job_2807` and `job_2807` are one.
 fn exact_rescue_terms(query: &str) -> Vec<String> {
+    let tokenizer = CodeTokenizer::new();
     let mut seen = HashSet::new();
     query
         .split_whitespace()
@@ -2323,7 +2329,7 @@ fn exact_rescue_terms(query: &str) -> Vec<String> {
             let code_like = cleaned.contains('_')
                 || cleaned.contains('-')
                 || cleaned.chars().any(|c| c.is_ascii_digit());
-            (code_like && seen.insert(cleaned.to_ascii_lowercase())).then(|| cleaned.to_string())
+            (code_like && seen.insert(tokenizer.tokenize(cleaned))).then(|| cleaned.to_string())
         })
         .take(EXACT_RESCUE_MAX_TERMS)
         .collect()
@@ -2379,17 +2385,12 @@ fn is_lexical_overlap_stopword(term: &str) -> bool {
     )
 }
 
-/// True when the chunk text holds the analyzer tokens of a term, whole and in
+/// True when the chunk tokens hold the analyzer tokens of a term, whole and in
 /// order. This is the match the keyword index makes, so a scan and the index
 /// agree: `873` does not match `18735`.
-fn chunk_holds_term_tokens(
-    tokenizer: &CodeTokenizer,
-    chunk: &MemoryChunk,
-    term_tokens: &[String],
-) -> bool {
+fn tokens_hold(chunk_tokens: &[String], term_tokens: &[String]) -> bool {
     !term_tokens.is_empty()
-        && tokenizer
-            .tokenize(&chunk.text)
+        && chunk_tokens
             .windows(term_tokens.len())
             .any(|window| window == term_tokens)
 }
@@ -2433,16 +2434,82 @@ fn chunk_in_scope(scope: &ProjectSearchScope, chunk: &MemoryChunk) -> bool {
         .is_none_or(|project_id| chunk.project_id.as_option() == Some(project_id))
 }
 
-/// Scan a scope for chunks that hold `term`, for stores without a keyword
-/// index. Stops once `found` holds more than `EXACT_RESCUE_MAX_MATCHES`.
+/// What the search scopes hold for one code-like term. Rows are counted by id,
+/// so a row whose payload cannot be read still counts toward rarity.
+#[derive(Default)]
+struct ExactTermMatches {
+    ids: HashSet<ChunkId>,
+    chunks: Vec<MemoryChunk>,
+    /// More than `EXACT_RESCUE_MAX_MATCHES` rows hold the term, or the store
+    /// could not tell: the term rescues and boosts nothing.
+    common: bool,
+}
+
+impl ExactTermMatches {
+    fn remaining(&self) -> usize {
+        EXACT_RESCUE_MAX_MATCHES.saturating_sub(self.ids.len())
+    }
+
+    /// Count a row. False when it was counted before.
+    fn count_id(&mut self, id: &ChunkId) -> bool {
+        let new = self.ids.insert(id.clone());
+        self.common |= self.ids.len() > EXACT_RESCUE_MAX_MATCHES;
+        new
+    }
+
+    fn add_chunk(&mut self, chunk: MemoryChunk) {
+        if self.count_id(&chunk.chunk_id) {
+            self.chunks.push(chunk);
+        }
+    }
+}
+
+/// Read the rows of one scope that wait for keyword indexing, once for all
+/// terms, and test them with the token rule of the scan.
+async fn add_unindexed_matches<S: Store>(
+    store: &S,
+    scope: &ProjectSearchScope,
+    tokenizer: &CodeTokenizer,
+    term_tokens: &[Vec<String>],
+    matches: &mut [ExactTermMatches],
+) -> Result<(), McpError> {
+    let waiting = store
+        .unindexed_chunks(
+            &scope.tenant_id,
+            scope.project_id.as_deref(),
+            EXACT_RESCUE_UNINDEXED_LIMIT,
+        )
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    match waiting {
+        UnindexedChunks::Unknown => matches.iter_mut().for_each(|m| m.common = true),
+        UnindexedChunks::Chunks(chunks) => {
+            for chunk in chunks {
+                if !chunk_status_is_searchable(chunk.status) || !chunk_in_scope(scope, &chunk) {
+                    continue;
+                }
+                let chunk_tokens = tokenizer.tokenize(&chunk.text);
+                for (m, tokens) in matches.iter_mut().zip(term_tokens) {
+                    if !m.common && tokens_hold(&chunk_tokens, tokens) {
+                        m.add_chunk(chunk.clone());
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Scan a scope for chunks that hold the terms, one pass for all of them, for
+/// stores without a keyword index. A scan that stops at its row cap before the
+/// rows run out has not seen every row, so every term is then unknown.
 async fn scan_exact_term_matches<S: Store>(
     store: &S,
     scope: &ProjectSearchScope,
-    term: &str,
-    found: &mut Vec<MemoryChunk>,
+    tokenizer: &CodeTokenizer,
+    term_tokens: &[Vec<String>],
+    matches: &mut [ExactTermMatches],
 ) -> Result<(), McpError> {
-    let tokenizer = CodeTokenizer::new();
-    let term_tokens = tokenizer.tokenize(term);
     let scan_limit = if scope.project_id.is_some() {
         EXACT_RESCUE_PROJECT_SCAN_LIMIT
     } else {
@@ -2461,18 +2528,77 @@ async fn scan_exact_term_matches<S: Store>(
             .await
             .map_err(|e| McpError::ToolError(e.to_string()))?;
         if chunks.is_empty() {
-            break;
+            return Ok(());
         }
         offset += page_limit;
         for chunk in chunks {
-            if chunk_status_is_searchable(chunk.status)
-                && chunk_in_scope(scope, &chunk)
-                && chunk_holds_term_tokens(&tokenizer, &chunk, &term_tokens)
-                && !found.iter().any(|seen| seen.chunk_id == chunk.chunk_id)
-            {
-                found.push(chunk);
-                if found.len() > EXACT_RESCUE_MAX_MATCHES {
-                    return Ok(());
+            if !chunk_status_is_searchable(chunk.status) || !chunk_in_scope(scope, &chunk) {
+                continue;
+            }
+            let chunk_tokens = tokenizer.tokenize(&chunk.text);
+            for (m, tokens) in matches.iter_mut().zip(term_tokens) {
+                if !m.common && tokens_hold(&chunk_tokens, tokens) {
+                    m.add_chunk(chunk.clone());
+                }
+            }
+        }
+        if matches.iter().all(|m| m.common) {
+            return Ok(());
+        }
+    }
+    matches.iter_mut().for_each(|m| m.common = true);
+    Ok(())
+}
+
+/// Add what one scope holds for each term: the rows that wait for indexing,
+/// then the keyword index, or a scan when the store has no index.
+async fn collect_scope_matches<S: Store>(
+    store: &S,
+    scope: &ProjectSearchScope,
+    terms: &[String],
+    tokenizer: &CodeTokenizer,
+    term_tokens: &[Vec<String>],
+    matches: &mut [ExactTermMatches],
+) -> Result<(), McpError> {
+    add_unindexed_matches(store, scope, tokenizer, term_tokens, matches).await?;
+    for (term, m) in terms.iter().zip(matches.iter_mut()) {
+        if m.common {
+            continue;
+        }
+        let lookup = store
+            .exact_term_chunk_ids(
+                &scope.tenant_id,
+                scope.project_id.as_deref(),
+                term,
+                m.remaining(),
+            )
+            .await
+            .map_err(|e| McpError::ToolError(e.to_string()))?;
+        match lookup {
+            ExactTermLookup::Common => m.common = true,
+            // The store has no index at all, so one scan answers every term.
+            ExactTermLookup::NoIndex => {
+                return scan_exact_term_matches(store, scope, tokenizer, term_tokens, matches)
+                    .await;
+            }
+            ExactTermLookup::Rare(ids) => {
+                for id in ids {
+                    if !m.count_id(&id) {
+                        continue;
+                    }
+                    // An unreadable row is skipped, as the hybrid lane does.
+                    match store.get(&scope.tenant_id, &id).await {
+                        Ok(Some(chunk))
+                            if chunk_status_is_searchable(chunk.status)
+                                && chunk_in_scope(scope, &chunk) =>
+                        {
+                            m.chunks.push(chunk);
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            warn!(chunk_id = %id, error = %error, "skipping unreadable chunk in exact rescue");
+                        }
+                    }
                 }
             }
         }
@@ -2480,69 +2606,38 @@ async fn scan_exact_term_matches<S: Store>(
     Ok(())
 }
 
-/// Chunks of the search scopes that hold `term`, or none when the term is
-/// common there (more than `EXACT_RESCUE_MAX_MATCHES` chunks). A common term
-/// is no identifier, and the hybrid search already scores it.
-async fn rare_exact_term_matches<S: Store>(
-    store: &S,
-    scopes: &[ProjectSearchScope],
-    term: &str,
-) -> Result<Vec<MemoryChunk>, McpError> {
-    let mut found: Vec<MemoryChunk> = Vec::new();
-    for scope in scopes {
-        let lookup = store
-            .exact_term_chunk_ids(
-                &scope.tenant_id,
-                scope.project_id.as_deref(),
-                term,
-                EXACT_RESCUE_MAX_MATCHES - found.len(),
-            )
-            .await
-            .map_err(|e| McpError::ToolError(e.to_string()))?;
-        match lookup {
-            ExactTermLookup::Common => return Ok(Vec::new()),
-            ExactTermLookup::Rare(ids) => {
-                for id in ids {
-                    // An unreadable row is skipped, as the hybrid lane does.
-                    let chunk = match store.get(&scope.tenant_id, &id).await {
-                        Ok(chunk) => chunk,
-                        Err(error) => {
-                            warn!(chunk_id = %id, error = %error, "skipping unreadable chunk in exact rescue");
-                            continue;
-                        }
-                    };
-                    if let Some(chunk) = chunk.filter(|chunk| {
-                        chunk_status_is_searchable(chunk.status) && chunk_in_scope(scope, chunk)
-                    }) {
-                        if !found.iter().any(|seen| seen.chunk_id == chunk.chunk_id) {
-                            found.push(chunk);
-                        }
-                    }
-                }
-            }
-            ExactTermLookup::NoIndex => {
-                scan_exact_term_matches(store, scope, term, &mut found).await?
-            }
-        }
-        if found.len() > EXACT_RESCUE_MAX_MATCHES {
-            return Ok(Vec::new());
-        }
-    }
-    Ok(found)
-}
-
 /// Candidates for code-like query terms (digits, `-`, `_`) that are rare in the
-/// search scope. Every chunk of a rare term is a candidate and gets
-/// `EXACT_RESCUE_SCORE_BOOST`, so the result does not depend on `k`.
+/// search scopes. Every chunk of a rare term is a candidate and gets
+/// `EXACT_RESCUE_SCORE_BOOST`, so the rescue does not depend on `k`.
 async fn exact_lexical_candidates_for_project_scopes<S: Store>(
     store: &S,
     scopes: &[ProjectSearchScope],
     query: &str,
 ) -> Result<Vec<(MemoryChunk, f32)>, McpError> {
+    let terms = exact_rescue_terms(query);
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tokenizer = CodeTokenizer::new();
+    let term_tokens = terms
+        .iter()
+        .map(|term| tokenizer.tokenize(term))
+        .collect::<Vec<_>>();
+    let mut matches = terms
+        .iter()
+        .map(|_| ExactTermMatches::default())
+        .collect::<Vec<_>>();
+    for scope in scopes {
+        if matches.iter().all(|m| m.common) {
+            break;
+        }
+        collect_scope_matches(store, scope, &terms, &tokenizer, &term_tokens, &mut matches).await?;
+    }
+
     let mut seen = HashSet::new();
     let mut candidates = Vec::new();
-    for term in exact_rescue_terms(query) {
-        for chunk in rare_exact_term_matches(store, scopes, &term).await? {
+    for m in matches.into_iter().filter(|m| !m.common) {
+        for chunk in m.chunks {
             if seen.insert(chunk.chunk_id.clone()) {
                 let score = score_candidate_chunk(query, &chunk);
                 candidates.push((chunk, score + EXACT_RESCUE_SCORE_BOOST));

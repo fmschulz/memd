@@ -39,6 +39,7 @@ use super::writer_lock::{acquire_writer_lock_capped, WriterLockGuard};
 use super::{
     chunk_status_is_searchable, rank_candidate_chunks, score_candidate_chunk, ExactTermLookup,
     ExternalMutationOutcome, RywProbeStats, Store, StoreHealthSnapshot, StoreStats,
+    UnindexedChunks,
 };
 use crate::embeddings::{CandleModel, EmbeddingModel};
 use crate::error::{MemdError, Result};
@@ -2273,6 +2274,42 @@ impl Store for PersistentStore {
             }))
         })?;
         Ok(ids.map_or(ExactTermLookup::Common, ExactTermLookup::Rare))
+    }
+
+    async fn unindexed_chunks(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        limit: usize,
+    ) -> Result<UnindexedChunks> {
+        // Without an active keyword index nothing waits for it, and the caller
+        // scans instead.
+        let sparse_active = self
+            .hybrid_searcher
+            .as_ref()
+            .is_some_and(|hybrid| hybrid.sparse_enabled());
+        if !sparse_active {
+            return Ok(UnindexedChunks::Chunks(Vec::new()));
+        }
+        let ids = self.metadata.list_unindexed_chunk_ids(
+            tenant_id,
+            project_id,
+            limit.saturating_add(1),
+        )?;
+        if ids.len() > limit {
+            return Ok(UnindexedChunks::Unknown);
+        }
+        let mut chunks = Vec::with_capacity(ids.len());
+        for id in &ids {
+            // The retrieval read skips an unreadable row.
+            if let Some(chunk) = self
+                .get_chunk_for_retrieval(tenant_id, id, "exact_rescue_unindexed")
+                .await?
+            {
+                chunks.push(chunk);
+            }
+        }
+        Ok(UnindexedChunks::Chunks(chunks))
     }
 }
 

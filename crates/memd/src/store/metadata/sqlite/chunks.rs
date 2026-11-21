@@ -11,6 +11,18 @@ const CHUNK_COLUMNS: &str = "chunk_id, tenant_id, project_id, segment_id, ordina
                              tier, supersedes, superseded_by, expires_at_ms, review_after_ms, \
                              lifecycle_updated_at_ms, canonical_text, ingestion_mode";
 
+/// Rows whose keyword indexing is not complete. The literal `index_state !=
+/// 'indexed'` must match the partial index `idx_chunks_unindexed`, so that the
+/// query reads only the rows still waiting, not the whole tenant.
+pub(crate) const LIST_UNINDEXED_SQL: &str = "SELECT chunk_id
+     FROM chunks
+     WHERE tenant_id = ?1
+       AND index_state != 'indexed'
+       AND status NOT IN ('candidate', 'deleted', 'error', 'superseded', 'expired')
+       AND (?2 IS NULL OR project_id = ?2)
+     ORDER BY timestamp_created DESC
+     LIMIT ?3";
+
 const HARD_PURGE_PREDICATE: &str = "WHERE tenant_id = :tenant
     AND (:project IS NULL OR project_id = :project)
     AND (
@@ -1091,6 +1103,30 @@ impl MetadataStore for SqliteMetadataStore {
             ],
         )?;
         Ok(())
+    }
+
+    fn list_unindexed_chunk_ids(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ChunkId>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.pool.get();
+        let mut stmt = conn.prepare_cached(LIST_UNINDEXED_SQL)?;
+        let rows = stmt.query_map(
+            rusqlite::params![tenant_id.as_str(), project_id, limit as i64],
+            |row| row.get::<usize, String>(0),
+        )?;
+        let mut chunk_ids = Vec::new();
+        for row in rows {
+            if let Ok(chunk_id) = ChunkId::parse(&row?) {
+                chunk_ids.push(chunk_id);
+            }
+        }
+        Ok(chunk_ids)
     }
 
     fn list_pending_index_chunk_ids(

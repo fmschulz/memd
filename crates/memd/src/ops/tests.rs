@@ -29,6 +29,7 @@ fn test_render_observed_time_into_text() {
     assert_eq!(chunks[1].0.text, "no event time here");
 }
 use crate::config::ProjectAliasScopeConfig;
+use crate::index::SparseIndex;
 use crate::store::persistent::{PersistentStore, PersistentStoreConfig};
 use crate::store::{MemoryStore, Store};
 use crate::types::lifecycle::MemoryTier;
@@ -242,6 +243,13 @@ struct SearchMissStore {
     /// Ids a keyword index would answer for an exact-term lookup. `None`
     /// models a store without a keyword index.
     indexed_hits: Mutex<Option<Vec<ChunkId>>>,
+    /// Per-project override of `indexed_hits`, keyed by project id.
+    scope_hits: Mutex<HashMap<String, Vec<ChunkId>>>,
+    /// Calls to `get`, the payload read of a hydrated hit.
+    gets: std::sync::atomic::AtomicUsize,
+    /// Calls to `unindexed_chunks`, and the answer the probe gives.
+    unindexed_calls: std::sync::atomic::AtomicUsize,
+    unindexed: Mutex<Option<crate::store::UnindexedChunks>>,
 }
 
 impl SearchMissStore {
@@ -253,6 +261,10 @@ impl SearchMissStore {
             project_scans: std::sync::atomic::AtomicUsize::new(0),
             index_lookups: std::sync::atomic::AtomicUsize::new(0),
             indexed_hits: Mutex::new(None),
+            scope_hits: Mutex::new(HashMap::new()),
+            gets: std::sync::atomic::AtomicUsize::new(0),
+            unindexed_calls: std::sync::atomic::AtomicUsize::new(0),
+            unindexed: Mutex::new(None),
         }
     }
 }
@@ -292,6 +304,7 @@ impl Store for SearchMissStore {
         tenant_id: &TenantId,
         chunk_id: &ChunkId,
     ) -> crate::error::Result<Option<MemoryChunk>> {
+        self.gets.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(self
             .chunks
             .lock()
@@ -430,17 +443,39 @@ impl Store for SearchMissStore {
     async fn exact_term_chunk_ids(
         &self,
         _tenant_id: &TenantId,
-        _project_id: Option<&str>,
+        project_id: Option<&str>,
         _term: &str,
         max_matches: usize,
     ) -> crate::error::Result<crate::store::ExactTermLookup> {
         use crate::store::ExactTermLookup;
         self.index_lookups
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(match self.indexed_hits.lock().unwrap().as_ref() {
+        let by_scope = self
+            .scope_hits
+            .lock()
+            .unwrap()
+            .get(project_id.unwrap_or_default())
+            .cloned();
+        let hits = by_scope.or_else(|| self.indexed_hits.lock().unwrap().clone());
+        Ok(match hits {
             None => ExactTermLookup::NoIndex,
             Some(ids) if ids.len() > max_matches => ExactTermLookup::Common,
-            Some(ids) => ExactTermLookup::Rare(ids.clone()),
+            Some(ids) => ExactTermLookup::Rare(ids),
+        })
+    }
+
+    async fn unindexed_chunks(
+        &self,
+        _tenant_id: &TenantId,
+        _project_id: Option<&str>,
+        _limit: usize,
+    ) -> crate::error::Result<crate::store::UnindexedChunks> {
+        use crate::store::UnindexedChunks;
+        self.unindexed_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(match self.unindexed.lock().unwrap().clone() {
+            Some(answer) => answer,
+            None => UnindexedChunks::Chunks(Vec::new()),
         })
     }
 
@@ -3998,7 +4033,7 @@ async fn exact_rescue_looks_up_at_most_eight_terms() {
 }
 
 #[tokio::test]
-async fn exact_rescue_terms_survive_the_sentence_splitter() {
+async fn exact_rescue_matches_terms_that_stay_inside_one_indexed_sentence() {
     let tenant = TenantId::new("rescue_sentences").unwrap();
     let texts = [
         "GET api?job_id=2807 failed with a 500.",
@@ -4011,8 +4046,11 @@ async fn exact_rescue_terms_survive_the_sentence_splitter() {
             .await
             .unwrap();
     }
-    // `api?job_id=2807` as one term is not covered: the sentence splitter cuts
-    // the indexed text after `?`, so a phrase of all its tokens cannot match.
+    // Covers terms whose tokens all sit in one sentence, with `=` and `.`
+    // inside. Does not cover a term that the sentence splitter cuts, such as
+    // `api?job_id=2807` as one term: each sentence is its own index document,
+    // so a phrase of all its tokens cannot match. A fix needs a chunk-level
+    // field, which is an index format change.
     for (query, text) in [("job_id=2807", texts[0]), ("v1.2.3-rc1", texts[1])] {
         assert_eq!(
             rescued_texts(&store, &tenant, "p", query).await,
@@ -4020,6 +4058,315 @@ async fn exact_rescue_terms_survive_the_sentence_splitter() {
             "{query}"
         );
     }
+}
+
+/// Chunk that holds `job_2807`, in project `p`.
+fn job_chunk(tenant: &TenantId, text: &str, created: i64) -> MemoryChunk {
+    project_chunk(tenant, "p", text, created)
+}
+
+fn index_pending(store: &PersistentStore, tenant: &TenantId, id: &ChunkId) {
+    // The state of a durable write whose keyword indexing has not run.
+    store.sparse_index().unwrap().delete(tenant, id).unwrap();
+    store.sparse_index().unwrap().commit().unwrap();
+    store
+        .metadata()
+        .mark_index_pending(tenant, std::slice::from_ref(id), 1)
+        .unwrap();
+}
+
+#[tokio::test]
+async fn exact_rescue_finds_a_chunk_whose_indexing_is_pending_or_failed() {
+    let tenant = TenantId::new("rescue_pending").unwrap();
+    let (store, _dir) = make_sparse_persistent_store();
+    let pending = store
+        .add(job_chunk(&tenant, "Pending note on job_2807.", 1))
+        .await
+        .unwrap();
+    let failed = store
+        .add(job_chunk(&tenant, "Failed note on job_9001.", 2))
+        .await
+        .unwrap();
+    index_pending(&store, &tenant, &pending);
+    store
+        .sparse_index()
+        .unwrap()
+        .delete(&tenant, &failed)
+        .unwrap();
+    store.sparse_index().unwrap().commit().unwrap();
+    store
+        .metadata()
+        .mark_index_failed(&tenant, &failed, "boom", 1)
+        .unwrap();
+
+    assert_eq!(
+        rescued_texts(&store, &tenant, "p", "job_2807").await,
+        vec!["Pending note on job_2807.".to_string()]
+    );
+    assert_eq!(
+        rescued_texts(&store, &tenant, "p", "job_9001").await,
+        vec!["Failed note on job_9001.".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn unindexed_rows_query_reads_the_partial_index_not_the_tenant() {
+    let tenant = TenantId::new("rescue_plan").unwrap();
+    let (store, dir) = make_sparse_persistent_store();
+    store
+        .add(job_chunk(&tenant, "One indexed note.", 1))
+        .await
+        .unwrap();
+    let connection = rusqlite::Connection::open(dir.path().join("metadata.db")).unwrap();
+    let mut statement = connection
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            crate::store::metadata::sqlite::LIST_UNINDEXED_SQL
+        ))
+        .unwrap();
+    let plan = statement
+        .query_map(rusqlite::params![tenant.as_str(), "p", 201_i64], |row| {
+            row.get::<_, String>(3)
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .join(" | ");
+    println!("unindexed rows query plan: {plan}");
+    assert!(plan.contains("idx_chunks_unindexed"), "{plan}");
+}
+
+#[tokio::test]
+async fn exact_rescue_counts_a_pending_chunk_with_the_indexed_ones() {
+    let tenant = TenantId::new("rescue_pending_count").unwrap();
+    let (store, _dir) = make_sparse_persistent_store();
+    for index in 0..EXACT_RESCUE_MAX_MATCHES {
+        store
+            .add(job_chunk(
+                &tenant,
+                &format!("Indexed {index} on job_2807."),
+                index as i64,
+            ))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        rescued_texts(&store, &tenant, "p", "job_2807").await.len(),
+        EXACT_RESCUE_MAX_MATCHES
+    );
+    let pending = store
+        .add(job_chunk(&tenant, "Pending on job_2807.", 100))
+        .await
+        .unwrap();
+    index_pending(&store, &tenant, &pending);
+
+    assert!(
+        rescued_texts(&store, &tenant, "p", "job_2807")
+            .await
+            .is_empty(),
+        "eight indexed plus one pending chunk make the term common"
+    );
+}
+
+#[tokio::test]
+async fn exact_rescue_is_unknown_when_more_rows_wait_than_the_lane_reads() {
+    let tenant = TenantId::new("rescue_pending_cap").unwrap();
+    let (store, _dir) = make_sparse_persistent_store();
+    let chunks = (0..=EXACT_RESCUE_UNINDEXED_LIMIT)
+        .map(|index| job_chunk(&tenant, &format!("Waiting note {index}."), index as i64))
+        .collect::<Vec<_>>();
+    let ids = store.add_batch(chunks).await.unwrap();
+    store
+        .add(job_chunk(&tenant, "The only note on job_2807.", 10_000))
+        .await
+        .unwrap();
+    assert_eq!(
+        rescued_texts(&store, &tenant, "p", "job_2807").await.len(),
+        1
+    );
+    store
+        .metadata()
+        .mark_index_pending(&tenant, &ids, 1)
+        .unwrap();
+
+    assert!(rescued_texts(&store, &tenant, "p", "job_2807")
+        .await
+        .is_empty());
+}
+
+#[tokio::test]
+async fn exact_rescue_reads_the_unindexed_lane_once_per_scope_and_only_when_it_has_rows() {
+    let tenant = TenantId::new("rescue_lane_once").unwrap();
+    let store = SearchMissStore::new(Vec::new());
+    *store.indexed_hits.lock().unwrap() = Some(Vec::new());
+
+    exact_lexical_candidates_for_project_scopes(
+        &store,
+        &rescue_scope(&tenant, "p"),
+        "job_2807 job_2808 job_2809",
+    )
+    .await
+    .unwrap();
+
+    use std::sync::atomic::Ordering::SeqCst;
+    assert_eq!(store.unindexed_calls.load(SeqCst), 1, "once, not per term");
+    assert_eq!(store.index_lookups.load(SeqCst), 3);
+    assert_eq!(
+        store.gets.load(SeqCst),
+        0,
+        "no row waits, so no payload read"
+    );
+}
+
+#[tokio::test]
+async fn exact_rescue_counts_unreadable_matches_across_scopes() {
+    let tenant = TenantId::new("rescue_alias_scopes").unwrap();
+    let live = project_chunk(&tenant, "b", "One live note on job_2807.", 1);
+    let live_id = live.chunk_id.clone();
+    let store = SearchMissStore::new(vec![live]);
+    // Eight matching rows in the first scope have no readable payload.
+    store.scope_hits.lock().unwrap().insert(
+        "a".to_string(),
+        (0..EXACT_RESCUE_MAX_MATCHES)
+            .map(|_| ChunkId::new())
+            .collect(),
+    );
+    store
+        .scope_hits
+        .lock()
+        .unwrap()
+        .insert("b".to_string(), vec![live_id]);
+    let scopes = ["a", "b"].map(|project| ProjectSearchScope {
+        tenant_id: tenant.clone(),
+        project_id: Some(project.to_string()),
+    });
+
+    let rescued = exact_lexical_candidates_for_project_scopes(&store, &scopes, "job_2807")
+        .await
+        .unwrap();
+
+    assert!(
+        rescued.is_empty(),
+        "nine rows hold the term, so it is common"
+    );
+}
+
+#[test]
+fn exact_rescue_terms_keep_terms_that_split_differently() {
+    assert_eq!(
+        exact_rescue_terms("parsejob_2807 parseJob_2807"),
+        vec!["parsejob_2807".to_string(), "parseJob_2807".to_string()]
+    );
+    // Same tokens, so the second is a duplicate.
+    assert_eq!(
+        exact_rescue_terms("Job_2807 job_2807 JOB-2807"),
+        vec!["Job_2807".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn exact_rescue_scan_that_hits_its_row_cap_does_not_call_a_term_rare() {
+    let tenant = TenantId::new("rescue_scan_cap").unwrap();
+    // Newest first in the scan: one match, filler up to the cap, then eight more.
+    let mut chunks = vec![MemoryChunk::new(
+        tenant.clone(),
+        "Newest note on job_2807.",
+        ChunkType::Summary,
+    )];
+    for index in 0..EXACT_RESCUE_GLOBAL_SCAN_LIMIT {
+        chunks.push(MemoryChunk::new(
+            tenant.clone(),
+            format!("Filler {index}."),
+            ChunkType::Summary,
+        ));
+    }
+    for index in 0..EXACT_RESCUE_MAX_MATCHES {
+        chunks.push(MemoryChunk::new(
+            tenant.clone(),
+            format!("Old {index} on job_2807."),
+            ChunkType::Summary,
+        ));
+    }
+    let store = SearchMissStore::new(chunks);
+    let scope = vec![ProjectSearchScope {
+        tenant_id: tenant,
+        project_id: None,
+    }];
+
+    let rescued = exact_lexical_candidates_for_project_scopes(&store, &scope, "job_2807")
+        .await
+        .unwrap();
+
+    assert!(rescued.is_empty(), "the scan could not see every row");
+}
+
+#[tokio::test]
+async fn exact_rescue_scans_the_rows_once_for_all_terms() {
+    let tenant = TenantId::new("rescue_scan_once").unwrap();
+    let mut chunks = (0..1_200)
+        .map(|index| project_chunk(&tenant, "p", &format!("Filler {index}."), index))
+        .collect::<Vec<_>>();
+    chunks.push(project_chunk(&tenant, "p", "Note on job_2807.", 5_000));
+    chunks.push(project_chunk(&tenant, "p", "Note on job_2808.", 5_001));
+    chunks.push(project_chunk(&tenant, "p", "Note on job_2809.", 5_002));
+    let store = SearchMissStore::new(chunks);
+
+    let rescued = exact_lexical_candidates_for_project_scopes(
+        &store,
+        &rescue_scope(&tenant, "p"),
+        "job_2807 job_2808 job_2809",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rescued.len(), 3);
+    // 1,203 rows are 3 pages, and the scan ends on the empty fourth page.
+    assert_eq!(
+        store
+            .project_scans
+            .load(std::sync::atomic::Ordering::SeqCst),
+        4
+    );
+}
+
+#[tokio::test]
+async fn memory_store_lists_one_project_in_pages() {
+    let store = make_store();
+    let tenant = TenantId::new("memory_project_pages").unwrap();
+    for index in 0..3 {
+        store
+            .add(project_chunk(
+                &tenant,
+                "p",
+                &format!("Mine {index}."),
+                index,
+            ))
+            .await
+            .unwrap();
+        store
+            .add(project_chunk(
+                &tenant,
+                "q",
+                &format!("Theirs {index}."),
+                index,
+            ))
+            .await
+            .unwrap();
+    }
+    let first = store
+        .list_chunks_for_project(&tenant, Some("p"), 2, 0)
+        .await
+        .unwrap();
+    let second = store
+        .list_chunks_for_project(&tenant, Some("p"), 2, 2)
+        .await
+        .unwrap();
+    let texts = first
+        .iter()
+        .chain(&second)
+        .map(|chunk| chunk.text.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(texts, vec!["Mine 2.", "Mine 1.", "Mine 0."]);
 }
 
 #[tokio::test]

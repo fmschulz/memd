@@ -199,6 +199,16 @@ pub trait MetadataStore: Send + Sync {
         now_ms: i64,
     ) -> Result<()>;
 
+    /// IDs of searchable rows (not candidate, deleted, error, superseded or
+    /// expired) of one tenant, and of one project when given, whose keyword
+    /// indexing is `pending` or `failed`. Newest first, at most `limit`.
+    fn list_unindexed_chunk_ids(
+        &self,
+        tenant_id: &TenantId,
+        project_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ChunkId>>;
+
     /// List pending index chunk IDs for one tenant.
     fn list_pending_index_chunk_ids(
         &self,
