@@ -76,11 +76,22 @@ project with the same problem, symptoms, fix, check, and `applies_when`
 (`failed`, `evidence`, and `visibility` are not compared). A replay returns the
 stored case (`"replay": true`) and writes nothing. The output names
 `problem_id`, `attempt_ids`, `check_id`, `lesson_id`, `evidence`, and
-`rows_written`, the number of search rows the call wrote.
+`rows_written`, the number of chunk rows the store wrote for the call.
 
-`--compact` stores every record of the case as above but creates a search row
-only for the lesson. Without it, each record (problem, each attempt, check,
-lesson) gets one row. `experience get`, replay, corrections, `experience find`,
+`--compact` stores every record of the case as above but makes only the lesson
+searchable: one searchable lesson, in one row unless the lesson is long enough
+to be split into several. Without it, each record (problem, each attempt,
+check, lesson) is searchable and gets its own row.
+
+A call that stops half way leaves an unfinished case: a problem, perhaps
+attempts and a check, but no lesson. The same submission finishes it. Memd
+looks the case up in the artifact tables, not through a row, because a compact
+case has no row before its lesson. The stored problem, symptoms, attempts and
+check must be the start of the file's, and with `--shared-id` they must carry
+`agentdash:ID`. Memd reuses them, writes the missing records, and returns
+`"replay": false` with the rows of that call only. If the stored records differ
+from the file, as when another case reuses the ID, memd leaves them alone and
+adds a new case, as before. `experience get`, replay, corrections, `experience find`,
 the `memory.md` lesson block, and the session-start content rule read lessons
 and the artifact tables, so they work the same on a compact case. A case first
 stored in full and sent again with `--compact` is a replay. `experience export`

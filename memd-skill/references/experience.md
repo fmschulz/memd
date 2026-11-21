@@ -72,11 +72,14 @@ a new one.
 
 Add `--compact` to keep the full case but make only the lesson searchable: the
 problem, attempts, and check stay readable through `experience get`, and the
-case adds one search row instead of one row per record. `find`, corrections,
-replay, and the `memory.md` lesson block work the same on a compact case.
+case adds one searchable lesson, in one row unless the lesson is long enough to
+be split, instead of one row per record. `find`, corrections, replay, and the
+`memory.md` lesson block work the same on a compact case. If a call stops half
+way, repeat it with the same `--shared-id` (or the same content) and memd
+finishes the stored case.
 
 The output names `problem_id`, `lesson_id`, `evidence`, and `rows_written` (the
-search rows this call wrote; 0 on a replay). A case built from a
+chunk rows this call wrote; 0 on a replay). A case built from a
 file reads `evidence: "observed"`, unless `check.receipt_id` names a passing
 receipt already in the store, which gives `executed`.
 

@@ -30,6 +30,7 @@ use validation::{require_text, validate_receipt, validate_terms};
 
 static EXPERIENCE_MUTATIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+const TASK_PREFIX: &str = "experience-";
 const ROLE_PROBLEM: &str = "experience_problem";
 const ROLE_ATTEMPT: &str = "experience_attempt";
 const ROLE_CHECK: &str = "experience_check";
@@ -336,7 +337,7 @@ pub async fn record<S: Store + ?Sized>(
     event: RecordEvent,
 ) -> Result<TaskArtifact> {
     let _guard = EXPERIENCE_MUTATIONS.lock().await;
-    record_unlocked(store, context, event, true).await
+    Ok(record_unlocked(store, context, event, true).await?.artifact)
 }
 
 /// `searchable` decides whether a problem or an attempt gets a retrieval row.
@@ -347,7 +348,7 @@ async fn record_unlocked<S: Store + ?Sized>(
     context: ExperienceContext,
     event: RecordEvent,
     searchable: bool,
-) -> Result<TaskArtifact> {
+) -> Result<Written> {
     match event {
         RecordEvent::Problem {
             description,
@@ -445,14 +446,16 @@ pub async fn record_check<S: Store + ?Sized>(
     receipt: CheckReceipt,
 ) -> Result<TaskArtifact> {
     let _guard = EXPERIENCE_MUTATIONS.lock().await;
-    record_check_unlocked(store, context, receipt).await
+    Ok(record_check_unlocked(store, context, receipt)
+        .await?
+        .artifact)
 }
 
 async fn record_check_unlocked<S: Store + ?Sized>(
     store: &S,
     context: ExperienceContext,
     receipt: CheckReceipt,
-) -> Result<TaskArtifact> {
+) -> Result<Written> {
     validate_receipt(&receipt)?;
     let (target, attempt) = load_check_target(
         store,
@@ -490,7 +493,7 @@ async fn record_observed_check_unlocked<S: Store + ?Sized>(
     context: ExperienceContext,
     check: ObservedCheck,
     searchable: bool,
-) -> Result<TaskArtifact> {
+) -> Result<Written> {
     validation::validate_observed_check(&check)?;
     let (target, attempt) = load_check_target(
         store,
@@ -599,7 +602,7 @@ async fn record_problem<S: Store + ?Sized>(
     description: String,
     symptom_terms: Vec<String>,
     searchable: bool,
-) -> Result<TaskArtifact> {
+) -> Result<Written> {
     require_text("description", &description)?;
     validate_terms(&symptom_terms)?;
     if context.project_id.as_option().is_none() {
@@ -608,7 +611,7 @@ async fn record_problem<S: Store + ?Sized>(
         ));
     }
 
-    let task_id = format!("experience-{}", Uuid::now_v7());
+    let task_id = format!("{TASK_PREFIX}{}", Uuid::now_v7());
     let mut artifact = TaskArtifact::new(
         ArtifactKind::TaskProgress,
         context.tenant_id.clone(),
@@ -633,7 +636,7 @@ async fn record_attempt<S: Store + ?Sized>(
     previous_attempt_id: Option<String>,
     action: String,
     searchable: bool,
-) -> Result<TaskArtifact> {
+) -> Result<Written> {
     require_text("problem_id", &problem_id)?;
     require_text("action", &action)?;
     let problem = require_problem(store, &context, &problem_id).await?;
@@ -696,7 +699,7 @@ async fn record_lesson<S: Store + ?Sized>(
     store: &S,
     context: ExperienceContext,
     lesson: ConditionalLesson,
-) -> Result<TaskArtifact> {
+) -> Result<Written> {
     let problem = validate_lesson(store, &context, &lesson).await?;
     validate_conflict_refs(store, &context, &problem, &lesson).await?;
 
@@ -723,7 +726,7 @@ async fn record_correction<S: Store + ?Sized>(
     problem_id: String,
     supersedes_id: String,
     replacement: ConditionalLesson,
-) -> Result<TaskArtifact> {
+) -> Result<Written> {
     require_text("supersedes_id", &supersedes_id)?;
     if replacement.problem_id != problem_id {
         return Err(validation(
@@ -785,22 +788,32 @@ async fn record_correction<S: Store + ?Sized>(
     write_artifact(store, artifact, true).await
 }
 
-/// Store the artifact, with one retrieval row when `searchable`, else with
-/// none. The artifact tables hold the full event either way.
+/// A stored artifact and the chunk rows the store wrote for it.
+pub(crate) struct Written {
+    pub(crate) artifact: TaskArtifact,
+    /// Rows the store reports, counting every part of a split projection.
+    pub(crate) rows: usize,
+}
+
+/// Store the artifact, with one retrieval projection when `searchable`, else
+/// with none. The artifact tables hold the full event either way.
 async fn write_artifact<S: Store + ?Sized>(
     store: &S,
     artifact: TaskArtifact,
     searchable: bool,
-) -> Result<TaskArtifact> {
+) -> Result<Written> {
     let projections = if searchable {
         build_task_projections_minimal(&artifact)
     } else {
         Vec::new()
     };
-    store
+    let stored = store
         .add_task_artifact(artifact.clone(), projections)
         .await?;
-    Ok(artifact)
+    Ok(Written {
+        artifact,
+        rows: stored.chunks_written,
+    })
 }
 
 async fn require_problem<S: Store + ?Sized>(

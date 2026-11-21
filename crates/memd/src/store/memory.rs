@@ -196,6 +196,7 @@ impl Store for MemoryStore {
         Ok(TaskArtifactWriteResult {
             task_id,
             artifact_id,
+            chunks_written: projection_chunk_ids.len(),
             projection_chunk_ids,
         })
     }

@@ -643,6 +643,9 @@ pub struct TaskArtifactWriteResult {
     pub task_id: String,
     pub artifact_id: String,
     pub projection_chunk_ids: Vec<String>,
+    /// Chunk rows the call stored. A long projection splits into several
+    /// rows, and only the first of each is in `projection_chunk_ids`.
+    pub chunks_written: usize,
 }
 
 /// Exact filters supported by task-aware search.

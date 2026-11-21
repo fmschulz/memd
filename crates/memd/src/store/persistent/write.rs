@@ -664,6 +664,7 @@ impl PersistentStore {
         Ok(TaskArtifactWriteResult {
             task_id: artifact.task_id.clone(),
             artifact_id: artifact.artifact_id.clone(),
+            chunks_written: pending.len(),
             projection_chunk_ids,
         })
     }

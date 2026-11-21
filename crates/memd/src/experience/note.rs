@@ -12,10 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use super::recall::EXHAUSTIVE_LIMIT;
 use super::{
-    ensure_project, get_experience, lesson_from_event, record_observed_check_unlocked,
-    record_unlocked, required_event, resolve_case, validation, ConditionalLesson,
+    ensure_project, event_time, get_experience, lesson_from_event, record_observed_check_unlocked,
+    record_unlocked, required_event, resolve_case, sort_artifacts, validation, ConditionalLesson,
     ExperienceContext, ExperienceEvent, LessonApplicability, LessonEvidence, LessonVisibility,
-    ObservedCheck, RecordEvent, EXPERIENCE_MUTATIONS, ROLE_LESSON,
+    ObservedCheck, RecordEvent, EXPERIENCE_MUTATIONS, ROLE_LESSON, TASK_PREFIX,
 };
 use crate::error::Result;
 use crate::store::Store;
@@ -211,8 +211,9 @@ pub struct NoteOutcome {
     pub evidence: LessonEvidence,
     /// True when the case was already stored and nothing was written.
     pub replay: bool,
-    /// Searchable chunk rows this call wrote: one per stored artifact, or one
-    /// (the lesson) for a compact case. Zero for a replay.
+    /// Chunk rows the store wrote for this call: one per searchable record,
+    /// more when a long lesson is split. A compact case has one searchable
+    /// record, the lesson. Zero for a replay.
     pub rows_written: usize,
 }
 
@@ -244,6 +245,17 @@ pub struct NoteOutcome {
 /// With `compact`, every event is still stored, but only the lesson gets a
 /// searchable row. The replay rules above read lessons only, so they hold for
 /// a compact case and for a case stored in full.
+///
+/// A crash between the writes leaves an unfinished case: a problem, maybe
+/// attempts and a check, but no lesson. The same submission finishes it
+/// instead of starting a second case. The lookup reads the artifact tables,
+/// because a compact case has no row before its lesson. An unfinished case
+/// matches when its problem, symptoms, attempts and check are a prefix of the
+/// file's; with `shared_id` it must also carry `agentdash:<id>`. The call
+/// reuses the stored records, writes the missing ones, and returns
+/// `replay: false` with the rows of this call only. A stored case that does
+/// not match (other content under the same ID) is left alone and the call adds
+/// a new case, as it did before.
 pub async fn record_case<S: Store + ?Sized>(
     store: &S,
     mut context: ExperienceContext,
@@ -264,37 +276,181 @@ pub async fn record_case<S: Store + ?Sized>(
 
     let _guard = EXPERIENCE_MUTATIONS.lock().await;
     if let Some(lesson) = find_replay(store, &context, &case).await? {
-        return outcome_for(store, &context, &lesson, 0).await;
+        return outcome_for(store, &context, &lesson, true, 0).await;
     }
     match (case.check.method, case.check.receipt_id.as_deref()) {
         (CheckMethod::Executed, Some(receipt_id)) => {
             attach_to_receipt(store, context, &case, receipt_id).await
         }
-        _ => create_case(store, context, &case, compact).await,
+        _ => {
+            let stored = find_unfinished(store, &context, &case).await?;
+            write_case(store, context, &case, compact, stored).await
+        }
     }
 }
 
-async fn create_case<S: Store + ?Sized>(
+/// The stored records of an unfinished case, in causal order.
+#[derive(Default)]
+struct Stored {
+    problem: Option<TaskArtifact>,
+    attempts: Vec<TaskArtifact>,
+    check: Option<TaskArtifact>,
+}
+
+/// The unfinished case of this submission, or nothing stored (see
+/// [`record_case`]). It reads the artifact tables, because a crash can leave a
+/// compact case without any chunk row.
+async fn find_unfinished<S: Store + ?Sized>(
+    store: &S,
+    context: &ExperienceContext,
+    case: &CaseFile,
+) -> Result<Stored> {
+    let mut tasks = store
+        .list_tasks(
+            &context.tenant_id,
+            context.project_id.as_option(),
+            EXHAUSTIVE_LIMIT,
+        )
+        .await?;
+    tasks.retain(|task| task.task_id.starts_with(TASK_PREFIX));
+    // Stable pick when several unfinished cases match.
+    tasks.sort_by(|left, right| left.task_id.cmp(&right.task_id));
+    for task in tasks {
+        let mut events = store
+            .list_task_artifacts(&context.tenant_id, &task.task_id)
+            .await?
+            .into_iter()
+            .filter(|artifact| artifact.experience.is_some())
+            .collect::<Vec<_>>();
+        sort_artifacts(&mut events);
+        if let Some(stored) = unfinished_prefix(events, context, case) {
+            return Ok(stored);
+        }
+    }
+    Ok(Stored::default())
+}
+
+/// `events` as a [`Stored`] case when they are a prefix of `case`: a problem,
+/// then the first attempts, then a check on the fix. A lesson, a correction,
+/// any other record, or any difference from the file gives `None`.
+fn unfinished_prefix(
+    mut events: Vec<TaskArtifact>,
+    context: &ExperienceContext,
+    case: &CaseFile,
+) -> Option<Stored> {
+    let check = match events.last().and_then(|last| last.experience.as_ref()) {
+        Some(ExperienceEvent::ObservedCheck(_)) => events.pop(),
+        _ => None,
+    };
+    if events.is_empty() {
+        return None;
+    }
+    let problem = events.remove(0);
+    let Some(ExperienceEvent::Problem {
+        description,
+        symptom_terms,
+    }) = problem.experience.as_ref()
+    else {
+        return None;
+    };
+    if *description != case.problem
+        || *symptom_terms != case.symptoms
+        || problem.project_id != context.project_id
+    {
+        return None;
+    }
+    if let Some(uri) = context.provenance.uri.as_deref() {
+        if problem.provenance.uri.as_deref() != Some(uri) {
+            return None;
+        }
+    }
+    let actions = case
+        .failed
+        .iter()
+        .chain(std::iter::once(&case.fix))
+        .collect::<Vec<_>>();
+    if events.len() > actions.len() {
+        return None;
+    }
+    for (attempt, action) in events.iter().zip(&actions) {
+        match attempt.experience.as_ref() {
+            Some(ExperienceEvent::Attempt { action: stored, .. }) if stored == *action => {}
+            _ => return None,
+        }
+    }
+    if let Some(check) = &check {
+        let Some(ExperienceEvent::ObservedCheck(observed)) = check.experience.as_ref() else {
+            return None;
+        };
+        let on_the_fix = events.len() == actions.len()
+            && events.last().map(|attempt| attempt.artifact_id.as_str())
+                == Some(observed.attempt_id.as_str());
+        if !on_the_fix
+            || observed.result != case.check.result
+            || observed.command != case.check.command
+        {
+            return None;
+        }
+    }
+    Some(Stored {
+        problem: Some(problem),
+        attempts: events,
+        check,
+    })
+}
+
+/// Write the records of the case that `stored` does not hold yet.
+async fn write_case<S: Store + ?Sized>(
     store: &S,
     context: ExperienceContext,
     case: &CaseFile,
     compact: bool,
+    stored: Stored,
 ) -> Result<NoteOutcome> {
     let mut clock = Clock::new(context.observed_at_ms);
-    let problem = record_unlocked(
-        store,
-        clock.tick(&context),
-        RecordEvent::Problem {
-            description: case.problem.clone(),
-            symptom_terms: case.symptoms.clone(),
-        },
-        !compact,
-    )
-    .await?;
+    if let Some(last) = stored
+        .check
+        .iter()
+        .chain(stored.attempts.last())
+        .chain(stored.problem.as_ref())
+        .map(event_time)
+        .max()
+    {
+        // The new records must not predate the stored ones.
+        clock.not_before(last + 1);
+    }
+    let mut rows_written = 0;
 
-    let mut attempt_ids: Vec<String> = Vec::new();
-    for action in case.failed.iter().chain(std::iter::once(&case.fix)) {
-        let attempt = record_unlocked(
+    let problem = match stored.problem {
+        Some(problem) => problem,
+        None => {
+            let written = record_unlocked(
+                store,
+                clock.tick(&context),
+                RecordEvent::Problem {
+                    description: case.problem.clone(),
+                    symptom_terms: case.symptoms.clone(),
+                },
+                !compact,
+            )
+            .await?;
+            rows_written += written.rows;
+            written.artifact
+        }
+    };
+
+    let mut attempt_ids: Vec<String> = stored
+        .attempts
+        .iter()
+        .map(|attempt| attempt.artifact_id.clone())
+        .collect();
+    for action in case
+        .failed
+        .iter()
+        .chain(std::iter::once(&case.fix))
+        .skip(attempt_ids.len())
+    {
+        let written = record_unlocked(
             store,
             clock.tick(&context),
             RecordEvent::Attempt {
@@ -305,21 +461,29 @@ async fn create_case<S: Store + ?Sized>(
             !compact,
         )
         .await?;
-        attempt_ids.push(attempt.artifact_id);
+        rows_written += written.rows;
+        attempt_ids.push(written.artifact.artifact_id);
     }
     let fix_attempt_id = attempt_ids.last().cloned().expect("the fix is an attempt");
 
-    let check = record_observed_check_unlocked(
-        store,
-        clock.tick(&context),
-        ObservedCheck {
-            attempt_id: fix_attempt_id,
-            result: case.check.result.clone(),
-            command: case.check.command.clone(),
-        },
-        !compact,
-    )
-    .await?;
+    let check = match stored.check {
+        Some(check) => check,
+        None => {
+            let written = record_observed_check_unlocked(
+                store,
+                clock.tick(&context),
+                ObservedCheck {
+                    attempt_id: fix_attempt_id,
+                    result: case.check.result.clone(),
+                    command: case.check.command.clone(),
+                },
+                !compact,
+            )
+            .await?;
+            rows_written += written.rows;
+            written.artifact
+        }
+    };
     let lesson = record_unlocked(
         store,
         clock.tick(&context),
@@ -332,15 +496,14 @@ async fn create_case<S: Store + ?Sized>(
         true,
     )
     .await?;
-    let rows_written = if compact { 1 } else { attempt_ids.len() + 3 };
     Ok(NoteOutcome {
         problem_id: problem.artifact_id,
         attempt_ids,
         check_id: check.artifact_id,
-        lesson_id: lesson.artifact_id,
+        lesson_id: lesson.artifact.artifact_id,
         evidence: LessonEvidence::Observed,
         replay: false,
-        rows_written,
+        rows_written: rows_written + lesson.rows,
     })
 }
 
@@ -386,7 +549,7 @@ async fn attach_to_receipt<S: Store + ?Sized>(
         true,
     )
     .await?;
-    outcome_for(store, &context, &lesson, 1).await
+    outcome_for(store, &context, &lesson.artifact, false, lesson.rows).await
 }
 
 fn lesson_from_case(
@@ -515,6 +678,7 @@ async fn outcome_for<S: Store + ?Sized>(
     store: &S,
     context: &ExperienceContext,
     lesson_artifact: &TaskArtifact,
+    replay: bool,
     rows_written: usize,
 ) -> Result<NoteOutcome> {
     let lesson = lesson_from_event(required_event(lesson_artifact)?)
@@ -532,7 +696,7 @@ async fn outcome_for<S: Store + ?Sized>(
         check_id: lesson.supporting_check_id.clone(),
         lesson_id: lesson_artifact.artifact_id.clone(),
         evidence: lesson.evidence,
-        replay: rows_written == 0,
+        replay,
         rows_written,
     })
 }
@@ -551,6 +715,11 @@ impl Clock {
         }))
     }
 
+    /// Never hand out a time before `earliest`.
+    fn not_before(&mut self, earliest: i64) {
+        self.0 = self.0.max(earliest);
+    }
+
     fn tick(&mut self, context: &ExperienceContext) -> ExperienceContext {
         let mut stamped = context.clone();
         stamped.observed_at_ms = Some(self.0);
@@ -558,6 +727,9 @@ impl Clock {
         stamped
     }
 }
+
+#[cfg(test)]
+mod finish_tests;
 
 #[cfg(test)]
 mod tests {

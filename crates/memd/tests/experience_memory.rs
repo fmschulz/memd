@@ -4,10 +4,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use memd::experience::{
-    export_bundle, import_bundle, record, record_check, resolve_case, retrieve_lessons,
-    validate_check_target, CheckReceipt, ConditionalLesson, ExperienceBundleV1, ExperienceContext,
-    ExperienceEvent, ExperienceResolutionState, LessonApplicability, LessonQuery, LessonRecall,
-    LessonVisibility, RecallAbstention, RecordEvent, SourceFingerprint, SourceFingerprintCoverage,
+    export_bundle, import_bundle, record, record_case, record_check, resolve_case,
+    retrieve_lessons, validate_check_target, CaseFile, CheckReceipt, ConditionalLesson,
+    ExperienceBundleV1, ExperienceContext, ExperienceEvent, ExperienceResolutionState,
+    LessonApplicability, LessonEvidence, LessonQuery, LessonRecall, LessonVisibility,
+    RecallAbstention, RecordEvent, SourceFingerprint, SourceFingerprintCoverage,
 };
 use memd::store::persistent::{PersistentStore, PersistentStoreConfig};
 use memd::store::{MemoryStore, Store};
@@ -1092,6 +1093,179 @@ fn context(project: &str, time: i64) -> ExperienceContext {
 
 fn tenant(value: &str) -> TenantId {
     TenantId::new(value).unwrap()
+}
+
+/// Chunk rows of the store, read from its metadata database.
+fn chunk_rows(path: &Path) -> usize {
+    let connection = rusqlite::Connection::open(path.join("metadata.db")).unwrap();
+    connection
+        .query_row("SELECT COUNT(*) FROM chunks", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap() as usize
+}
+
+fn cargo_case(fix: &str) -> CaseFile {
+    CaseFile::parse(
+        serde_json::json!({
+            "problem": "Cargo resolution fails on the build host",
+            "symptoms": ["cargo", "dependency", "resolution"],
+            "failed": ["retry the build"],
+            "fix": fix,
+            "check": {"method": "observed", "result": "cargo check passed"},
+        })
+        .to_string()
+        .as_bytes(),
+    )
+    .unwrap()
+}
+
+/// A lesson of 1,000 three-byte characters is longer than the store's split
+/// threshold, so the store writes several rows for it. `rows_written` counts
+/// the rows the store wrote, not the records.
+#[tokio::test]
+async fn rows_written_counts_the_rows_of_a_split_lesson() {
+    let long_fix = "\u{20ac}".repeat(1000);
+    for compact in [true, false] {
+        let data = tempfile::tempdir().unwrap();
+        let store = persistent_store(data.path());
+        let before = chunk_rows(data.path());
+
+        let note = record_case(
+            &store,
+            context("project_a", START_MS),
+            cargo_case(&long_fix),
+            None,
+            compact,
+        )
+        .await
+        .unwrap();
+
+        let written = chunk_rows(data.path()) - before;
+        assert!(written > 1, "compact {compact}: the lesson must split");
+        assert_eq!(note.rows_written, written, "compact {compact}");
+        if !compact {
+            // Problem, two attempts and check have one row each.
+            assert!(written > 5, "compact {compact}");
+        }
+    }
+}
+
+/// A lesson attached to an executed receipt is one write: its rows are the
+/// rows of the lesson alone, compact or not.
+#[tokio::test]
+async fn rows_written_of_a_receipt_lesson_is_what_the_store_wrote() {
+    let long_fix = "\u{20ac}".repeat(1000);
+    for (compact, fix) in [(true, "Pin the lockfile"), (false, long_fix.as_str())] {
+        let data = tempfile::tempdir().unwrap();
+        let store = persistent_store(data.path());
+        let problem = record_problem(&store, "project_a", START_MS).await;
+        let attempt = record_attempt(&store, &problem, None, START_MS + 1).await;
+        let check = record_check(
+            &store,
+            context("project_a", START_MS + 2),
+            successful_receipt(&attempt.artifact_id, START_MS + 2),
+        )
+        .await
+        .unwrap();
+        let mut case = cargo_case(fix);
+        case.check = memd::experience::CaseCheck {
+            method: memd::experience::CheckMethod::Executed,
+            result: "cargo check passed".to_string(),
+            command: None,
+            receipt_id: Some(check.artifact_id.clone()),
+        };
+        let before = chunk_rows(data.path());
+
+        let note = record_case(
+            &store,
+            context("project_a", START_MS + 10),
+            case,
+            Some("EXP-70"),
+            compact,
+        )
+        .await
+        .unwrap();
+
+        let written = chunk_rows(data.path()) - before;
+        assert!(written >= 1);
+        assert_eq!(note.rows_written, written, "compact {compact}");
+        assert_eq!(note.evidence, LessonEvidence::Executed);
+        assert_eq!(note.problem_id, problem.artifact_id);
+        if !compact {
+            assert!(written > 1, "the long lesson splits");
+        }
+        // The receipt lesson is the only lesson row, and a replay writes none.
+        let again = record_case(
+            &store,
+            context("project_a", START_MS + 20),
+            cargo_case(fix),
+            Some("EXP-70"),
+            compact,
+        )
+        .await
+        .unwrap();
+        assert!(again.replay);
+        assert_eq!(again.rows_written, 0);
+        assert_eq!(chunk_rows(data.path()) - before, written);
+    }
+}
+
+/// Two current lessons that conflict make a compact case abstain, as a case
+/// stored in full does.
+#[tokio::test]
+async fn a_compact_case_with_conflicting_lessons_abstains() {
+    let data = tempfile::tempdir().unwrap();
+    let store = persistent_store(data.path());
+    let note = record_case(
+        &store,
+        context("project_a", START_MS),
+        cargo_case("Pin cargo dependencies"),
+        Some("EXP-71"),
+        true,
+    )
+    .await
+    .unwrap();
+    let mut conflicting = ConditionalLesson {
+        problem_id: note.problem_id.clone(),
+        supporting_check_id: note.check_id.clone(),
+        guidance: "Update cargo dependencies".to_string(),
+        symptom_terms: vec![
+            "cargo".to_string(),
+            "dependency".to_string(),
+            "resolution".to_string(),
+        ],
+        visibility: LessonVisibility::Project,
+        evidence: LessonEvidence::Observed,
+        ..Default::default()
+    };
+    conflicting.conflicts_with = vec![note.lesson_id.clone()];
+    let second = record(
+        &store,
+        context("project_a", START_MS + 100),
+        RecordEvent::Lesson(conflicting),
+    )
+    .await
+    .unwrap();
+
+    let case = resolve_case(&store, &tenant("experience_test"), &note.problem_id)
+        .await
+        .unwrap();
+    assert_eq!(case.resolution_state, ExperienceResolutionState::Conflicted);
+    let LessonRecall::Abstain {
+        reason: RecallAbstention::Conflict { lesson_ids },
+    } = recall(&store, "project_a", false, None, None, None).await
+    else {
+        panic!("conflicting lessons must abstain");
+    };
+    assert_eq!(
+        lesson_ids
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
+        [note.lesson_id.clone(), second.artifact_id]
+            .into_iter()
+            .collect()
+    );
 }
 
 fn persistent_store(path: &Path) -> PersistentStore {
