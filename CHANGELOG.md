@@ -29,6 +29,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - A writer saves a dense index at shutdown only when it changed, and once. A failed save now reaches the caller of `shutdown` and `save_all` instead of only the log. Saving an index without points no longer fails, and `embeddings.bin` is read and written in blocks with the same bytes as before.
 - Reading a chunk from the active segment reads only that record with a positioned read instead of the whole payload file.
 - Dense indexes record the embedding model and reject switches, including between two 384-d models. Switching an existing store requires `MEMD_BACKFILL_HNSW_ON_STARTUP=1` to rebuild from segments; unmarked 384-d and 768-d stores are treated as MiniLM and BGE-base respectively.
+- CI fails on clippy warnings for the whole workspace, runs the three `test-support` tests, and runs the `memd-wiki` unit tests.
+- `make status` and `verify_memd_enforcement.sh` accept the enforcement block in `~/.claude/rules/*.md`, as `memd doctor` does.
 
 ### Removed
 
@@ -59,16 +61,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Warm worker PID checks use portable Unix signal-zero semantics, including macOS.
 - A model that cannot load (files missing, no network, a broken file) no longer makes the store unusable. The embedding model loads on first use, so the failure arrives at the first call that embeds. That load is tried once per process and its cause is logged once at warn. From then on search answers from the keyword index, reports `retrieval_mode` `keyword_fallback` with the cause in `scope_status` warnings (a dense-only store reports `text_fallback`), and writes still index the keyword side and leave the dense side to a later repair pass. The first write in a process that skips dense indexing sets the `embedding_revision` marker to `rebuilding` before the write returns (if that cannot be written, the chunk stays an index failure). The next writer whose model loads then resumes the segment-backed rebuild, embeds only the chunks that lack a vector, and marks the store current. A repair or rebuild that embedded nothing no longer marks the rebuild finished.
 - Context packing skips chunks that exceed the remaining token budget and continues with smaller chunks.
-
 - Warm startup waits for live workers up to a configurable budget, reaps timed-out children before fallback, preserves background consolidation's data directory, and uses a private per-user socket root. Long requests wait for completion.
 - Claude consolidation disables tools and project configuration in a fresh temporary directory; its model is configurable and defaults to `sonnet`.
 - Removed the nonfunctional `memory.metrics` operation, health latency block, and orphaned per-call collectors; health keeps measured store state.
 - Claude execution provenance reads `CLAUDE_CODE_SESSION_ID`.
 - Automatic session scope creation skips the home directory and filesystem root; explicit initialization remains available.
 - `memd init` and the installer share one memory policy without a mandatory write before every answer.
-
 - Short writer lifetimes now pack small sealed payload segments in size tiers at writer open, bounding segment growth and amortizing payload copies. Replacement files and metadata are made durable before obsolete directories and purged plaintext are removed.
-
 - BM25 uses the same lowercase-and-stem analyzer for indexed text and queries. The first writer rebuilds older sparse indexes once; read-only commands leave the index and its revision marker unchanged.
 - WAL recovery preserves lifecycle metadata and leaves new or physically repaired chunks pending until indexing succeeds. It skips deleted or purged chunks and reports bad records while loading later records. Shutdown seals small segments so reopening does not copy them again or leak unfinished directories.
 - Purge aborts on transient payload read errors. Metadata scans continue past unreadable rows, and cleanup previews that include unreadable rows use the same selection and counts as their purge commands.
@@ -86,11 +85,6 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - `memd report --since` and `time_range` timezone parsing no longer panic on a multi-byte character.
 - `memd purge` syncs the archive file and its directory to disk before it deletes any row.
 - `memd-wiki` with no subcommand crashed; `memd-wiki lint --check-staleness` read the wrong payload shape and never reported a stale page.
-
-### Changed
-
-- CI fails on clippy warnings for the whole workspace, runs the three `test-support` tests, and runs the `memd-wiki` unit tests.
-- `make status` and `verify_memd_enforcement.sh` accept the enforcement block in `~/.claude/rules/*.md`, as `memd doctor` does.
 
 ## [1.9.0] - 2026-10-17
 
