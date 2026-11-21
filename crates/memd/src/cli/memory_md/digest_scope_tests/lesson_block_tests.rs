@@ -66,6 +66,56 @@ async fn one_case_renders_one_lesson_line() {
     assert!(entries[0]["skipped"].is_null());
 }
 
+/// A compact case has one searchable row, the lesson. The digest must render
+/// the same line as for a case stored in full.
+#[tokio::test]
+async fn a_compact_case_renders_its_lesson_line() {
+    let data = tempfile::tempdir().unwrap();
+    let project_dir = tempfile::tempdir().unwrap();
+    let store = open_store(data.path());
+    let case = CaseFile::parse(
+        json!({
+            "problem": "Cargo registry index is read-only",
+            "symptoms": ["slow startup"],
+            "failed": ["restarted the daemon"],
+            "fix": "Set CARGO_HOME to a writable directory.",
+            "check": {"method": "observed", "result": "startup took under a second"},
+            "applies_when": {"tool": "cargo", "version": "1.80", "machine": "nelli-gpu"},
+            "visibility": "shared",
+        })
+        .to_string()
+        .as_bytes(),
+    )
+    .unwrap();
+    let note = record_case(
+        &store,
+        experience_context("alpha", T0),
+        case,
+        Some("EXP-1"),
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(note.rows_written, 1);
+
+    let (result, memory_md, explain) =
+        refresh_digest(&store, project_dir.path(), None, "alpha", 3).await;
+
+    let block = block(&memory_md).unwrap_or_else(|| panic!("no block:\n{memory_md}"));
+    assert_eq!(
+        block,
+        format!(
+            "1. Set CARGO_HOME to a writable directory.\n   - when: slow startup; applies to: tool cargo 1.80, machine nelli-gpu; evidence: observed; case: `{}`\n\nMore lessons: memd experience find \"<error words>\"",
+            note.problem_id
+        )
+    );
+    assert_eq!(result["project_lessons"], 1);
+    let entries = explain["lessons"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["lesson_id"], note.lesson_id);
+    assert!(entries[0]["skipped"].is_null());
+}
+
 #[tokio::test]
 async fn four_cases_show_the_three_newest() {
     let data = tempfile::tempdir().unwrap();
@@ -337,9 +387,15 @@ async fn hostile_lesson_fields_stay_inert() {
         .as_bytes(),
     )
     .unwrap();
-    let note = record_case(&store, experience_context("alpha", T0), case, Some("EXP-1"))
-        .await
-        .unwrap();
+    let note = record_case(
+        &store,
+        experience_context("alpha", T0),
+        case,
+        Some("EXP-1"),
+        false,
+    )
+    .await
+    .unwrap();
     store
         .add(fact(
             Some("alpha"),

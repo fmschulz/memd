@@ -41,6 +41,10 @@ pub enum ExperienceCommand {
         /// a second note with the same ID returns the stored case.
         #[arg(long)]
         shared_id: Option<String>,
+        /// Store the full case, but create a searchable row only for the
+        /// lesson.
+        #[arg(long)]
+        compact: bool,
     },
     /// Read a problem and its attempts, checks, and current lessons.
     ///
@@ -179,9 +183,14 @@ pub async fn prepare_experience_command(
             file,
             emit: _,
             shared_id,
+            compact,
         } => (
             "experience.note",
-            json!({"case": read_case(&file)?, "shared_id": shared_id}),
+            json!({
+                "case": read_case(&file)?,
+                "shared_id": shared_id,
+                "compact": compact,
+            }),
         ),
         ExperienceCommand::Get { problem_id } => {
             ("experience.get", json!({"problem_id": problem_id}))
@@ -266,6 +275,8 @@ struct NoteRequest {
     case: CaseFile,
     #[serde(default)]
     shared_id: Option<String>,
+    #[serde(default)]
+    compact: bool,
 }
 
 #[derive(Deserialize)]
@@ -319,6 +330,7 @@ pub(super) async fn call<S: Store>(store: &S, tool: &str, arguments: Value) -> R
                     request.context,
                     request.case,
                     request.shared_id.as_deref(),
+                    request.compact,
                 )
                 .await?,
             )?
@@ -428,6 +440,7 @@ mod tests {
                 file: PathBuf::from("case.json"),
                 emit: false,
                 shared_id: None,
+                compact: false,
             },
         ];
         for command in reads {

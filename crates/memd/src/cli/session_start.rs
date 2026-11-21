@@ -2421,6 +2421,15 @@ mod tests {
 
     #[tokio::test]
     async fn an_experience_case_counts_as_stored_content() {
+        assert_case_counts_as_content(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_compact_experience_case_counts_as_stored_content() {
+        assert_case_counts_as_content(true).await;
+    }
+
+    async fn assert_case_counts_as_content(compact: bool) {
         use crate::experience::{record_case, CaseFile, ExperienceContext};
 
         let tmp = tempdir().unwrap();
@@ -2452,6 +2461,7 @@ mod tests {
             },
             case,
             None,
+            compact,
         )
         .await
         .unwrap();

@@ -75,7 +75,17 @@ different ID always makes a new case. Without an ID, it is a case in the same
 project with the same problem, symptoms, fix, check, and `applies_when`
 (`failed`, `evidence`, and `visibility` are not compared). A replay returns the
 stored case (`"replay": true`) and writes nothing. The output names
-`problem_id`, `attempt_ids`, `check_id`, `lesson_id`, and `evidence`.
+`problem_id`, `attempt_ids`, `check_id`, `lesson_id`, `evidence`, and
+`rows_written`, the number of search rows the call wrote.
+
+`--compact` stores every record of the case as above but creates a search row
+only for the lesson. Without it, each record (problem, each attempt, check,
+lesson) gets one row. `experience get`, replay, corrections, `experience find`,
+the `memory.md` lesson block, and the session-start content rule read lessons
+and the artifact tables, so they work the same on a compact case. A case first
+stored in full and sent again with `--compact` is a replay. `experience export`
+and `experience import` still regenerate one row per record on the importing
+store. `--compact` with `--emit` validates and prints only.
 
 ### Observed and executed evidence
 

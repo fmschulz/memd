@@ -83,6 +83,7 @@ async fn record_lesson<S: Store + ?Sized>(
         experience_context(project, observed_at_ms),
         case,
         Some(id),
+        false,
     )
     .await
     .unwrap()

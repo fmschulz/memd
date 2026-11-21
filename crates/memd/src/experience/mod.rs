@@ -336,24 +336,38 @@ pub async fn record<S: Store + ?Sized>(
     event: RecordEvent,
 ) -> Result<TaskArtifact> {
     let _guard = EXPERIENCE_MUTATIONS.lock().await;
-    record_unlocked(store, context, event).await
+    record_unlocked(store, context, event, true).await
 }
 
+/// `searchable` decides whether a problem or an attempt gets a retrieval row.
+/// Lessons and corrections always do: recall and the `memory.md` digest find
+/// them through that row.
 async fn record_unlocked<S: Store + ?Sized>(
     store: &S,
     context: ExperienceContext,
     event: RecordEvent,
+    searchable: bool,
 ) -> Result<TaskArtifact> {
     match event {
         RecordEvent::Problem {
             description,
             symptom_terms,
-        } => record_problem(store, context, description, symptom_terms).await,
+        } => record_problem(store, context, description, symptom_terms, searchable).await,
         RecordEvent::Attempt {
             problem_id,
             previous_attempt_id,
             action,
-        } => record_attempt(store, context, problem_id, previous_attempt_id, action).await,
+        } => {
+            record_attempt(
+                store,
+                context,
+                problem_id,
+                previous_attempt_id,
+                action,
+                searchable,
+            )
+            .await
+        }
         RecordEvent::Lesson(lesson) => record_lesson(store, context, lesson).await,
         RecordEvent::Correction {
             problem_id,
@@ -467,7 +481,7 @@ async fn record_check_unlocked<S: Store + ?Sized>(
     artifact.verification_status = Some("recorded_check".to_string());
     artifact.related_artifact_ids = vec![receipt.attempt_id.clone()];
     artifact.experience = Some(ExperienceEvent::Check(Box::new(receipt)));
-    write_artifact(store, artifact).await
+    write_artifact(store, artifact, true).await
 }
 
 /// Store an agent-reported check for the current attempt of a problem.
@@ -475,6 +489,7 @@ async fn record_observed_check_unlocked<S: Store + ?Sized>(
     store: &S,
     context: ExperienceContext,
     check: ObservedCheck,
+    searchable: bool,
 ) -> Result<TaskArtifact> {
     validation::validate_observed_check(&check)?;
     let (target, attempt) = load_check_target(
@@ -503,7 +518,7 @@ async fn record_observed_check_unlocked<S: Store + ?Sized>(
     artifact.verification_status = Some("recorded_check".to_string());
     artifact.related_artifact_ids = vec![check.attempt_id.clone()];
     artifact.experience = Some(ExperienceEvent::ObservedCheck(check));
-    write_artifact(store, artifact).await
+    write_artifact(store, artifact, searchable).await
 }
 
 /// Fetch one typed experience artifact by ID.
@@ -583,6 +598,7 @@ async fn record_problem<S: Store + ?Sized>(
     context: ExperienceContext,
     description: String,
     symptom_terms: Vec<String>,
+    searchable: bool,
 ) -> Result<TaskArtifact> {
     require_text("description", &description)?;
     validate_terms(&symptom_terms)?;
@@ -607,7 +623,7 @@ async fn record_problem<S: Store + ?Sized>(
         description,
         symptom_terms,
     });
-    write_artifact(store, artifact).await
+    write_artifact(store, artifact, searchable).await
 }
 
 async fn record_attempt<S: Store + ?Sized>(
@@ -616,6 +632,7 @@ async fn record_attempt<S: Store + ?Sized>(
     problem_id: String,
     previous_attempt_id: Option<String>,
     action: String,
+    searchable: bool,
 ) -> Result<TaskArtifact> {
     require_text("problem_id", &problem_id)?;
     require_text("action", &action)?;
@@ -672,7 +689,7 @@ async fn record_attempt<S: Store + ?Sized>(
         ordinal,
         action,
     });
-    write_artifact(store, artifact).await
+    write_artifact(store, artifact, searchable).await
 }
 
 async fn record_lesson<S: Store + ?Sized>(
@@ -697,7 +714,7 @@ async fn record_lesson<S: Store + ?Sized>(
     artifact.what_worked = vec![lesson.guidance.clone()];
     artifact.related_artifact_ids = validation::lesson_related_ids(&lesson);
     artifact.experience = Some(ExperienceEvent::Lesson(lesson));
-    write_artifact(store, artifact).await
+    write_artifact(store, artifact, true).await
 }
 
 async fn record_correction<S: Store + ?Sized>(
@@ -765,14 +782,21 @@ async fn record_correction<S: Store + ?Sized>(
         supersedes_id,
         replacement,
     });
-    write_artifact(store, artifact).await
+    write_artifact(store, artifact, true).await
 }
 
+/// Store the artifact, with one retrieval row when `searchable`, else with
+/// none. The artifact tables hold the full event either way.
 async fn write_artifact<S: Store + ?Sized>(
     store: &S,
     artifact: TaskArtifact,
+    searchable: bool,
 ) -> Result<TaskArtifact> {
-    let projections = build_task_projections_minimal(&artifact);
+    let projections = if searchable {
+        build_task_projections_minimal(&artifact)
+    } else {
+        Vec::new()
+    };
     store
         .add_task_artifact(artifact.clone(), projections)
         .await?;

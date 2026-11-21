@@ -39,7 +39,10 @@ exp find 'configuration rejected' --tool demo-check --version 1 --project-only \
 
 `--emit` checks the file and prints the canonical case without opening a store.
 `--shared-id` ties the local copy to an external exchange and makes a repeated
-call return the stored case. The lesson reads `evidence: "observed"` because
+call return the stored case. `--compact` stores the same full case but creates a
+search row only for the lesson, so one case adds one row instead of one row per
+problem, attempt, check, and lesson. The result shows `rows_written`. Use it
+when another system holds the details and the local copy only serves recall. The lesson reads `evidence: "observed"` because
 memd did not run the command; the sections below show the audit path, where
 memd runs the check and the lesson reads `executed`. Run `find` before you
 try a fix, and read `evidence` in the result: an observed lesson is a lead to

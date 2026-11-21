@@ -466,12 +466,6 @@ impl PersistentStore {
             .map(|projection| projection.kind.as_str().to_string())
             .collect::<Vec<_>>();
 
-        if projections.is_empty() {
-            return Err(MemdError::StorageError(
-                "task artifact requires at least one projection".into(),
-            ));
-        }
-
         let tenant_id = artifact.tenant_id.clone();
         let tenant_id_str = tenant_id.to_string();
         let projection_chunks = projections
@@ -592,7 +586,10 @@ impl PersistentStore {
             &projection_kinds,
         )?;
 
-        if self.async_indexing_enabled() {
+        if chunk_ids_for_state.is_empty() {
+            // No projections (an event of a compact experience case): no
+            // rows to index.
+        } else if self.async_indexing_enabled() {
             if let Some(indexer) = self.async_indexer.as_ref() {
                 let (ack_tx, ack_rx) = oneshot::channel();
                 let job = IndexJob {

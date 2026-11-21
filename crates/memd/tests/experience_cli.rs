@@ -1760,3 +1760,258 @@ fn get_from_another_project_hides_project_only_lessons() {
         ["problem", "attempt", "attempt", "observed_check", "lesson"]
     );
 }
+
+/// Chunk rows and canonical task artifacts of the whole store.
+fn store_counts(data_dir: &Path) -> (i64, i64) {
+    let connection = Connection::open(data_dir.join("metadata.db")).unwrap();
+    let count = |table: &str| -> i64 {
+        connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    (count("chunks"), count("task_artifacts"))
+}
+
+fn event_kinds(case: &Value) -> Vec<&str> {
+    case["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["experience"]["kind"].as_str().unwrap())
+        .collect()
+}
+
+const FULL_KINDS: [&str; 5] = ["problem", "attempt", "attempt", "observed_check", "lesson"];
+
+#[test]
+fn a_full_note_writes_one_row_per_artifact() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_dir = temp.path().join("project");
+    let data_dir = temp.path().join("data");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let file = write_case(temp.path(), "case.json", &example_case());
+
+    let note = note_case(&data_dir, &project_dir, PROJECT_A, &file, &[]);
+
+    // Problem, two attempts, check, lesson.
+    assert_eq!(store_counts(&data_dir), (5, 5));
+    assert_eq!(note["rows_written"], 5);
+}
+
+#[test]
+fn a_compact_note_stores_the_whole_case_with_one_searchable_row() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_dir = temp.path().join("project");
+    let data_dir = temp.path().join("data");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let file = write_case(temp.path(), "case.json", &example_case());
+
+    let note = note_case(&data_dir, &project_dir, PROJECT_A, &file, &["--compact"]);
+
+    assert_eq!(store_counts(&data_dir), (1, 5));
+    assert_eq!(note["rows_written"], 1);
+    assert_eq!(note["replay"], false);
+    let problem_id = note["problem_id"].as_str().unwrap();
+    let (case, _) = successful_json(
+        get_in(&data_dir, &project_dir, PROJECT_A, problem_id),
+        "get compact case",
+    );
+    assert_eq!(case["resolution_state"], "resolved");
+    assert_eq!(event_kinds(&case), FULL_KINDS);
+    assert_eq!(case["current_lessons"][0]["artifact_id"], note["lesson_id"]);
+    assert_eq!(
+        case["events"][3]["experience"]["attempt_id"],
+        case["events"][2]["artifact_id"]
+    );
+}
+
+#[test]
+fn find_returns_the_lesson_of_a_compact_case() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_dir = temp.path().join("project");
+    let data_dir = temp.path().join("data");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let file = write_case(temp.path(), "case.json", &example_case());
+    let note = note_case(&data_dir, &project_dir, PROJECT_A, &file, &["--compact"]);
+
+    let found = find_in(
+        &data_dir,
+        &project_dir,
+        PROJECT_A,
+        "uv cache read-only",
+        &[],
+    );
+
+    assert_eq!(found["status"], "matches", "{found}");
+    assert_eq!(
+        found["lessons"][0]["artifact"]["artifact_id"],
+        note["lesson_id"]
+    );
+    assert_eq!(
+        found["lessons"][0]["artifact"]["experience"]["guidance"],
+        "set UV_CACHE_DIR to a turn-local directory"
+    );
+}
+
+#[test]
+fn a_compact_note_replays_by_shared_id_and_by_content() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_dir = temp.path().join("project");
+    let data_dir = temp.path().join("data");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let file = write_case(temp.path(), "case.json", &example_case());
+
+    let by_id = note_case(
+        &data_dir,
+        &project_dir,
+        PROJECT_A,
+        &file,
+        &["--compact", "--shared-id", "EXP-40"],
+    );
+    let by_id_again = note_case(
+        &data_dir,
+        &project_dir,
+        PROJECT_A,
+        &file,
+        &["--compact", "--shared-id", "EXP-40"],
+    );
+    assert_eq!(by_id_again["replay"], true);
+    assert_eq!(by_id_again["rows_written"], 0);
+    assert_eq!(by_id_again["problem_id"], by_id["problem_id"]);
+    assert_eq!(by_id_again["lesson_id"], by_id["lesson_id"]);
+    assert_eq!(store_counts(&data_dir), (1, 5));
+
+    let (case, _) = successful_json(
+        get_in(
+            &data_dir,
+            &project_dir,
+            PROJECT_A,
+            by_id["problem_id"].as_str().unwrap(),
+        ),
+        "get compact case",
+    );
+    assert_eq!(case["problem"]["provenance"]["uri"], "agentdash:EXP-40");
+    assert_eq!(
+        case["current_lessons"][0]["provenance"]["uri"],
+        "agentdash:EXP-40"
+    );
+
+    // Without an ID, the same content is the same submission.
+    let by_content = note_case(&data_dir, &project_dir, PROJECT_B, &file, &["--compact"]);
+    assert_eq!(by_content["replay"], false);
+    let by_content_again = note_case(&data_dir, &project_dir, PROJECT_B, &file, &["--compact"]);
+    assert_eq!(by_content_again["replay"], true);
+    assert_eq!(by_content_again["lesson_id"], by_content["lesson_id"]);
+    assert_eq!(store_counts(&data_dir), (2, 10));
+}
+
+#[test]
+fn a_case_stored_in_full_is_not_stored_again_by_a_compact_note() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_dir = temp.path().join("project");
+    let data_dir = temp.path().join("data");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let file = write_case(temp.path(), "case.json", &example_case());
+    let full = note_case(
+        &data_dir,
+        &project_dir,
+        PROJECT_A,
+        &file,
+        &["--shared-id", "EXP-41"],
+    );
+    assert_eq!(store_counts(&data_dir), (5, 5));
+
+    let again = note_case(
+        &data_dir,
+        &project_dir,
+        PROJECT_A,
+        &file,
+        &["--compact", "--shared-id", "EXP-41"],
+    );
+
+    assert_eq!(again["replay"], true);
+    assert_eq!(again["problem_id"], full["problem_id"]);
+    assert_eq!(again["lesson_id"], full["lesson_id"]);
+    assert_eq!(store_counts(&data_dir), (5, 5));
+}
+
+#[test]
+fn a_correction_of_a_compact_lesson_is_searchable_and_supersedes_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_dir = temp.path().join("project");
+    let data_dir = temp.path().join("data");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let file = write_case(temp.path(), "case.json", &example_case());
+    let note = note_case(&data_dir, &project_dir, PROJECT_A, &file, &["--compact"]);
+
+    let mut command = note_command(&data_dir, &project_dir, PROJECT_A, "off");
+    command.args(["record", "--json"]).arg(
+        json!({"event": {
+            "kind": "correction",
+            "problem_id": note["problem_id"],
+            "supersedes_id": note["lesson_id"],
+            "replacement": {
+                "problem_id": note["problem_id"],
+                "supporting_check_id": note["check_id"],
+                "guidance": "set UV_CACHE_DIR to /tmp/uv-cache",
+                "symptom_terms": ["uv", "cache", "read-only"],
+                "applicability": {"tool": "uv"},
+                "visibility": "shared",
+                "evidence": "observed"
+            }
+        }})
+        .to_string(),
+    );
+    let correction = successful_json(command, "correct a compact lesson").0;
+
+    // The lesson row and the correction row are the only searchable rows.
+    assert_eq!(store_counts(&data_dir), (2, 6));
+    let found = find_in(
+        &data_dir,
+        &project_dir,
+        PROJECT_A,
+        "uv cache read-only",
+        &[],
+    );
+    assert_eq!(found["status"], "matches", "{found}");
+    assert_eq!(found["lessons"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        found["lessons"][0]["artifact"]["artifact_id"],
+        correction["artifact_id"]
+    );
+    let (case, _) = successful_json(
+        get_in(
+            &data_dir,
+            &project_dir,
+            PROJECT_A,
+            note["problem_id"].as_str().unwrap(),
+        ),
+        "get corrected compact case",
+    );
+    assert_eq!(case["current_lessons"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        case["current_lessons"][0]["artifact_id"],
+        correction["artifact_id"]
+    );
+}
+
+#[test]
+fn compact_with_emit_validates_and_stores_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let work_dir = temp.path().join("work");
+    std::fs::create_dir_all(&work_dir).unwrap();
+    let data_dir = temp.path().join("never-created");
+    let file = write_case(temp.path(), "case.json", &example_case());
+
+    let mut command = base_command(&data_dir, &work_dir);
+    command
+        .args(["experience", "note"])
+        .arg(&file)
+        .args(["--compact", "--emit"]);
+    let (canonical, _) = successful_json(command, "emit compact case");
+
+    assert_eq!(canonical, example_case());
+    assert!(!data_dir.exists(), "--emit must not create the data dir");
+}

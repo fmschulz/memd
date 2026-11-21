@@ -1586,6 +1586,60 @@ async fn wal_recovery_rebuilds_task_side_tables() {
 }
 
 #[tokio::test]
+async fn a_task_artifact_without_projections_is_stored_and_recovered() {
+    let dir = tempdir().unwrap();
+    let tenant = make_tenant();
+    let metadata_path = dir.path().join("metadata.db");
+    let config = || PersistentStoreConfig {
+        data_dir: dir.path().to_path_buf(),
+        segment_max_chunks: 100,
+        wal_checkpoint_interval: 0,
+        enable_dense_search: false,
+        enable_hybrid_search: false,
+        ..Default::default()
+    };
+    let artifact = TaskArtifact::new_task_start(tenant.clone());
+    let artifact_id = artifact.artifact_id.clone();
+    let task_id = artifact.task_id.clone();
+
+    {
+        let store = PersistentStore::open(config()).unwrap();
+        let written = store.add_task_artifact(artifact, Vec::new()).await.unwrap();
+        assert!(written.projection_chunk_ids.is_empty());
+        assert!(store
+            .get_task_artifact(&tenant, &artifact_id)
+            .await
+            .unwrap()
+            .is_some());
+
+        let conn = Connection::open(&metadata_path).unwrap();
+        conn.execute("DELETE FROM tasks", []).unwrap();
+        conn.execute("DELETE FROM task_artifacts", []).unwrap();
+        drop(conn);
+    }
+
+    let store = PersistentStore::open(config()).unwrap();
+    assert!(store
+        .get_task_artifact(&tenant, &artifact_id)
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        store
+            .list_task_artifacts(&tenant, &task_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let chunk_ids = store
+        .search_task_projection_chunk_ids(&tenant, &TaskSearchFilters::default(), 10)
+        .await
+        .unwrap();
+    assert!(chunk_ids.is_empty());
+}
+
+#[tokio::test]
 async fn rerank_chunks_for_query_uses_hybrid_reranker_for_candidate_set() {
     let (mut store, _dir) = make_test_store();
     let tenant = make_tenant();

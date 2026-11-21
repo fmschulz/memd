@@ -211,6 +211,9 @@ pub struct NoteOutcome {
     pub evidence: LessonEvidence,
     /// True when the case was already stored and nothing was written.
     pub replay: bool,
+    /// Searchable chunk rows this call wrote: one per stored artifact, or one
+    /// (the lesson) for a compact case. Zero for a replay.
+    pub rows_written: usize,
 }
 
 /// Store a case file as problem, attempts, check, and lesson.
@@ -237,11 +240,16 @@ pub struct NoteOutcome {
 ///
 /// Anything else adds a case, or, for a receipt, a lesson on the receipt's
 /// problem.
+///
+/// With `compact`, every event is still stored, but only the lesson gets a
+/// searchable row. The replay rules above read lessons only, so they hold for
+/// a compact case and for a case stored in full.
 pub async fn record_case<S: Store + ?Sized>(
     store: &S,
     mut context: ExperienceContext,
     case: CaseFile,
     shared_id: Option<&str>,
+    compact: bool,
 ) -> Result<NoteOutcome> {
     case.validate()?;
     if context.project_id.as_option().is_none() {
@@ -256,13 +264,13 @@ pub async fn record_case<S: Store + ?Sized>(
 
     let _guard = EXPERIENCE_MUTATIONS.lock().await;
     if let Some(lesson) = find_replay(store, &context, &case).await? {
-        return outcome_for(store, &context, &lesson, true).await;
+        return outcome_for(store, &context, &lesson, 0).await;
     }
     match (case.check.method, case.check.receipt_id.as_deref()) {
         (CheckMethod::Executed, Some(receipt_id)) => {
             attach_to_receipt(store, context, &case, receipt_id).await
         }
-        _ => create_case(store, context, &case).await,
+        _ => create_case(store, context, &case, compact).await,
     }
 }
 
@@ -270,6 +278,7 @@ async fn create_case<S: Store + ?Sized>(
     store: &S,
     context: ExperienceContext,
     case: &CaseFile,
+    compact: bool,
 ) -> Result<NoteOutcome> {
     let mut clock = Clock::new(context.observed_at_ms);
     let problem = record_unlocked(
@@ -279,6 +288,7 @@ async fn create_case<S: Store + ?Sized>(
             description: case.problem.clone(),
             symptom_terms: case.symptoms.clone(),
         },
+        !compact,
     )
     .await?;
 
@@ -292,6 +302,7 @@ async fn create_case<S: Store + ?Sized>(
                 previous_attempt_id: attempt_ids.last().cloned(),
                 action: action.clone(),
             },
+            !compact,
         )
         .await?;
         attempt_ids.push(attempt.artifact_id);
@@ -306,6 +317,7 @@ async fn create_case<S: Store + ?Sized>(
             result: case.check.result.clone(),
             command: case.check.command.clone(),
         },
+        !compact,
     )
     .await?;
     let lesson = record_unlocked(
@@ -317,8 +329,10 @@ async fn create_case<S: Store + ?Sized>(
             &check.artifact_id,
             LessonEvidence::Observed,
         )),
+        true,
     )
     .await?;
+    let rows_written = if compact { 1 } else { attempt_ids.len() + 3 };
     Ok(NoteOutcome {
         problem_id: problem.artifact_id,
         attempt_ids,
@@ -326,6 +340,7 @@ async fn create_case<S: Store + ?Sized>(
         lesson_id: lesson.artifact_id,
         evidence: LessonEvidence::Observed,
         replay: false,
+        rows_written,
     })
 }
 
@@ -368,9 +383,10 @@ async fn attach_to_receipt<S: Store + ?Sized>(
             receipt_id,
             LessonEvidence::Executed,
         )),
+        true,
     )
     .await?;
-    outcome_for(store, &context, &lesson, false).await
+    outcome_for(store, &context, &lesson, 1).await
 }
 
 fn lesson_from_case(
@@ -499,7 +515,7 @@ async fn outcome_for<S: Store + ?Sized>(
     store: &S,
     context: &ExperienceContext,
     lesson_artifact: &TaskArtifact,
-    replay: bool,
+    rows_written: usize,
 ) -> Result<NoteOutcome> {
     let lesson = lesson_from_event(required_event(lesson_artifact)?)
         .ok_or_else(|| validation("stored artifact is not a lesson"))?;
@@ -516,7 +532,8 @@ async fn outcome_for<S: Store + ?Sized>(
         check_id: lesson.supporting_check_id.clone(),
         lesson_id: lesson_artifact.artifact_id.clone(),
         evidence: lesson.evidence,
-        replay,
+        replay: rows_written == 0,
+        rows_written,
     })
 }
 
