@@ -1008,7 +1008,12 @@ impl PersistentStore {
                 .await
                 {
                     Ok(stats) => {
-                        every_batch_indexed = stats.batches_failed == 0;
+                        // A model that cannot load embedded nothing, so the
+                        // pass has not rebuilt anything.
+                        every_batch_indexed = stats.batches_failed == 0
+                            && dense_searcher
+                                .as_ref()
+                                .is_none_or(|dense| dense.unavailable_reason().is_none());
                         // Count only probe-triggered repairs; a startup backfill
                         // is not a "repair" for telemetry purposes.
                         if kind == RepairKind::Probe {
@@ -2118,14 +2123,40 @@ impl Store for PersistentStore {
         // Mirrors search_with_scores_real's dispatch: hybrid (dense + sparse
         // fusion) when the hybrid searcher is present, dense-only when just the
         // dense searcher is, and substring matching at constant score when
-        // neither embedding path is available.
-        if self.hybrid_searcher.is_some() {
-            "hybrid"
-        } else if self.dense_searcher.is_some() {
-            "dense"
+        // neither embedding path is available. A model that cannot load takes
+        // away the dense side: hybrid answers from the keyword index alone
+        // and a dense-only store drops to substring matching.
+        if let Some(hybrid) = &self.hybrid_searcher {
+            if hybrid.dense_unavailable_reason().is_some() {
+                "keyword_fallback"
+            } else {
+                "hybrid"
+            }
+        } else if let Some(dense) = &self.dense_searcher {
+            if dense.unavailable_reason().is_some() {
+                "text_fallback"
+            } else {
+                "dense"
+            }
         } else {
             "text_fallback"
         }
+    }
+
+    fn retrieval_warning(&self) -> Option<String> {
+        let cause = self
+            .dense_searcher
+            .as_ref()
+            .and_then(|dense| dense.unavailable_reason())?;
+        let answers_from = if self.retrieval_mode() == "keyword_fallback" {
+            "the keyword index only"
+        } else {
+            "substring matching"
+        };
+        Some(format!(
+            "embedding model unavailable ({cause}); semantic retrieval is off for this process \
+             and results come from {answers_from}"
+        ))
     }
 
     async fn delete(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> Result<bool> {

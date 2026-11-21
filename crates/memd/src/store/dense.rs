@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
@@ -64,6 +64,10 @@ pub struct DenseSearcher {
     base_path: Option<PathBuf>,
     /// Disable disk writes and index mutations.
     read_only: bool,
+    /// Why the embedding model cannot load, once an embedding call found
+    /// out. From then on this searcher does not call the embedder again:
+    /// indexing skips the dense side and search reports the failure.
+    unavailable: OnceLock<String>,
     /// Configuration
     config: DenseSearchConfig,
 }
@@ -90,13 +94,7 @@ impl DenseSearcher {
         // Update HNSW config dimension to match model
         config.hnsw.dimension = embedder.dimension();
 
-        Self {
-            embedder,
-            indices: RwLock::new(HashMap::new()),
-            base_path: None,
-            read_only: false,
-            config,
-        }
+        Self::with_embedder(embedder, config)
     }
 
     /// Create with custom embedder (for testing with MockEmbedder)
@@ -106,8 +104,23 @@ impl DenseSearcher {
             indices: RwLock::new(HashMap::new()),
             base_path: None,
             read_only: false,
+            unavailable: OnceLock::new(),
             config,
         }
+    }
+
+    /// Why the embedding model cannot load, if an embedding call has found
+    /// out. `None` means the model works or has not been needed yet.
+    pub fn unavailable_reason(&self) -> Option<&str> {
+        self.unavailable.get().map(String::as_str)
+    }
+
+    /// The embedding result, remembering a model that cannot load.
+    fn note_model_failure<T>(&self, result: Result<T>) -> Result<T> {
+        if let Err(MemdError::ModelUnavailable(cause)) = &result {
+            let _ = self.unavailable.set(cause.clone());
+        }
+        result
     }
 
     /// Set base path for index persistence
@@ -178,17 +191,20 @@ impl DenseSearcher {
                 op: "dense_index_chunk".to_string(),
             });
         }
+        if self.unavailable.get().is_some() {
+            return Ok(());
+        }
         // Documents are embedded verbatim via embed_texts; embed_query would
         // apply a retrieval query prefix (BGE), corrupting stored vectors.
-        let embedding = self
-            .embedder
-            .embed_texts(&[text])
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
+        let embedded = self.note_model_failure(self.embedder.embed_texts(&[text]).await);
+        let embedding = match embedded {
+            Ok(vectors) => vectors.into_iter().next().ok_or_else(|| {
                 MemdError::EmbeddingError("embed_texts returned no embedding".to_string())
-            })?;
+            })?,
+            // The model cannot load: the dense side waits for a repair pass.
+            Err(MemdError::ModelUnavailable(_)) => return Ok(()),
+            Err(error) => return Err(error),
+        };
         let index = self.get_or_create_index(tenant_id)?;
         index.insert(chunk_id, &embedding)?;
 
@@ -216,9 +232,20 @@ impl DenseSearcher {
             return Ok(());
         }
 
+        // A model that cannot load leaves the dense side unindexed, as when a
+        // store has no dense searcher. The rows wait for a repair pass that
+        // has the model; the caller can tell from `unavailable_reason`.
+        if self.unavailable.get().is_some() {
+            return Ok(());
+        }
+
         // Batch embed all texts
         let texts: Vec<&str> = chunks.iter().map(|(_, text)| text.as_str()).collect();
-        let embeddings = self.embedder.embed_texts(&texts).await?;
+        let embeddings = match self.note_model_failure(self.embedder.embed_texts(&texts).await) {
+            Ok(embeddings) => embeddings,
+            Err(MemdError::ModelUnavailable(_)) => return Ok(()),
+            Err(error) => return Err(error),
+        };
 
         // Insert into index
         let index = self.get_or_create_index(tenant_id)?;
@@ -259,8 +286,13 @@ impl DenseSearcher {
         query: &str,
         k: usize,
     ) -> Result<(Vec<DenseSearchResult>, Duration, Duration)> {
+        // A model that cannot load cannot answer a query. Callers fall back
+        // to the keyword index on `ModelUnavailable`.
+        if let Some(cause) = self.unavailable.get() {
+            return Err(MemdError::ModelUnavailable(cause.clone()));
+        }
         let embed_start = Instant::now();
-        let query_embedding = self.embedder.embed_query(query).await?;
+        let query_embedding = self.note_model_failure(self.embedder.embed_query(query).await)?;
         let embed_time = embed_start.elapsed();
 
         let search_start = Instant::now();

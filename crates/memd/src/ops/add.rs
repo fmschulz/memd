@@ -21,6 +21,47 @@ async fn add_chunk_with_complete_ids<S: Store>(
     }
 }
 
+/// Store the chunks waiting in `queue` in one call and record each id at its
+/// batch position.
+async fn store_queued_with_lifecycle(
+    ps: &crate::store::persistent::PersistentStore,
+    queue: &mut Vec<(usize, MemoryChunk, LifecycleDelta)>,
+    ids_by_position: &mut [Option<ChunkId>],
+) -> Result<(), McpError> {
+    if queue.is_empty() {
+        return Ok(());
+    }
+    let queued = std::mem::take(queue);
+    let positions: Vec<usize> = queued.iter().map(|(position, _, _)| *position).collect();
+    let rows = queued
+        .into_iter()
+        .map(|(_, chunk, delta)| (chunk, delta))
+        .collect();
+    let ids = ps
+        .add_chunks_with_lifecycle(rows)
+        .await
+        .map_err(|e| McpError::ToolError(e.to_string()))?;
+    for (position, id) in positions.into_iter().zip(ids) {
+        ids_by_position[position] = Some(id);
+    }
+    Ok(())
+}
+
+/// The batch's chunk ids in input order; every position must have one.
+fn ordered_chunk_ids(ids_by_position: Vec<Option<ChunkId>>) -> Result<Vec<ChunkId>, McpError> {
+    ids_by_position
+        .into_iter()
+        .enumerate()
+        .map(|(position, maybe_id)| {
+            maybe_id.ok_or_else(|| {
+                McpError::ToolError(format!(
+                    "memory.add_batch did not produce chunk id for position {position}"
+                ))
+            })
+        })
+        .collect()
+}
+
 /// Handle memory.add tool call
 pub async fn handle_memory_add<S: Store>(
     store: &S,
@@ -524,8 +565,8 @@ pub async fn handle_memory_add_batch<S: Store>(
         .collect::<Vec<_>>();
 
     let prepared_len = prepared.len();
-    let mut dedupe_decisions = Vec::with_capacity(prepared_len);
-    let mut deduped_existing_ids = Vec::with_capacity(prepared_len);
+    let mut dedupe_decisions = vec!["inserted".to_string(); prepared_len];
+    let mut deduped_existing_ids: Vec<Option<String>> = vec![None; prepared_len];
     let mut any_default_deduped = false;
 
     let chunk_ids = if any_lifecycle {
@@ -534,40 +575,58 @@ pub async fn handle_memory_add_batch<S: Store>(
                 "memory.add_batch with temporal fields requires a persistent store".into(),
             )
         })?;
-        let mut ids = Vec::with_capacity(prepared.len());
-        for (chunk, delta, has_lifecycle, _, caller_tags, caller_requested_lifecycle) in prepared {
+
+        // Chunks that pass the per-chunk rules wait in `queue` and are stored
+        // in one call, so the embedder sees the batch together. Chunks that
+        // were stored one by one could be the target of a later duplicate
+        // check; `queued_keys` marks the content waiting in the queue so that
+        // check can still find it.
+        let mut ids_by_position: Vec<Option<ChunkId>> = vec![None; prepared_len];
+        let mut queue: Vec<(usize, MemoryChunk, LifecycleDelta)> = Vec::new();
+        let mut queued_keys: HashSet<(String, String, Option<String>)> = HashSet::new();
+        for (position, (chunk, delta, _, _, caller_tags, caller_requested_lifecycle)) in
+            prepared.into_iter().enumerate()
+        {
+            let key = (
+                sha256_hex(&chunk.text),
+                chunk.chunk_type.to_string(),
+                chunk.project_id.as_option().map(str::to_string),
+            );
             if !caller_requested_lifecycle {
-                if let Some(existing_id) =
-                    find_default_content_duplicate(store, &chunk, &caller_tags).await?
+                if queued_keys.contains(&key)
+                    && !default_content_dedupe_exempt(&chunk, &caller_tags)
                 {
-                    let existing_id_string = existing_id.to_string();
-                    ids.push(existing_id);
-                    dedupe_decisions.push("reused_existing_exact_content".to_string());
-                    deduped_existing_ids.push(Some(existing_id_string));
+                    // This chunk repeats one that waits: store the queue first
+                    // so the duplicate check below sees it in the store.
+                    store_queued_with_lifecycle(ps, &mut queue, &mut ids_by_position).await?;
+                    queued_keys.clear();
+                }
+                let existing = match find_default_content_duplicate(store, &chunk, &caller_tags)
+                    .await
+                {
+                    Ok(existing) => existing,
+                    Err(error) => {
+                        // Stored one by one, the earlier chunks were already
+                        // committed when a lookup failed.
+                        let _ =
+                            store_queued_with_lifecycle(ps, &mut queue, &mut ids_by_position).await;
+                        return Err(error);
+                    }
+                };
+                if let Some(existing_id) = existing {
+                    dedupe_decisions[position] = "reused_existing_exact_content".to_string();
+                    deduped_existing_ids[position] = Some(existing_id.to_string());
+                    ids_by_position[position] = Some(existing_id);
                     any_default_deduped = true;
                     continue;
                 }
             }
-
-            let id = if has_lifecycle {
-                ps.add_chunk_with_lifecycle(chunk, delta)
-                    .await
-                    .map_err(|e| McpError::ToolError(e.to_string()))?
-            } else {
-                store
-                    .add(chunk)
-                    .await
-                    .map_err(|e| McpError::ToolError(e.to_string()))?
-            };
-            ids.push(id);
-            dedupe_decisions.push("inserted".to_string());
-            deduped_existing_ids.push(None);
+            queued_keys.insert(key);
+            queue.push((position, chunk, delta));
         }
-        ids
+        store_queued_with_lifecycle(ps, &mut queue, &mut ids_by_position).await?;
+        ordered_chunk_ids(ids_by_position)?
     } else if store.as_persistent().is_some() {
-        dedupe_decisions = vec!["inserted".to_string(); prepared_len];
-        deduped_existing_ids = vec![None; prepared_len];
-
         let mut ids_by_position: Vec<Option<ChunkId>> = vec![None; prepared_len];
         let mut pending_insert_positions = Vec::new();
         let mut pending_insert_chunks = Vec::new();
@@ -640,20 +699,8 @@ pub async fn handle_memory_add_batch<S: Store>(
             ids_by_position[position] = Some(id);
         }
 
-        ids_by_position
-            .into_iter()
-            .enumerate()
-            .map(|(position, maybe_id)| {
-                maybe_id.ok_or_else(|| {
-                    McpError::ToolError(format!(
-                        "memory.add_batch did not produce chunk id for position {position}"
-                    ))
-                })
-            })
-            .collect::<std::result::Result<Vec<_>, McpError>>()?
+        ordered_chunk_ids(ids_by_position)?
     } else {
-        dedupe_decisions = vec!["inserted".to_string(); prepared_len];
-        deduped_existing_ids = vec![None; prepared_len];
         // No lifecycle overlay anywhere → bulk path. The chunks already
         // carry the per-row ingestion_mode label (set in the pre-pass);
         // store.add_batch threads that through to ChunkMetadata.

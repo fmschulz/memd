@@ -2214,6 +2214,8 @@ async fn scope_status_for_search<S: Store>(
                 .to_string(),
         );
     }
+    // A model that cannot load changes the mode; say why.
+    warnings.extend(store.retrieval_warning());
     if let Ok(tenants) = store.list_tenants().await {
         if !tenants.iter().any(|t| t == tenant_id) {
             warnings.push(format!(

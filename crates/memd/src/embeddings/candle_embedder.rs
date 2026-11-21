@@ -263,26 +263,54 @@ impl LoadedModel {
     }
 }
 
+/// Builds the model. A function value so a test can make the load fail.
+type ModelLoader = Box<dyn Fn(CandleModel) -> Result<LoadedModel> + Send + Sync>;
+
 /// The model of one embedder, shared by its clones and loaded on first use.
 struct LazyModel {
     choice: CandleModel,
+    load: ModelLoader,
     loaded: OnceLock<LoadedModel>,
-    /// Makes concurrent first calls load once. A failed load leaves the cell
-    /// empty, so the next call tries again.
+    /// Why the load failed, once it has. Set at most once.
+    failed: OnceLock<String>,
+    /// Makes concurrent first calls load once.
     loading: Mutex<()>,
 }
 
 impl LazyModel {
+    /// The loaded model. The first call loads it. If that fails, the cause is
+    /// kept and logged once, and every later call returns
+    /// `MemdError::ModelUnavailable` at once without another attempt.
     fn get(&self) -> Result<&LoadedModel> {
         if let Some(loaded) = self.loaded.get() {
             return Ok(loaded);
         }
+        if let Some(cause) = self.failed.get() {
+            return Err(MemdError::ModelUnavailable(cause.clone()));
+        }
         let _loading = self.loading.lock();
+        // Another caller may have finished while this one waited for the lock.
         if let Some(loaded) = self.loaded.get() {
             return Ok(loaded);
         }
-        let loaded = LoadedModel::load(self.choice)?;
-        Ok(self.loaded.get_or_init(|| loaded))
+        if let Some(cause) = self.failed.get() {
+            return Err(MemdError::ModelUnavailable(cause.clone()));
+        }
+        match (self.load)(self.choice) {
+            Ok(loaded) => Ok(self.loaded.get_or_init(|| loaded)),
+            Err(error) => {
+                let cause = error.to_string();
+                tracing::warn!(
+                    model = self.choice.hf_id(),
+                    error = %cause,
+                    "embedding model failed to load; dense search is off for this process \
+                     and retrieval falls back to the keyword index"
+                );
+                Err(MemdError::ModelUnavailable(
+                    self.failed.get_or_init(|| cause).clone(),
+                ))
+            }
+        }
     }
 }
 
@@ -322,14 +350,38 @@ impl CandleEmbedder {
     /// does not touch the model files: the first `embed_texts` or
     /// `embed_query` call loads them, and a load failure is that call's
     /// error.
-    pub fn with_config_and_model(mut config: EmbeddingConfig, model: CandleModel) -> Self {
+    pub fn with_config_and_model(config: EmbeddingConfig, model: CandleModel) -> Self {
+        Self::with_loader(config, model, Box::new(LoadedModel::load))
+    }
+
+    /// An embedder whose model never loads: the loader counts its runs and
+    /// fails with `cause`.
+    #[cfg(test)]
+    pub(crate) fn unloadable_for_tests(
+        cause: &str,
+        loads: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        let cause = cause.to_string();
+        Self::with_loader(
+            EmbeddingConfig::default(),
+            CandleModel::default(),
+            Box::new(move |_| {
+                loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(MemdError::ConfigError(cause.clone()))
+            }),
+        )
+    }
+
+    fn with_loader(mut config: EmbeddingConfig, model: CandleModel, load: ModelLoader) -> Self {
         config.pooling = model.pooling_strategy();
         let workers = inference_workers();
 
         Self {
             model: Arc::new(LazyModel {
                 choice: model,
+                load,
                 loaded: OnceLock::new(),
+                failed: OnceLock::new(),
                 loading: Mutex::new(()),
             }),
             semaphore: Arc::new(Semaphore::new(workers)),
@@ -720,6 +772,74 @@ mod tests {
         assert_eq!(embedder.dimension(), 768);
         assert_eq!(embedder.config().pooling, PoolingStrategy::Cls);
         assert!(!embedder.is_loaded());
+    }
+
+    /// A failed load is tried once. Every later call fails at once with the
+    /// same cause, whether it comes from the same call or a later one.
+    #[tokio::test]
+    async fn a_failed_model_load_is_tried_once_and_remembered() {
+        let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let embedder =
+            CandleEmbedder::unloadable_for_tests("weights file is missing", Arc::clone(&loads));
+
+        // Two texts make two forward passes that race to load the model.
+        for _ in 0..3 {
+            let error = embedder.embed_texts(&["alpha", "beta"]).await.unwrap_err();
+            assert!(
+                matches!(&error, MemdError::ModelUnavailable(cause)
+                    if cause.contains("weights file is missing")),
+                "got {error}"
+            );
+        }
+        let error = embedder.embed_query("gamma").await.unwrap_err();
+        assert!(
+            matches!(error, MemdError::ModelUnavailable(_)),
+            "got {error}"
+        );
+
+        assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!embedder.is_loaded());
+    }
+
+    /// The cause is logged once at warn, not once per call.
+    #[test]
+    fn a_failed_model_load_logs_its_cause_once_at_warn() {
+        #[derive(Clone, Default)]
+        struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for LogBuffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+            type Writer = LogBuffer;
+            fn make_writer(&'a self) -> LogBuffer {
+                self.clone()
+            }
+        }
+
+        let log = LogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(log.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let embedder = CandleEmbedder::unloadable_for_tests("weights file is missing", loads);
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..3 {
+                assert!(embedder.model.get().is_err());
+            }
+        });
+
+        let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        let warnings: Vec<&str> = text.lines().filter(|line| line.contains("WARN")).collect();
+        assert_eq!(warnings.len(), 1, "log was:\n{text}");
+        assert!(warnings[0].contains("weights file is missing"), "{text}");
     }
 
     #[test]

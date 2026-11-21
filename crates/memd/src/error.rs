@@ -109,6 +109,14 @@ pub enum MemdError {
     #[error("embedding error: {0}")]
     EmbeddingError(String),
 
+    /// The embedding model could not be loaded: files missing, no network,
+    /// or a broken file. The embedder tries once per process and keeps the
+    /// cause, so every later call fails at once with the same text. The
+    /// store then behaves as if dense search were off: keyword retrieval
+    /// answers, and the dense side waits for a later repair pass.
+    #[error("embedding model unavailable: {0}")]
+    ModelUnavailable(String),
+
     /// IO errors
     #[error("io error: {0}")]
     IoError(#[from] std::io::Error),

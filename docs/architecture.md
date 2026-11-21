@@ -44,7 +44,9 @@ Two surfaces, one shared dispatcher.
 - **Retrieval observability.** `memd search` and `memd agent-context` attach a
   `scope_status` block to every result payload: the effective tenant/project,
   the `retrieval_mode` (`hybrid` for fused or BM25-only retrieval, `dense` for
-  dense-only retrieval, or `text_fallback` when neither index is available),
+  dense-only retrieval, `keyword_fallback` when the embedding model cannot load
+  and the keyword index answers alone, or `text_fallback` when no index is
+  available), a warning with the cause when the model cannot load,
   a warning when the requested tenant has no stored memory, and
   a `wider_scope_hits` hint when a project-scoped query comes up short but the
   tenant holds matching memory one scope wider. This keeps "no memory exists"

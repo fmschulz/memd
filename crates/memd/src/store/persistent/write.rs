@@ -4,6 +4,9 @@ use super::*;
 pub(super) struct AddChunksOutcome {
     pub primary_ids: Vec<ChunkId>,
     pub stored_ids: Vec<ChunkId>,
+    /// The ids of `stored_ids` grouped by the chunk they came from, in input
+    /// order. A long chunk is split into several stored rows.
+    pub stored_ids_by_chunk: Vec<Vec<ChunkId>>,
 }
 
 impl PersistentStore {
@@ -410,15 +413,29 @@ impl PersistentStore {
 
         let expanded_ids: Vec<ChunkId> = pending.iter().map(|row| row.chunk_id.clone()).collect();
         let mut primary_ids = Vec::with_capacity(primary_positions.len());
-        for pos in primary_positions {
+        for &pos in &primary_positions {
             let chunk_id = expanded_ids
                 .get(pos)
                 .ok_or_else(|| MemdError::StorageError("missing primary chunk id".into()))?;
             primary_ids.push(chunk_id.clone());
         }
+        // Each input chunk's rows run from its primary position to the next
+        // chunk's primary position.
+        let stored_ids_by_chunk = primary_positions
+            .iter()
+            .enumerate()
+            .map(|(chunk_index, &start)| {
+                let end = primary_positions
+                    .get(chunk_index + 1)
+                    .copied()
+                    .unwrap_or(expanded_ids.len());
+                expanded_ids[start..end].to_vec()
+            })
+            .collect();
         Ok(AddChunksOutcome {
             primary_ids,
             stored_ids: expanded_ids,
+            stored_ids_by_chunk,
         })
     }
 

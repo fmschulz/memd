@@ -586,6 +586,12 @@ pub trait Store: Send + Sync {
         "text_fallback"
     }
 
+    /// Why retrieval is degraded, when the cause is known beyond the mode
+    /// itself. Reported as a `scope_status` warning. `None` by default.
+    fn retrieval_warning(&self) -> Option<String> {
+        None
+    }
+
     /// List chunks for a tenant with pagination semantics.
     ///
     /// Default implementation uses `search` with an empty query and applies

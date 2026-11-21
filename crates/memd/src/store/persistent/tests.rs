@@ -2507,3 +2507,171 @@ async fn shutdown_returns_a_failed_dense_save_after_finishing_the_rest() {
         .any(|entry| entry.unwrap().path().join("meta").exists());
     assert!(sealed, "the failed save skipped sealing the segment");
 }
+
+const MODEL_CAUSE: &str = "model files are missing";
+
+/// An embedder whose model never loads, with a counter of load attempts.
+fn unloadable_embedder() -> (
+    Arc<crate::embeddings::CandleEmbedder>,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let embedder = Arc::new(crate::embeddings::CandleEmbedder::unloadable_for_tests(
+        MODEL_CAUSE,
+        Arc::clone(&loads),
+    ));
+    (embedder, loads)
+}
+
+/// A store with hybrid search whose embedding model cannot load.
+fn make_store_with_unloadable_model() -> (
+    PersistentStore,
+    tempfile::TempDir,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let (mut store, dir) = make_test_store();
+    let (embedder, loads) = unloadable_embedder();
+    let dense = Arc::new(DenseSearcher::with_embedder(
+        embedder,
+        DenseSearchConfig {
+            persist: false,
+            ..Default::default()
+        },
+    ));
+    let sparse = Arc::new(Bm25Index::with_path(Some(dir.path().join("sparse_index"))).unwrap());
+    let hybrid = HybridSearcher::new(
+        dense.clone(),
+        Some(sparse.clone()),
+        HybridConfig {
+            reranker: RerankerConfig {
+                mode: RerankerMode::Feature,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    store.dense_searcher = Some(dense);
+    store.sparse_index = Some(sparse);
+    store.hybrid_searcher = Some(Arc::new(hybrid));
+    (store, dir, loads)
+}
+
+/// A model that cannot load must not make the store unusable: writes still
+/// reach the keyword index, search answers from it and says so, and the load
+/// is tried once.
+#[tokio::test]
+async fn unloadable_model_falls_back_to_the_keyword_index() {
+    let (store, _dir, loads) = make_store_with_unloadable_model();
+    let tenant = make_tenant();
+    let mut ids = Vec::new();
+    for text in [
+        "zanzibar expedition left in june",
+        "unrelated note about compilers",
+        "harbor logistics memo",
+    ] {
+        ids.push(Store::add(&store, make_chunk(&tenant, text)).await.unwrap());
+    }
+
+    // Every write reached the keyword index and none is left as an index failure.
+    let sparse = store.sparse_index().unwrap();
+    sparse.commit().unwrap();
+    assert_eq!(sparse.doc_count(&tenant).unwrap(), 3);
+    assert_eq!(
+        store.metadata.count_by_index_state(&tenant).unwrap(),
+        (0, 3, 0)
+    );
+
+    // Search answers from the keyword index.
+    let hits = store
+        .search_with_scores(&tenant, "zanzibar", 3)
+        .await
+        .unwrap();
+    assert_eq!(hits.first().map(|hit| &hit.0.chunk_id), Some(&ids[0]));
+    assert_eq!(store.retrieval_mode(), "keyword_fallback");
+
+    // The search payload says so, with the cause.
+    let response = crate::mcp::handle_memory_search(
+        &store,
+        crate::mcp::SearchParams {
+            tenant_id: tenant.to_string(),
+            query: "zanzibar".to_string(),
+            k: 3,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let text = response["content"][0]["text"].as_str().unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed["scope_status"]["retrieval_mode"], "keyword_fallback");
+    let warnings = parsed["scope_status"]["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|warning| {
+            let warning = warning.as_str().unwrap_or_default();
+            warning.contains(MODEL_CAUSE) && warning.contains("keyword")
+        }),
+        "the payload must name the cause and the keyword index: {warnings:?}"
+    );
+
+    assert_eq!(
+        loads.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the model load is tried once, not once per call"
+    );
+}
+
+/// Without a hybrid searcher the old open-time fallback was substring
+/// matching; a model that cannot load lands there too, and the write is
+/// recorded as indexed as it was when no dense searcher existed.
+#[tokio::test]
+async fn unloadable_model_in_a_dense_only_store_falls_back_to_text_search() {
+    let (mut store, _dir) = make_test_store();
+    let (embedder, loads) = unloadable_embedder();
+    store.dense_searcher = Some(Arc::new(DenseSearcher::with_embedder(
+        embedder,
+        DenseSearchConfig {
+            persist: false,
+            ..Default::default()
+        },
+    )));
+    let tenant = make_tenant();
+    let id = Store::add(
+        &store,
+        make_chunk(&tenant, "zanzibar expedition left in june"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        store.metadata.count_by_index_state(&tenant).unwrap(),
+        (0, 1, 0)
+    );
+
+    let hits = store
+        .search_with_scores(&tenant, "zanzibar", 5)
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].0.chunk_id, id);
+    assert_eq!(store.retrieval_mode(), "text_fallback");
+    assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// A rebuild that embedded nothing is not a finished rebuild. The marker
+/// keeps reading `rebuilding`, so a writer that has the model resumes it.
+#[tokio::test]
+async fn repair_does_not_finish_a_rebuild_when_the_model_cannot_load() {
+    let (embedder, loads) = unloadable_embedder();
+    let (store, dir, _tenant) = store_awaiting_embedding_rebuild(embedder).await;
+
+    let RepairSchedule::Scheduled(done) = store.schedule_hnsw_repair(RepairKind::Startup) else {
+        panic!("the repair must be scheduled");
+    };
+    done.await.unwrap();
+
+    assert!(store.embedding_rebuild_pending.load(Ordering::Acquire));
+    assert_eq!(
+        embedding_revision_marker(dir.path()),
+        format!("{} rebuilding", crate::embeddings::EMBEDDING_REVISION)
+    );
+    assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

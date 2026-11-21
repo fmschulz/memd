@@ -1126,8 +1126,10 @@ pub struct ScopeStatus {
     pub tenant_id: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub project_id: Option<String>,
-    /// "hybrid" for ranked semantic retrieval, "text_fallback" when
-    /// queries degrade to substring matching at constant score.
+    /// "hybrid" for ranked semantic retrieval, "keyword_fallback" when the
+    /// embedding model cannot load and the keyword index answers alone,
+    /// "text_fallback" when queries degrade to substring matching at
+    /// constant score.
     pub retrieval_mode: String,
     /// Tenant-wide candidate hits outside the requested project.
     /// Counted lazily, only when a project-scoped search returns fewer

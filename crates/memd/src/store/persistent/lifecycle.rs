@@ -102,6 +102,57 @@ impl PersistentStore {
         Ok((chunk_id, stored_ids))
     }
 
+    /// Write several chunks with their initial lifecycle overlays as one
+    /// batch and return one primary id per input chunk, in input order.
+    ///
+    /// The chunks go through one `add_chunks_internal` call, so the dense
+    /// index embeds them together. Each chunk with a non-empty delta then
+    /// gets that delta on every row it was split into, as
+    /// `add_chunk_with_lifecycle` does for one chunk. If an overlay update
+    /// fails, the remaining updates still run and the first error is
+    /// returned: every row is stored by then, and a row should not lose its
+    /// retention because an earlier row's update failed.
+    pub async fn add_chunks_with_lifecycle(
+        &self,
+        rows: Vec<(MemoryChunk, LifecycleDelta)>,
+    ) -> Result<Vec<ChunkId>> {
+        self.ensure_writable("add_chunks_with_lifecycle")?;
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (chunks, deltas): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
+        let tenant_ids: Vec<TenantId> =
+            chunks.iter().map(|chunk| chunk.tenant_id.clone()).collect();
+
+        let outcome = self
+            .add_chunks_internal_with_details_and_hook(chunks, false, |_| Ok(()))
+            .await?;
+
+        let now = current_time_ms();
+        let mut first_error = None;
+        for ((tenant_id, mut delta), stored_ids) in tenant_ids
+            .iter()
+            .zip(deltas)
+            .zip(&outcome.stored_ids_by_chunk)
+        {
+            if delta.is_empty() {
+                continue;
+            }
+            if delta.lifecycle_updated_at_ms.is_none() {
+                delta.lifecycle_updated_at_ms = Some(now);
+            }
+            for stored_id in stored_ids {
+                if let Err(error) = self.metadata.update_lifecycle(tenant_id, stored_id, &delta) {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(outcome.primary_ids),
+        }
+    }
+
     /// Persist one journaled consolidation candidate with its preallocated
     /// chunk id. Candidates are intentionally not split: each journal entry
     /// must map to exactly one payload and one lineage target.

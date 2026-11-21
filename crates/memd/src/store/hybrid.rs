@@ -52,8 +52,10 @@ impl Default for HybridConfig {
     }
 }
 
-fn sparse_candidate_count(config: &HybridConfig, requested_k: usize) -> usize {
-    if config.dense_k == 0 && !config.enable_rerank {
+/// Sparse candidates to fetch when the dense side contributes `dense_k`
+/// candidates. A dense side that cannot run counts as zero.
+fn sparse_candidate_count(config: &HybridConfig, dense_k: usize, requested_k: usize) -> usize {
+    if dense_k == 0 && !config.enable_rerank {
         requested_k
     } else {
         config.sparse_k
@@ -117,6 +119,12 @@ impl HybridSearcher {
     /// Borrow the sparse index if BM25 is enabled.
     pub fn sparse_index(&self) -> Option<&Arc<Bm25Index>> {
         self.sparse.as_ref()
+    }
+
+    /// Why the dense side cannot run, once an embedding call found that the
+    /// model does not load. Searches then answer from the keyword index.
+    pub fn dense_unavailable_reason(&self) -> Option<&str> {
+        self.dense.as_ref()?.unavailable_reason()
     }
 
     /// Create a new hybrid searcher
@@ -269,14 +277,24 @@ impl HybridSearcher {
         let mut timing = HybridTiming::default();
 
         let dense_start = Instant::now();
-        let mut dense_results = if self.config.dense_k > 0 {
+        let mut dense_k = self.config.dense_k;
+        let mut dense_results = if dense_k > 0 {
             let dense = self.dense.as_ref().ok_or_else(|| {
                 MemdError::StorageError("dense search is not configured".to_string())
             })?;
-            let (dense_results, _embed_time, _search_time) = dense
-                .search_with_timing(tenant_id, query, self.config.dense_k.max(k))
-                .await?;
-            dense_results
+            match dense
+                .search_with_timing(tenant_id, query, dense_k.max(k))
+                .await
+            {
+                Ok((dense_results, _embed_time, _search_time)) => dense_results,
+                // The model cannot load: answer from the keyword index alone,
+                // the same as a searcher built without a dense side.
+                Err(MemdError::ModelUnavailable(_)) => {
+                    dense_k = 0;
+                    Vec::new()
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             Vec::new()
         };
@@ -295,7 +313,11 @@ impl HybridSearcher {
         let sparse_start = Instant::now();
         let sparse_results = if self.config.enable_sparse {
             if let Some(ref sparse) = self.sparse {
-                sparse.search(tenant_id, query, sparse_candidate_count(&self.config, k))?
+                sparse.search(
+                    tenant_id,
+                    query,
+                    sparse_candidate_count(&self.config, dense_k, k),
+                )?
             } else {
                 Vec::new()
             }
@@ -589,7 +611,10 @@ mod tests {
             enable_rerank: false,
             ..HybridConfig::default()
         };
-        assert_eq!(sparse_candidate_count(&sparse_only, 80), 80);
+        assert_eq!(
+            sparse_candidate_count(&sparse_only, sparse_only.dense_k, 80),
+            80
+        );
 
         let reranked_sparse = HybridConfig {
             dense_k: 0,
@@ -597,14 +622,17 @@ mod tests {
             enable_rerank: true,
             ..HybridConfig::default()
         };
-        assert_eq!(sparse_candidate_count(&reranked_sparse, 80), 200);
+        assert_eq!(
+            sparse_candidate_count(&reranked_sparse, reranked_sparse.dense_k, 80),
+            200
+        );
 
         let hybrid = HybridConfig {
             dense_k: 100,
             sparse_k: 200,
             ..HybridConfig::default()
         };
-        assert_eq!(sparse_candidate_count(&hybrid, 80), 200);
+        assert_eq!(sparse_candidate_count(&hybrid, hybrid.dense_k, 80), 200);
     }
 
     #[tokio::test]

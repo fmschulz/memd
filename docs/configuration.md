@@ -99,8 +99,11 @@ and the query-only prefix `Represent this sentence for searching relevant passag
 
 The model loads on the first call that embeds text, not when a store opens.
 Commands that never embed, such as `get`, `stats` and `doctor`, do not load it,
-and a missing or broken model file is an error of the call that needed the
-embedding. One copy of the weights serves all concurrent work. Each forward
+and a missing or broken model file is found by the first call that embeds. The
+load is tried once per process. After a failure the store behaves as if dense
+search were off: search answers from the keyword index and says so in
+`scope_status`, and writes still index keywords. One copy of the weights serves
+all concurrent work. Each forward
 pass runs on one thread and a call that embeds many texts runs one pass per
 core, up to 32, with at most 8 texts per pass; `MEMD_EMBED_BATCH_SIZE` can
 lower that limit.

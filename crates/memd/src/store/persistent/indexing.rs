@@ -214,8 +214,13 @@ pub(super) async fn run_hnsw_backfill(
         // Dense search disabled — nothing to do.
         return Ok(stats);
     };
+    if dense.unavailable_reason().is_some() {
+        // The model cannot load: there are no vectors to repair.
+        return Ok(stats);
+    }
 
     let tenant_strs: Vec<String> = tenants.read().keys().cloned().collect();
+    let mut model_unavailable = false;
     for tenant_str in tenant_strs {
         let tenant_id = match TenantId::new(&tenant_str) {
             Ok(id) => id,
@@ -359,6 +364,15 @@ pub(super) async fn run_hnsw_backfill(
                 dense.index_batch(&tenant_id, &index_rows).await
             };
             match result {
+                Ok(()) if dense.unavailable_reason().is_some() => {
+                    // The model cannot load, so this batch embedded nothing
+                    // (a hybrid searcher still indexed its keyword side).
+                    // Stop: later batches would skip the same way. The
+                    // caller must not count this pass as a finished rebuild.
+                    stats.chunks_skipped += batch_len;
+                    model_unavailable = true;
+                    break;
+                }
                 Ok(()) => {
                     indexed_this_tenant += batch_len;
                     stats.chunks_indexed += batch_len;
@@ -404,6 +418,9 @@ pub(super) async fn run_hnsw_backfill(
                     }
                 }
             }
+        }
+        if model_unavailable {
+            break;
         }
     }
 

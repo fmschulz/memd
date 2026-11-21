@@ -7170,3 +7170,251 @@ async fn memory_compact_can_refresh_digests_without_storage_compaction() {
         .map(|items| !items.is_empty())
         .unwrap_or(false));
 }
+
+/// Embedder that counts the `embed_texts` calls it receives.
+struct CountingEmbedder {
+    inner: crate::embeddings::MockEmbedder,
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl crate::embeddings::Embedder for CountingEmbedder {
+    async fn embed_texts(
+        &self,
+        texts: &[&str],
+    ) -> crate::error::Result<Vec<crate::embeddings::EmbeddingResult>> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.embed_texts(texts).await
+    }
+
+    async fn embed_query(
+        &self,
+        query: &str,
+    ) -> crate::error::Result<crate::embeddings::EmbeddingResult> {
+        self.inner.embed_query(query).await
+    }
+
+    fn dimension(&self) -> usize {
+        self.inner.dimension()
+    }
+
+    fn config(&self) -> &crate::embeddings::EmbeddingConfig {
+        self.inner.config()
+    }
+}
+
+/// A store whose dense index embeds through a call counter.
+fn make_counting_store() -> (
+    PersistentStore,
+    TempDir,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let (mut store, dir) = make_persistent_store();
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let embedder = std::sync::Arc::new(CountingEmbedder {
+        inner: crate::embeddings::MockEmbedder::new(),
+        calls: std::sync::Arc::clone(&calls),
+    });
+    store.set_dense_searcher_for_tests(std::sync::Arc::new(
+        crate::store::dense::DenseSearcher::with_embedder(
+            embedder,
+            crate::store::dense::DenseSearchConfig {
+                persist: false,
+                ..Default::default()
+            },
+        ),
+    ));
+    (store, dir, calls)
+}
+
+const FAR_EXPIRY_MS: i64 = 4_102_444_800_000;
+const FAR_REVIEW_MS: i64 = 4_070_908_800_000;
+
+fn long_note() -> String {
+    (0..40)
+        .map(|i| format!("Sentence {i} explains how the scheduler quota applies on this node."))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// One batch that mixes every per-chunk rule of the lifecycle path.
+fn lifecycle_batch(tenant: &TenantId) -> AddBatchParams {
+    let long = long_note();
+    let plain = |text: &str| BatchChunkParams {
+        text: text.to_string(),
+        chunk_type: "doc".to_string(),
+        ..Default::default()
+    };
+    AddBatchParams {
+        tenant_id: tenant.to_string(),
+        chunks: vec![
+            // 0: explicit expiry and review
+            BatchChunkParams {
+                expires_at_ms: Some(FAR_EXPIRY_MS),
+                review_after_ms: Some(FAR_REVIEW_MS),
+                ..plain("alpha release note one")
+            },
+            // 1: conversation mode, which admission files as history
+            BatchChunkParams {
+                text: "starting to inspect the files".to_string(),
+                chunk_type: "summary".to_string(),
+                tags: vec!["kind:progress".to_string()],
+                mode: Some("conversation".to_string()),
+                ..Default::default()
+            },
+            // 2: no lifecycle at all
+            plain("charlie plain note"),
+            // 3: exact repeat of 2, which is reused
+            plain("charlie plain note"),
+            // 4: long text that splits, with a review time
+            BatchChunkParams {
+                review_after_ms: Some(FAR_REVIEW_MS),
+                ..plain(&long)
+            },
+            // 5: the same long text again; split rows never match by hash
+            plain(&long),
+            // 6: repeat of 0 that asks for its own expiry, so it is stored
+            BatchChunkParams {
+                expires_at_ms: Some(FAR_EXPIRY_MS),
+                ..plain("alpha release note one")
+            },
+            // 7: run trace with the default retention
+            BatchChunkParams {
+                text: "Command: cargo test -p memd ordinary trace.".to_string(),
+                chunk_type: "trace".to_string(),
+                tags: vec!["kind:run".to_string()],
+                ..Default::default()
+            },
+        ],
+        supersede_near_duplicates: None,
+    }
+}
+
+/// What a finished batch left behind, without ids or clock values.
+async fn lifecycle_batch_snapshot(store: &PersistentStore, tenant: &TenantId) -> Vec<String> {
+    use crate::store::metadata::MetadataStore;
+    let result = handle_memory_add_batch(store, None, lifecycle_batch(tenant))
+        .await
+        .unwrap();
+    let text = result["content"][0]["text"].as_str().unwrap();
+    let response: AddBatchResult = serde_json::from_str(text).unwrap();
+    let mut rows = store.metadata().list(tenant, usize::MAX, 0).unwrap();
+    rows.sort_by_key(|row| (row.segment_id, row.ordinal));
+    let position_of = |id: &str| {
+        rows.iter()
+            .position(|row| row.chunk_id.to_string() == id)
+            .map_or("none".to_string(), |p| p.to_string())
+    };
+    let mut snapshot = vec![
+        format!("ids={}", response.chunk_ids.len()),
+        format!(
+            "distinct={}",
+            response.chunk_ids.iter().collect::<HashSet<_>>().len()
+        ),
+        format!("decisions={:?}", response.dedupe_decisions),
+        format!(
+            "reused_rows={:?}",
+            response
+                .deduped_existing_ids
+                .iter()
+                .flatten()
+                .map(|id| id.as_deref().map_or("none".to_string(), position_of))
+                .collect::<Vec<_>>()
+        ),
+        format!("admission={:?}", response.admission_decisions),
+        format!(
+            "primary_rows={:?}",
+            response
+                .chunk_ids
+                .iter()
+                .map(|id| position_of(id))
+                .collect::<Vec<_>>()
+        ),
+    ];
+    for row in &rows {
+        snapshot.push(format!(
+            "{}|{}|{:?}|{}|exp={:?}|rev={:?}|mode={:?}|stamped={}",
+            row.chunk_type,
+            row.status,
+            row.lifecycle.tier,
+            row.project_id.as_deref().unwrap_or("-"),
+            row.lifecycle.expires_at_ms.map(|ms| ms == FAR_EXPIRY_MS),
+            row.lifecycle.review_after_ms.map(|ms| ms == FAR_REVIEW_MS),
+            row.ingestion_mode,
+            row.lifecycle.lifecycle_updated_at_ms > 0,
+        ));
+    }
+    snapshot
+}
+
+#[tokio::test]
+async fn memory_add_batch_with_lifecycle_keeps_rows_statuses_and_overlays() {
+    let (store, _dir) = make_persistent_store();
+    let tenant = TenantId::new("lifecycle_batch_rows").unwrap();
+    let snapshot = lifecycle_batch_snapshot(&store, &tenant).await;
+    // Recorded from the per-chunk path that stored these chunks one by one:
+    // chunk 3 reuses chunk 2, the repeated long text is stored again (its
+    // rows are split, so no hash matches), the long text with a review time
+    // stamps all three of its rows, and a repeat that asks for its own expiry
+    // is stored.
+    let expected = [
+        "ids=8",
+        "distinct=7",
+        "decisions=Some([\"inserted\", \"inserted\", \"inserted\", \"reused_existing_exact_content\", \"inserted\", \"inserted\", \"inserted\", \"inserted\"])",
+        "reused_rows=[\"none\", \"none\", \"none\", \"2\", \"none\", \"none\", \"none\", \"none\"]",
+        "admission=Some([\"durable\", \"ephemeral\", \"durable\", \"durable\", \"durable\", \"durable\", \"durable\", \"durable\"])",
+        "primary_rows=[\"0\", \"1\", \"2\", \"2\", \"3\", \"6\", \"9\", \"10\"]",
+        "doc|final|LongTerm|-|exp=Some(true)|rev=Some(true)|mode=Document|stamped=true",
+        "summary|final|History|-|exp=Some(false)|rev=Some(false)|mode=Conversation|stamped=true",
+        "doc|final|LongTerm|-|exp=None|rev=None|mode=Document|stamped=false",
+        "doc|final|LongTerm|-|exp=None|rev=Some(true)|mode=Document|stamped=true",
+        "doc|final|LongTerm|-|exp=None|rev=Some(true)|mode=Document|stamped=true",
+        "doc|final|LongTerm|-|exp=None|rev=Some(true)|mode=Document|stamped=true",
+        "doc|final|LongTerm|-|exp=None|rev=None|mode=Document|stamped=false",
+        "doc|final|LongTerm|-|exp=None|rev=None|mode=Document|stamped=false",
+        "doc|final|LongTerm|-|exp=None|rev=None|mode=Document|stamped=false",
+        "doc|final|LongTerm|-|exp=Some(true)|rev=None|mode=Document|stamped=true",
+        "trace|final|LongTerm|-|exp=Some(false)|rev=Some(false)|mode=Document|stamped=true",
+    ];
+    assert_eq!(snapshot, expected);
+}
+
+#[tokio::test]
+async fn memory_add_batch_with_lifecycle_embeds_the_batch_in_one_call() {
+    let (store, _dir, calls) = make_counting_store();
+    let tenant = TenantId::new("lifecycle_batch_embed").unwrap();
+    let chunks = (0..8)
+        .map(|i| BatchChunkParams {
+            text: format!("distinct note number {i} about quota {i}"),
+            chunk_type: "doc".to_string(),
+            review_after_ms: Some(FAR_REVIEW_MS),
+            ..Default::default()
+        })
+        .collect();
+
+    let result = handle_memory_add_batch(
+        &store,
+        None,
+        AddBatchParams {
+            tenant_id: tenant.to_string(),
+            chunks,
+            supersede_near_duplicates: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let text = result["content"][0]["text"].as_str().unwrap();
+    let response: AddBatchResult = serde_json::from_str(text).unwrap();
+    assert_eq!(response.chunk_ids.len(), 8);
+    assert_eq!(
+        store.stats(&tenant).await.unwrap().active_chunks,
+        8,
+        "every chunk is stored"
+    );
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the batch embeds in one call, not one call per chunk"
+    );
+}

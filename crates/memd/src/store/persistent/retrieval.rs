@@ -167,13 +167,22 @@ impl PersistentStore {
             return Ok(results);
         }
 
-        // Fallback to dense-only if hybrid not available
-        if let Some(ref searcher) = self.dense_searcher {
-            debug!("using DENSE-ONLY search path");
-            let (dense_results, _embed_time, _search_time) = searcher
-                .search_with_timing(tenant_id, query, fetch_k)
-                .await?;
-
+        // Fallback to dense-only if hybrid not available. A model that cannot
+        // load leaves nothing to answer with here, so the search drops to the
+        // text fallback below, as it did when the store opened without a
+        // dense searcher.
+        let dense_answer = match self.dense_searcher {
+            Some(ref searcher) => {
+                debug!("using DENSE-ONLY search path");
+                match searcher.search_with_timing(tenant_id, query, fetch_k).await {
+                    Ok(answer) => Some(answer),
+                    Err(MemdError::ModelUnavailable(_)) => None,
+                    Err(error) => return Err(error),
+                }
+            }
+            None => None,
+        };
+        if let Some((dense_results, _embed_time, _search_time)) = dense_answer {
             warn!(
                 dense_count = dense_results.len(),
                 "dense search returned results"
@@ -198,10 +207,11 @@ impl PersistentStore {
             return Ok(results);
         }
 
-        // Fall back to text search with score 1.0
+        // Fall back to text search with score 1.0. Go to the substring scan
+        // directly: `search` would dispatch back here while a dense searcher
+        // is present, which is the case when its model cannot load.
         warn!("using TEXT-ONLY fallback search (no embeddings available)");
-        let chunks = self.search(tenant_id, query, k).await?;
-        Ok(chunks.into_iter().map(|c| (c, 1.0)).collect())
+        self.search_with_scores_impl(tenant_id, query, k).await
     }
 
     pub(super) async fn delete_chunk(
