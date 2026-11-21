@@ -34,7 +34,7 @@ async fn one_case_renders_one_lesson_line() {
         "alpha",
         "Cargo registry index is read-only",
         "Set CARGO_HOME to a writable directory.",
-        json!({"tool": "cargo", "version": "1.80", "machine": "nelli-gpu"}),
+        json!({"tool": "cargo", "version": "1.80", "machine": "build-host"}),
         T0,
         "EXP-1",
     )
@@ -48,7 +48,7 @@ async fn one_case_renders_one_lesson_line() {
     assert_eq!(
         block,
         format!(
-            "1. Set CARGO_HOME to a writable directory.\n   - when: slow startup; applies to: tool cargo 1.80, machine nelli-gpu; evidence: observed; case: `{}`\n\nMore lessons: memd experience find \"<error words>\"",
+            "1. Set CARGO_HOME to a writable directory.\n   - when: slow startup; applies to: tool cargo 1.80, machine build-host; evidence: observed; case: `{}`\n\nMore lessons: memd experience find \"<error words>\"",
             note.problem_id
         )
     );
