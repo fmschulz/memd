@@ -203,7 +203,9 @@ fn owns_checkout(dir: &Path, owns: &Owns) -> bool {
 pub(super) fn foreign_scope_entry(dir: &Path, name: &str, owns: &Owns) -> Option<PathBuf> {
     let memd_dir = dir.join(".memd");
     let file = memd_dir.join(name);
-    let dir_trusted = owns(dir);
+    // A path through a symlink is checked at its target too: the owner of the
+    // target directory can rename `.memd`.
+    let dir_trusted = owns(dir) && dir.canonicalize().is_ok_and(|target| owns(&target));
     [memd_dir, file].into_iter().find(|entry| {
         entry
             .symlink_metadata()
@@ -328,6 +330,11 @@ pub(super) fn main_checkout_of_linked_worktree(project_dir: &Path) -> Option<Pat
 /// its `.git`. A pointer to another user's checkout is rejected, so it can
 /// neither supply a scope nor choose the project id.
 pub(super) fn trusted_main_checkout(project_dir: &Path, owns: &Owns) -> Option<PathBuf> {
+    // The worktree's own `.git` pointer names the main checkout, so its owner
+    // must be trusted too, not only the checkout it names.
+    if !owns_checkout(project_dir, owns) {
+        return None;
+    }
     main_checkout_of_linked_worktree(project_dir).filter(|main| owns_checkout(main, owns))
 }
 
@@ -1713,6 +1720,37 @@ pub(super) mod tests {
         assert_eq!(not_owned, [shared.join(".memd")]);
         // A foreign directory without a `.memd` has nothing to report.
         assert!(foreign_scope_entry(&project, "project_scope.json", &owns).is_none());
+    }
+
+    #[test]
+    fn a_worktree_pointer_file_the_user_does_not_own_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (_main, worktree) = sibling_worktree(&root);
+        // The user owns both checkouts, but another user owns the worktree's
+        // `.git` pointer file, so it cannot name the main checkout.
+        let owns = owned_below(&root, &[&worktree.join(".git")]);
+
+        assert_eq!(trusted_main_checkout(&worktree, &owns), None);
+        assert!(find_project_scope_with_home(&worktree, Some(&root), &owns)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn a_symlink_to_a_foreign_directory_does_not_make_its_scope_trusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let foreign = root.join("foreign");
+        std::fs::create_dir_all(&foreign).unwrap();
+        write_scope_file(&foreign, "chosen_by_other", "p");
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&foreign, &link).unwrap();
+        // The user owns the link, `.memd` and the file, but not the target
+        // directory, whose owner can rename `.memd`.
+        let owns = owned_below(&root, &[&foreign]);
+
+        assert!(foreign_scope_entry(&link, "project_scope.json", &owns).is_some());
     }
 
     #[test]
