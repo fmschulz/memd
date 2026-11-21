@@ -481,6 +481,17 @@ impl SqliteMetadataStore {
         Ok(artifacts)
     }
 
+    /// Count the canonical task artifacts of one logical task.
+    pub fn count_task_artifacts(&self, tenant_id: &TenantId, task_id: &str) -> Result<usize> {
+        let conn = self.pool.get();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM task_artifacts WHERE tenant_id = ?1 AND task_id = ?2",
+            rusqlite::params![tenant_id.as_str(), task_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
     /// List canonical task artifacts for a thread ordered by creation time.
     pub fn list_thread_artifacts(
         &self,

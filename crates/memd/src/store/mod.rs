@@ -741,6 +741,12 @@ pub trait Store: Send + Sync {
     ) -> Result<UnindexedChunks> {
         Ok(UnindexedChunks::Chunks(Vec::new()))
     }
+
+    /// Number of canonical artifacts of one logical task. The default loads
+    /// them; stores with a metadata table count in the query.
+    async fn count_task_artifacts(&self, tenant_id: &TenantId, task_id: &str) -> Result<usize> {
+        Ok(self.list_task_artifacts(tenant_id, task_id).await?.len())
+    }
 }
 
 /// Answer of [`Store::unindexed_chunks`].

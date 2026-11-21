@@ -58,11 +58,12 @@ list of every physical chunk created by document splitting.
   excluded experience projections and generated digests, the rows excluded by status, and whether a
   cap truncated the scan. Its `lessons` array lists each lesson candidate with
   the problem ID, lesson artifact ID, event time and skip reason (`superseded`,
-  `conflict`, `over_limit`, `unresolvable`; null when shown).
+  `conflict`, `over_limit`, `too_large`, `unresolvable`; null when shown).
 - `memory-md --lesson-limit <n>` (default 3, maximum 10, 0 turns the block off)
   sets the `Recent Lessons` block, which follows the project facts. It lists
-  the newest current lessons of the active project (and its aliases): a
-  superseded lesson, a case with conflicting lessons and lessons of other
+  the newest (by creation time) current lessons of the active project (and its aliases), written as inert single-line text with fixed field lengths: a
+  superseded lesson, a case with conflicting lessons, a case with more than
+  200 stored artifacts and lessons of other
   projects are left out. It does not use `--project-limit` places and skips the
   repository-coverage and dedupe gates. The command result reports
   `project_lessons`. Recall lessons of other projects with

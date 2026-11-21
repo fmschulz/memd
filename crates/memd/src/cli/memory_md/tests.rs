@@ -1227,3 +1227,69 @@ fn repo_index_excludes_generated_memory_md_and_memd_dir() {
     assert!(!paths.iter().any(|path| path.contains("_archive")));
     assert!(!paths.iter().any(|path| path.contains(".memd")));
 }
+
+#[test]
+fn inert_text_is_one_inert_line() {
+    assert_eq!(inert_text("a\n\n# b\t- c\r\n", 80), "a # b - c");
+    assert_eq!(inert_text("## Heading", 80), "Heading");
+    assert_eq!(inert_text("> - * quote", 80), "quote");
+    assert_eq!(
+        inert_text("`code` and ``` fence", 80),
+        "'code' and ''' fence"
+    );
+    assert_eq!(
+        inert_text("<script>x</script>", 80),
+        "\u{2039}script\u{203a}x\u{2039}/script\u{203a}"
+    );
+    assert_eq!(inert_text("a\u{1b}[31m b\u{202e}c", 80), "a [31m b c");
+    assert_eq!(inert_text("   \n  ", 80), "");
+    let cut = inert_text(&"word ".repeat(100), 20);
+    assert_eq!(cut.chars().count(), 20);
+    assert!(cut.ends_with("..."));
+}
+
+#[test]
+fn lesson_fields_are_capped_per_field() {
+    use crate::experience::{ConditionalLesson, LessonApplicability, LessonEvidence, RecentLesson};
+    let lesson = ConditionalLesson {
+        guidance: "g".repeat(500),
+        symptom_terms: (0..20)
+            .map(|index| format!("term{index} {}", "x".repeat(200)))
+            .collect(),
+        applicability: LessonApplicability {
+            machine: Some("m".repeat(200)),
+            tool: Some("t".repeat(200)),
+            version: Some("v".repeat(200)),
+        },
+        evidence: LessonEvidence::Executed,
+        ..Default::default()
+    };
+    let recent = RecentLesson {
+        problem_id: "p1".to_string(),
+        lesson_id: "l1".to_string(),
+        event_time_ms: 1,
+        created_at_ms: 1,
+        skipped: None,
+        lesson,
+    };
+    let mut out = String::new();
+    render_lessons(&mut out, &[&recent]);
+    let lines = out.lines().collect::<Vec<_>>();
+    let guidance = lines[2].strip_prefix("1. ").unwrap();
+    assert_eq!(guidance.chars().count(), 320);
+    let detail = lines[3];
+    let mut parts = detail.trim_start_matches("   - ").split("; ");
+    let when = parts.next().unwrap().trim_start_matches("when: ");
+    let terms = when.split(", ").collect::<Vec<_>>();
+    assert_eq!(terms.len(), 12, "{detail}");
+    assert!(terms.iter().all(|term| term.chars().count() <= 80));
+    let applies = parts.next().unwrap();
+    assert!(applies.starts_with("applies to: tool "), "{applies}");
+    assert!(
+        applies
+            .split([' ', ','])
+            .all(|token| token.chars().count() <= 60),
+        "{applies}"
+    );
+    assert!(detail.contains("evidence: executed"));
+}

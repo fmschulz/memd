@@ -72,6 +72,7 @@ async fn record_lesson<S: Store + ?Sized>(
             "fix": fix,
             "check": {"method": "observed", "result": "startup took under a second"},
             "applies_when": applies_when,
+            "visibility": "shared",
         })
         .to_string()
         .as_bytes(),

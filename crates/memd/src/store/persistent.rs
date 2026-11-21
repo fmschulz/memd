@@ -1864,6 +1864,10 @@ impl Store for PersistentStore {
         self.metadata.list_task_artifacts(tenant_id, task_id)
     }
 
+    async fn count_task_artifacts(&self, tenant_id: &TenantId, task_id: &str) -> Result<usize> {
+        self.metadata.count_task_artifacts(tenant_id, task_id)
+    }
+
     async fn list_thread_artifacts(
         &self,
         tenant_id: &TenantId,

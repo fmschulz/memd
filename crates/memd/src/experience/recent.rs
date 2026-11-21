@@ -18,6 +18,11 @@ use crate::types::TenantId;
 /// Lesson artifacts one call looks at, however many places it must fill.
 pub const LESSON_WINDOW: usize = 30;
 
+/// Largest case, in stored artifacts of its task, that the call resolves.
+/// `resolve_case` loads and validates the whole history, so a longer case is
+/// skipped.
+pub const MAX_CASE_ARTIFACTS: usize = 200;
+
 /// Why a candidate lesson is not shown.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +33,8 @@ pub enum LessonSkip {
     Conflict,
     /// The places are full.
     OverLimit,
+    /// The case holds more than [`MAX_CASE_ARTIFACTS`] artifacts.
+    TooLarge,
     /// The case did not resolve.
     Unresolvable,
 }
@@ -37,7 +44,10 @@ pub enum LessonSkip {
 pub struct RecentLesson {
     pub problem_id: String,
     pub lesson_id: String,
+    /// When the lesson was observed, as its writer states.
     pub event_time_ms: i64,
+    /// When the store created the lesson. This orders the candidates.
+    pub created_at_ms: i64,
     /// `None` when the lesson is shown.
     pub skipped: Option<LessonSkip>,
     #[serde(skip)]
@@ -45,7 +55,10 @@ pub struct RecentLesson {
 }
 
 /// The newest lesson artifacts of the projects in `project_ids`, at most
-/// [`LESSON_WINDOW`] of them, newest event first. Each is marked shown or
+/// [`LESSON_WINDOW`] of them, newest first by creation time. The metadata
+/// query cuts the window by creation time, so the final order uses the same
+/// clock: the creation time is set by the store, while the event time is
+/// stated by the writer and can be backdated. Each is marked shown or
 /// skipped; at most `limit` are shown. A case resolves once, and no case
 /// resolves after the places are full.
 ///
@@ -81,13 +94,14 @@ pub async fn recent_lessons<S: Store + ?Sized>(
     }
     let mut candidates = found.into_values().collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
-        event_time(right)
-            .cmp(&event_time(left))
-            .then_with(|| left.artifact_id.cmp(&right.artifact_id))
+        right
+            .timestamp_created
+            .cmp(&left.timestamp_created)
+            .then_with(|| right.artifact_id.cmp(&left.artifact_id))
     });
     candidates.truncate(LESSON_WINDOW);
 
-    let mut cases: HashMap<String, Option<ExperienceCase>> = HashMap::new();
+    let mut cases: HashMap<String, CaseState> = HashMap::new();
     let mut shown = 0usize;
     let mut out = Vec::with_capacity(candidates.len());
     for artifact in candidates {
@@ -98,15 +112,26 @@ pub async fn recent_lessons<S: Store + ?Sized>(
             Some(LessonSkip::OverLimit)
         } else {
             if !cases.contains_key(&lesson.problem_id) {
-                let case = resolve_case(store, tenant_id, &lesson.problem_id)
-                    .await
-                    .ok();
-                cases.insert(lesson.problem_id.clone(), case);
+                let size = store
+                    .count_task_artifacts(tenant_id, &artifact.task_id)
+                    .await?;
+                let state = if size > MAX_CASE_ARTIFACTS {
+                    CaseState::TooLarge
+                } else {
+                    match resolve_case(store, tenant_id, &lesson.problem_id).await {
+                        Ok(case) => CaseState::Resolved(Box::new(case)),
+                        Err(_) => CaseState::Unresolvable,
+                    }
+                };
+                cases.insert(lesson.problem_id.clone(), state);
             }
             match &cases[&lesson.problem_id] {
-                None => Some(LessonSkip::Unresolvable),
-                Some(case) if !case.lesson_conflicts.is_empty() => Some(LessonSkip::Conflict),
-                Some(case)
+                CaseState::TooLarge => Some(LessonSkip::TooLarge),
+                CaseState::Unresolvable => Some(LessonSkip::Unresolvable),
+                CaseState::Resolved(case) if !case.lesson_conflicts.is_empty() => {
+                    Some(LessonSkip::Conflict)
+                }
+                CaseState::Resolved(case)
                     if !case
                         .current_lessons
                         .iter()
@@ -114,7 +139,7 @@ pub async fn recent_lessons<S: Store + ?Sized>(
                 {
                     Some(LessonSkip::Superseded)
                 }
-                Some(_) => None,
+                CaseState::Resolved(_) => None,
             }
         };
         if skipped.is_none() {
@@ -124,9 +149,16 @@ pub async fn recent_lessons<S: Store + ?Sized>(
             problem_id: lesson.problem_id.clone(),
             lesson_id: artifact.artifact_id.clone(),
             event_time_ms: event_time(&artifact),
+            created_at_ms: artifact.timestamp_created,
             skipped,
             lesson: lesson.clone(),
         });
     }
     Ok(out)
+}
+
+enum CaseState {
+    Resolved(Box<ExperienceCase>),
+    TooLarge,
+    Unresolvable,
 }

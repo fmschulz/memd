@@ -28,9 +28,56 @@ pub(super) fn render_memory_md(
     out
 }
 
+/// Length limits for untrusted fields.
+const LESSON_GUIDANCE_CHARS: usize = 320;
+const LESSON_TERM_CHARS: usize = 80;
+const LESSON_TERMS_SHOWN: usize = 12;
+const LESSON_ENVIRONMENT_CHARS: usize = 60;
+const TAG_CHARS: usize = 60;
+const ID_CHARS: usize = 80;
+
+/// Untrusted text (lesson fields, tags) as inert single-line text. Agents
+/// read `memory.md` as context, so a stored value must not start a heading,
+/// list item, quote, code fence or HTML tag, or close a code span. One rule
+/// for every such field:
+/// * whitespace, control characters and bidirectional-format characters
+///   become one space, so the text stays on one line;
+/// * backticks become apostrophes, so the text cannot close a code span;
+/// * `<` and `>` become single angle quotes, so no tag can form;
+/// * a leading run of `#`, `>`, `-`, `*`, `+`, `=`, `_`, `~`, `|` is dropped;
+/// * the result is cut to `limit` characters, with `...` when cut.
+pub(super) fn inert_text(text: &str, limit: usize) -> String {
+    let mut single_line = String::with_capacity(text.len().min(limit * 4));
+    let mut pending_space = false;
+    for ch in text.chars() {
+        let ch = match ch {
+            '`' => '\'',
+            '<' => '\u{2039}',
+            '>' => '\u{203a}',
+            ch => ch,
+        };
+        if ch.is_whitespace()
+            || ch.is_control()
+            || matches!(ch, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
+        {
+            pending_space = !single_line.is_empty();
+            continue;
+        }
+        if pending_space {
+            single_line.push(' ');
+            pending_space = false;
+        }
+        single_line.push(ch);
+    }
+    let trimmed = single_line
+        .trim_start_matches(['#', '\u{203a}', '-', '*', '+', '=', '_', '~', '|', ' '])
+        .to_string();
+    summarize_text(&trimmed, limit)
+}
+
 /// The shown lessons of the project, each rendered from the lesson itself:
 /// guidance, then when it applies and how it was checked. Nothing renders
-/// without a lesson.
+/// without a lesson. Every field passes through [`inert_text`].
 pub(super) fn render_lessons(out: &mut String, lessons: &[&RecentLesson]) {
     if lessons.is_empty() {
         return;
@@ -41,21 +88,37 @@ pub(super) fn render_lessons(out: &mut String, lessons: &[&RecentLesson]) {
         out.push_str(&format!(
             "{}. {}\n",
             index + 1,
-            summarize_text(&lesson.guidance, 320)
+            inert_text(&lesson.guidance, LESSON_GUIDANCE_CHARS)
         ));
         let mut parts = Vec::new();
-        if !lesson.symptom_terms.is_empty() {
-            parts.push(format!("when: {}", lesson.symptom_terms.join(", ")));
+        let terms = lesson
+            .symptom_terms
+            .iter()
+            .take(LESSON_TERMS_SHOWN)
+            .map(|term| inert_text(term, LESSON_TERM_CHARS))
+            .filter(|term| !term.is_empty())
+            .collect::<Vec<_>>();
+        if !terms.is_empty() {
+            parts.push(format!("when: {}", terms.join(", ")));
         }
         let applicability = &lesson.applicability;
+        let environment = |value: &Option<String>| {
+            value
+                .as_deref()
+                .map(|value| inert_text(value, LESSON_ENVIRONMENT_CHARS))
+                .filter(|value| !value.is_empty())
+        };
         let mut applies = Vec::new();
-        match (&applicability.tool, &applicability.version) {
+        match (
+            environment(&applicability.tool),
+            environment(&applicability.version),
+        ) {
             (Some(tool), Some(version)) => applies.push(format!("tool {tool} {version}")),
             (Some(tool), None) => applies.push(format!("tool {tool}")),
             (None, Some(version)) => applies.push(format!("version {version}")),
             (None, None) => {}
         }
-        if let Some(machine) = &applicability.machine {
+        if let Some(machine) = environment(&applicability.machine) {
             applies.push(format!("machine {machine}"));
         }
         if !applies.is_empty() {
@@ -68,7 +131,10 @@ pub(super) fn render_lessons(out: &mut String, lessons: &[&RecentLesson]) {
                 LessonEvidence::Executed => "executed",
             }
         ));
-        parts.push(format!("case: `{}`", recent.problem_id));
+        parts.push(format!(
+            "case: `{}`",
+            inert_text(&recent.problem_id, ID_CHARS)
+        ));
         out.push_str(&format!("   - {}\n", parts.join("; ")));
     }
     out.push_str("\nMore lessons: memd experience find \"<error words>\"\n\n");
@@ -161,7 +227,8 @@ pub(super) fn render_takeaway(out: &mut String, idx: usize, takeaway: &Takeaway)
     ));
     out.push_str(&format!(
         "   - chunk: `{}`; priority: `{:.1}`",
-        takeaway.chunk_id, takeaway.priority
+        inert_text(&takeaway.chunk_id, ID_CHARS),
+        takeaway.priority
     ));
     if !takeaway.tags.is_empty() {
         out.push_str(&format!(
@@ -170,7 +237,7 @@ pub(super) fn render_takeaway(out: &mut String, idx: usize, takeaway: &Takeaway)
                 .tags
                 .iter()
                 .take(4)
-                .cloned()
+                .map(|tag| inert_text(tag, TAG_CHARS))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));

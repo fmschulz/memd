@@ -33,7 +33,7 @@ duplicates; the agent still decides where a fact belongs. Add
 excluded rows.
 
 After the project facts, a `Recent Lessons` block lists up to 3 current
-lessons of the project, newest first (`--lesson-limit N`, maximum 10, 0 turns
+lessons of the project, newest first by creation time (`--lesson-limit N`, maximum 10, 0 turns
 it off). Each shows the guidance, when it applies (symptom terms, tool,
 version, machine), the evidence label (`observed` or `executed`), and the case
 ID. A superseded lesson, a case with conflicting lessons, and lessons of other
