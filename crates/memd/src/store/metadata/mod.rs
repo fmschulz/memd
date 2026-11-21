@@ -69,6 +69,50 @@ pub struct ChunkMetadata {
     pub ingestion_mode: crate::types::IngestionMode,
 }
 
+/// Which rows of a tenant the `memory.md` digest reads, relative to the
+/// active project scope.
+#[derive(Debug, Clone, Copy)]
+pub enum DigestRows<'a> {
+    /// Rows inside the project scope.
+    InScope(&'a DigestScope),
+    /// Rows outside the project scope.
+    OutOfScope(&'a DigestScope),
+}
+
+/// The projects that count as the active scope: the active project and its
+/// configured aliases.
+#[derive(Debug, Clone, Default)]
+pub struct DigestScope {
+    pub project_ids: Vec<String>,
+    /// Rows without a project are inside the scope (no active project).
+    pub include_unscoped: bool,
+}
+
+impl DigestScope {
+    /// True when a row of `project_id` is inside the scope.
+    pub fn contains(&self, project_id: Option<&str>) -> bool {
+        match project_id {
+            Some(id) => self.project_ids.iter().any(|candidate| candidate == id),
+            None => self.include_unscoped,
+        }
+    }
+}
+
+/// What a digest row selection holds, split by why a row is in or out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DigestCounts {
+    /// Rows with a visible status that are neither experience projections nor
+    /// generated digests.
+    pub visible: usize,
+    /// Rows with a visible status that project an experience case.
+    pub experience_projections: usize,
+    /// Rows with a visible status that project a generated digest.
+    pub generated_digests: usize,
+    /// Rows with a non-visible status (candidate, deleted, error,
+    /// superseded, expired).
+    pub not_visible: usize,
+}
+
 /// Metadata store trait
 pub trait MetadataStore: Send + Sync {
     /// Insert metadata for a new chunk
@@ -375,4 +419,19 @@ pub trait MetadataStore: Send + Sync {
         project_id: Option<&str>,
         include_history: bool,
     ) -> Result<Vec<ChunkMetadata>>;
+
+    /// List the rows the `memory.md` digest may read, newest first. Rows with
+    /// a non-visible status and projections of experience cases are left out
+    /// in the query, so the caller reads no payload for them.
+    fn list_digest_rows(
+        &self,
+        tenant_id: &TenantId,
+        rows: DigestRows<'_>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<ChunkMetadata>>;
+
+    /// Count the rows of one digest selection by why they are in or out.
+    fn count_digest_rows(&self, tenant_id: &TenantId, rows: DigestRows<'_>)
+        -> Result<DigestCounts>;
 }

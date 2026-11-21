@@ -3,14 +3,14 @@
 //! Implements MetadataStore using SQLite with WAL mode for crash safety
 //! and tenant isolation via indexes.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 use super::pool::SqliteConnectionPool;
-use super::{ChunkMetadata, IndexState, MetadataStore};
+use super::{ChunkMetadata, DigestCounts, DigestRows, IndexState, MetadataStore};
 use crate::consolidate::journal::{
     ConsolidationEntryRecord, ConsolidationRun, ConsolidationRunId, ConsolidationState,
     LineageRelation, MemoryLineage, PromotionOutcome,

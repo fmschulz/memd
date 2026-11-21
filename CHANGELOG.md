@@ -12,6 +12,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- `memory.md` selects candidates per project scope: every visible fact of the active project is a candidate, however many newer rows other projects hold. Machine-wide candidates are the newest 5,000 visible rows outside the project. Experience-case projections, generated digest projections and rows with a non-visible status are excluded in the metadata query, before any payload read. Dedupe runs after ranking, within the best 200 candidates per section.
+- **Breaking:** the `memory.md` health header prints `facts: <P> visible in project <id>, <T> visible in tenant <tenant>` from SQL counts. It no longer runs `memd report` and drops the `chunks`, `retrieval` and `learned` lines. `memory-md --explain-output` adds a `scan` object with the excluded experience projections and generated digests, the rows excluded by status, and the unreadable and truncated counts per section.
 - Dense indexes record the embedding model and reject switches, including between two 384-d models. Switching an existing store requires `MEMD_BACKFILL_HNSW_ON_STARTUP=1` to rebuild from segments; unmarked 384-d and 768-d stores are treated as MiniLM and BGE-base respectively.
 
 ### Removed

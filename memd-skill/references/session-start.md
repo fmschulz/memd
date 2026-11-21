@@ -18,12 +18,18 @@ form is preferred:
 memd memory-md --project-dir . --output memory.md
 ```
 
-The file shows its generation date and scope, memory-health warnings, and
-ranked facts with chunk IDs, scores, and tags. Defaults are at most 10 project
-facts and 2 machine-wide facts (`--global-limit 0` disables the latter).
-Selection scans stored candidates and suppresses ephemeral progress, generated
-wrappers, and facts covered by indexed repository documents. The coverage
-heuristic can miss duplicates; the agent still decides where a fact belongs.
+The file shows its generation date and scope, a health line
+(`facts: <P> visible in project <id>, <T> visible in tenant <tenant>`), warnings,
+and ranked facts with chunk IDs, scores, and tags. Defaults are at most 10
+project facts and 2 machine-wide facts (`--global-limit 0` disables the latter).
+Selection reads every visible fact of the project, however many newer rows other
+projects hold, and the newest 5,000 visible facts outside it. It leaves out
+superseded and deleted rows, generated digests, experience-case projections (recall lessons with
+`memd experience find`), ephemeral progress, generated wrappers, and facts
+covered by indexed repository documents. The coverage heuristic can miss
+duplicates; the agent still decides where a fact belongs. Add
+`--explain-output <path>` to audit the selection, including the counts of
+excluded rows.
 
 Explicit priority, durable categories, freshness, and verified outcomes affect
 ranking. Retrieval exposure alone is not proof of usefulness. Source inspection,

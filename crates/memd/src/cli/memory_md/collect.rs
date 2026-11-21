@@ -1,14 +1,14 @@
+use super::rank::SectionScan;
 use super::state::*;
 use super::*;
 
-pub(super) async fn collect_project_state<S: Store>(
-    store: &S,
-    tenant: &TenantId,
+pub(super) fn collect_project_state(
     tenant_id: &str,
     project_id: Option<&str>,
     project_dir: &Path,
     scope: Option<&ProjectScopeConfig>,
     generated_unix_ms: u128,
+    memory: MemoryState,
 ) -> ProjectState {
     let configured_project_dir = scope.map(|scope| scope.project_dir.clone());
     let mut scope_warnings = Vec::new();
@@ -17,8 +17,6 @@ pub(super) async fn collect_project_state<S: Store>(
             scope_warnings.push(warning);
         }
     }
-
-    let memory = collect_memory_state(store, tenant, project_id).await;
 
     ProjectState {
         generated_unix_ms,
@@ -32,53 +30,28 @@ pub(super) async fn collect_project_state<S: Store>(
     }
 }
 
-pub(super) async fn collect_memory_state<S: Store>(
-    store: &S,
-    tenant: &TenantId,
-    project_id: Option<&str>,
+/// Health counts and warnings from the candidate scan. No second scan runs.
+pub(super) fn memory_state_from_scan(
+    project: &SectionScan,
+    machine_wide: &SectionScan,
 ) -> MemoryState {
-    let snapshot = match store.health_snapshot(tenant, project_id, 0).await {
-        Ok(Some(snapshot)) => snapshot,
-        Ok(None) => return MemoryState::default(),
-        Err(error) => {
-            return MemoryState {
-                scan_warning: Some(format!("memory health scan failed: {error}")),
-                ..MemoryState::default()
-            };
+    let mut scan_warnings = Vec::new();
+    for (label, scan, cap) in [
+        ("project", project, PROJECT_SCAN_MAX_ROWS),
+        ("machine-wide", machine_wide, MACHINE_SCAN_MAX_ROWS),
+    ] {
+        if scan.truncated {
+            scan_warnings.push(format!(
+                "{label} scan truncated: read {} of {} visible facts (cap {cap}); lower-ranked facts were not considered",
+                scan.read_rows, scan.visible_rows
+            ));
         }
-    };
-    let metadata_active = snapshot.counts.active_chunks;
-    let mut readable = 0usize;
-    let mut warning = None;
-    let mut offset = 0usize;
-    let scan_limit = metadata_active.min(READABLE_SCAN_MAX_METADATA_ROWS);
-    while offset < scan_limit {
-        let limit = READABLE_SCAN_PAGE_SIZE.min(scan_limit.saturating_sub(offset));
-        match store
-            .list_chunks_for_project(tenant, project_id, limit, offset)
-            .await
-        {
-            Ok(chunks) => readable = readable.saturating_add(chunks.len()),
-            Err(error) => {
-                warning = Some(format!(
-                    "readable memory scan failed at offset {offset}: {error}"
-                ));
-                break;
-            }
-        }
-        offset = offset.saturating_add(limit);
     }
-    if metadata_active > scan_limit && warning.is_none() {
-        warning = Some(format!(
-            "readable memory scan partial: checked {scan_limit} of {metadata_active} active chunks; unreadable count may be understated"
-        ));
-    }
-    let unreadable = scan_limit.saturating_sub(readable);
     MemoryState {
-        metadata_active_chunks: Some(metadata_active),
-        readable_active_chunks: Some(readable),
-        unreadable_active_chunks: Some(unreadable),
-        scan_warning: warning,
+        visible_project_facts: project.visible_rows,
+        visible_tenant_facts: project.visible_rows + machine_wide.visible_rows,
+        unreadable_active_chunks: project.unreadable_rows + machine_wide.unreadable_rows,
+        scan_warnings,
     }
 }
 

@@ -50,16 +50,25 @@ list of every physical chunk created by document splitting.
 
 - `memory-md --explain-output <path>` writes a JSON candidate audit with scan
   source, score components, tags, display/filter decisions, scope and memory
-  health state, and agent-usefulness metrics.
+  health state, and agent-usefulness metrics. Its `scan` object counts, for the
+  project and machine-wide sections, the visible, read and unreadable rows, the
+  excluded experience projections and generated digests, the rows excluded by status, and whether a
+  cap truncated the scan.
 - `memory-md` renders a generation date and scope before the fact libraries.
-  `Memory health` includes available health metrics and warnings for scope
-  drift, unreadable payloads, or incomplete health scans. Task, handoff, and
+  `Memory health` prints `facts: <P> visible in project <id>, <T> visible in
+  tenant <tenant>` (SQL counts that skip superseded, deleted and other
+  non-visible rows and experience projections) and warnings for scope drift,
+  truncated scans, or unreadable payloads. Task, handoff, and
   git state belong in repository files. Takeaways covered by indexed repository
   documents are suppressed using a token-overlap heuristic; lessons tagged
   `priority:8+` or `importance:8+` are exempt. Missing or unreadable repository files
   are skipped by that coverage check.
-- Project and machine-wide candidates are assigned and deduplicated as one
-  bounded pool before display limits are applied. Exact IDs, consolidation
+- Every visible row of the active project is a candidate. Machine-wide
+  candidates are the newest 5,000 visible rows outside it. Experience-case
+  projections are never candidates; use `memd experience find` for lessons.
+- Project and machine-wide candidates are ranked, then deduplicated as one
+  pool within the best 200 candidates per section, before display limits are
+  applied. Exact IDs, consolidation
   lineage, and high-confidence topic matches appear in one section only, with
   the active project's section taking precedence.
 - `eval-memory-md` writes to `memory-eval.md` by default and rejects an output

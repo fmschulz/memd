@@ -377,10 +377,19 @@ async fn scan_partitions_candidates_by_active_project_in_one_pass() {
     ];
     let store = FakeHealthStore::new(chunks.len(), chunks);
 
-    let (project, global, explanations) =
-        scan_takeaway_candidates(&store, &tenant, Some("project-a"))
-            .await
-            .unwrap();
+    let ScanOutcome {
+        project,
+        machine_wide: global,
+        explanations,
+        project_scan,
+        machine_scan,
+    } = scan_takeaway_candidates(&store, &tenant, Some("project-a"))
+        .await
+        .unwrap();
+    assert_eq!(project_scan.visible_rows, 1);
+    assert_eq!(project_scan.excluded_by_status, 1);
+    assert_eq!(machine_scan.visible_rows, 2);
+    assert_eq!(machine_scan.excluded_by_status, 0);
 
     assert_eq!(
         project
@@ -496,14 +505,25 @@ fn startup_filters_remove_boilerplate_before_union_dedup() {
         .unwrap_or(false));
 }
 
-#[tokio::test]
-async fn memory_state_reports_project_scoped_unreadable_chunks() {
-    let store = FakeHealthStore::new(2, Vec::new());
-    let tenant = TenantId::new("t").unwrap();
-    let state = collect_memory_state(&store, &tenant, Some("p")).await;
-    assert_eq!(state.metadata_active_chunks, Some(2));
-    assert_eq!(state.readable_active_chunks, Some(0));
-    assert_eq!(state.unreadable_active_chunks, Some(2));
+#[test]
+fn memory_state_comes_from_the_candidate_scan() {
+    let project = SectionScan {
+        visible_rows: 3,
+        read_rows: 3,
+        unreadable_rows: 2,
+        ..SectionScan::default()
+    };
+    let machine_wide = SectionScan {
+        visible_rows: 4,
+        read_rows: 4,
+        unreadable_rows: 1,
+        ..SectionScan::default()
+    };
+    let state = memory_state_from_scan(&project, &machine_wide);
+    assert_eq!(state.visible_project_facts, 3);
+    assert_eq!(state.visible_tenant_facts, 7);
+    assert_eq!(state.unreadable_active_chunks, 3);
+    assert!(state.scan_warnings.is_empty());
 
     let project_state = ProjectState {
         memory: state,
@@ -511,23 +531,110 @@ async fn memory_state_reports_project_scoped_unreadable_chunks() {
     };
     assert!(project_state_warnings(&project_state)
         .iter()
-        .any(|warning| warning.contains("memory degraded: 2 active chunks")));
+        .any(|warning| warning.contains("memory degraded: 3 active chunks")));
+    assert_eq!(
+        facts_health_line(&project_state),
+        "facts: 3 visible in project project-a, 7 visible in tenant tenant-a"
+    );
+}
+
+#[test]
+fn truncated_scans_warn_in_the_digest() {
+    let project = SectionScan {
+        visible_rows: PROJECT_SCAN_MAX_ROWS + 1,
+        read_rows: PROJECT_SCAN_MAX_ROWS,
+        truncated: true,
+        ..SectionScan::default()
+    };
+    let machine_wide = SectionScan {
+        visible_rows: MACHINE_SCAN_MAX_ROWS + 7,
+        read_rows: MACHINE_SCAN_MAX_ROWS,
+        truncated: true,
+        ..SectionScan::default()
+    };
+    let state = memory_state_from_scan(&project, &machine_wide);
+    assert_eq!(state.scan_warnings.len(), 2);
+    assert!(state.scan_warnings[0].starts_with("project scan truncated: read 50000 of 50001"));
+    assert!(state.scan_warnings[1].starts_with("machine-wide scan truncated: read 5000 of 5007"));
 }
 
 #[tokio::test]
-async fn memory_state_caps_large_readable_scan_and_warns_partial() {
-    let store = FakeHealthStore::new(READABLE_SCAN_MAX_METADATA_ROWS + 5, Vec::new());
+async fn listed_scan_drops_experience_projection_tags() {
     let tenant = TenantId::new("t").unwrap();
-    let state = collect_memory_state(&store, &tenant, Some("p")).await;
+    let chunks = vec![
+        MemoryChunk::new(
+            tenant.clone(),
+            "Task decision status recorded for task experience-x.",
+            ChunkType::Decision,
+        )
+        .with_project(ProjectId::from("project-a"))
+        .with_tags(vec![
+            "task:kind:decision".to_string(),
+            "task:role:experience_lesson".to_string(),
+        ]),
+        MemoryChunk::new(
+            tenant.clone(),
+            "Decision: keep the curated fact.",
+            ChunkType::Decision,
+        )
+        .with_project(ProjectId::from("project-a")),
+        MemoryChunk::new(
+            tenant.clone(),
+            "Task digest status generated for task t1.",
+            ChunkType::Summary,
+        )
+        .with_project(ProjectId::from("project-a"))
+        .with_tags(vec![
+            "task:status:generated".to_string(),
+            "task:role:highlight_library".to_string(),
+        ]),
+    ];
+    let store = FakeHealthStore::new(chunks.len(), chunks);
+
+    let outcome = scan_takeaway_candidates(&store, &tenant, Some("project-a"))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.project.len(), 1);
+    assert_eq!(outcome.project_scan.excluded_experience_projections, 1);
+    assert_eq!(outcome.project_scan.excluded_generated_digests, 1);
+    assert_eq!(outcome.project_scan.visible_rows, 1);
+    assert!(outcome
+        .explanations
+        .iter()
+        .any(|explanation| explanation.filter_reason.as_deref() == Some("experience_projection")));
+}
+
+#[test]
+fn dedupe_ranks_first_and_keeps_the_best_window() {
+    let mut project = (0..DEDUPE_WINDOW + 5)
+        .map(|index| {
+            let mut takeaway = make_takeaway(
+                &format!("project-{index:03}"),
+                &format!("Decision: unrelated fact number {index:03} about topic{index:03}."),
+                vec!["kind:decision"],
+                "decision",
+            );
+            takeaway.priority = index as f32;
+            takeaway
+        })
+        .collect::<Vec<_>>();
+    let mut global = Vec::new();
+
+    let suppressed = dedupe_ranked_window(&mut project, &mut global);
+
+    assert_eq!(project.len(), DEDUPE_WINDOW);
     assert_eq!(
-        state.unreadable_active_chunks,
-        Some(READABLE_SCAN_MAX_METADATA_ROWS)
+        project[0].chunk_id,
+        format!("project-{:03}", DEDUPE_WINDOW + 4)
     );
-    assert!(state
-        .scan_warning
-        .as_deref()
-        .unwrap_or_default()
-        .contains("readable memory scan partial"));
+    assert_eq!(suppressed.len(), 5);
+    assert_eq!(
+        suppressed
+            .get(&("project".to_string(), "project-000".to_string()))
+            .map(String::as_str),
+        Some("below_dedupe_window")
+    );
 }
 
 #[test]
@@ -546,7 +653,7 @@ fn render_memory_md_caps_long_takeaway_text() {
         occurrences: 1,
     };
     let state = make_project_state();
-    let rendered = render_memory_md(&state, &[], &[takeaway], &[]);
+    let rendered = render_memory_md(&state, &[takeaway], &[]);
     assert!(rendered.contains("## Project Fact Library"));
     assert!(rendered.contains("chunk-a"));
     assert!(rendered.contains("..."));
@@ -568,7 +675,7 @@ fn render_memory_md_omits_empty_global_section() {
         occurrences: 1,
     };
     let state = make_project_state();
-    let rendered = render_memory_md(&state, &[], &[takeaway], &[]);
+    let rendered = render_memory_md(&state, &[takeaway], &[]);
     assert!(rendered.contains("## Project Fact Library"));
     assert!(!rendered.contains("## Machine-Wide Fact Library"));
 }
@@ -601,7 +708,7 @@ fn render_memory_md_groups_takeaways_by_signal_category() {
     command.priority = 60.0;
 
     let state = make_project_state();
-    let rendered = render_memory_md(&state, &[], &[command, fix, decision], &[]);
+    let rendered = render_memory_md(&state, &[command, fix, decision], &[]);
 
     assert!(rendered.contains("### Decisions"));
     assert!(rendered.contains("### Validated Fixes"));

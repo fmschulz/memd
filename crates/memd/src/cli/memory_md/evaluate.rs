@@ -254,11 +254,7 @@ pub(super) fn evaluate_agent_usefulness(
     // startup items used by the renderer. They describe the rendered items;
     // they are not an independent quality gate.
     let scope_health_present = scope_health_checked(state);
-    let memory_degraded_warning_present = state
-        .memory
-        .unreadable_active_chunks
-        .map(|count| count > 0)
-        .unwrap_or(false);
+    let memory_degraded_warning_present = state.memory.unreadable_active_chunks > 0;
     let fragment_count = project_takeaways
         .iter()
         .chain(global_takeaways.iter())

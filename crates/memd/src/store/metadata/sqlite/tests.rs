@@ -1,5 +1,6 @@
 use super::schema::{detect_chunks_unique_shape, ChunksUniqueShape};
 use super::*;
+use crate::store::metadata::DigestScope;
 use crate::task_memory::{ArtifactKind, DatasetRef, TaskArtifact, TaskSearchFilters};
 use crate::types::ProjectId;
 use rusqlite::Connection;
@@ -2115,4 +2116,88 @@ fn list_expired_before_skips_already_expired_rows() {
     let ids = store.list_expired_before(&a.tenant_id, 1_000).unwrap();
     assert_eq!(ids.len(), 1);
     assert_eq!(ids[0], a.chunk_id);
+}
+
+#[test]
+fn digest_rows_split_scope_status_and_unscoped_rows() {
+    let dir = tempdir().unwrap();
+    let store = SqliteMetadataStore::open(&dir.path().join("test.db")).unwrap();
+    let tenant = TenantId::new("tenant_digest").unwrap();
+    let row = |project: Option<&str>, status: ChunkStatus, ordinal: u32| {
+        let mut row = create_test_metadata("tenant_digest", &ChunkId::new());
+        row.project_id = project.map(str::to_string);
+        row.status = status;
+        row.ordinal = ordinal;
+        row.timestamp_created = 100 + ordinal as i64;
+        row
+    };
+    let rows = vec![
+        row(Some("main"), ChunkStatus::Final, 0),
+        row(Some("alias"), ChunkStatus::Final, 1),
+        row(Some("main"), ChunkStatus::Superseded, 2),
+        row(Some("other"), ChunkStatus::Final, 3),
+        row(None, ChunkStatus::Final, 4),
+        row(None, ChunkStatus::Deleted, 5),
+    ];
+    store.insert_many(&rows).unwrap();
+
+    let scope = DigestScope {
+        project_ids: vec!["main".to_string(), "alias".to_string()],
+        include_unscoped: false,
+    };
+    let inside = store
+        .list_digest_rows(&tenant, DigestRows::InScope(&scope), 10, 0)
+        .unwrap();
+    assert_eq!(
+        inside.iter().map(|row| row.ordinal).collect::<Vec<_>>(),
+        vec![1, 0]
+    );
+    let outside = store
+        .list_digest_rows(&tenant, DigestRows::OutOfScope(&scope), 10, 0)
+        .unwrap();
+    assert_eq!(
+        outside.iter().map(|row| row.ordinal).collect::<Vec<_>>(),
+        vec![4, 3]
+    );
+    assert_eq!(
+        store
+            .count_digest_rows(&tenant, DigestRows::InScope(&scope))
+            .unwrap(),
+        DigestCounts {
+            visible: 2,
+            experience_projections: 0,
+            generated_digests: 0,
+            not_visible: 1,
+        }
+    );
+    assert_eq!(
+        store
+            .count_digest_rows(&tenant, DigestRows::OutOfScope(&scope))
+            .unwrap(),
+        DigestCounts {
+            visible: 2,
+            experience_projections: 0,
+            generated_digests: 0,
+            not_visible: 1,
+        }
+    );
+
+    let unscoped = DigestScope {
+        project_ids: Vec::new(),
+        include_unscoped: true,
+    };
+    let inside = store
+        .list_digest_rows(&tenant, DigestRows::InScope(&unscoped), 10, 0)
+        .unwrap();
+    assert_eq!(
+        inside.iter().map(|row| row.ordinal).collect::<Vec<_>>(),
+        vec![4]
+    );
+    assert_eq!(
+        store
+            .list_digest_rows(&tenant, DigestRows::OutOfScope(&unscoped), 2, 1)
+            .unwrap()
+            .len(),
+        2
+    );
 }

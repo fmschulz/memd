@@ -18,13 +18,6 @@ fn nonce() -> u128 {
         .as_nanos()
 }
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before unix epoch")
-        .as_millis() as i64
-}
-
 fn add_command(data_dir: &Path, text: &str, tags: &str) -> Command {
     let mut command = Command::new(memd_bin());
     command
@@ -77,60 +70,6 @@ fn active_chunks(data_dir: &Path) -> usize {
     .unwrap() as usize
 }
 
-fn add_counts(data_dir: &Path) -> (usize, usize) {
-    let conn = Connection::open(data_dir.join("metadata.db")).unwrap();
-    conn.busy_timeout(Duration::from_secs(5)).unwrap();
-    let admitted = conn
-        .query_row(
-            "SELECT COUNT(*)
-             FROM usage_events
-             WHERE op = 'add'
-               AND outcome = 'admitted'
-               AND tenant = 't'
-               AND project = 'p'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap() as usize;
-    let rejected = conn
-        .query_row(
-            "SELECT COUNT(*)
-             FROM usage_events
-             WHERE op = 'add'
-               AND outcome LIKE 'rejected:%'
-               AND tenant = 't'
-               AND project = 'p'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap() as usize;
-    (admitted, rejected)
-}
-
-fn seed_search_events(data_dir: &Path) {
-    let conn = Connection::open(data_dir.join("metadata.db")).unwrap();
-    conn.busy_timeout(Duration::from_secs(5)).unwrap();
-    let ts = now_ms();
-    for idx in 0..4 {
-        conn.execute(
-            "INSERT INTO usage_events (
-                ts_unix_ms, op, tenant, project, outcome, chunk_count, bytes, detail
-             )
-             VALUES (?1, 'search', 't', 'p', 'hits:3', 3, NULL, ?2)",
-            rusqlite::params![ts, format!(r#"{{"q_hash":"health-hit-{idx}","k":3}}"#)],
-        )
-        .unwrap();
-    }
-    conn.execute(
-        "INSERT INTO usage_events (
-            ts_unix_ms, op, tenant, project, outcome, chunk_count, bytes, detail
-         )
-         VALUES (?1, 'search', 't', 'p', 'zero_hits', 0, NULL, ?2)",
-        rusqlite::params![ts, r#"{"q_hash":"health-miss","k":3}"#],
-    )
-    .unwrap();
-}
-
 fn run_memory_md(data_dir: &Path, project_dir: &Path, tenant: &str, project: &str) -> Output {
     Command::new(memd_bin())
         .arg("--data-dir")
@@ -150,7 +89,7 @@ fn run_memory_md(data_dir: &Path, project_dir: &Path, tenant: &str, project: &st
 }
 
 #[test]
-fn health_header_reflects_ledger_and_chunks() {
+fn health_header_counts_visible_facts() {
     let tmp = tempdir().unwrap();
     let data_dir = tmp.path().join("memd_data");
     let project_dir = tmp.path().join("project");
@@ -182,13 +121,9 @@ fn health_header_reflects_ledger_and_chunks() {
         run_add(add_command(&data_dir, &plain, "kind:finish")),
         "add plain",
     );
-    seed_search_events(&data_dir);
 
     let active = active_chunks(&data_dir);
-    let (admitted, rejected) = add_counts(&data_dir);
     assert_eq!(active, 3);
-    assert_eq!(admitted, 3);
-    assert_eq!(rejected, 0);
 
     assert_success(
         run_memory_md(&data_dir, &project_dir, "t", "p"),
@@ -202,10 +137,8 @@ fn health_header_reflects_ledger_and_chunks() {
         "memory.md must not restate repo-readable project state:\n{content}"
     );
     assert!(content.contains(&format!(
-        "- chunks: {active} active (+{admitted} added, {rejected} rejected, 7d)"
+        "- facts: {active} visible in project p, {active} visible in tenant t\n"
     )));
-    assert!(content.contains("- retrieval: 5 searches, 80% hit rate (7d)"));
-    assert!(content.contains("- learned: 2 high-priority + 0 consolidated lessons (7d)"));
     assert!(
         !content.lines().any(|line| line.starts_with("- [warn]")),
         "unexpected warning line:\n{content}"
@@ -230,9 +163,9 @@ fn fresh_store_renders_zero_state_header() {
         !content.contains("## Latest Project State"),
         "memory.md must not restate repo-readable project state:\n{content}"
     );
-    assert!(content.contains("- chunks: 0 active (+0 added, 0 rejected, 7d)"));
-    assert!(content.contains("- retrieval: 0 searches (7d)"));
-    assert!(content.contains("- learned: 0 high-priority + 0 consolidated lessons (7d)"));
+    assert!(
+        content.contains("- facts: 0 visible in project fresh_p, 0 visible in tenant fresh_t\n")
+    );
     assert!(
         !content.lines().any(|line| line.starts_with("- [warn]")),
         "unexpected warning line:\n{content}"

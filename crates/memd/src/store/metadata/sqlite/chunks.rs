@@ -1400,4 +1400,152 @@ impl MetadataStore for SqliteMetadataStore {
         }
         Ok(out)
     }
+
+    fn list_digest_rows(
+        &self,
+        tenant_id: &TenantId,
+        rows: DigestRows<'_>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<ChunkMetadata>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut params = vec![rusqlite::types::Value::Text(tenant_id.as_str().to_string())];
+        let scope = digest_scope_clause(rows, &mut params);
+        params.push(rusqlite::types::Value::Integer(limit as i64));
+        let limit_index = params.len();
+        params.push(rusqlite::types::Value::Integer(offset as i64));
+        let offset_index = params.len();
+        let sql = format!(
+            "SELECT {CHUNK_COLUMNS} FROM chunks
+             WHERE tenant_id = ?1
+               AND status NOT IN {NOT_VISIBLE_STATUSES}
+               AND {scope}
+               AND NOT {EXPERIENCE_PROJECTION}
+               AND NOT {GENERATED_DIGEST_PROJECTION}
+             ORDER BY timestamp_created DESC, chunk_id ASC
+             LIMIT ?{limit_index} OFFSET ?{offset_index}"
+        );
+        let conn = self.pool.get();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(params.iter()),
+            Self::row_to_metadata,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    fn count_digest_rows(
+        &self,
+        tenant_id: &TenantId,
+        rows: DigestRows<'_>,
+    ) -> Result<DigestCounts> {
+        let mut params = vec![rusqlite::types::Value::Text(tenant_id.as_str().to_string())];
+        let scope = digest_scope_clause(rows, &mut params);
+        let sql = format!(
+            "SELECT
+                 COALESCE(SUM(CASE WHEN status IN {NOT_VISIBLE_STATUSES}
+                                   THEN 1 ELSE 0 END), 0),
+                 COALESCE(SUM(CASE WHEN status NOT IN {NOT_VISIBLE_STATUSES}
+                                    AND {EXPERIENCE_PROJECTION}
+                                   THEN 1 ELSE 0 END), 0),
+                 COALESCE(SUM(CASE WHEN status NOT IN {NOT_VISIBLE_STATUSES}
+                                    AND NOT {EXPERIENCE_PROJECTION}
+                                    AND {GENERATED_DIGEST_PROJECTION}
+                                   THEN 1 ELSE 0 END), 0),
+                 COALESCE(SUM(CASE WHEN status NOT IN {NOT_VISIBLE_STATUSES}
+                                    AND NOT {EXPERIENCE_PROJECTION}
+                                    AND NOT {GENERATED_DIGEST_PROJECTION}
+                                   THEN 1 ELSE 0 END), 0)
+             FROM chunks
+             WHERE tenant_id = ?1 AND {scope}"
+        );
+        let conn = self.pool.get();
+        let (not_visible, experience, generated, visible): (i64, i64, i64, i64) =
+            conn.query_row(&sql, rusqlite::params_from_iter(params.iter()), |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+        Ok(DigestCounts {
+            visible: visible as usize,
+            experience_projections: experience as usize,
+            generated_digests: generated as usize,
+            not_visible: not_visible as usize,
+        })
+    }
+}
+
+/// Statuses the digest never shows.
+const NOT_VISIBLE_STATUSES: &str = "('candidate', 'deleted', 'error', 'superseded', 'expired')";
+
+/// A row that retrieval-projects an experience case (problem, attempt, check,
+/// lesson or correction). The lookup runs on `idx_artifact_links_chunk` and
+/// the `task_artifacts` primary key.
+const EXPERIENCE_PROJECTION: &str = "EXISTS (
+    SELECT 1
+    FROM artifact_links l
+    JOIN task_artifacts a ON a.artifact_id = l.artifact_id
+    WHERE l.chunk_id = chunks.chunk_id
+      AND l.link_kind = 'retrieval_projection'
+      AND substr(a.artifact_role, 1, 11) = 'experience_'
+)";
+
+/// A row that retrieval-projects a generated digest (task resume, failure or
+/// decision library, project brief, highlight library). This is the SQL form
+/// of `is_generated_digest_takeaway`: `base_projection_tags` writes
+/// `task:status:<status>`, `task:role:<role>` and `task:digest:<key>` from
+/// these columns, and the digest writers store the status as exactly
+/// `generated`. The tag rule sanitizes the status (`Generated!` also yields
+/// `generated`), the SQL compares the raw value; the two differ only for such
+/// non-canonical statuses.
+const GENERATED_DIGEST_PROJECTION: &str = "EXISTS (
+    SELECT 1
+    FROM artifact_links l
+    JOIN task_artifacts a ON a.artifact_id = l.artifact_id
+    WHERE l.chunk_id = chunks.chunk_id
+      AND l.link_kind = 'retrieval_projection'
+      AND a.status = 'generated'
+      AND (COALESCE(trim(a.artifact_role), '') <> ''
+           OR COALESCE(trim(a.digest_key), '') <> '')
+)";
+
+/// SQL condition for the project scope of one digest selection. Bound
+/// project ids go to `params`. The condition is never NULL, so `NOT` is safe.
+fn digest_scope_clause(rows: DigestRows<'_>, params: &mut Vec<rusqlite::types::Value>) -> String {
+    let (scope, outside) = match rows {
+        DigestRows::InScope(scope) => (scope, false),
+        DigestRows::OutOfScope(scope) => (scope, true),
+    };
+    let mut parts = Vec::new();
+    let project_ids = scope.project_ids.iter().collect::<BTreeSet<_>>();
+    if !project_ids.is_empty() {
+        let placeholders = project_ids
+            .into_iter()
+            .map(|project_id| {
+                params.push(rusqlite::types::Value::Text(project_id.clone()));
+                format!("?{}", params.len())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        parts.push(format!(
+            "(project_id IS NOT NULL AND project_id IN ({placeholders}))"
+        ));
+    }
+    if scope.include_unscoped {
+        parts.push("project_id IS NULL".to_string());
+    }
+    let inside = if parts.is_empty() {
+        "0".to_string()
+    } else {
+        format!("({})", parts.join(" OR "))
+    };
+    if outside {
+        format!("(NOT {inside})")
+    } else {
+        inside
+    }
 }

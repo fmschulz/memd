@@ -2,8 +2,10 @@ use super::action::*;
 use super::collect::{canonical_or_lexical_path, read_text_capped};
 use super::*;
 use crate::ops::configured_project_aliases;
+use crate::store::metadata::{DigestRows, DigestScope, MetadataStore};
+use crate::store::persistent::PersistentStore;
 use crate::store::OutcomePrior;
-use crate::types::ChunkStatus;
+use crate::types::{ChunkStatus, MemoryChunk};
 use std::collections::HashSet;
 
 #[cfg(test)]
@@ -42,12 +44,14 @@ mod pagination_tests {
             [ids[0].to_string()],
         )
         .unwrap();
-        let (project, global, _) = scan_takeaway_candidates(&store, &tenant, None)
+        let outcome = scan_takeaway_candidates(&store, &tenant, None)
             .await
             .unwrap();
-        assert!(global.is_empty());
-        assert_eq!(project.len(), READABLE_SCAN_PAGE_SIZE);
-        assert!(project
+        assert!(outcome.machine_wide.is_empty());
+        assert_eq!(outcome.project.len(), READABLE_SCAN_PAGE_SIZE);
+        assert_eq!(outcome.project_scan.unreadable_rows, 1);
+        assert!(outcome
+            .project
             .iter()
             .any(|row| row.chunk_id == ids.last().unwrap().to_string()));
     }
@@ -115,130 +119,234 @@ pub(super) struct TakeawayCategory {
     pub(super) order: u8,
 }
 
-/// One tenant-wide metadata scan replacing the former canned-query
-/// fan-out: every stored chunk is a candidate, partitioned into
-/// (project, machine-wide) by `chunk.project_id == active_project`.
-/// Configured project aliases count as the active project so
-/// historically mis-scoped chunks stay readable, matching the scope
-/// expansion the search path applies.
+/// What one section's candidate scan saw. Serialized into
+/// `--explain-output`.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub(super) struct SectionScan {
+    /// Rows with a visible status that are neither experience projections nor
+    /// generated digests.
+    pub(super) visible_rows: usize,
+    /// Visible rows the scan tried to read.
+    pub(super) read_rows: usize,
+    /// Visible rows whose payload did not load.
+    pub(super) unreadable_rows: usize,
+    /// Generated projections of experience cases, left out of the scan.
+    pub(super) excluded_experience_projections: usize,
+    /// Generated digest projections, left out of the scan.
+    pub(super) excluded_generated_digests: usize,
+    /// Rows with a non-visible status, left out of the scan.
+    pub(super) excluded_by_status: usize,
+    /// The row cap stopped the scan before it read every visible row.
+    pub(super) truncated: bool,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct ScanOutcome {
+    pub(super) project: Vec<Takeaway>,
+    pub(super) machine_wide: Vec<Takeaway>,
+    pub(super) explanations: Vec<MemoryMdCandidateExplanation>,
+    pub(super) project_scan: SectionScan,
+    pub(super) machine_scan: SectionScan,
+}
+
+/// Two metadata scans replace the former canned-query fan-out: every visible
+/// chunk of the active project, then the newest visible chunks outside it
+/// (machine-wide). The query leaves out non-visible statuses and experience
+/// projections, so those rows cost no payload read. Configured project
+/// aliases count as the active project so historically mis-scoped chunks stay
+/// readable, matching the scope expansion the search path applies.
 pub(super) async fn scan_takeaway_candidates<S: Store>(
     store: &S,
     tenant: &TenantId,
     active_project: Option<&str>,
-) -> Result<(
-    Vec<Takeaway>,
-    Vec<Takeaway>,
-    Vec<MemoryMdCandidateExplanation>,
-)> {
-    let alias_scopes = active_project
-        .map(|project| configured_project_aliases(tenant, project))
-        .unwrap_or_default();
-    let mut project_takeaways = Vec::new();
-    let mut global_takeaways = Vec::new();
-    let mut explanations = Vec::new();
-    let mut offset = 0usize;
-    let mut raw_rank = 0usize;
-    while offset < READABLE_SCAN_MAX_METADATA_ROWS {
-        let limit = READABLE_SCAN_PAGE_SIZE.min(READABLE_SCAN_MAX_METADATA_ROWS - offset);
-        let (chunks, fetched) = if let Some(persistent) = store.as_persistent() {
-            use crate::store::metadata::MetadataStore;
-            let metadata_rows = persistent.metadata().list(tenant, limit, offset)?;
-            let fetched = metadata_rows.len();
-            let mut chunks = Vec::with_capacity(fetched);
-            for meta in metadata_rows {
-                if let Some(chunk) = persistent
+) -> Result<ScanOutcome> {
+    let scope = digest_scope(tenant, active_project);
+    let mut outcome = ScanOutcome::default();
+    if let Some(persistent) = store.as_persistent() {
+        scan_metadata_rows(persistent, tenant, &scope, &mut outcome).await?;
+    } else {
+        scan_listed_chunks(store, tenant, &scope, &mut outcome).await?;
+    }
+    Ok(outcome)
+}
+
+fn digest_scope(tenant: &TenantId, active_project: Option<&str>) -> DigestScope {
+    let mut project_ids = Vec::new();
+    if let Some(project) = active_project {
+        project_ids.push(project.to_string());
+        project_ids.extend(
+            configured_project_aliases(tenant, project)
+                .into_iter()
+                .filter(|alias| alias.origin_tenant_id == tenant.as_str())
+                .filter_map(|alias| alias.origin_project_id),
+        );
+    }
+    DigestScope {
+        project_ids,
+        include_unscoped: active_project.is_none(),
+    }
+}
+
+async fn scan_metadata_rows(
+    persistent: &PersistentStore,
+    tenant: &TenantId,
+    scope: &DigestScope,
+    outcome: &mut ScanOutcome,
+) -> Result<()> {
+    let metadata = persistent.metadata();
+    for (is_project, rows, cap) in [
+        (true, DigestRows::InScope(scope), PROJECT_SCAN_MAX_ROWS),
+        (false, DigestRows::OutOfScope(scope), MACHINE_SCAN_MAX_ROWS),
+    ] {
+        let counts = metadata.count_digest_rows(tenant, rows)?;
+        let mut scan = SectionScan {
+            visible_rows: counts.visible,
+            excluded_experience_projections: counts.experience_projections,
+            excluded_generated_digests: counts.generated_digests,
+            excluded_by_status: counts.not_visible,
+            ..SectionScan::default()
+        };
+        while scan.read_rows < cap {
+            let limit = READABLE_SCAN_PAGE_SIZE.min(cap - scan.read_rows);
+            let page = metadata.list_digest_rows(tenant, rows, limit, scan.read_rows)?;
+            let fetched = page.len();
+            for meta in page {
+                match persistent
                     .get_chunk_for_retrieval(tenant, &meta.chunk_id, "memory_md_scan")
                     .await?
                 {
-                    chunks.push(chunk);
-                }
-            }
-            (chunks, fetched)
-        } else {
-            let chunks = store.list_chunks(tenant, limit, offset).await?;
-            let fetched = chunks.len();
-            (chunks, fetched)
-        };
-        if fetched == 0 {
-            break;
-        }
-        for chunk in chunks {
-            raw_rank += 1;
-            let is_project = chunk.project_id.as_option() == active_project
-                || alias_scopes.iter().any(|alias| {
-                    alias.origin_tenant_id == chunk.tenant_id.as_str()
-                        && alias.origin_project_id.as_deref() == chunk.project_id.as_option()
-                });
-            let section = if is_project {
-                "project"
-            } else {
-                "machine_wide"
-            };
-            let takeaway = Takeaway {
-                chunk_id: chunk.chunk_id.to_string(),
-                tenant_id: chunk.tenant_id.to_string(),
-                project_id: chunk.project_id.as_option().map(str::to_string),
-                text: chunk.text.trim().to_string(),
-                score: 0.0,
-                priority: 0.0,
-                chunk_type: chunk.chunk_type.to_string(),
-                timestamp_created: chunk.timestamp_created,
-                tags: chunk.tags.clone(),
-                sources: BTreeSet::from(["scan".to_string()]),
-                occurrences: 1,
-            };
-            let mut explanation = MemoryMdCandidateExplanation {
-                section: section.to_string(),
-                source: "scan".to_string(),
-                query: String::new(),
-                mode: "scan".to_string(),
-                raw_rank,
-                chunk_id: takeaway.chunk_id.clone(),
-                tenant_id: takeaway.tenant_id.clone(),
-                project_id: takeaway.project_id.clone(),
-                chunk_type: takeaway.chunk_type.clone(),
-                timestamp_created: takeaway.timestamp_created,
-                search_score: takeaway.score,
-                priority_score: None,
-                priority_breakdown: None,
-                display_status: "candidate".to_string(),
-                filter_reason: None,
-                display_rank: None,
-                generated_digest: is_generated_digest_takeaway(&takeaway.tags),
-                quality_flags: Vec::new(),
-                topic_key: None,
-                tags: takeaway.tags.clone(),
-                matched_sources: vec!["scan".to_string()],
-            };
-            match scan_candidate_filter_reason(chunk.status, &takeaway.tags, &takeaway.text) {
-                Some(reason) => {
-                    explanation.display_status = "filtered".to_string();
-                    explanation.filter_reason = Some(reason.to_string());
-                    explanation.quality_flags.push(reason.to_string());
-                    explanations.push(explanation);
-                }
-                None => {
-                    explanations.push(explanation);
-                    if is_project {
-                        project_takeaways.push(takeaway);
-                    } else {
-                        global_takeaways.push(takeaway);
+                    Some(chunk) => {
+                        admit_scanned_chunk(outcome, chunk, is_project);
                     }
+                    None => scan.unreadable_rows += 1,
                 }
             }
+            scan.read_rows += fetched;
+            if fetched < limit {
+                break;
+            }
         }
-        if fetched < limit {
-            break;
+        scan.truncated = scan.visible_rows > scan.read_rows;
+        if is_project {
+            outcome.project_scan = scan;
+        } else {
+            outcome.machine_scan = scan;
         }
-        offset = offset.saturating_add(limit);
     }
-    Ok((project_takeaways, global_takeaways, explanations))
+    Ok(())
 }
 
-/// Admission predicate for the tenant-wide scan. Mirrors the filters
-/// the former per-query candidate merge applied, plus a lifecycle
-/// check because `list_chunks` (unlike search) can surface
-/// superseded/expired/error chunks.
+/// Scan for stores without metadata rows (the in-memory store): list every
+/// chunk and apply the exclusions to the loaded chunks. There is no row cap.
+async fn scan_listed_chunks<S: Store>(
+    store: &S,
+    tenant: &TenantId,
+    scope: &DigestScope,
+    outcome: &mut ScanOutcome,
+) -> Result<()> {
+    let mut offset = 0usize;
+    loop {
+        let chunks = store
+            .list_chunks(tenant, READABLE_SCAN_PAGE_SIZE, offset)
+            .await?;
+        let fetched = chunks.len();
+        for chunk in chunks {
+            let is_project = scope.contains(chunk.project_id.as_option());
+            let reason = admit_scanned_chunk(outcome, chunk, is_project);
+            let scan = if is_project {
+                &mut outcome.project_scan
+            } else {
+                &mut outcome.machine_scan
+            };
+            match reason {
+                Some("not_visible") => scan.excluded_by_status += 1,
+                Some("experience_projection") => scan.excluded_experience_projections += 1,
+                Some("generated_digest_wrapper") => scan.excluded_generated_digests += 1,
+                _ => {
+                    scan.visible_rows += 1;
+                    scan.read_rows += 1;
+                }
+            }
+        }
+        if fetched < READABLE_SCAN_PAGE_SIZE {
+            return Ok(());
+        }
+        offset += fetched;
+    }
+}
+
+/// Record one scanned chunk in its section and in the explanations. Returns
+/// the filter reason when the chunk is not a candidate.
+fn admit_scanned_chunk(
+    outcome: &mut ScanOutcome,
+    chunk: MemoryChunk,
+    is_project: bool,
+) -> Option<&'static str> {
+    let section = if is_project {
+        "project"
+    } else {
+        "machine_wide"
+    };
+    let takeaway = Takeaway {
+        chunk_id: chunk.chunk_id.to_string(),
+        tenant_id: chunk.tenant_id.to_string(),
+        project_id: chunk.project_id.as_option().map(str::to_string),
+        text: chunk.text.trim().to_string(),
+        score: 0.0,
+        priority: 0.0,
+        chunk_type: chunk.chunk_type.to_string(),
+        timestamp_created: chunk.timestamp_created,
+        tags: chunk.tags.clone(),
+        sources: BTreeSet::from(["scan".to_string()]),
+        occurrences: 1,
+    };
+    let mut explanation = MemoryMdCandidateExplanation {
+        section: section.to_string(),
+        source: "scan".to_string(),
+        query: String::new(),
+        mode: "scan".to_string(),
+        raw_rank: outcome.explanations.len() + 1,
+        chunk_id: takeaway.chunk_id.clone(),
+        tenant_id: takeaway.tenant_id.clone(),
+        project_id: takeaway.project_id.clone(),
+        chunk_type: takeaway.chunk_type.clone(),
+        timestamp_created: takeaway.timestamp_created,
+        search_score: takeaway.score,
+        priority_score: None,
+        priority_breakdown: None,
+        display_status: "candidate".to_string(),
+        filter_reason: None,
+        display_rank: None,
+        generated_digest: is_generated_digest_takeaway(&takeaway.tags),
+        quality_flags: Vec::new(),
+        topic_key: None,
+        tags: takeaway.tags.clone(),
+        matched_sources: vec!["scan".to_string()],
+    };
+    let reason = scan_candidate_filter_reason(chunk.status, &takeaway.tags, &takeaway.text);
+    match reason {
+        Some(reason) => {
+            explanation.display_status = "filtered".to_string();
+            explanation.filter_reason = Some(reason.to_string());
+            explanation.quality_flags.push(reason.to_string());
+            outcome.explanations.push(explanation);
+        }
+        None => {
+            outcome.explanations.push(explanation);
+            if is_project {
+                outcome.project.push(takeaway);
+            } else {
+                outcome.machine_wide.push(takeaway);
+            }
+        }
+    }
+    reason
+}
+
+/// Admission predicate for a scanned chunk: the second check after the
+/// metadata query's status and experience-projection filter, and the only
+/// check for stores without metadata rows, whose `list_chunks` (unlike search)
+/// can surface superseded, expired, error and experience-projection chunks.
 pub(super) fn scan_candidate_filter_reason(
     status: ChunkStatus,
     tags: &[String],
@@ -253,6 +361,12 @@ pub(super) fn scan_candidate_filter_reason(
             | ChunkStatus::Expired
     ) {
         return Some("not_visible");
+    }
+    if tags
+        .iter()
+        .any(|tag| tag.starts_with("task:role:experience_"))
+    {
+        return Some("experience_projection");
     }
     if text.is_empty() {
         return Some("empty_text");
@@ -565,6 +679,30 @@ pub(super) fn sort_takeaways(takeaways: &mut [Takeaway]) {
             .then_with(|| right.timestamp_created.cmp(&left.timestamp_created))
             .then_with(|| left.chunk_id.cmp(&right.chunk_id))
     });
+}
+
+/// Rank both sections, then dedupe within the best `DEDUPE_WINDOW`
+/// candidates of each: the pairwise duplicate test is quadratic. Candidates
+/// below the window leave the pool with reason `below_dedupe_window`.
+pub(super) fn dedupe_ranked_window(
+    project_takeaways: &mut Vec<Takeaway>,
+    global_takeaways: &mut Vec<Takeaway>,
+) -> ScopedSuppressionReasons {
+    let mut suppressed = ScopedSuppressionReasons::new();
+    for (section, takeaways) in [
+        ("project", &mut *project_takeaways),
+        ("machine_wide", &mut *global_takeaways),
+    ] {
+        sort_takeaways(takeaways);
+        for dropped in takeaways.split_off(takeaways.len().min(DEDUPE_WINDOW)) {
+            suppressed.insert(
+                (section.to_string(), dropped.chunk_id),
+                "below_dedupe_window".to_string(),
+            );
+        }
+    }
+    suppressed.extend(dedupe_memory_md_union(project_takeaways, global_takeaways));
+    suppressed
 }
 
 pub(super) fn dedupe_memory_md_union(

@@ -83,8 +83,13 @@ handoff, or git state: those live in `tasks/todo.md`, `docs/handoffs/`, and git,
 which an agent reads directly. `memory.md` carries only facts no repo file
 holds.
 
-Candidates come from one tenant-wide store scan, partitioned by project, rather
-than from a fixed set of search queries. Takeaways whose distinctive tokens are
+Candidates come from two metadata queries, not from a fixed set of search
+queries: every visible row of the active project (and its configured aliases),
+and the newest 5,000 visible rows outside it. A project's candidates do not
+depend on how many newer rows other projects hold. Rows with a non-visible
+status (candidate, deleted, error, superseded, expired), generated digest
+projections and experience-case projections are left out in the query, before any payload
+read. Recall lessons with `memd experience find`. Takeaways whose distinctive tokens are
 already contained in a repo file (`tasks/**`, `docs/handoffs/`, `README.md`,
 `CLAUDE.md`, `AGENTS.md`) are suppressed with reason `covered_by_repo:<path>`.
 The project and machine-wide candidates feed one bounded union before
@@ -93,11 +98,14 @@ lineage, and high-confidence topic duplicates are collapsed across that union.
 If the active project's item competes with a machine-wide match, the project
 item is retained.
 
-`## Memory health` summarizes lines derived from `memd report`.
-This is best-effort and is silently skipped if report generation fails. If it
-reports `memory degraded`, inspect the store with
-`memd audit --format markdown` or `memd report --strict`; the warning means
-active metadata rows exist whose segment payloads could not be read.
+`## Memory health` prints one line,
+`facts: <P> visible in project <id>, <T> visible in tenant <tenant>`. Both
+numbers are SQL counts of rows with a visible status that are not experience
+projections, so they drop when a fact is superseded or deleted. The section
+also lists warnings for scope drift, truncated scans, and unreadable payloads.
+It does not run `memd report`. If it reports `memory degraded`, inspect the
+store with `memd audit --format markdown` or `memd report --strict`; the
+warning means candidate rows exist whose segment payloads could not be read.
 
 ## Stats, health, metrics
 

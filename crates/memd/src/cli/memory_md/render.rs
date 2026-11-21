@@ -5,24 +5,18 @@ use super::*;
 
 pub(super) fn render_memory_md(
     project_state: &ProjectState,
-    health_lines: &[String],
     project_takeaways: &[Takeaway],
     global_takeaways: &[Takeaway],
 ) -> String {
     let mut out = String::new();
     out.push_str("# memory.md\n\n");
     render_latest_project_state(&mut out, project_state);
-    let warnings = project_state_warnings(project_state);
-    if !health_lines.is_empty() || !warnings.is_empty() {
-        out.push_str("## Memory health\n\n");
-        for line in health_lines {
-            out.push_str(&format!("- {line}\n"));
-        }
-        for warning in &warnings {
-            out.push_str(&format!("- {warning}\n"));
-        }
-        out.push('\n');
+    out.push_str("## Memory health\n\n");
+    out.push_str(&format!("- {}\n", facts_health_line(project_state)));
+    for warning in project_state_warnings(project_state) {
+        out.push_str(&format!("- {warning}\n"));
     }
+    out.push('\n');
 
     render_section(&mut out, "Project Fact Library", project_takeaways);
     if !global_takeaways.is_empty() {
@@ -40,19 +34,32 @@ pub(super) fn render_latest_project_state(out: &mut String, state: &ProjectState
     ));
 }
 
+/// The visible-fact counts, from SQL. Without an active project there is no
+/// project count to show.
+pub(super) fn facts_health_line(state: &ProjectState) -> String {
+    let memory = &state.memory;
+    match state.project_id.as_deref() {
+        Some(project) => format!(
+            "facts: {} visible in project {project}, {} visible in tenant {}",
+            memory.visible_project_facts, memory.visible_tenant_facts, state.tenant_id
+        ),
+        None => format!(
+            "facts: {} visible in tenant {}",
+            memory.visible_tenant_facts, state.tenant_id
+        ),
+    }
+}
+
 pub(super) fn project_state_warnings(state: &ProjectState) -> Vec<String> {
     let mut warnings = Vec::new();
     warnings.extend(state.scope_warnings.iter().cloned());
-    if let Some(unreadable) = state.memory.unreadable_active_chunks {
-        if unreadable > 0 {
-            warnings.push(format!(
-                "memory degraded: {unreadable} active chunks could not be read from payload segments"
-            ));
-        }
+    if state.memory.unreadable_active_chunks > 0 {
+        warnings.push(format!(
+            "memory degraded: {} active chunks could not be read from payload segments",
+            state.memory.unreadable_active_chunks
+        ));
     }
-    if let Some(warning) = &state.memory.scan_warning {
-        warnings.push(warning.clone());
-    }
+    warnings.extend(state.memory.scan_warnings.iter().cloned());
     warnings.extend(state.collection_warnings.iter().cloned());
     warnings
 }

@@ -14,8 +14,11 @@ pub(super) struct ProjectState {
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
 pub(super) struct MemoryState {
-    pub(super) metadata_active_chunks: Option<usize>,
-    pub(super) readable_active_chunks: Option<usize>,
-    pub(super) unreadable_active_chunks: Option<usize>,
-    pub(super) scan_warning: Option<String>,
+    /// Visible facts of the active project (SQL count).
+    pub(super) visible_project_facts: usize,
+    /// Visible facts of the tenant (SQL count).
+    pub(super) visible_tenant_facts: usize,
+    /// Candidate rows whose payload did not load.
+    pub(super) unreadable_active_chunks: usize,
+    pub(super) scan_warnings: Vec<String>,
 }

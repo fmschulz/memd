@@ -10,7 +10,6 @@ use serde_json::{json, Value};
 
 use super::args::ProjectScopeConfig;
 use super::paths::absolutize_project_dir;
-use super::report::memory_health_lines;
 use crate::error::{MemdError, Result};
 use crate::hit_stats::{
     aggregate_hits_at_data_dir, aggregate_hits_in, HitStats, DEFAULT_SUMMARY_TTL_MS,
@@ -26,18 +25,20 @@ mod render;
 mod state;
 
 #[cfg(test)]
+mod digest_scope_tests;
+#[cfg(test)]
 mod tests;
 
 pub(super) use action::explicit_agent_action;
-use collect::collect_project_state;
+use collect::{collect_project_state, memory_state_from_scan};
 use evaluate::evaluate_agent_usefulness;
 pub(super) use evaluate::run_memory_md_eval;
 use rank::build_repo_index;
 use rank::{
-    dedupe_memory_md_union, filter_startup_takeaways, recompute_union_priorities,
+    dedupe_ranked_window, filter_startup_takeaways, recompute_union_priorities,
     reconcile_candidate_explanations, scan_takeaway_candidates, sort_takeaways,
     suppress_finishes_covered_by_libraries, suppress_repo_covered,
-    suppress_unrelated_machine_takeaways, ScopedSuppressionReasons,
+    suppress_unrelated_machine_takeaways, ScanOutcome, ScopedSuppressionReasons,
 };
 use render::render_memory_md;
 
@@ -53,7 +54,12 @@ const HIT_WINDOW_DAYS: u32 = 30;
 /// Age in ms above which a chunk with zero hits is considered stale.
 const STALE_CHUNK_AGE_MS: i64 = 30 * 86_400_000;
 const READABLE_SCAN_PAGE_SIZE: usize = 1_000;
-const READABLE_SCAN_MAX_METADATA_ROWS: usize = 10_000;
+/// Safety caps on the rows one refresh reads per section. A scan that reaches
+/// a cap prints a warning in the digest.
+const PROJECT_SCAN_MAX_ROWS: usize = 50_000;
+const MACHINE_SCAN_MAX_ROWS: usize = 5_000;
+/// Candidates per section that enter the quadratic duplicate test.
+const DEDUPE_WINDOW: usize = 200;
 
 const TAKEAWAY_CATEGORIES: &[(&str, u8)] = &[
     ("Decisions", 0),
@@ -112,24 +118,10 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
         .or_else(|| scope.as_ref().and_then(|scope| scope.project_id.clone()));
     let tenant = TenantId::new(&tenant_id)?;
     // Parsed for CLI compatibility but unused since scan-first
-    // selection: every stored chunk is a candidate.
+    // selection: every visible project chunk is a candidate.
     let candidate_k = options.candidate_k;
     let project_limit = options.project_limit.min(10);
     let global_limit = options.global_limit.min(10);
-    let health_lines = match memory_health_lines(
-        store,
-        tenant_manager,
-        tenant.as_str(),
-        project_id.as_deref(),
-    )
-    .await
-    {
-        Ok(lines) => lines,
-        Err(error) => {
-            tracing::debug!(?error, "memory health header skipped");
-            Vec::new()
-        }
-    };
 
     // Aggregate retrieval hits once per refresh; the same `HitStats`
     // map is shared with every `priority_score` call so we don't
@@ -143,18 +135,21 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
         }
         None => aggregate_hits_in(&project_dir, HIT_WINDOW_DAYS, DEFAULT_SUMMARY_TTL_MS),
     };
+    let ScanOutcome {
+        project: mut project_takeaways,
+        machine_wide: mut global_takeaways,
+        explanations: scan_explanations,
+        project_scan,
+        machine_scan,
+    } = scan_takeaway_candidates(store, &tenant, project_id.as_deref()).await?;
     let project_state = collect_project_state(
-        store,
-        &tenant,
         tenant.as_str(),
         project_id.as_deref(),
         &project_dir,
         scope.as_ref(),
         generated_unix_ms,
-    )
-    .await;
-    let (mut project_takeaways, mut global_takeaways, scan_explanations) =
-        scan_takeaway_candidates(store, &tenant, project_id.as_deref()).await?;
+        memory_state_from_scan(&project_scan, &machine_scan),
+    );
     let (mut project_explanations, mut global_explanations): (Vec<_>, Vec<_>) = scan_explanations
         .into_iter()
         .partition(|explanation| explanation.section == "project");
@@ -205,7 +200,7 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
         }
     }
     union_suppressed.extend(suppress_unrelated_machine_takeaways(&mut global_takeaways));
-    union_suppressed.extend(dedupe_memory_md_union(
+    union_suppressed.extend(dedupe_ranked_window(
         &mut project_takeaways,
         &mut global_takeaways,
     ));
@@ -245,12 +240,7 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
     );
     let agent_usefulness =
         evaluate_agent_usefulness(&project_state, &project_takeaways, &global_takeaways);
-    let rendered = render_memory_md(
-        &project_state,
-        &health_lines,
-        &project_takeaways,
-        &global_takeaways,
-    );
+    let rendered = render_memory_md(&project_state, &project_takeaways, &global_takeaways);
     atomic_replace(&output_path, rendered.as_bytes())?;
 
     let explain_output = if let Some(path) = options.explain_output {
@@ -269,6 +259,10 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
                 "machine_wide": global_limit,
             },
             "project_state": project_state.clone(),
+            "scan": {
+                "project": project_scan,
+                "machine_wide": machine_scan,
+            },
             "agent_usefulness": agent_usefulness.clone(),
             "project": project_explanations,
             "machine_wide": global_explanations,

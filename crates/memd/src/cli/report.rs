@@ -19,7 +19,6 @@ use crate::types::MemoryChunk;
 
 const DAY_MS: i64 = 86_400_000;
 const HOUR_MS: i64 = 3_600_000;
-const REPORT_DEFAULT_TOP: usize = 5;
 const REPORT_SCAN_PAGE_SIZE: usize = 10_000;
 
 pub(super) struct ReportOptions {
@@ -329,54 +328,6 @@ async fn collect_report<S: Store>(
         retrieval_usefulness,
         self_diagnosis,
     })
-}
-
-pub(super) async fn memory_health_lines<S: Store>(
-    store: &S,
-    tenant_manager: Option<&TenantManager>,
-    tenant_id: &str,
-    project_id: Option<&str>,
-) -> Result<Vec<String>> {
-    let options = ReportOptions {
-        tenant_id: Some(tenant_id.to_string()),
-        project_id: project_id.map(str::to_string),
-        since: "7d".to_string(),
-        top: REPORT_DEFAULT_TOP,
-        format: ReportFormat::Markdown,
-        served_via_worker: false,
-    };
-    let report = collect_report(store, tenant_manager, &options).await?;
-    let mut lines = vec![
-        format!(
-            "chunks: {} active (+{} added, {} rejected, 7d)",
-            report.growth.store_totals.active_chunks,
-            report.growth.adds.admitted,
-            report.growth.adds.rejected.total
-        ),
-        if report.retrieval_usefulness.searches == 0 {
-            "retrieval: 0 searches (7d)".to_string()
-        } else {
-            format!(
-                "retrieval: {} searches, {:.0}% hit rate (7d)",
-                report.retrieval_usefulness.searches,
-                report.retrieval_usefulness.hit_rate.unwrap_or(0.0) * 100.0
-            )
-        },
-        format!(
-            "learned: {} high-priority + {} consolidated lessons (7d)",
-            report.learning_digest.high_priority_in_window,
-            report.learning_digest.consolidated_in_window
-        ),
-    ];
-    lines.extend(
-        report
-            .self_diagnosis
-            .lines
-            .iter()
-            .filter(|line| line.level == DiagnosisLevel::Warn)
-            .map(|line| format!("[warn] {}: {}", line.name, line.detail)),
-    );
-    Ok(lines)
 }
 
 pub(super) fn parse_since_window_ms(s: &str) -> Result<i64> {
