@@ -457,7 +457,7 @@ fn check_project_scope(project_dir: &Path) -> Value {
         return json!({
             "ok": true,
             "path": scope_path.display().to_string(),
-            "note": "none yet (created by memd session-start)",
+            "note": "none yet (the first memd add creates it at the repository root)",
             "fix": "",
         });
     }
@@ -468,7 +468,7 @@ fn check_project_scope(project_dir: &Path) -> Value {
             "ok": false,
             "path": scope_path.display().to_string(),
             "reason": "malformed JSON",
-            "fix": "run: memd session-start --project-dir . (rewrites .memd/project_scope.json)",
+            "fix": "repair or remove .memd/project_scope.json; the next memd add creates a new one",
         });
     };
     json!({
@@ -930,7 +930,7 @@ mod tests {
         let v = check_project_scope(dir.path());
         assert_eq!(v["ok"], true);
         let note = v["note"].as_str().unwrap_or("");
-        assert!(note.contains("session-start"), "note was: {note}");
+        assert!(note.contains("memd add"), "note was: {note}");
     }
 
     #[test]
@@ -943,7 +943,7 @@ mod tests {
         assert_eq!(v["reason"], "malformed JSON");
         assert_eq!(
             v["fix"],
-            "run: memd session-start --project-dir . (rewrites .memd/project_scope.json)"
+            "repair or remove .memd/project_scope.json; the next memd add creates a new one"
         );
     }
 
@@ -1106,7 +1106,7 @@ mod tests {
                 "cursor_rules_mdc": {"ok": true},
             },
             "session_start_hook": {"ok": true},
-            "project_scope": {"ok": true, "note": "none yet (created by memd session-start)"},
+            "project_scope": {"ok": true, "note": "none yet (the first memd add creates it at the repository root)"},
         });
         let text = render_text(&report);
         assert!(text.contains(
