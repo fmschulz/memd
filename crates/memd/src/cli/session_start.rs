@@ -387,7 +387,9 @@ pub(super) async fn run_session_start_inner<S: Store>(
             global_limit: 2,
             candidate_k: 40,
             explain_output: None,
-            repo_dir: None,
+            // A session below the scope directory shows the repository's
+            // facts, so the repo-novelty gate reads the repository's docs.
+            repo_dir: (scope_dir != project_dir).then(|| scope_dir.clone()),
         },
     )
     .await?;
@@ -617,6 +619,10 @@ pub(super) fn maybe_auto_create_scope(
 /// Write `contents` to a temporary file in `dir`, then hard-link it to `name`.
 /// The link fails if `name` exists, so the first publisher wins and no reader
 /// sees a partial file. The temporary file is always removed.
+///
+/// A filesystem without hard links (FAT, some network mounts) rejects the
+/// link. `name` is then created exclusively and written in place, which still
+/// lets the first publisher win but can show a reader a partial file.
 fn publish_new_file(dir: &Path, name: &str, contents: &[u8]) -> Result<AutoScopeOutcome> {
     static NEXT_TEMPORARY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let temporary = dir.join(format!(
@@ -624,12 +630,20 @@ fn publish_new_file(dir: &Path, name: &str, contents: &[u8]) -> Result<AutoScope
         std::process::id(),
         NEXT_TEMPORARY.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
+    let target = dir.join(name);
     let written = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&temporary)
         .and_then(|mut file| file.write_all(contents).and_then(|()| file.sync_all()))
-        .and_then(|()| std::fs::hard_link(&temporary, dir.join(name)));
+        .and_then(|()| {
+            std::fs::hard_link(&temporary, &target).or_else(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    return Err(error);
+                }
+                write_new_file(&target, contents)
+            })
+        });
     let _ = std::fs::remove_file(&temporary);
     match written {
         Ok(()) => Ok(AutoScopeOutcome::Created),
@@ -638,6 +652,18 @@ fn publish_new_file(dir: &Path, name: &str, contents: &[u8]) -> Result<AutoScope
         }
         Err(error) => Err(error.into()),
     }
+}
+
+/// Create `path` exclusively and write `contents`. A failed write removes the
+/// partial file.
+fn write_new_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(contents).inspect_err(|_| {
+        let _ = std::fs::remove_file(path);
+    })
 }
 
 /// True for the errors of a directory that session-start may not write.
