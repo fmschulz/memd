@@ -706,19 +706,47 @@ pub trait Store: Send + Sync {
         ))
     }
 
-    /// Chunk ids whose indexed text holds any of `terms` as whole tokens,
-    /// best keyword match first, limited to `project_id` when given and to
-    /// readable chunks. Returns at most `limit` ids, or `None` when the store
-    /// has no keyword index; callers then scan chunks themselves.
+    /// Chunks of `tenant_id` (and `project_id`, when given) whose indexed text
+    /// holds `term` as whole tokens. Only chunks a default search can show
+    /// count (see [`chunk_status_is_searchable`]). The answer is `Rare` with
+    /// the ids, best keyword match first, when at most `max_matches` chunks
+    /// hold the term. It is `Common` when more do, and also when the index
+    /// could not rule that out within its fetch bound. A store without a
+    /// keyword index answers `NoIndex`, and callers scan chunks themselves.
     async fn exact_term_chunk_ids(
         &self,
         _tenant_id: &TenantId,
         _project_id: Option<&str>,
-        _terms: &[String],
-        _limit: usize,
-    ) -> Result<Option<Vec<ChunkId>>> {
-        Ok(None)
+        _term: &str,
+        _max_matches: usize,
+    ) -> Result<ExactTermLookup> {
+        Ok(ExactTermLookup::NoIndex)
     }
+}
+
+/// Answer of [`Store::exact_term_chunk_ids`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExactTermLookup {
+    /// The store has no keyword index.
+    NoIndex,
+    /// More than the maximum number of chunks hold the term, or the index
+    /// could not tell.
+    Common,
+    /// At most the maximum number of chunks hold the term, best match first.
+    Rare(Vec<ChunkId>),
+}
+
+/// Whether a default search can show a chunk with this status.
+pub(crate) fn chunk_status_is_searchable(status: crate::types::ChunkStatus) -> bool {
+    use crate::types::ChunkStatus;
+    !matches!(
+        status,
+        ChunkStatus::Candidate
+            | ChunkStatus::Deleted
+            | ChunkStatus::Error
+            | ChunkStatus::Superseded
+            | ChunkStatus::Expired
+    )
 }
 
 pub use dense::{DenseSearchConfig, DenseSearchResult, DenseSearcher};

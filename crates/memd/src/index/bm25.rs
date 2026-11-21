@@ -44,9 +44,10 @@ const SPARSE_CHUNK_OVERFETCH: usize = 8;
 /// limits the distinct-chunk yield on conversational corpora.
 const SPARSE_FETCH_CEILING: usize = 1024;
 
-/// Most sentence documents an exact-term lookup scores. A term in more
-/// sentences than this is common, and callers treat it as such anyway.
-const EXACT_TERM_FETCH_BOUND: usize = 5_000;
+/// Most sentence documents an exact-term lookup reads. A term that fills the
+/// bound is reported as common: the lookup cannot tell how many in-scope
+/// chunks hold it.
+const EXACT_TERM_FETCH_BOUND: usize = 1_000;
 
 /// Directory for a read-only index handle.
 ///
@@ -402,50 +403,41 @@ impl Bm25Index {
         Ok(())
     }
 
-    /// Chunks of `tenant_id` with a sentence that holds any of `terms` as
-    /// whole tokens, best BM25 match first.
+    /// Chunks of `tenant_id` with a sentence that holds `term` as whole
+    /// tokens, best BM25 match first. `None` means the term is common: more
+    /// than `max_chunks` accepted chunks hold it, or the index read
+    /// `EXACT_TERM_FETCH_BOUND` sentences and cannot rule that out.
     ///
-    /// Each term goes through the index analyzer. One token becomes a term
-    /// query. Several tokens (`ai-local`, `cve-2026-111497`) become a phrase
-    /// query, so the tokens must be adjacent and whole: `873` does not match
-    /// `18735`. Scoring reads at most `EXACT_TERM_FETCH_BOUND` sentences.
-    /// `accept` filters each distinct chunk before it counts; the scan stops
-    /// after `max_chunks` accepted chunks.
-    pub fn chunks_with_terms(
+    /// The term goes through the index analyzer, case intact. One token
+    /// becomes a term query. Several tokens (`ai-local`, `cve-2026-111497`)
+    /// become a phrase query, so the tokens must be adjacent and whole: `873`
+    /// does not match `18735`. `accept` filters each distinct chunk before it
+    /// counts.
+    pub fn chunks_with_term(
         &self,
         tenant_id: &TenantId,
-        terms: &[String],
+        term: &str,
         max_chunks: usize,
         mut accept: impl FnMut(&ChunkId) -> Result<bool>,
-    ) -> Result<Vec<ChunkId>> {
-        if max_chunks == 0 {
-            return Ok(Vec::new());
-        }
+    ) -> Result<Option<Vec<ChunkId>>> {
         let mut analyzer = self
             .index
             .tokenizers()
             .get("code")
             .ok_or_else(|| MemdError::StorageError("code tokenizer not registered".into()))?;
-        let mut alternatives: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-        for term in terms {
-            let mut tokens = Vec::new();
-            let mut stream = analyzer.token_stream(term);
-            while stream.advance() {
-                tokens.push(Term::from_field_text(self.text_field, &stream.token().text));
-            }
-            let query: Box<dyn Query> = match tokens.len() {
-                0 => continue,
-                1 => Box::new(TermQuery::new(
-                    tokens.remove(0),
-                    IndexRecordOption::WithFreqsAndPositions,
-                )),
-                _ => Box::new(PhraseQuery::new(tokens)),
-            };
-            alternatives.push((Occur::Should, query));
+        let mut tokens = Vec::new();
+        let mut stream = analyzer.token_stream(term);
+        while stream.advance() {
+            tokens.push(Term::from_field_text(self.text_field, &stream.token().text));
         }
-        if alternatives.is_empty() {
-            return Ok(Vec::new());
-        }
+        let text_query: Box<dyn Query> = match tokens.len() {
+            0 => return Ok(Some(Vec::new())),
+            1 => Box::new(TermQuery::new(
+                tokens.remove(0),
+                IndexRecordOption::WithFreqsAndPositions,
+            )),
+            _ => Box::new(PhraseQuery::new(tokens)),
+        };
 
         self.commit_if_dirty()?;
         self.reader
@@ -456,13 +448,12 @@ impl Bm25Index {
             Term::from_field_text(self.tenant_field, tenant_id.as_str()),
             IndexRecordOption::Basic,
         ));
-        let combined = BooleanQuery::new(vec![
-            (Occur::Must, tenant_query),
-            (Occur::Must, Box::new(BooleanQuery::new(alternatives))),
-        ]);
+        let combined =
+            BooleanQuery::new(vec![(Occur::Must, tenant_query), (Occur::Must, text_query)]);
         let top_docs = searcher
             .search(&combined, &TopDocs::with_limit(EXACT_TERM_FETCH_BOUND))
             .map_err(|e| MemdError::StorageError(format!("exact term search: {}", e)))?;
+        let complete = top_docs.len() < EXACT_TERM_FETCH_BOUND;
 
         let mut seen: HashSet<ChunkId> = HashSet::new();
         let mut chunks = Vec::new();
@@ -479,11 +470,11 @@ impl Bm25Index {
                 continue;
             }
             chunks.push(chunk_id);
-            if chunks.len() >= max_chunks {
-                break;
+            if chunks.len() > max_chunks {
+                return Ok(None);
             }
         }
-        Ok(chunks)
+        Ok(complete.then_some(chunks))
     }
 }
 
@@ -735,50 +726,89 @@ mod tests {
     }
 
     #[test]
-    fn chunks_with_terms_match_whole_token_runs_in_one_tenant() {
+    fn chunks_with_term_match_whole_token_runs_in_one_tenant() {
         let index = Bm25Index::new().unwrap();
         let tenant = create_test_tenant();
         let other = TenantId::new("other_terms").unwrap();
+        let single = |text: &str| vec![text.to_string()];
         let mut ids = Vec::new();
-        for text in [
-            "Ticket 873 reopened.",
-            "Build 18735 failed.",
-            "Use the ai-local profile.",
-            "Thai-localization strings.",
-            "Patched cve-2026-111497 today. Second sentence mentions cve-2026-111497 again.",
+        for sentences in [
+            single("Ticket 873 reopened."),
+            single("Build 18735 failed."),
+            single("Use the ai-local profile."),
+            single("Thai-localization strings."),
+            // One chunk, several sentences that hold the term.
+            vec![
+                "Patched cve-2026-111497 today.".to_string(),
+                "Nothing else changed.".to_string(),
+                "Second sentence mentions cve-2026-111497 again.".to_string(),
+            ],
+            single("Slurm `job_2807` and #4410 and @alice_dev, \u{201c}parseJob_2807\u{201d}."),
         ] {
             let id = ChunkId::new();
-            index.insert(&tenant, &id, &[text.to_string()]).unwrap();
+            index.insert(&tenant, &id, &sentences).unwrap();
             ids.push(id);
         }
         index
-            .insert(
-                &other,
-                &ChunkId::new(),
-                &["Ticket 873 elsewhere.".to_string()],
-            )
+            .insert(&other, &ChunkId::new(), &single("Ticket 873 elsewhere."))
             .unwrap();
-        let find = |terms: &[&str], max: usize, deny: Option<&ChunkId>| {
-            let terms = terms
-                .iter()
-                .map(|term| term.to_string())
-                .collect::<Vec<_>>();
+        let find = |term: &str, max: usize, deny: Option<&ChunkId>| {
             index
-                .chunks_with_terms(&tenant, &terms, max, |id| Ok(Some(id) != deny))
+                .chunks_with_term(&tenant, term, max, |id| Ok(Some(id) != deny))
                 .unwrap()
         };
 
-        assert_eq!(find(&["873"], 10, None), vec![ids[0].clone()]);
-        assert_eq!(find(&["ai-local"], 10, None), vec![ids[2].clone()]);
-        assert_eq!(find(&["cve-2026-111497"], 10, None), vec![ids[4].clone()]);
-        let mut both = find(&["873", "ai-local"], 10, None);
-        both.sort();
-        let mut want = vec![ids[0].clone(), ids[2].clone()];
-        want.sort();
-        assert_eq!(both, want);
-        assert!(find(&["873", "ai-local"], 1, None).len() == 1);
-        assert!(find(&["873"], 10, Some(&ids[0])).is_empty());
-        assert!(find(&["---"], 10, None).is_empty());
+        assert_eq!(find("873", 8, None), Some(vec![ids[0].clone()]));
+        assert_eq!(find("ai-local", 8, None), Some(vec![ids[2].clone()]));
+        assert_eq!(
+            find("cve-2026-111497", 8, None),
+            Some(vec![ids[4].clone()]),
+            "a chunk counts once, however many sentences hold the term"
+        );
+        for term in ["job_2807", "4410", "alice_dev", "parseJob_2807"] {
+            assert_eq!(find(term, 8, None), Some(vec![ids[5].clone()]), "{term}");
+        }
+        assert_eq!(find("873", 8, Some(&ids[0])), Some(Vec::new()));
+        assert_eq!(find("---", 8, None), Some(Vec::new()));
+        assert_eq!(
+            find("873", 0, None),
+            None,
+            "one match exceeds a maximum of 0"
+        );
+    }
+
+    #[test]
+    fn chunks_with_term_report_common_terms_and_a_reached_fetch_bound() {
+        let index = Bm25Index::new().unwrap();
+        let tenant = create_test_tenant();
+        for round in 0..9 {
+            index
+                .insert(
+                    &tenant,
+                    &ChunkId::new(),
+                    &[format!("Round {round} of job_7001.")],
+                )
+                .unwrap();
+        }
+        // One chunk with more sentences than the fetch bound.
+        let crowded = ChunkId::new();
+        let sentences = (0..EXACT_TERM_FETCH_BOUND + 5)
+            .map(|n| format!("Line {n} of node_88."))
+            .collect::<Vec<_>>();
+        index.insert(&tenant, &crowded, &sentences).unwrap();
+
+        let find = |term: &str, max: usize| {
+            index
+                .chunks_with_term(&tenant, term, max, |_| Ok(true))
+                .unwrap()
+        };
+        assert_eq!(find("job_7001", 9).map(|ids| ids.len()), Some(9));
+        assert_eq!(find("job_7001", 8), None, "9 chunks exceed a maximum of 8");
+        assert_eq!(
+            find("node_88", 8),
+            None,
+            "the bound was reached, so one chunk is not certain"
+        );
     }
 
     fn create_test_tenant() -> TenantId {

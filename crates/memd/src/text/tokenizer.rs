@@ -59,8 +59,10 @@ impl CodeTokenizer {
         let mut word_start: Option<usize> = None;
 
         for (idx, ch) in text.char_indices() {
-            let is_delimiter = ch.is_whitespace() || ch == '_' || is_separator(ch);
-            if is_delimiter {
+            // Only letters and digits stay in a token, so punctuation around an
+            // identifier (`` `job_2807` ``, `#873`, `@name`, `$VAR`, quotes) never
+            // becomes part of it. Underscores split snake_case.
+            if !ch.is_alphanumeric() {
                 if let Some(start) = word_start.take() {
                     self.push_word_tokens(&mut tokens, &text[start..idx], start);
                 }
@@ -167,36 +169,6 @@ fn split_camel_case(word: &str) -> Vec<String> {
 fn is_acronym(s: &str) -> bool {
     let chars: Vec<char> = s.chars().collect();
     chars.len() >= 2 && chars.iter().all(|c| c.is_uppercase())
-}
-
-/// Check if a character is a separator (not whitespace or underscore).
-fn is_separator(c: char) -> bool {
-    matches!(
-        c,
-        '.' | ','
-            | ';'
-            | ':'
-            | '('
-            | ')'
-            | '['
-            | ']'
-            | '{'
-            | '}'
-            | '<'
-            | '>'
-            | '"'
-            | '\''
-            | '&'
-            | '|'
-            | '+'
-            | '-'
-            | '*'
-            | '/'
-            | '%'
-            | '='
-            | '!'
-            | '?'
-    )
 }
 
 /// Detect the token type based on content.
@@ -380,6 +352,37 @@ mod tests {
         }
 
         assert_eq!(tokens, vec!["get", "user", "by", "id"]);
+    }
+
+    #[test]
+    fn punctuation_around_identifiers_does_not_stay_in_tokens() {
+        let tokenizer = CodeTokenizer::new();
+        for (text, want) in [
+            ("`job_2807`", vec!["job", "2807"]),
+            ("Fixed #873", vec!["fix", "873"]),
+            ("ping @name now", vec!["ping", "name", "now"]),
+            ("echo $VAR_1", vec!["echo", "var", "1"]),
+            ("\u{201c}job_2807\u{201d}", vec!["job", "2807"]),
+            ("\u{2018}job_2807\u{2019}", vec!["job", "2807"]),
+            (
+                "ai\u{2014}local ai\u{2013}local",
+                vec!["ai", "local", "ai", "local"],
+            ),
+            ("~/dir\\file^2", vec!["dir", "file", "2"]),
+            ("a\u{00a0}b", vec!["a", "b"]),
+        ] {
+            assert_eq!(tokenizer.tokenize(text), want, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn case_boundaries_still_split_identifiers() {
+        let tokenizer = CodeTokenizer::new();
+        assert_eq!(
+            tokenizer.tokenize("parseJob_2807"),
+            vec!["pars", "job", "2807"]
+        );
+        assert_eq!(tokenizer.tokenize("Float32Array"), vec!["float32", "array"]);
     }
 
     #[test]

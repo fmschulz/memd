@@ -52,6 +52,61 @@ async fn ops_regression_dense_unavailable_uses_bm25_for_old_chunks() {
     assert_ne!(store.retrieval_mode(), "text_fallback");
 }
 
+fn current_revision_marker() -> String {
+    format!("{}\n", crate::store::sparse_revision::REVISION)
+}
+
+/// Revision 1 indexed `#873` and `` `job_2807` `` with the punctuation inside the
+/// token. A writer must rebuild that index once, from payloads alone.
+#[tokio::test]
+async fn sparse_revision_one_index_is_rebuilt_for_the_punctuation_analyzer() {
+    let dir = tempdir().unwrap();
+    let config = PersistentStoreConfig {
+        data_dir: dir.path().to_path_buf(),
+        enable_dense_search: false,
+        enable_hybrid_search: true,
+        hybrid_config: Some(HybridConfig {
+            dense_k: 0,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let tenant = TenantId::new("revision_one").unwrap();
+    let id = {
+        let store = PersistentStore::open(config.clone()).unwrap();
+        let id = store
+            .add(MemoryChunk::new(
+                tenant.clone(),
+                "Fixed #873 in the parser.",
+                ChunkType::Doc,
+            ))
+            .await
+            .unwrap();
+        // Stand in for the index the old analyzer built.
+        let index = store.sparse_index().unwrap();
+        index.delete(&tenant, &id).unwrap();
+        index
+            .insert(&tenant, &id, &["obsolete tokens".into()])
+            .unwrap();
+        index.commit().unwrap();
+        id
+    };
+    fs::write(dir.path().join("sparse_revision"), "1\n").unwrap();
+
+    let store = PersistentStore::open(config).unwrap();
+    let hits = store
+        .sparse_index()
+        .unwrap()
+        .search(&tenant, "873", 10)
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].chunk_id, id);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("sparse_revision")).unwrap(),
+        current_revision_marker()
+    );
+}
+
 #[tokio::test]
 async fn sparse_revision_rebuilds_all_tenants_once_on_writer_open() {
     let dir = tempdir().unwrap();
@@ -130,7 +185,10 @@ async fn sparse_revision_rebuilds_all_tenants_once_on_writer_open() {
                 .unwrap()
                 .is_empty());
         }
-        assert_eq!(fs::read_to_string(&marker).unwrap(), "1\n");
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap(),
+            current_revision_marker()
+        );
     }
     // A document not represented by metadata survives a current-revision
     // reopen, proving we did not discard and rebuild the index again.
@@ -218,7 +276,10 @@ async fn sparse_revision_skips_bad_payloads_without_rebuilding_healthy_tenants_a
                 .unwrap();
             assert_eq!(hits.len(), 1);
             assert_eq!(hits[0].chunk_id, healthy_id);
-            assert_eq!(fs::read_to_string(&marker).unwrap(), "1\n");
+            assert_eq!(
+                fs::read_to_string(&marker).unwrap(),
+                current_revision_marker()
+            );
             drop(store);
             // Let the runtime drop the aborted startup-repair task's index handle
             // before opening another writer on the same directory.

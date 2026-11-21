@@ -251,12 +251,18 @@ explicitly scoped lines continue.
 - `memory.search` — hybrid retrieval with optional `mode`, `project_id`,
   compact/token-budgeted output, and event sibling expansion.
   A query term with a digit, `-` or `_` (`cve-2026-111497`, `job_2807`) also
-  gets an exact lookup in the keyword index. The term must match whole tokens:
-  `873` does not match `18735`. When at most 8 chunks in the search scope hold
-  the term, all of them get a +20 score boost, whatever `k` is. When more
-  chunks hold it, the term is common (`read-only`), and it gets no boost. Only
-  chunk text is matched, not tags. A generic search never rebuilds digests;
-  `mode` values such as `brief_project` or `find_failures` still refresh theirs.
+  gets an exact lookup in the keyword index, for the first 8 such terms of a
+  query. The term must match whole tokens: `873` does not match `18735`, and
+  punctuation around an identifier (backticks, `#`, `@`, quotes) is ignored.
+  When at most 8 visible chunks in the search scope hold the term, all of them
+  get a +20 score boost; this rescue does not depend on `k`. When more chunks
+  hold it, or the index read 1,000 sentences before the count was certain, the
+  term is common (`read-only`) and gets no boost. Only chunk text is matched,
+  not tags. Superseded, expired, deleted and candidate chunks do not count. The
+  keyword index is rebuilt once, from stored payloads, by the first writer that
+  opens a store after a tokenizer change. A generic search never rebuilds
+  digests; `mode` values such as `brief_project` or `find_failures` still
+  refresh theirs.
 - `memory.get`, `memory.delete`, `memory.stats`, `memory.health`.
 - `memory.compact` — explicit digest refresh; supports `digest_modes` and `force_digest_rebuild`.
 - `memory.dream` — dry-run-first retention and compaction planning; safely

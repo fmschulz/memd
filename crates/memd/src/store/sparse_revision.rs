@@ -1,4 +1,6 @@
 //! Writer-only rebuild marker for the BM25 analyzer.
+//!
+//! Revision 2: every character that is not a letter or digit separates tokens.
 
 use std::fs;
 use std::io::Write;
@@ -6,7 +8,7 @@ use std::path::Path;
 
 use crate::error::Result;
 
-const REVISION: &str = "1";
+pub(super) const REVISION: &str = "2";
 const MARKER: &str = "sparse_revision";
 
 fn write_marker(data_dir: &Path, value: &str) -> Result<()> {
@@ -31,7 +33,7 @@ pub(super) fn prepare(data_dir: &Path) -> Result<bool> {
     if index.is_dir() {
         fs::remove_dir_all(index)?;
     }
-    write_marker(data_dir, "1 rebuilding")?;
+    write_marker(data_dir, &format!("{REVISION} rebuilding"))?;
     Ok(true)
 }
 

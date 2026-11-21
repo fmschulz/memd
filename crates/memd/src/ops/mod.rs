@@ -29,6 +29,8 @@ const EXACT_RESCUE_SCORE_BOOST: f32 = 20.0;
 /// A code-like term rescues and boosts only when at most this many chunks in
 /// the search scope hold it. A term in more chunks is common, not an identifier.
 const EXACT_RESCUE_MAX_MATCHES: usize = 8;
+/// Most code-like terms of one query that get a lookup or a scan.
+const EXACT_RESCUE_MAX_TERMS: usize = 8;
 const LEXICAL_OVERLAP_PROJECT_SCAN_LIMIT: usize = 500;
 const LEXICAL_OVERLAP_SCORE_BOOST: f32 = 16.0;
 const LEXICAL_OVERLAP_MAX_CANDIDATES: usize = 100;
@@ -131,11 +133,11 @@ use crate::retrieval::{ContextPacker, PackerConfig, PackerInput};
 use crate::store::metadata::MetadataStore;
 use crate::store::usage::{query_hash_hex, UsageEvent, UsageOp};
 use crate::store::{
-    compare_scored_chunks, rank_candidate_chunks, score_candidate_chunk, DuplicateHealth,
-    FeedbackEntry, HealthCounts, IndexCoverageHealth, OutcomeEvent, OutcomeKind, OutcomeVerifier,
-    PayloadHealth, RankingPolicyMode, RelevanceLabel, RetrievalEpisode, RetrievalEpisodeId,
-    RetrievalEpisodeItem, Store, StoreHealthSnapshot, StoreStats, TenantManager,
-    OUTCOME_POLICY_VERSION,
+    chunk_status_is_searchable, compare_scored_chunks, rank_candidate_chunks,
+    score_candidate_chunk, DuplicateHealth, ExactTermLookup, FeedbackEntry, HealthCounts,
+    IndexCoverageHealth, OutcomeEvent, OutcomeKind, OutcomeVerifier, PayloadHealth,
+    RankingPolicyMode, RelevanceLabel, RetrievalEpisode, RetrievalEpisodeId, RetrievalEpisodeItem,
+    Store, StoreHealthSnapshot, StoreStats, TenantManager, OUTCOME_POLICY_VERSION,
 };
 use crate::task_memory::{
     build_library_digest_artifact, build_project_brief_digest_artifact, build_project_brief_view,
@@ -2303,26 +2305,25 @@ async fn search_with_scores_for_project_scopes<S: Store>(
     ))
 }
 
+/// Code-like query terms (digits, `-`, `_`), first `EXACT_RESCUE_MAX_TERMS` in
+/// query order. Case stays as typed: the keyword analyzer splits camelCase, so
+/// `parseJob_2807` must reach it unchanged. Only the duplicate check ignores case.
 fn exact_rescue_terms(query: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     query
         .split_whitespace()
         .filter_map(|term| {
-            let cleaned = term
-                .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
-                .to_ascii_lowercase();
+            let cleaned =
+                term.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-');
             if cleaned.len() < 3 || !cleaned.chars().any(|c| c.is_ascii_alphanumeric()) {
                 return None;
             }
             let code_like = cleaned.contains('_')
                 || cleaned.contains('-')
                 || cleaned.chars().any(|c| c.is_ascii_digit());
-            if code_like && seen.insert(cleaned.clone()) {
-                Some(cleaned)
-            } else {
-                None
-            }
+            (code_like && seen.insert(cleaned.to_ascii_lowercase())).then(|| cleaned.to_string())
         })
+        .take(EXACT_RESCUE_MAX_TERMS)
         .collect()
 }
 
@@ -2462,7 +2463,8 @@ async fn scan_exact_term_matches<S: Store>(
         }
         offset += page_limit;
         for chunk in chunks {
-            if chunk_in_scope(scope, &chunk)
+            if chunk_status_is_searchable(chunk.status)
+                && chunk_in_scope(scope, &chunk)
                 && chunk_holds_term_tokens(&tokenizer, &chunk, &term_tokens)
                 && !found.iter().any(|seen| seen.chunk_id == chunk.chunk_id)
             {
@@ -2486,30 +2488,39 @@ async fn rare_exact_term_matches<S: Store>(
 ) -> Result<Vec<MemoryChunk>, McpError> {
     let mut found: Vec<MemoryChunk> = Vec::new();
     for scope in scopes {
-        let ids = store
+        let lookup = store
             .exact_term_chunk_ids(
                 &scope.tenant_id,
                 scope.project_id.as_deref(),
-                &[term.to_string()],
-                EXACT_RESCUE_MAX_MATCHES + 1 - found.len(),
+                term,
+                EXACT_RESCUE_MAX_MATCHES - found.len(),
             )
             .await
             .map_err(|e| McpError::ToolError(e.to_string()))?;
-        match ids {
-            Some(ids) => {
+        match lookup {
+            ExactTermLookup::Common => return Ok(Vec::new()),
+            ExactTermLookup::Rare(ids) => {
                 for id in ids {
-                    let chunk = store
-                        .get(&scope.tenant_id, &id)
-                        .await
-                        .map_err(|e| McpError::ToolError(e.to_string()))?;
-                    if let Some(chunk) = chunk.filter(|chunk| chunk_in_scope(scope, chunk)) {
+                    // An unreadable row is skipped, as the hybrid lane does.
+                    let chunk = match store.get(&scope.tenant_id, &id).await {
+                        Ok(chunk) => chunk,
+                        Err(error) => {
+                            warn!(chunk_id = %id, error = %error, "skipping unreadable chunk in exact rescue");
+                            continue;
+                        }
+                    };
+                    if let Some(chunk) = chunk.filter(|chunk| {
+                        chunk_status_is_searchable(chunk.status) && chunk_in_scope(scope, chunk)
+                    }) {
                         if !found.iter().any(|seen| seen.chunk_id == chunk.chunk_id) {
                             found.push(chunk);
                         }
                     }
                 }
             }
-            None => scan_exact_term_matches(store, scope, term, &mut found).await?,
+            ExactTermLookup::NoIndex => {
+                scan_exact_term_matches(store, scope, term, &mut found).await?
+            }
         }
         if found.len() > EXACT_RESCUE_MAX_MATCHES {
             return Ok(Vec::new());

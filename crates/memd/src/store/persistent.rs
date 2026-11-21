@@ -37,8 +37,8 @@ use super::usage::{usage_ledger_enabled, usage_retention_ms, UsageEvent};
 use super::wal::{TaskArtifactWalPayload, WalReader, WalRecord, WalRecordType, WalWriter};
 use super::writer_lock::{acquire_writer_lock_capped, WriterLockGuard};
 use super::{
-    rank_candidate_chunks, score_candidate_chunk, ExternalMutationOutcome, RywProbeStats, Store,
-    StoreHealthSnapshot, StoreStats,
+    chunk_status_is_searchable, rank_candidate_chunks, score_candidate_chunk, ExactTermLookup,
+    ExternalMutationOutcome, RywProbeStats, Store, StoreHealthSnapshot, StoreStats,
 };
 use crate::embeddings::{CandleModel, EmbeddingModel};
 use crate::error::{MemdError, Result};
@@ -2229,9 +2229,9 @@ impl Store for PersistentStore {
         &self,
         tenant_id: &TenantId,
         project_id: Option<&str>,
-        terms: &[String],
-        limit: usize,
-    ) -> Result<Option<Vec<ChunkId>>> {
+        term: &str,
+        max_matches: usize,
+    ) -> Result<ExactTermLookup> {
         // A dense-only configuration opens the index but never fills it.
         let Some(sparse) = self
             .hybrid_searcher
@@ -2239,24 +2239,18 @@ impl Store for PersistentStore {
             .filter(|hybrid| hybrid.sparse_enabled())
             .and_then(|hybrid| hybrid.sparse_index())
         else {
-            return Ok(None);
+            return Ok(ExactTermLookup::NoIndex);
         };
         // Scope and visibility come from metadata rows, so no payload is read.
-        let ids = sparse.chunks_with_terms(tenant_id, terms, limit, |chunk_id| {
+        // Only rows a default search can show count, so superseded versions of
+        // one fact do not make its identifier look common.
+        let ids = sparse.chunks_with_term(tenant_id, term, max_matches, |chunk_id| {
             Ok(self.metadata.get(tenant_id, chunk_id)?.is_some_and(|meta| {
-                // Count only rows a default search can show, so superseded
-                // versions of one fact do not make its identifier look common.
-                !matches!(
-                    meta.status,
-                    ChunkStatus::Candidate
-                        | ChunkStatus::Deleted
-                        | ChunkStatus::Error
-                        | ChunkStatus::Superseded
-                        | ChunkStatus::Expired
-                ) && (project_id.is_none() || meta.project_id.as_deref() == project_id)
+                chunk_status_is_searchable(meta.status)
+                    && (project_id.is_none() || meta.project_id.as_deref() == project_id)
             }))
         })?;
-        Ok(Some(ids))
+        Ok(ids.map_or(ExactTermLookup::Common, ExactTermLookup::Rare))
     }
 }
 
