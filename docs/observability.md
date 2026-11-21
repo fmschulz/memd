@@ -104,10 +104,14 @@ the experience store, not from the fact scan; `--explain-output` lists each
 lesson candidate and the reason it was skipped.
 
 `## Memory health` prints one line,
-`facts: <P> visible in project <id>, <T> visible in tenant <tenant>`. Both
-numbers are SQL counts of rows with a visible status that are neither
-experience projections nor generated digests, so they drop when a fact is
-superseded or deleted. The section also lists warnings for scope drift, a
+`facts: <P> visible in project <id>, <T> visible in tenant <tenant>`. `<P>` is
+the number of facts the scan admitted as candidates (visible status, not an
+experience projection or generated digest, and passing the payload checks), so
+it drops when a fact is superseded or deleted. `<T>` is a SQL row count of the
+same kind of rows for the tenant. A projection long enough to split is stored
+as several rows, and since this version every row links to its artifact, so the
+SQL excludes all of them. Rows written before this version have no link on
+their continuation rows, so `<T>` can include those rows; `<P>` never does. The section also lists warnings for scope drift, a
 truncated project scan (the cap cuts the oldest facts first), and unreadable
 payloads. The machine-wide cap is a designed bound and prints no warning; the
 explain output keeps its `truncated` flag. The section does not run

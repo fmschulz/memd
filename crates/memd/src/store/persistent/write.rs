@@ -493,11 +493,19 @@ impl PersistentStore {
             })?;
             projection_chunk_ids.push(chunk_id.to_string());
         }
+        // Every other physical row is a continuation of a split projection.
+        let projection_part_chunk_ids = expanded_ids
+            .iter()
+            .enumerate()
+            .filter(|(position, _)| !primary_positions.contains(position))
+            .map(|(_, chunk_id)| chunk_id.to_string())
+            .collect::<Vec<_>>();
 
         let task_wal_payload = serde_json::to_vec(&TaskArtifactWalPayload {
             artifact: artifact.clone(),
             projection_chunk_ids: projection_chunk_ids.clone(),
             projection_kinds: projection_kinds.clone(),
+            projection_part_chunk_ids: projection_part_chunk_ids.clone(),
         })
         .map_err(|e| {
             MemdError::StorageError(format!("serialize task artifact WAL payload: {}", e))
@@ -584,6 +592,7 @@ impl PersistentStore {
             &artifact,
             &projection_chunk_ids,
             &projection_kinds,
+            &projection_part_chunk_ids,
         )?;
 
         if chunk_ids_for_state.is_empty() {

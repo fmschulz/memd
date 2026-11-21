@@ -50,6 +50,10 @@ pub struct TaskArtifactWalPayload {
     pub artifact: TaskArtifact,
     pub projection_chunk_ids: Vec<String>,
     pub projection_kinds: Vec<String>,
+    /// Continuation rows of split projections, in write order. Absent in
+    /// records written before part links existed.
+    #[serde(default)]
+    pub projection_part_chunk_ids: Vec<String>,
 }
 
 /// WAL record containing operation data
@@ -343,6 +347,7 @@ mod tests {
             artifact: artifact.clone(),
             projection_chunk_ids: vec!["chunk-1".to_string()],
             projection_kinds: vec!["task_goal".to_string()],
+            projection_part_chunk_ids: Vec::new(),
         };
         let record = WalRecord::task_artifact(
             "tenant_1".to_string(),

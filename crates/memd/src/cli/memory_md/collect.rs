@@ -47,7 +47,13 @@ pub(super) fn memory_state_from_scan(
         ));
     }
     MemoryState {
-        visible_project_facts: project.visible_rows,
+        // Facts the scan admitted. A truncated scan did not read every row,
+        // so only then the SQL count stands in.
+        visible_project_facts: if project.truncated {
+            project.visible_rows
+        } else {
+            project.admitted_rows
+        },
         visible_tenant_facts: project.visible_rows + machine_wide.visible_rows,
         unreadable_active_chunks: project.unreadable_rows + machine_wide.unreadable_rows,
         scan_warnings,

@@ -508,8 +508,9 @@ fn startup_filters_remove_boilerplate_before_union_dedup() {
 #[test]
 fn memory_state_comes_from_the_candidate_scan() {
     let project = SectionScan {
-        visible_rows: 3,
-        read_rows: 3,
+        visible_rows: 5,
+        admitted_rows: 3,
+        read_rows: 5,
         unreadable_rows: 2,
         ..SectionScan::default()
     };
@@ -521,7 +522,7 @@ fn memory_state_comes_from_the_candidate_scan() {
     };
     let state = memory_state_from_scan(&project, &machine_wide);
     assert_eq!(state.visible_project_facts, 3);
-    assert_eq!(state.visible_tenant_facts, 7);
+    assert_eq!(state.visible_tenant_facts, 9);
     assert_eq!(state.unreadable_active_chunks, 3);
     assert!(state.scan_warnings.is_empty());
 
@@ -534,7 +535,7 @@ fn memory_state_comes_from_the_candidate_scan() {
         .any(|warning| warning.contains("memory degraded: 3 active chunks")));
     assert_eq!(
         facts_health_line(&project_state),
-        "facts: 3 visible in project project-a, 7 visible in tenant tenant-a"
+        "facts: 3 visible in project project-a, 9 visible in tenant tenant-a"
     );
 }
 

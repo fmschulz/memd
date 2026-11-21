@@ -136,6 +136,11 @@ pub(super) struct SectionScan {
     pub(super) excluded_generated_digests: usize,
     /// Rows with a non-visible status, left out of the scan.
     pub(super) excluded_by_status: usize,
+    /// Rows left as candidates after `scan_candidate_filter_reason`. Unlike
+    /// `visible_rows`, this does not count continuation rows of generated
+    /// digests or experience lessons written before part links existed: the
+    /// payload check drops those.
+    pub(super) admitted_rows: usize,
     /// The newest-first row cap of the scan; `None` for stores without
     /// metadata rows.
     pub(super) cap: Option<usize>,
@@ -260,6 +265,11 @@ async fn scan_metadata_rows(
             }
         }
         scan.truncated = scan.visible_rows > scan.read_rows;
+        scan.admitted_rows = if is_project {
+            outcome.project.len()
+        } else {
+            outcome.machine_wide.len()
+        };
         if is_project {
             outcome.project_scan = scan;
         } else {
@@ -302,6 +312,8 @@ async fn scan_listed_chunks<S: Store>(
             }
         }
         if fetched < READABLE_SCAN_PAGE_SIZE {
+            outcome.project_scan.admitted_rows = outcome.project.len();
+            outcome.machine_scan.admitted_rows = outcome.machine_wide.len();
             return Ok(());
         }
         offset += fetched;

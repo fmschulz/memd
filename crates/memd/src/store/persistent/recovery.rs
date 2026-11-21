@@ -436,10 +436,16 @@ impl TenantStore {
                             skipped += 1;
                             return Ok(());
                         }
+                        let projection_part_chunk_ids = payload
+                            .projection_part_chunk_ids
+                            .into_iter()
+                            .filter(|id| !deleted_ids.contains(id))
+                            .collect::<Vec<_>>();
                         metadata.insert_task_artifact_bundle(
                             &payload.artifact,
                             &projection_chunk_ids,
                             &projection_kinds,
+                            &projection_part_chunk_ids,
                         )?;
                         task_artifacts += 1;
                     }
@@ -1100,6 +1106,7 @@ mod tests {
             artifact: artifact.clone(),
             projection_chunk_ids: vec![chunk.chunk_id.to_string()],
             projection_kinds: vec!["task".to_string()],
+            projection_part_chunk_ids: Vec::new(),
         };
         metadata.insert(&row(&chunk)).unwrap();
         metadata
@@ -1107,6 +1114,7 @@ mod tests {
                 &artifact,
                 &payload.projection_chunk_ids,
                 &payload.projection_kinds,
+                &payload.projection_part_chunk_ids,
             )
             .unwrap();
         metadata
@@ -1398,5 +1406,55 @@ mod tests {
             before
         );
         assert_eq!(std::fs::read_dir(segments_dir).unwrap().count(), 2);
+    }
+    #[test]
+    fn wal_task_artifact_restores_part_links_of_split_projections() {
+        use crate::store::metadata::{DigestScope, MetadataStore};
+        let dir = tempdir().unwrap();
+        let metadata = SqliteMetadataStore::open_in_memory().unwrap();
+        let primary = chunk();
+        let mut part = chunk();
+        part.text = "continuation of the digest".to_string();
+        part.tags.push("chunk_index:1".to_string());
+        let artifact = TaskArtifact::new_digest(
+            primary.tenant_id.clone(),
+            "task-split",
+            "highlight_library",
+            "highlight_library",
+        );
+        let payload = TaskArtifactWalPayload {
+            artifact: artifact.clone(),
+            projection_chunk_ids: vec![primary.chunk_id.to_string()],
+            projection_kinds: vec!["task".to_string()],
+            projection_part_chunk_ids: vec![part.chunk_id.to_string()],
+        };
+        write_records(
+            dir.path(),
+            &[
+                add_record(&primary),
+                add_record(&part),
+                WalRecord::task_artifact(
+                    primary.tenant_id.to_string(),
+                    artifact.artifact_id.clone(),
+                    123,
+                    serde_json::to_vec(&payload).unwrap(),
+                ),
+            ],
+        );
+
+        let _store = open(dir.path(), &metadata).unwrap();
+
+        // Both physical rows are linked to the generated digest, so the
+        // digest scan excludes both.
+        let scope = DigestScope {
+            project_ids: Vec::new(),
+            include_unscoped: true,
+        };
+        let counts = metadata
+            .count_digest_rows(&primary.tenant_id, &scope)
+            .unwrap()
+            .inside;
+        assert_eq!(counts.generated_digests, 2, "{counts:?}");
+        assert_eq!(counts.visible, 0, "{counts:?}");
     }
 }

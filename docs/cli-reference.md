@@ -70,8 +70,11 @@ list of every physical chunk created by document splitting.
   `memd experience find`.
 - `memory-md` renders a generation date and scope before the fact libraries.
   `Memory health` prints `facts: <P> visible in project <id>, <T> visible in
-  tenant <tenant>` ("visible" skips superseded, deleted and other non-visible
-  rows, experience projections and generated digests; the counts are SQL) and
+  tenant <tenant>` (`<P>` counts the facts the scan admitted, so it skips
+  superseded, deleted and other non-visible rows, experience projections and
+  generated digests, including continuation rows of long ones written before
+  part links existed; `<T>` is a SQL row count that can include those old
+  continuation rows) and
   warnings for scope drift, a truncated project scan (oldest facts cut first),
   or unreadable payloads. The `[warn]` self-diagnosis lines of `memd report`
   no longer appear. Task, handoff, and

@@ -239,6 +239,68 @@ fn regression_store_unknown_legacy_deletion_time_gets_full_grace_once() {
     );
 }
 
+/// A replaced digest drops the part links of its old version and supersedes
+/// the old continuation rows, like its old primary rows.
+#[test]
+fn digest_replacement_retires_part_links_and_rows() {
+    let store = SqliteMetadataStore::open_in_memory().unwrap();
+    let tenant = TenantId::new("digest_parts").unwrap();
+    let (primary, part, replacement) = (ChunkId::new(), ChunkId::new(), ChunkId::new());
+    for (ordinal, chunk) in [&primary, &part, &replacement].into_iter().enumerate() {
+        let mut row = create_test_metadata(tenant.as_str(), chunk);
+        row.ordinal = ordinal as u32;
+        store.insert(&row).unwrap();
+    }
+    let artifact =
+        TaskArtifact::new_digest(tenant.clone(), "digest_task", "digest_key", "project_brief");
+    store
+        .insert_task_artifact_bundle(
+            &artifact,
+            &[primary.to_string()],
+            &["digest".to_string()],
+            &[part.to_string()],
+        )
+        .unwrap();
+    let link_kinds = |chunk: &ChunkId| -> Vec<String> {
+        let conn = store.pool.get();
+        let mut statement = conn
+            .prepare("SELECT link_kind FROM artifact_links WHERE chunk_id = ?1")
+            .unwrap();
+        statement
+            .query_map([chunk.to_string()], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect()
+    };
+    assert_eq!(link_kinds(&primary), vec!["retrieval_projection"]);
+    assert_eq!(link_kinds(&part), vec!["retrieval_projection_part"]);
+
+    let mut newer = artifact.clone();
+    newer.timestamp_created += 10;
+    store
+        .insert_task_artifact_bundle(
+            &newer,
+            &[replacement.to_string()],
+            &["digest".to_string()],
+            &[],
+        )
+        .unwrap();
+
+    assert!(link_kinds(&part).is_empty());
+    assert!(link_kinds(&primary).is_empty());
+    assert_eq!(link_kinds(&replacement), vec!["retrieval_projection"]);
+    for old in [&primary, &part] {
+        assert_eq!(
+            store.get(&tenant, old).unwrap().unwrap().status,
+            ChunkStatus::Superseded
+        );
+    }
+    assert_eq!(
+        store.get(&tenant, &replacement).unwrap().unwrap().status,
+        ChunkStatus::Final
+    );
+}
+
 #[test]
 fn regression_store_digest_collision_cannot_replace_another_tenant() {
     let store = SqliteMetadataStore::open_in_memory().unwrap();
@@ -260,13 +322,18 @@ fn regression_store_digest_collision_cannot_replace_another_tenant() {
     );
     first.artifact_id = "shared_legacy_digest_id".to_string();
     store
-        .insert_task_artifact_bundle(&first, &[chunk_a.to_string()], &["digest".to_string()])
+        .insert_task_artifact_bundle(&first, &[chunk_a.to_string()], &["digest".to_string()], &[])
         .unwrap();
     let mut incoming = first.clone();
     incoming.tenant_id = tenant_b;
     assert!(store.ensure_task_artifact_write_safe(&incoming).is_err());
     assert!(store
-        .insert_task_artifact_bundle(&incoming, &[chunk_b.to_string()], &["digest".to_string()])
+        .insert_task_artifact_bundle(
+            &incoming,
+            &[chunk_b.to_string()],
+            &["digest".to_string()],
+            &[]
+        )
         .is_err());
     assert_eq!(
         store
@@ -712,6 +779,7 @@ fn task_artifact_bundle_roundtrip() {
             &artifact,
             &["chunk-1".to_string(), "chunk-2".to_string()],
             &["task_goal".to_string(), "task_summary".to_string()],
+            &[],
         )
         .unwrap();
 
@@ -757,6 +825,7 @@ fn task_projection_search_filters_by_exact_dimensions() {
             &run_artifact,
             std::slice::from_ref(&chunk_a),
             &["run".to_string()],
+            &[],
         )
         .unwrap();
 
@@ -770,7 +839,7 @@ fn task_projection_search_filters_by_exact_dimensions() {
         description: None,
     }];
     store
-        .insert_task_artifact_bundle(&other_artifact, &[chunk_b], &["run".to_string()])
+        .insert_task_artifact_bundle(&other_artifact, &[chunk_b], &["run".to_string()], &[])
         .unwrap();
 
     let chunk_ids = store

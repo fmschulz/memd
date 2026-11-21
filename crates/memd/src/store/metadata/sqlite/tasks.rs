@@ -7,6 +7,7 @@ impl SqliteMetadataStore {
         artifact: &TaskArtifact,
         projection_chunk_ids: &[String],
         projection_kinds: &[String],
+        projection_part_chunk_ids: &[String],
     ) -> Result<()> {
         let canonical_json = serde_json::to_string(artifact)?;
         let summary = artifact.event_summary();
@@ -212,7 +213,8 @@ impl SqliteMetadataStore {
         let old_projection_chunk_ids = if artifact.artifact_kind == ArtifactKind::Digest {
             let mut stmt = tx.prepare(
                 "SELECT chunk_id FROM artifact_links
-                 WHERE artifact_id = ?1 AND link_kind = 'retrieval_projection'
+                 WHERE artifact_id = ?1
+                   AND link_kind IN ('retrieval_projection', 'retrieval_projection_part')
                    AND chunk_id IN (SELECT chunk_id FROM chunks WHERE tenant_id = ?2)",
             )?;
             let rows = stmt.query_map(
@@ -231,6 +233,7 @@ impl SqliteMetadataStore {
         if artifact.artifact_kind == ArtifactKind::Digest {
             let current_ids = projection_chunk_ids
                 .iter()
+                .chain(projection_part_chunk_ids)
                 .cloned()
                 .collect::<std::collections::HashSet<_>>();
             for old_chunk_id in old_projection_chunk_ids {
@@ -255,7 +258,8 @@ impl SqliteMetadataStore {
 
             tx.execute(
                 "DELETE FROM artifact_links
-                 WHERE artifact_id = ?1 AND link_kind = 'retrieval_projection'
+                 WHERE artifact_id = ?1
+                   AND link_kind IN ('retrieval_projection', 'retrieval_projection_part')
                    AND chunk_id IN (SELECT chunk_id FROM chunks WHERE tenant_id = ?2)",
                 rusqlite::params![artifact.artifact_id.as_str(), artifact.tenant_id.as_str()],
             )?;
@@ -274,6 +278,18 @@ impl SqliteMetadataStore {
             )?;
         }
 
+        // Continuation rows of split projections get their own link kind:
+        // `retrieval_projection` means "the projection row" to search and to
+        // artifact resolution. The digest scan reads both kinds.
+        for chunk_id in projection_part_chunk_ids {
+            tx.execute(
+                "INSERT OR REPLACE INTO artifact_links (
+                    artifact_id, chunk_id, link_kind, projection_kind
+                ) VALUES (?1, ?2, 'retrieval_projection_part', NULL)",
+                rusqlite::params![artifact.artifact_id.as_str(), chunk_id],
+            )?;
+        }
+
         if artifact.artifact_kind == ArtifactKind::Digest {
             for chunk_id in projection_chunk_ids {
                 tx.execute(
@@ -286,7 +302,7 @@ impl SqliteMetadataStore {
                         AND chunk_id NOT IN (
                             SELECT chunk_id FROM artifact_links
                              WHERE artifact_id = ?5
-                               AND link_kind = 'retrieval_projection'
+                               AND link_kind IN ('retrieval_projection', 'retrieval_projection_part')
                         )
                         AND status NOT IN ('candidate', 'deleted')
                         AND ((?3 IS NULL AND project_id IS NULL) OR project_id = ?3)

@@ -1537,7 +1537,7 @@ const EXPERIENCE_PROJECTION: &str = "EXISTS (
     FROM artifact_links l
     JOIN task_artifacts a ON a.artifact_id = l.artifact_id
     WHERE l.chunk_id = chunks.chunk_id
-      AND l.link_kind = 'retrieval_projection'
+      AND l.link_kind IN ('retrieval_projection', 'retrieval_projection_part')
       AND substr(a.artifact_role, 1, 11) = 'experience_'
 )";
 
@@ -1554,7 +1554,7 @@ const GENERATED_DIGEST_PROJECTION: &str = "EXISTS (
     FROM artifact_links l
     JOIN task_artifacts a ON a.artifact_id = l.artifact_id
     WHERE l.chunk_id = chunks.chunk_id
-      AND l.link_kind = 'retrieval_projection'
+      AND l.link_kind IN ('retrieval_projection', 'retrieval_projection_part')
       AND a.status = 'generated'
       AND (COALESCE(trim(a.artifact_role), '') <> ''
            OR COALESCE(trim(a.digest_key), '') <> '')

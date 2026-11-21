@@ -600,3 +600,151 @@ async fn covered_candidates_do_not_fill_the_dedupe_window() {
     assert!(memory_md.contains(uncovered), "{memory_md}");
     assert!(!memory_md.contains("covered fact number"), "{memory_md}");
 }
+
+mod split_projection_tests {
+    //! A projection long enough to split is stored as several physical rows.
+    //! Every row must stay out of the digest scan.
+
+    use super::*;
+    use crate::task_memory::build_task_projections;
+
+    const HEADER: &str = "- facts: 1 visible in project alpha, 1 visible in tenant digest_scope\n";
+
+    async fn add_real_fact(store: &PersistentStore) -> String {
+        store
+            .add(fact(
+                Some("alpha"),
+                "Decision: the one real fact stays.",
+                &["kind:decision"],
+                10,
+            ))
+            .await
+            .unwrap()
+            .to_string()
+    }
+
+    async fn record_long_digest(store: &PersistentStore) {
+        let mut artifact = TaskArtifact::new_digest(
+            TenantId::new(TENANT).unwrap(),
+            "task-long-digest",
+            "highlight_library",
+            "highlight_library",
+        );
+        artifact.project_id = ProjectId::from("alpha");
+        artifact.summary = Some(
+            "This is a long sentence that should trigger chunk splitting behavior. ".repeat(60),
+        );
+        let projections = build_task_projections(&artifact);
+        store
+            .add_task_artifact(artifact, projections)
+            .await
+            .unwrap();
+    }
+
+    /// Physical rows other than the real fact.
+    fn extra_rows(conn: &rusqlite::Connection, fact_id: &str) -> Vec<String> {
+        let mut statement = conn
+            .prepare("SELECT chunk_id FROM chunks WHERE chunk_id != ?1")
+            .unwrap();
+        statement
+            .query_map([fact_id], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect()
+    }
+
+    fn break_payloads(conn: &rusqlite::Connection, chunk_ids: &[String]) {
+        for chunk_id in chunk_ids {
+            conn.execute(
+                "UPDATE chunks SET segment_id = 99999 WHERE chunk_id = ?1",
+                [chunk_id],
+            )
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn long_generated_digest_is_excluded_row_by_row() {
+        let data = tempfile::tempdir().unwrap();
+        let project_dir = tempfile::tempdir().unwrap();
+        let store = open_store(data.path());
+        let fact_id = add_real_fact(&store).await;
+        record_long_digest(&store).await;
+        let conn = rusqlite::Connection::open(data.path().join("metadata.db")).unwrap();
+        let rows = extra_rows(&conn, &fact_id);
+        assert!(rows.len() > 1, "the digest must split: {}", rows.len());
+        break_payloads(&conn, &rows);
+
+        let (memory_md, explain) = run_digest(&store, project_dir.path(), "alpha").await;
+
+        assert_eq!(scan_count(&explain, "project", "unreadable_rows"), 0);
+        assert_eq!(
+            scan_count(&explain, "project", "excluded_generated_digests"),
+            rows.len() as u64
+        );
+        assert_eq!(scan_count(&explain, "project", "visible_rows"), 1);
+        assert!(memory_md.contains(HEADER), "{memory_md}");
+        assert!(!memory_md.contains("memory degraded"), "{memory_md}");
+    }
+
+    #[tokio::test]
+    async fn long_experience_lesson_is_excluded_row_by_row() {
+        let data = tempfile::tempdir().unwrap();
+        let project_dir = tempfile::tempdir().unwrap();
+        let store = open_store(data.path());
+        let fact_id = add_real_fact(&store).await;
+        record_lesson(
+            &store,
+            "alpha",
+            "A very long lesson",
+            &"\u{3042}".repeat(1000),
+            json!({}),
+            1_800_000_000_000,
+            "EXP-long",
+        )
+        .await;
+        let conn = rusqlite::Connection::open(data.path().join("metadata.db")).unwrap();
+        let rows = extra_rows(&conn, &fact_id);
+        assert!(rows.len() > 1, "the lesson must split: {}", rows.len());
+        break_payloads(&conn, &rows);
+
+        let (memory_md, explain) = run_digest(&store, project_dir.path(), "alpha").await;
+
+        assert_eq!(scan_count(&explain, "project", "unreadable_rows"), 0);
+        assert_eq!(
+            scan_count(&explain, "project", "excluded_experience_projections"),
+            rows.len() as u64
+        );
+        assert_eq!(scan_count(&explain, "project", "visible_rows"), 1);
+        assert!(memory_md.contains(HEADER), "{memory_md}");
+    }
+
+    /// A store written before part links existed: the continuation rows have
+    /// no link. The SQL cannot see them, but the header's project count is the
+    /// number of facts the scan admitted, so it stays true.
+    #[tokio::test]
+    async fn unlinked_continuation_rows_do_not_inflate_the_project_count() {
+        let data = tempfile::tempdir().unwrap();
+        let project_dir = tempfile::tempdir().unwrap();
+        let store = open_store(data.path());
+        add_real_fact(&store).await;
+        record_long_digest(&store).await;
+        let conn = rusqlite::Connection::open(data.path().join("metadata.db")).unwrap();
+        // Imitate an old store: drop the part links, keep the primary link.
+        conn.execute(
+            "DELETE FROM artifact_links WHERE link_kind = 'retrieval_projection_part'",
+            [],
+        )
+        .unwrap();
+
+        let (memory_md, explain) = run_digest(&store, project_dir.path(), "alpha").await;
+
+        // The old rows are read and dropped as generated wrappers.
+        assert!(scan_count(&explain, "project", "visible_rows") > 1);
+        assert_eq!(scan_count(&explain, "project", "admitted_rows"), 1);
+        assert!(
+            memory_md.contains("- facts: 1 visible in project alpha, "),
+            "{memory_md}"
+        );
+    }
+}
