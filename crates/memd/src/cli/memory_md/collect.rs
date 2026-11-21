@@ -31,21 +31,20 @@ pub(super) fn collect_project_state(
 }
 
 /// Health counts and warnings from the candidate scan. No second scan runs.
+/// Only the project cap warns: it cuts facts of the active project by age. The
+/// machine-wide cap is the designed bound and stays in the explain output.
 pub(super) fn memory_state_from_scan(
     project: &SectionScan,
     machine_wide: &SectionScan,
 ) -> MemoryState {
     let mut scan_warnings = Vec::new();
-    for (label, scan, cap) in [
-        ("project", project, PROJECT_SCAN_MAX_ROWS),
-        ("machine-wide", machine_wide, MACHINE_SCAN_MAX_ROWS),
-    ] {
-        if scan.truncated {
-            scan_warnings.push(format!(
-                "{label} scan truncated: read {} of {} visible facts (cap {cap}); lower-ranked facts were not considered",
-                scan.read_rows, scan.visible_rows
-            ));
-        }
+    if project.truncated {
+        scan_warnings.push(format!(
+            "project scan truncated: read the newest {} of {} visible facts (cap {}); older facts were not considered",
+            project.read_rows,
+            project.visible_rows,
+            project.cap.unwrap_or(project.read_rows)
+        ));
     }
     MemoryState {
         visible_project_facts: project.visible_rows,

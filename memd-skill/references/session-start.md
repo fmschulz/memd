@@ -19,8 +19,9 @@ memd memory-md --project-dir . --output memory.md
 ```
 
 The file shows its generation date and scope, a health line
-(`facts: <P> visible in project <id>, <T> visible in tenant <tenant>`), warnings,
-and ranked facts with chunk IDs, scores, and tags. Defaults are at most 10
+(`facts: <P> visible in project <id>, <T> visible in tenant <tenant>`; visible
+excludes experience projections and generated digests), warnings, and ranked
+facts with chunk IDs, scores, and tags. Defaults are at most 10
 project facts and 2 machine-wide facts (`--global-limit 0` disables the latter).
 Selection reads every visible fact of the project, however many newer rows other
 projects hold, and the newest 5,000 visible facts outside it. It leaves out

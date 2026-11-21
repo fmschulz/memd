@@ -387,6 +387,7 @@ pub(super) async fn run_session_start_inner<S: Store>(
             global_limit: 2,
             candidate_k: 40,
             explain_output: None,
+            repo_dir: None,
         },
     )
     .await?;

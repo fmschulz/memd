@@ -9,13 +9,13 @@ use crate::types::{ChunkStatus, MemoryChunk};
 use std::collections::HashSet;
 
 #[cfg(test)]
-mod pagination_tests {
+mod unreadable_payload_tests {
     use super::*;
     use crate::store::persistent::{PersistentStore, PersistentStoreConfig};
     use crate::types::MemoryChunk;
 
     #[tokio::test]
-    async fn takeaway_scan_continues_after_unreadable_payload_in_full_metadata_page() {
+    async fn takeaway_scan_continues_after_unreadable_payload() {
         let dir = tempfile::tempdir().unwrap();
         let store = PersistentStore::open(PersistentStoreConfig {
             data_dir: dir.path().to_path_buf(),
@@ -136,8 +136,25 @@ pub(super) struct SectionScan {
     pub(super) excluded_generated_digests: usize,
     /// Rows with a non-visible status, left out of the scan.
     pub(super) excluded_by_status: usize,
+    /// The newest-first row cap of the scan; `None` for stores without
+    /// metadata rows.
+    pub(super) cap: Option<usize>,
     /// The row cap stopped the scan before it read every visible row.
     pub(super) truncated: bool,
+}
+
+/// Rows one scan reads per section.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ScanCaps {
+    pub(super) project: usize,
+    pub(super) machine_wide: usize,
+}
+
+impl ScanCaps {
+    pub(super) const PRODUCTION: Self = Self {
+        project: PROJECT_SCAN_MAX_ROWS,
+        machine_wide: MACHINE_SCAN_MAX_ROWS,
+    };
 }
 
 #[derive(Debug, Default)]
@@ -151,8 +168,9 @@ pub(super) struct ScanOutcome {
 
 /// Two metadata scans replace the former canned-query fan-out: every visible
 /// chunk of the active project, then the newest visible chunks outside it
-/// (machine-wide). The query leaves out non-visible statuses and experience
-/// projections, so those rows cost no payload read. Configured project
+/// (machine-wide), each read by one query, newest first, up to its cap. The
+/// query leaves out non-visible statuses, experience projections and
+/// generated digests, so those rows cost no payload read. Configured project
 /// aliases count as the active project so historically mis-scoped chunks stay
 /// readable, matching the scope expansion the search path applies.
 pub(super) async fn scan_takeaway_candidates<S: Store>(
@@ -160,10 +178,19 @@ pub(super) async fn scan_takeaway_candidates<S: Store>(
     tenant: &TenantId,
     active_project: Option<&str>,
 ) -> Result<ScanOutcome> {
+    scan_takeaway_candidates_capped(store, tenant, active_project, ScanCaps::PRODUCTION).await
+}
+
+pub(super) async fn scan_takeaway_candidates_capped<S: Store>(
+    store: &S,
+    tenant: &TenantId,
+    active_project: Option<&str>,
+    caps: ScanCaps,
+) -> Result<ScanOutcome> {
     let scope = digest_scope(tenant, active_project);
     let mut outcome = ScanOutcome::default();
     if let Some(persistent) = store.as_persistent() {
-        scan_metadata_rows(persistent, tenant, &scope, &mut outcome).await?;
+        scan_metadata_rows(persistent, tenant, &scope, caps, &mut outcome).await?;
     } else {
         scan_listed_chunks(store, tenant, &scope, &mut outcome).await?;
     }
@@ -191,39 +218,45 @@ async fn scan_metadata_rows(
     persistent: &PersistentStore,
     tenant: &TenantId,
     scope: &DigestScope,
+    caps: ScanCaps,
     outcome: &mut ScanOutcome,
 ) -> Result<()> {
     let metadata = persistent.metadata();
-    for (is_project, rows, cap) in [
-        (true, DigestRows::InScope(scope), PROJECT_SCAN_MAX_ROWS),
-        (false, DigestRows::OutOfScope(scope), MACHINE_SCAN_MAX_ROWS),
+    let counts = metadata.count_digest_rows(tenant, scope)?;
+    for (is_project, rows, section_counts, cap) in [
+        (
+            true,
+            DigestRows::InScope(scope),
+            counts.inside,
+            caps.project,
+        ),
+        (
+            false,
+            DigestRows::OutOfScope(scope),
+            counts.outside,
+            caps.machine_wide,
+        ),
     ] {
-        let counts = metadata.count_digest_rows(tenant, rows)?;
         let mut scan = SectionScan {
-            visible_rows: counts.visible,
-            excluded_experience_projections: counts.experience_projections,
-            excluded_generated_digests: counts.generated_digests,
-            excluded_by_status: counts.not_visible,
+            cap: Some(cap),
+            visible_rows: section_counts.visible,
+            excluded_experience_projections: section_counts.experience_projections,
+            excluded_generated_digests: section_counts.generated_digests,
+            excluded_by_status: section_counts.not_visible,
             ..SectionScan::default()
         };
-        while scan.read_rows < cap {
-            let limit = READABLE_SCAN_PAGE_SIZE.min(cap - scan.read_rows);
-            let page = metadata.list_digest_rows(tenant, rows, limit, scan.read_rows)?;
-            let fetched = page.len();
-            for meta in page {
-                match persistent
-                    .get_chunk_for_retrieval(tenant, &meta.chunk_id, "memory_md_scan")
-                    .await?
-                {
-                    Some(chunk) => {
-                        admit_scanned_chunk(outcome, chunk, is_project);
-                    }
-                    None => scan.unreadable_rows += 1,
+        // One statement per section: the newest `cap` visible rows.
+        let page = metadata.list_digest_rows(tenant, rows, cap)?;
+        scan.read_rows = page.len();
+        for meta in page {
+            match persistent
+                .get_chunk_for_retrieval(tenant, &meta.chunk_id, "memory_md_scan")
+                .await?
+            {
+                Some(chunk) => {
+                    admit_scanned_chunk(outcome, chunk, is_project);
                 }
-            }
-            scan.read_rows += fetched;
-            if fetched < limit {
-                break;
+                None => scan.unreadable_rows += 1,
             }
         }
         scan.truncated = scan.visible_rows > scan.read_rows;

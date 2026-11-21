@@ -10,7 +10,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 use super::pool::SqliteConnectionPool;
-use super::{ChunkMetadata, DigestCounts, DigestRows, IndexState, MetadataStore};
+use super::{
+    ChunkMetadata, DigestCounts, DigestRows, DigestScope, DigestScopeCounts, IndexState,
+    MetadataStore,
+};
 use crate::consolidate::journal::{
     ConsolidationEntryRecord, ConsolidationRun, ConsolidationRunId, ConsolidationState,
     LineageRelation, MemoryLineage, PromotionOutcome,

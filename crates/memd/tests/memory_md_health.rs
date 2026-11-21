@@ -88,6 +88,18 @@ fn run_memory_md(data_dir: &Path, project_dir: &Path, tenant: &str, project: &st
         .expect("run memd memory-md")
 }
 
+/// The bullets of the `## Memory health` section: the facts line, plus a
+/// warning line only when something is wrong.
+fn health_bullets(content: &str) -> Vec<&str> {
+    content
+        .split("## Memory health\n\n")
+        .nth(1)
+        .unwrap_or_default()
+        .lines()
+        .take_while(|line| !line.is_empty())
+        .collect()
+}
+
 #[test]
 fn health_header_counts_visible_facts() {
     let tmp = tempdir().unwrap();
@@ -139,10 +151,7 @@ fn health_header_counts_visible_facts() {
     assert!(content.contains(&format!(
         "- facts: {active} visible in project p, {active} visible in tenant t\n"
     )));
-    assert!(
-        !content.lines().any(|line| line.starts_with("- [warn]")),
-        "unexpected warning line:\n{content}"
-    );
+    assert_eq!(health_bullets(&content).len(), 1, "{content}");
 }
 
 #[test]
@@ -166,8 +175,5 @@ fn fresh_store_renders_zero_state_header() {
     assert!(
         content.contains("- facts: 0 visible in project fresh_p, 0 visible in tenant fresh_t\n")
     );
-    assert!(
-        !content.lines().any(|line| line.starts_with("- [warn]")),
-        "unexpected warning line:\n{content}"
-    );
+    assert_eq!(health_bullets(&content).len(), 1, "{content}");
 }

@@ -56,9 +56,11 @@ list of every physical chunk created by document splitting.
   cap truncated the scan.
 - `memory-md` renders a generation date and scope before the fact libraries.
   `Memory health` prints `facts: <P> visible in project <id>, <T> visible in
-  tenant <tenant>` (SQL counts that skip superseded, deleted and other
-  non-visible rows and experience projections) and warnings for scope drift,
-  truncated scans, or unreadable payloads. Task, handoff, and
+  tenant <tenant>` ("visible" skips superseded, deleted and other non-visible
+  rows, experience projections and generated digests; the counts are SQL) and
+  warnings for scope drift, a truncated project scan (oldest facts cut first),
+  or unreadable payloads. The `[warn]` self-diagnosis lines of `memd report`
+  no longer appear. Task, handoff, and
   git state belong in repository files. Takeaways covered by indexed repository
   documents are suppressed using a token-overlap heuristic; lessons tagged
   `priority:8+` or `importance:8+` are exempt. Missing or unreadable repository files

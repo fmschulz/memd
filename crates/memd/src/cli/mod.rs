@@ -261,6 +261,7 @@ pub async fn run_cli<S: Store>(
                     global_limit,
                     candidate_k,
                     explain_output,
+                    repo_dir: None,
                 },
             )
             .await?;

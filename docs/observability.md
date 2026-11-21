@@ -100,10 +100,14 @@ item is retained.
 
 `## Memory health` prints one line,
 `facts: <P> visible in project <id>, <T> visible in tenant <tenant>`. Both
-numbers are SQL counts of rows with a visible status that are not experience
-projections, so they drop when a fact is superseded or deleted. The section
-also lists warnings for scope drift, truncated scans, and unreadable payloads.
-It does not run `memd report`. If it reports `memory degraded`, inspect the
+numbers are SQL counts of rows with a visible status that are neither
+experience projections nor generated digests, so they drop when a fact is
+superseded or deleted. The section also lists warnings for scope drift, a
+truncated project scan (the cap cuts the oldest facts first), and unreadable
+payloads. The machine-wide cap is a designed bound and prints no warning; the
+explain output keeps its `truncated` flag. The section does not run
+`memd report`, so the `[warn]` self-diagnosis lines no longer appear in
+`memory.md`; they remain in `memd report`. If it reports `memory degraded`, inspect the
 store with `memd audit --format markdown` or `memd report --strict`; the
 warning means candidate rows exist whose segment payloads could not be read.
 

@@ -539,23 +539,28 @@ fn memory_state_comes_from_the_candidate_scan() {
 }
 
 #[test]
-fn truncated_scans_warn_in_the_digest() {
+fn only_the_project_cap_warns_in_the_digest() {
     let project = SectionScan {
+        cap: Some(PROJECT_SCAN_MAX_ROWS),
         visible_rows: PROJECT_SCAN_MAX_ROWS + 1,
         read_rows: PROJECT_SCAN_MAX_ROWS,
         truncated: true,
         ..SectionScan::default()
     };
     let machine_wide = SectionScan {
+        cap: Some(MACHINE_SCAN_MAX_ROWS),
         visible_rows: MACHINE_SCAN_MAX_ROWS + 7,
         read_rows: MACHINE_SCAN_MAX_ROWS,
         truncated: true,
         ..SectionScan::default()
     };
     let state = memory_state_from_scan(&project, &machine_wide);
-    assert_eq!(state.scan_warnings.len(), 2);
-    assert!(state.scan_warnings[0].starts_with("project scan truncated: read 50000 of 50001"));
-    assert!(state.scan_warnings[1].starts_with("machine-wide scan truncated: read 5000 of 5007"));
+    assert_eq!(
+        state.scan_warnings,
+        vec![
+            "project scan truncated: read the newest 50000 of 50001 visible facts (cap 50000); older facts were not considered"
+        ]
+    );
 }
 
 #[tokio::test]

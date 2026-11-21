@@ -113,6 +113,13 @@ pub struct DigestCounts {
     pub not_visible: usize,
 }
 
+/// Digest row counts for the rows inside and outside one scope.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DigestScopeCounts {
+    pub inside: DigestCounts,
+    pub outside: DigestCounts,
+}
+
 /// Metadata store trait
 pub trait MetadataStore: Send + Sync {
     /// Insert metadata for a new chunk
@@ -420,18 +427,22 @@ pub trait MetadataStore: Send + Sync {
         include_history: bool,
     ) -> Result<Vec<ChunkMetadata>>;
 
-    /// List the rows the `memory.md` digest may read, newest first. Rows with
-    /// a non-visible status and projections of experience cases are left out
-    /// in the query, so the caller reads no payload for them.
+    /// List up to `limit` rows the `memory.md` digest may read, newest first,
+    /// in one statement. Rows with a non-visible status, experience
+    /// projections and generated digests are left out in the query, so the
+    /// caller reads no payload for them.
     fn list_digest_rows(
         &self,
         tenant_id: &TenantId,
         rows: DigestRows<'_>,
         limit: usize,
-        offset: usize,
     ) -> Result<Vec<ChunkMetadata>>;
 
-    /// Count the rows of one digest selection by why they are in or out.
-    fn count_digest_rows(&self, tenant_id: &TenantId, rows: DigestRows<'_>)
-        -> Result<DigestCounts>;
+    /// Count the rows inside and outside the scope in one pass, by why they
+    /// are in or out.
+    fn count_digest_rows(
+        &self,
+        tenant_id: &TenantId,
+        scope: &DigestScope,
+    ) -> Result<DigestScopeCounts>;
 }

@@ -57,6 +57,7 @@ pub(in crate::cli) async fn run_memory_md_eval<S: Store>(
             global_limit: 0,
             candidate_k: options.candidate_k,
             explain_output: None,
+            repo_dir: None,
         },
     )
     .await?;
@@ -178,6 +179,7 @@ pub(super) async fn run_memory_md_gold_eval<S: Store>(
                 global_limit: 2,
                 candidate_k: options.candidate_k,
                 explain_output: None,
+                repo_dir: None,
             },
         )
         .await?;

@@ -53,6 +53,7 @@ const HIT_WINDOW_DAYS: u32 = 30;
 
 /// Age in ms above which a chunk with zero hits is considered stale.
 const STALE_CHUNK_AGE_MS: i64 = 30 * 86_400_000;
+/// Page size of the listed-chunk scan (stores without metadata rows).
 const READABLE_SCAN_PAGE_SIZE: usize = 1_000;
 /// Safety caps on the rows one refresh reads per section. A scan that reaches
 /// a cap prints a warning in the digest.
@@ -81,6 +82,9 @@ pub(super) struct MemoryMdOptions {
     pub(super) global_limit: usize,
     pub(super) candidate_k: usize,
     pub(super) explain_output: Option<PathBuf>,
+    /// Directory whose docs the repo-novelty gate reads; defaults to
+    /// `project_dir`.
+    pub(super) repo_dir: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -211,7 +215,11 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
     };
     // Repo-novelty gate: a takeaway a repo file already covers is not
     // worth a memory.md slot — the agent reads those files anyway.
-    let repo_index = build_repo_index(&project_dir, &output_path);
+    let repo_dir = match options.repo_dir {
+        Some(dir) => absolutize_project_dir(&dir)?,
+        None => project_dir.clone(),
+    };
+    let repo_index = build_repo_index(&repo_dir, &output_path);
     for (section, takeaways) in [
         ("project", &mut project_takeaways),
         ("machine_wide", &mut global_takeaways),

@@ -1,6 +1,8 @@
 //! Selection and health-header tests against a real persistent store. The
 //! store runs without dense or hybrid search, so no embedding model loads.
 
+use super::collect::memory_state_from_scan;
+use super::rank::{scan_takeaway_candidates_capped, ScanCaps, Takeaway};
 use super::*;
 use crate::experience::{record_case, CaseFile, ExperienceContext};
 use crate::store::metadata::MetadataStore;
@@ -90,6 +92,15 @@ async fn record_generated_digest(store: &PersistentStore, project: &str, role: &
 }
 
 async fn run_digest(store: &PersistentStore, project_dir: &Path, project: &str) -> (String, Value) {
+    run_digest_in(store, project_dir, None, project).await
+}
+
+async fn run_digest_in(
+    store: &PersistentStore,
+    project_dir: &Path,
+    repo_dir: Option<PathBuf>,
+    project: &str,
+) -> (String, Value) {
     let explain = project_dir.join("explain.json");
     refresh_memory_md_with_health(
         store,
@@ -103,6 +114,7 @@ async fn run_digest(store: &PersistentStore, project_dir: &Path, project: &str) 
             global_limit: 10,
             candidate_k: 40,
             explain_output: Some(explain.clone()),
+            repo_dir,
         },
     )
     .await
@@ -405,4 +417,107 @@ async fn excluded_rows_cost_no_payload_read() {
         memory_md.contains("memory degraded: 1 active chunks"),
         "{memory_md}"
     );
+}
+
+/// A scan that reaches its cap keeps the newest rows of the section and says
+/// so, in the explain data and (for the project) in the header.
+#[tokio::test]
+async fn capped_scan_keeps_the_newest_rows_and_sets_truncated() {
+    let data = tempfile::tempdir().unwrap();
+    let store = open_store(data.path());
+    let tenant = TenantId::new(TENANT).unwrap();
+    let chunks = (0..5)
+        .map(|index| {
+            fact(
+                Some("alpha"),
+                &format!("Decision: project fact {index}."),
+                &["kind:decision"],
+                10 + index,
+            )
+        })
+        .chain((0..4).map(|index| {
+            fact(
+                Some("beta"),
+                &format!("Decision: machine fact {index}."),
+                &["kind:decision"],
+                20 + index,
+            )
+        }))
+        .collect::<Vec<_>>();
+    store.add_batch(chunks).await.unwrap();
+
+    let outcome = scan_takeaway_candidates_capped(
+        &store,
+        &tenant,
+        Some("alpha"),
+        ScanCaps {
+            project: 2,
+            machine_wide: 3,
+        },
+    )
+    .await
+    .unwrap();
+
+    let texts = |takeaways: &[Takeaway]| {
+        takeaways
+            .iter()
+            .map(|takeaway| takeaway.text.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        texts(&outcome.project),
+        vec!["Decision: project fact 4.", "Decision: project fact 3."]
+    );
+    assert_eq!(outcome.machine_wide.len(), 3);
+    assert!(outcome.project_scan.truncated);
+    assert_eq!(outcome.project_scan.read_rows, 2);
+    assert_eq!(outcome.project_scan.visible_rows, 5);
+    assert!(outcome.machine_scan.truncated);
+    assert_eq!(outcome.machine_scan.visible_rows, 4);
+
+    let state = memory_state_from_scan(&outcome.project_scan, &outcome.machine_scan);
+    assert_eq!(state.scan_warnings.len(), 1);
+    assert!(state.scan_warnings[0].starts_with("project scan truncated: read the newest 2 of 5"));
+
+    let uncapped = scan_takeaway_candidates(&store, &tenant, Some("alpha"))
+        .await
+        .unwrap();
+    assert!(!uncapped.project_scan.truncated);
+    assert!(!uncapped.machine_scan.truncated);
+}
+
+/// A session in a subdirectory checks coverage against the repository docs.
+#[tokio::test]
+async fn repo_dir_docs_suppress_covered_facts() {
+    let data = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let session_dir = repo.path().join("subdir");
+    fs::create_dir_all(&session_dir).unwrap();
+    let covered = "Decision: rotate segment files after compaction using the writer lock protocol before restarting workers.";
+    fs::create_dir_all(repo.path().join("tasks")).unwrap();
+    fs::write(repo.path().join("tasks/todo.md"), covered).unwrap();
+    let store = open_store(data.path());
+    store
+        .add(fact(Some("alpha"), covered, &["kind:decision"], 10))
+        .await
+        .unwrap();
+
+    let (without, _) = run_digest_in(&store, &session_dir, None, "alpha").await;
+    assert!(without.contains(covered), "{without}");
+
+    let (with, explain) = run_digest_in(
+        &store,
+        &session_dir,
+        Some(repo.path().to_path_buf()),
+        "alpha",
+    )
+    .await;
+    assert!(!with.contains(covered), "{with}");
+    assert!(explain["project"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["filter_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with("covered_by_repo:tasks/todo.md"))));
 }

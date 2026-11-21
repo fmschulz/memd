@@ -1,6 +1,5 @@
 use super::schema::{detect_chunks_unique_shape, ChunksUniqueShape};
 use super::*;
-use crate::store::metadata::DigestScope;
 use crate::task_memory::{ArtifactKind, DatasetRef, TaskArtifact, TaskSearchFilters};
 use crate::types::ProjectId;
 use rusqlite::Connection;
@@ -2145,40 +2144,44 @@ fn digest_rows_split_scope_status_and_unscoped_rows() {
         project_ids: vec!["main".to_string(), "alias".to_string()],
         include_unscoped: false,
     };
-    let inside = store
-        .list_digest_rows(&tenant, DigestRows::InScope(&scope), 10, 0)
-        .unwrap();
+    let ordinals =
+        |rows: Vec<ChunkMetadata>| rows.iter().map(|row| row.ordinal).collect::<Vec<_>>();
     assert_eq!(
-        inside.iter().map(|row| row.ordinal).collect::<Vec<_>>(),
+        ordinals(
+            store
+                .list_digest_rows(&tenant, DigestRows::InScope(&scope), 10)
+                .unwrap()
+        ),
         vec![1, 0]
     );
-    let outside = store
-        .list_digest_rows(&tenant, DigestRows::OutOfScope(&scope), 10, 0)
-        .unwrap();
     assert_eq!(
-        outside.iter().map(|row| row.ordinal).collect::<Vec<_>>(),
+        ordinals(
+            store
+                .list_digest_rows(&tenant, DigestRows::OutOfScope(&scope), 10)
+                .unwrap()
+        ),
         vec![4, 3]
     );
+    // The limit keeps the newest rows.
     assert_eq!(
-        store
-            .count_digest_rows(&tenant, DigestRows::InScope(&scope))
-            .unwrap(),
-        DigestCounts {
-            visible: 2,
-            experience_projections: 0,
-            generated_digests: 0,
-            not_visible: 1,
-        }
+        ordinals(
+            store
+                .list_digest_rows(&tenant, DigestRows::OutOfScope(&scope), 1)
+                .unwrap()
+        ),
+        vec![4]
     );
+    let counts = DigestCounts {
+        visible: 2,
+        experience_projections: 0,
+        generated_digests: 0,
+        not_visible: 1,
+    };
     assert_eq!(
-        store
-            .count_digest_rows(&tenant, DigestRows::OutOfScope(&scope))
-            .unwrap(),
-        DigestCounts {
-            visible: 2,
-            experience_projections: 0,
-            generated_digests: 0,
-            not_visible: 1,
+        store.count_digest_rows(&tenant, &scope).unwrap(),
+        DigestScopeCounts {
+            inside: counts,
+            outside: counts,
         }
     );
 
@@ -2186,18 +2189,17 @@ fn digest_rows_split_scope_status_and_unscoped_rows() {
         project_ids: Vec::new(),
         include_unscoped: true,
     };
-    let inside = store
-        .list_digest_rows(&tenant, DigestRows::InScope(&unscoped), 10, 0)
-        .unwrap();
     assert_eq!(
-        inside.iter().map(|row| row.ordinal).collect::<Vec<_>>(),
+        ordinals(
+            store
+                .list_digest_rows(&tenant, DigestRows::InScope(&unscoped), 10)
+                .unwrap()
+        ),
         vec![4]
     );
-    assert_eq!(
-        store
-            .list_digest_rows(&tenant, DigestRows::OutOfScope(&unscoped), 2, 1)
-            .unwrap()
-            .len(),
-        2
-    );
+    let counts = store.count_digest_rows(&tenant, &unscoped).unwrap();
+    assert_eq!(counts.inside.visible, 1);
+    assert_eq!(counts.inside.not_visible, 1);
+    assert_eq!(counts.outside.visible, 3);
+    assert_eq!(counts.outside.not_visible, 1);
 }

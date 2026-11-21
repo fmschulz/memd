@@ -1406,7 +1406,6 @@ impl MetadataStore for SqliteMetadataStore {
         tenant_id: &TenantId,
         rows: DigestRows<'_>,
         limit: usize,
-        offset: usize,
     ) -> Result<Vec<ChunkMetadata>> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -1415,8 +1414,6 @@ impl MetadataStore for SqliteMetadataStore {
         let scope = digest_scope_clause(rows, &mut params);
         params.push(rusqlite::types::Value::Integer(limit as i64));
         let limit_index = params.len();
-        params.push(rusqlite::types::Value::Integer(offset as i64));
-        let offset_index = params.len();
         let sql = format!(
             "SELECT {CHUNK_COLUMNS} FROM chunks
              WHERE tenant_id = ?1
@@ -1425,7 +1422,7 @@ impl MetadataStore for SqliteMetadataStore {
                AND NOT {EXPERIENCE_PROJECTION}
                AND NOT {GENERATED_DIGEST_PROJECTION}
              ORDER BY timestamp_created DESC, chunk_id ASC
-             LIMIT ?{limit_index} OFFSET ?{offset_index}"
+             LIMIT ?{limit_index}"
         );
         let conn = self.pool.get();
         let mut stmt = conn.prepare(&sql)?;
@@ -1443,39 +1440,53 @@ impl MetadataStore for SqliteMetadataStore {
     fn count_digest_rows(
         &self,
         tenant_id: &TenantId,
-        rows: DigestRows<'_>,
-    ) -> Result<DigestCounts> {
+        scope: &DigestScope,
+    ) -> Result<DigestScopeCounts> {
         let mut params = vec![rusqlite::types::Value::Text(tenant_id.as_str().to_string())];
-        let scope = digest_scope_clause(rows, &mut params);
+        let in_scope = digest_scope_clause(DigestRows::InScope(scope), &mut params);
+        // One scan: classify each row once (the CASE stops at the first match,
+        // so the projection lookups run only for rows with a visible status),
+        // then group by scope side.
         let sql = format!(
-            "SELECT
-                 COALESCE(SUM(CASE WHEN status IN {NOT_VISIBLE_STATUSES}
-                                   THEN 1 ELSE 0 END), 0),
-                 COALESCE(SUM(CASE WHEN status NOT IN {NOT_VISIBLE_STATUSES}
-                                    AND {EXPERIENCE_PROJECTION}
-                                   THEN 1 ELSE 0 END), 0),
-                 COALESCE(SUM(CASE WHEN status NOT IN {NOT_VISIBLE_STATUSES}
-                                    AND NOT {EXPERIENCE_PROJECTION}
-                                    AND {GENERATED_DIGEST_PROJECTION}
-                                   THEN 1 ELSE 0 END), 0),
-                 COALESCE(SUM(CASE WHEN status NOT IN {NOT_VISIBLE_STATUSES}
-                                    AND NOT {EXPERIENCE_PROJECTION}
-                                    AND NOT {GENERATED_DIGEST_PROJECTION}
-                                   THEN 1 ELSE 0 END), 0)
-             FROM chunks
-             WHERE tenant_id = ?1 AND {scope}"
+            "SELECT in_scope,
+                    COALESCE(SUM(kind = 'status'), 0),
+                    COALESCE(SUM(kind = 'experience'), 0),
+                    COALESCE(SUM(kind = 'generated'), 0),
+                    COALESCE(SUM(kind = 'visible'), 0)
+             FROM (
+                 SELECT {in_scope} AS in_scope,
+                        CASE WHEN status IN {NOT_VISIBLE_STATUSES} THEN 'status'
+                             WHEN {EXPERIENCE_PROJECTION} THEN 'experience'
+                             WHEN {GENERATED_DIGEST_PROJECTION} THEN 'generated'
+                             ELSE 'visible' END AS kind
+                 FROM chunks
+                 WHERE tenant_id = ?1
+             )
+             GROUP BY in_scope"
         );
         let conn = self.pool.get();
-        let (not_visible, experience, generated, visible): (i64, i64, i64, i64) =
-            conn.query_row(&sql, rusqlite::params_from_iter(params.iter()), |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })?;
-        Ok(DigestCounts {
-            visible: visible as usize,
-            experience_projections: experience as usize,
-            generated_digests: generated as usize,
-            not_visible: not_visible as usize,
-        })
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                DigestCounts {
+                    not_visible: row.get::<_, i64>(1)? as usize,
+                    experience_projections: row.get::<_, i64>(2)? as usize,
+                    generated_digests: row.get::<_, i64>(3)? as usize,
+                    visible: row.get::<_, i64>(4)? as usize,
+                },
+            ))
+        })?;
+        let mut counts = DigestScopeCounts::default();
+        for row in rows {
+            let (in_scope, side_counts) = row?;
+            if in_scope == 1 {
+                counts.inside = side_counts;
+            } else {
+                counts.outside = side_counts;
+            }
+        }
+        Ok(counts)
     }
 }
 
