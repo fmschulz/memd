@@ -359,15 +359,9 @@ pub(super) async fn run_session_start_inner<S: Store>(
     let (tenant_id, project_id) = match new_scope {
         None => (tenant_id, project_id),
         Some(plan) => {
-            let outcome = match plan.write(&scope_dir) {
-                Err(MemdError::IoError(error))
-                    if scope_dir != project_dir && is_unwritable(&error) =>
-                {
-                    scope_dir = project_dir.clone();
-                    plan.write(&scope_dir)?
-                }
-                other => other?,
-            };
+            let (outcome, written_dir) =
+                write_scope_with_fallback(&plan, &scope_dir, &project_dir)?;
+            scope_dir = written_dir;
             auto_scoped = outcome == AutoScopeOutcome::Created;
             match read_scope_at(&scope_dir) {
                 Ok(Some(ids)) => ids,
@@ -705,15 +699,54 @@ async fn project_has_content<S: Store>(
     Ok(counts.inside.visible + counts.inside.experience_projections > 0)
 }
 
-/// The first write in a directory with no scope: create the scope the way
-/// session-start does, once the write is certain to follow. Returns the new
-/// scope, or the scope that a legacy `.memd/config.json` already gives. `None`
-/// means creation is refused (auto-scope off, `.memd-skip`, unsafe root), and
-/// the caller reports the usual "no scope" error.
-pub(super) fn create_scope_for_first_write(
+/// A scope that a first write publishes once the write has succeeded. Nothing
+/// is on disk while it is pending, so a command that fails (bad input, a
+/// rejected write, a store that will not open) leaves no scope behind, and a
+/// project without a stored fact has no `.memd` directory.
+#[derive(Debug)]
+pub struct PendingScope {
+    plan: NewScope,
+    scope_dir: PathBuf,
+    project_dir: PathBuf,
+}
+
+impl PendingScope {
+    /// Publish the scope file. Returns true when this call created it, false
+    /// when a concurrent first write published one first (that file stays).
+    pub fn publish(self) -> Result<bool> {
+        let (outcome, _dir) =
+            write_scope_with_fallback(&self.plan, &self.scope_dir, &self.project_dir)?;
+        Ok(outcome == AutoScopeOutcome::Created)
+    }
+}
+
+/// Publish `plan` in `scope_dir`. A directory that cannot be written must not
+/// fail the session: the scope then goes to `project_dir`, still named after
+/// the repository. Returns the outcome and the directory that holds the scope.
+fn write_scope_with_fallback(
+    plan: &NewScope,
+    scope_dir: &Path,
+    project_dir: &Path,
+) -> Result<(AutoScopeOutcome, PathBuf)> {
+    match plan.write(scope_dir) {
+        Err(MemdError::IoError(error)) if scope_dir != project_dir && is_unwritable(&error) => {
+            Ok((plan.write(project_dir)?, project_dir.to_path_buf()))
+        }
+        other => Ok((other?, scope_dir.to_path_buf())),
+    }
+}
+
+/// The first write in a directory with no scope: plan the scope the way
+/// session-start does, without writing it. Returns the tenant and project to
+/// write under, and the pending scope to publish after the write succeeded
+/// (`None` when a scope, including a legacy `.memd/config.json`, already
+/// exists). The outer `None` means creation is refused (auto-scope off,
+/// `.memd-skip`, unsafe root), and the caller reports the usual "no scope"
+/// error.
+pub(super) fn plan_scope_for_first_write(
     start: &Path,
     inputs: &AutoScopeInputs,
-) -> Result<Option<ScopeIds>> {
+) -> Result<Option<(ScopeIds, Option<PendingScope>)>> {
     let project_dir = absolutize_project_dir(start)?;
     if project_dir.join(".memd-skip").exists() {
         return Ok(None);
@@ -723,7 +756,7 @@ pub(super) fn create_scope_for_first_write(
         return Ok(None);
     }
     let (scope_dir, id_source) = match look_up_scope(&project_dir, repository.as_ref()) {
-        ScopeLookup::Found { ids, .. } => return Ok(Some(ids)),
+        ScopeLookup::Found { ids, .. } => return Ok(Some((ids, None))),
         ScopeLookup::Invalid { path, error } => {
             return Err(MemdError::ValidationError(format!(
                 "invalid scope file {}: {error}",
@@ -738,24 +771,13 @@ pub(super) fn create_scope_for_first_write(
     let Ok(plan) = plan_new_scope(&scope_dir, &id_source, inputs)? else {
         return Ok(None);
     };
-    let written = match plan.write(&scope_dir) {
-        Err(MemdError::IoError(error)) if scope_dir != project_dir && is_unwritable(&error) => {
-            plan.write(&project_dir)?;
-            project_dir
-        }
-        other => {
-            other?;
-            scope_dir
-        }
+    let ids = (plan.tenant_id.clone(), Some(plan.project_id.clone()));
+    let pending = PendingScope {
+        plan,
+        scope_dir,
+        project_dir,
     };
-    match read_scope_at(&written) {
-        Ok(ids) => Ok(ids),
-        Err(invalid) => Err(MemdError::ValidationError(format!(
-            "invalid scope file {}: {}",
-            invalid.0.display(),
-            invalid.1
-        ))),
-    }
+    Ok(Some((ids, Some(pending))))
 }
 
 /// Write `contents` to a temporary file in `dir`, then hard-link it to `name`.
@@ -795,11 +817,7 @@ fn publish_new_file_with(
         .and_then(|mut file| file.write_all(contents).and_then(|()| file.sync_all()))
         .and_then(|()| match link(&temporary, &target) {
             Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
-                if target.symlink_metadata().is_ok() {
-                    Err(std::io::ErrorKind::AlreadyExists.into())
-                } else {
-                    std::fs::rename(&temporary, &target)
-                }
+                rename_unless_exists(dir, name, &temporary, &target)
             }
             linked => linked,
         })
@@ -812,6 +830,62 @@ fn publish_new_file_with(
         }
         Err(error) => Err(error.into()),
     }
+}
+
+/// How long the rename fallback waits for another publisher's lock.
+const PUBLISH_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Rename `temporary` to `target` unless `target` exists, with the existence
+/// check and the rename under an exclusive lock file `.<name>.lock` in `dir`.
+/// Another memd that publishes the same file without a hard link takes the same
+/// lock, so it cannot slip a file in between our check and our rename. The
+/// wait is bounded; a lock still held after it is an error that names the lock
+/// file. A lock this call created is removed on every path.
+///
+/// Remaining window: a process that does not use this function (an editor,
+/// `memd init`) can still write the file between the check and the rename. A
+/// crash while holding the lock leaves the lock file; remove it by hand.
+fn rename_unless_exists(
+    dir: &Path,
+    name: &str,
+    temporary: &Path,
+    target: &Path,
+) -> std::io::Result<()> {
+    struct Lock(PathBuf);
+    impl Drop for Lock {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    let lock_path = dir.join(format!(".{name}.lock"));
+    let deadline = std::time::Instant::now() + PUBLISH_LOCK_WAIT;
+    let _lock = loop {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+        {
+            Ok(_) => break Lock(lock_path.clone()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            "another process holds {}; remove it if no memd is running",
+                            lock_path.display()
+                        ),
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    if target.symlink_metadata().is_ok() {
+        return Err(std::io::ErrorKind::AlreadyExists.into());
+    }
+    std::fs::rename(temporary, target)
 }
 
 /// The repository root that the facts' docs are checked against: the
@@ -2172,6 +2246,68 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names, ["scope.json"]);
+    }
+
+    #[test]
+    fn rename_fallback_never_replaces_a_file_published_between_check_and_rename() {
+        let dir = tempdir().unwrap();
+        let lock = dir.path().join(".scope.json.lock");
+        // Another process holds the publication lock, then publishes its own
+        // scope and releases the lock. Our check and rename run under the lock,
+        // so they must see that file.
+        std::fs::write(&lock, b"").unwrap();
+        let other = std::thread::spawn({
+            let dir = dir.path().to_path_buf();
+            let lock = lock.clone();
+            move || {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                std::fs::write(dir.join("scope.json"), b"other tenant\n").unwrap();
+                std::fs::remove_file(lock).unwrap();
+            }
+        });
+        let unsupported = |_: &Path, _: &Path| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "no hard links",
+            ))
+        };
+
+        let outcome =
+            publish_new_file_with(dir.path(), "scope.json", b"our tenant\n", unsupported).unwrap();
+        other.join().unwrap();
+
+        assert_eq!(outcome, AutoScopeOutcome::AlreadyExists);
+        assert_eq!(
+            std::fs::read(dir.path().join("scope.json")).unwrap(),
+            b"other tenant\n"
+        );
+        assert_eq!(
+            entries(dir.path()),
+            ["scope.json"],
+            "no lock or temporary file"
+        );
+    }
+
+    #[test]
+    fn rename_fallback_gives_up_on_a_lock_that_is_never_released() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join(".scope.json.lock"), b"").unwrap();
+        let unsupported = |_: &Path, _: &Path| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "no hard links",
+            ))
+        };
+
+        let started = std::time::Instant::now();
+        let error =
+            publish_new_file_with(dir.path(), "scope.json", b"x\n", unsupported).unwrap_err();
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(error.to_string().contains(".scope.json.lock"), "{error}");
+        assert!(!dir.path().join("scope.json").exists());
+        // A lock this call did not create is left for its owner.
+        assert!(dir.path().join(".scope.json.lock").exists());
     }
 
     #[test]

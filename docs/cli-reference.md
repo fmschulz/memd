@@ -26,7 +26,7 @@ For write-quality expectations and cleanup safety, see the
 | --- | --- |
 | `memd agent-context` | Prefetch bounded context to a file with audit logs. |
 | `memd search` | Direct compact search. |
-| `memd add` | Store summaries, traces, evidence, decisions. Without `--tenant-id` and with no scope in reach, the first add creates `.memd/project_scope.json` (at the repository root, else in the directory) and uses it. |
+| `memd add` | Store summaries, traces, evidence, decisions. Without `--tenant-id` and with no scope in reach, the add uses the scope it would create and, once it succeeded, publishes `.memd/project_scope.json` (at the repository root, else in the directory). |
 | `memd warm start \| status \| stop` | Manage the private local warm worker used by `--warm auto\|required`. |
 | `memd batch --jsonl` | Run structured operation calls from JSONL in one loaded process; `--stream` keeps stdin/stdout open for benchmark clients. |
 | `memd get`, `memd delete`, `memd stats` | Inspect and maintain chunks. |

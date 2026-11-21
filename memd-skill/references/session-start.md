@@ -97,8 +97,9 @@ checkout for a linked worktree), named after the repository, and writes
 `{"skipped": "no_stored_facts", "tenant_id", "project_id"}`: no `.memd`
 directory, no scope, no `memory.md`. A scope whose project has no content gets
 no new `memory.md` either, and an existing one stays. The first flagless
-`memd add` or `memd experience note` creates the scope by the same rule;
-read commands never do. If the root is not writable,
+`memd add`, `memd experience note` or `memd experience record` publishes the
+scope by the same rule after the write succeeded (a failed command leaves no
+`.memd` directory); read commands never do. If the root is not writable,
 the scope goes to the session directory instead. A `.memd-skip` file at that
 root skips startup for the whole repository, even for a subdirectory with its
 own scope. A nested clone or submodule is its own repository and keeps its own

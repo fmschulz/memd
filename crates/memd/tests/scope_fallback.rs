@@ -213,6 +213,75 @@ fn search_without_scope_fails_and_creates_nothing() {
     assert!(!project_dir.join(".memd").exists());
 }
 
+/// A first write that fails must leave no scope behind: a project without a
+/// stored fact has no `.memd` directory.
+fn unscoped_project(tmp: &Path) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let home = tmp.join("home");
+    let data_dir = tmp.join("data");
+    let project_dir = tmp.join("scoped_project");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&project_dir).unwrap();
+    (home, data_dir, project_dir)
+}
+
+#[test]
+fn failing_note_leaves_no_scope() {
+    let tmp = tempdir().unwrap();
+    let (home, data_dir, project_dir) = unscoped_project(tmp.path());
+
+    let output = command(&home, &data_dir, &project_dir)
+        .args(["experience", "note", "missing-case.json"])
+        .output()
+        .expect("run memd experience note");
+
+    assert_failure(output, "note with a missing file");
+    assert!(!project_dir.join(".memd").exists());
+}
+
+#[test]
+fn quality_gate_rejection_leaves_no_scope() {
+    let tmp = tempdir().unwrap();
+    let (home, data_dir, project_dir) = unscoped_project(tmp.path());
+
+    let output = command(&home, &data_dir, &project_dir)
+        .args([
+            "add",
+            "--warm",
+            "off",
+            "--chunk-type",
+            "summary",
+            "--tags",
+            "kind:progress",
+            "--text",
+            "starting to inspect the files",
+        ])
+        .output()
+        .expect("run memd add");
+
+    let output = assert_failure(output, "low-signal add");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("rejected by quality gate"));
+    assert!(!project_dir.join(".memd").exists());
+}
+
+#[test]
+fn failing_store_open_leaves_no_scope() {
+    let tmp = tempdir().unwrap();
+    let (home, _data_dir, project_dir) = unscoped_project(tmp.path());
+    let not_a_directory = tmp.path().join("data-is-a-file");
+    std::fs::write(&not_a_directory, "not a store").unwrap();
+
+    let output = add_text(
+        &home,
+        &not_a_directory,
+        &project_dir,
+        "Validated that a failed store open leaves no scope behind.",
+        &[],
+    );
+
+    assert_failure(output, "add with an unusable data dir");
+    assert!(!project_dir.join(".memd").exists());
+}
+
 #[test]
 fn session_start_in_an_empty_project_writes_nothing_until_the_first_add() {
     let tmp = tempdir().unwrap();

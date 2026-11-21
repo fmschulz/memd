@@ -84,6 +84,7 @@ use search::{
     apply_search_reranker, cli_agent_context_payload, cli_search_payload, export_format_name,
     finalize_search_episode,
 };
+pub use session_start::PendingScope;
 use session_start::{
     native_hook_project_dir, read_native_hook_context, run_session_start, SessionStartOptions,
 };

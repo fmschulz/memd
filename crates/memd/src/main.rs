@@ -232,10 +232,16 @@ async fn main() {
         }
     }
 
-    if let Err(e) = memd::cli::resolve_command_scope(&mut cmd) {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
-    }
+    // A flagless first write resolves to a scope that is only planned; it is
+    // published after the command succeeded, so a failed command leaves no
+    // `.memd` directory behind.
+    let pending_scope = match memd::cli::resolve_command_scope(&mut cmd) {
+        Ok(pending) => pending,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     cmd = match memd::cli::prepare_experience_command(cmd, &data_dir, args.in_memory).await {
         Ok(cmd) => cmd,
@@ -314,7 +320,10 @@ async fn main() {
             }
         } else if mode != memd::cli::WarmMode::Off {
             match try_run_warm_client(&warm_config, &cmd).await {
-                Ok(true) => return,
+                Ok(true) => {
+                    publish_pending_scope(pending_scope);
+                    return;
+                }
                 Ok(false) => {}
                 Err(e) => {
                     eprintln!("error: {}", e);
@@ -333,6 +342,7 @@ async fn main() {
             eprintln!("error: {}", e);
             std::process::exit(1);
         }
+        publish_pending_scope(pending_scope);
         return;
     }
 
@@ -374,6 +384,19 @@ async fn main() {
                 eprintln!("error: failed to create persistent store: {}", e);
                 std::process::exit(1);
             }
+        }
+    }
+    // An in-memory run keeps no fact, so it leaves no scope either.
+    publish_pending_scope(pending_scope.filter(|_| !args.in_memory));
+}
+
+/// Publish the scope that a first write planned, now that the write
+/// succeeded. A failure here does not undo the stored fact: it is reported and
+/// the next first write tries again.
+fn publish_pending_scope(pending: Option<memd::cli::PendingScope>) {
+    if let Some(pending) = pending {
+        if let Err(error) = pending.publish() {
+            eprintln!("warning: stored the fact but could not create the project scope: {error}");
         }
     }
 }

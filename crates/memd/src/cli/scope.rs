@@ -4,6 +4,7 @@ use serde_json::{Map, Value};
 
 use super::args::{CliCommand, ProjectScopeConfig};
 use super::paths::absolutize_project_dir;
+use super::session_start::PendingScope;
 use crate::error::{MemdError, Result};
 
 #[derive(Default)]
@@ -214,24 +215,27 @@ pub(super) fn resolve_required(
 }
 
 /// [`resolve_required`] for a command that writes. When no tenant is given and
-/// no scope exists, the first write creates the scope the way `session-start`
+/// no scope exists, the first write plans the scope the way `session-start`
 /// would (at the repository root, else in the directory; unsafe roots,
-/// `.memd-skip` and `MEMD_AUTO_SCOPE=0` honoured) and uses it. When creation
-/// is refused, the usual "no scope" error follows.
+/// `.memd-skip` and `MEMD_AUTO_SCOPE=0` honoured) and writes under it. Nothing
+/// is created here: the caller publishes the returned [`PendingScope`] once
+/// the command succeeded. When planning is refused, the usual "no scope" error
+/// follows.
 fn resolve_for_write(
     start: &Path,
     tenant: Option<String>,
     project: Option<String>,
     inputs: &super::session_start::AutoScopeInputs,
-) -> Result<(String, Option<String>)> {
+) -> Result<(String, Option<String>, Option<PendingScope>)> {
     if tenant.is_none() && find_project_scope(start)?.is_none() {
-        if let Some((tenant_id, scope_project)) =
-            super::session_start::create_scope_for_first_write(start, inputs)?
+        if let Some(((tenant_id, scope_project), pending)) =
+            super::session_start::plan_scope_for_first_write(start, inputs)?
         {
-            return Ok((tenant_id, project.or(scope_project)));
+            return Ok((tenant_id, project.or(scope_project), pending));
         }
     }
-    resolve_required(start, tenant, project)
+    let (tenant_id, project_id) = resolve_required(start, tenant, project)?;
+    Ok((tenant_id, project_id, None))
 }
 
 pub(super) fn resolve_optional(
@@ -321,7 +325,10 @@ pub(super) fn apply_operation_scope_at(
     Ok(Value::Object(object))
 }
 
-pub fn resolve_command_scope(cmd: &mut CliCommand) -> Result<()> {
+/// Fill the tenant and project of `cmd` from the scope. A flagless first write
+/// with no scope in reach returns the scope to publish after the command
+/// succeeded (see [`PendingScope`]); every other command returns `None`.
+pub fn resolve_command_scope(cmd: &mut CliCommand) -> Result<Option<PendingScope>> {
     resolve_command_scope_at(
         &current_dir(),
         cmd,
@@ -333,8 +340,9 @@ fn resolve_command_scope_at(
     cwd: &Path,
     cmd: &mut CliCommand,
     inputs: &super::session_start::AutoScopeInputs,
-) -> Result<()> {
+) -> Result<Option<PendingScope>> {
     let cwd = cwd.to_path_buf();
+    let mut pending = None;
     match cmd {
         // The first write creates the scope; reads never do.
         CliCommand::Add {
@@ -342,10 +350,11 @@ fn resolve_command_scope_at(
             project_id,
             ..
         } => {
-            let (resolved_tenant, resolved_project) =
+            let (resolved_tenant, resolved_project, plan) =
                 resolve_for_write(&cwd, tenant_id.take(), project_id.take(), inputs)?;
             *tenant_id = Some(resolved_tenant);
             *project_id = resolved_project;
+            pending = plan;
         }
         CliCommand::Experience {
             tenant_id,
@@ -355,7 +364,9 @@ fn resolve_command_scope_at(
         } => {
             let (tenant, project) = (tenant_id.take(), project_id.take());
             let (resolved_tenant, resolved_project) = if command.first_write() {
-                resolve_for_write(&cwd, tenant, project, inputs)?
+                let (tenant, project, plan) = resolve_for_write(&cwd, tenant, project, inputs)?;
+                pending = plan;
+                (tenant, project)
             } else {
                 resolve_required(&cwd, tenant, project)?
             };
@@ -418,7 +429,7 @@ fn resolve_command_scope_at(
         }
         _ => {}
     }
-    Ok(())
+    Ok(pending)
 }
 
 #[cfg(test)]
@@ -936,7 +947,9 @@ mod tests {
         let (repo, sub) = unscoped_repository(dir.path());
         let mut command = add_command();
 
-        resolve_command_scope_at(&sub, &mut command, &inputs(true)).unwrap();
+        let pending = resolve_command_scope_at(&sub, &mut command, &inputs(true))
+            .unwrap()
+            .expect("a flagless first write plans a scope");
 
         let CliCommand::Add {
             tenant_id,
@@ -950,9 +963,9 @@ mod tests {
         };
         assert_eq!(tenant_id.as_deref(), Some("writer"));
         assert_eq!(project_id.as_deref(), Some("my_repo"));
-        assert!(repo.join(".memd/project_scope.json").exists());
+        // Resolution only plans: nothing is on disk before the write.
+        assert!(!repo.join(".memd").exists());
         assert!(!sub.join(".memd").exists());
-        assert!(!repo.join("review/.memd").exists());
 
         let store = MemoryStore::new();
         cli_add_rendered(
@@ -980,9 +993,63 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored.len(), 1);
-        // A second flagless command now finds the scope and creates nothing.
+        // The scope is published after the row exists.
+        assert!(!repo.join(".memd").exists());
+        assert!(pending.publish().unwrap());
+        assert!(repo.join(".memd/project_scope.json").exists());
+        assert!(!sub.join(".memd").exists());
+        assert!(!repo.join("review/.memd").exists());
+        // A second flagless command now finds the scope and plans nothing.
         let mut again = add_command();
-        resolve_command_scope_at(&sub, &mut again, &inputs(true)).unwrap();
+        let second = resolve_command_scope_at(&sub, &mut again, &inputs(true)).unwrap();
+        assert!(second.is_none());
+    }
+
+    #[test]
+    fn a_planned_scope_that_is_never_published_leaves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (repo, sub) = unscoped_repository(dir.path());
+        let mut command = add_command();
+
+        // The command fails after resolution: the plan is dropped unpublished.
+        drop(resolve_command_scope_at(&sub, &mut command, &inputs(true)).unwrap());
+
+        assert_eq!(
+            std::fs::read_dir(&repo).unwrap().count(),
+            2,
+            "only .git and review remain"
+        );
+        assert!(!repo.join(".memd").exists());
+    }
+
+    #[test]
+    fn two_first_writes_publish_one_scope_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (repo, sub) = unscoped_repository(dir.path());
+        let mut first = add_command();
+        let mut second = add_command();
+        let other = super::super::session_start::AutoScopeInputs {
+            default_tenant: "other".to_string(),
+            enabled: true,
+            consolidate: false,
+        };
+        let first_plan = resolve_command_scope_at(&sub, &mut first, &inputs(true))
+            .unwrap()
+            .unwrap();
+        let second_plan = resolve_command_scope_at(&sub, &mut second, &other)
+            .unwrap()
+            .unwrap();
+
+        assert!(first_plan.publish().unwrap());
+        assert!(!second_plan.publish().unwrap(), "the loser adopts the file");
+
+        let names: Vec<_> = std::fs::read_dir(repo.join(".memd"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["project_scope.json"]);
+        let text = std::fs::read_to_string(repo.join(".memd/project_scope.json")).unwrap();
+        assert!(text.contains("\"writer\""), "{text}");
     }
 
     #[test]
@@ -1029,8 +1096,9 @@ mod tests {
             *tenant_id = Some("explicit".to_string());
         }
 
-        resolve_command_scope_at(&sub, &mut command, &inputs(true)).unwrap();
+        let pending = resolve_command_scope_at(&sub, &mut command, &inputs(true)).unwrap();
 
+        assert!(pending.is_none());
         assert!(!repo.join(".memd").exists());
     }
 }

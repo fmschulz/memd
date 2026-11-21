@@ -146,12 +146,32 @@ pub(super) fn reject_if_any_symlink_inside_outdir(
 /// resolved textually. Callers see the canonical path of a symlinked
 /// directory in results and in the `project_dir` they write.
 pub(super) fn absolutize_project_dir(path: &Path) -> Result<PathBuf> {
+    absolutize_project_dir_with(path, |absolute| std::fs::canonicalize(absolute))
+}
+
+/// [`absolutize_project_dir`] with the canonicalise step as a parameter.
+fn absolutize_project_dir_with(
+    path: &Path,
+    canonicalize: impl Fn(&Path) -> std::io::Result<PathBuf>,
+) -> Result<PathBuf> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()?.join(path)
     };
-    Ok(std::fs::canonicalize(&absolute).unwrap_or_else(|_| normalize_absolute(&absolute)))
+    match canonicalize(&absolute) {
+        Ok(canonical) => Ok(canonical),
+        // A path that does not exist yet is the only case for the lexical
+        // form. Any other failure could make `..` after a symlink name a
+        // different directory, so the caller sees it.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(normalize_absolute(&absolute))
+        }
+        Err(error) => Err(crate::error::MemdError::ValidationError(format!(
+            "cannot resolve project directory {}: {error}",
+            absolute.display()
+        ))),
+    }
 }
 
 pub(super) fn resolve_data_dir(explicit: Option<&Path>) -> Result<PathBuf> {
@@ -261,4 +281,40 @@ pub(super) fn resolve_export_markdown_data_dirs_from(
 pub(super) fn resolve_export_markdown_data_dirs(explicit: Option<&Path>) -> Result<Vec<PathBuf>> {
     let cwd = std::env::current_dir().ok();
     resolve_export_markdown_data_dirs_from(explicit, cwd.as_deref())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lexical_fallback_applies_only_to_a_missing_path() {
+        let missing = |_: &Path| Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        let resolved = absolutize_project_dir_with(Path::new("/a/link/../src"), missing).unwrap();
+        assert_eq!(resolved, Path::new("/a/src"));
+    }
+
+    #[test]
+    fn other_canonicalise_errors_reach_the_caller_with_the_path() {
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::NotADirectory,
+        ] {
+            let failing = |_: &Path| Err(std::io::Error::from(kind));
+            let error =
+                absolutize_project_dir_with(Path::new("/a/link/../src"), failing).unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("/a/link/../src"), "{kind:?}: {message}");
+        }
+    }
+
+    #[test]
+    fn an_existing_directory_resolves_to_its_canonical_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(canonical.join("a")).unwrap();
+        let resolved = absolutize_project_dir(&canonical.join("a/../a")).unwrap();
+        assert_eq!(resolved, canonical.join("a"));
+    }
 }

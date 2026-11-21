@@ -100,9 +100,11 @@ whose project has no content gets no new `memory.md` either; an existing
 `memory.md` stays. Because such a project has no `memory.md`, it also shows no
 machine-wide facts.
 
-The first write creates the scope. A flagless `memd add` or `memd experience
-note` in a directory with no scope creates it by the same rule, then stores the
-fact. Read commands (`search`, `agent-context`, `get` without ids) never create
+The first write creates the scope. A flagless `memd add`, `memd experience note`
+or `memd experience record` in a directory with no scope plans the scope by the
+same rule, stores the fact, and publishes the scope file only after the store
+succeeded. A failed command (a missing case file, a rejected write, a store that
+will not open) leaves no `.memd` directory. Read commands (`search`, `agent-context`, `get` without ids) never create
 a scope; their "no scope" error says so and names `--tenant-id`.
 
 The scope comes from `$MEMD_DEFAULT_TENANT` (then `$USER`, then `"default"`) and
