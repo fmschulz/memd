@@ -276,8 +276,8 @@ explicitly scoped lines continue.
   term is common (`read-only`) and gets no boost. Only chunk text is matched,
   not tags. Superseded, expired, deleted and candidate chunks do not count.
   Rows still waiting for keyword indexing (up to 200 per scope) are tested too
-  and counted with the indexed ones; more waiting rows than that mean no term
-  is boosted. A term that the sentence splitter cuts, such as `api?job_id=2807`
+  and counted with the indexed ones; more waiting rows than that, or a waiting
+  row that cannot be read, mean no term is boosted. A term that the sentence splitter cuts, such as `api?job_id=2807`
   as one term, cannot match: each sentence is its own index document, and a fix
   needs a chunk-level field. The keyword index is rebuilt once, from stored
   payloads, by the first writer that opens a store after a tokenizer change. A generic search never rebuilds

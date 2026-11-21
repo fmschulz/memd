@@ -4137,6 +4137,98 @@ async fn unindexed_rows_query_reads_the_partial_index_not_the_tenant() {
 }
 
 #[tokio::test]
+async fn unindexed_lane_ignores_waiting_rows_of_other_projects() {
+    let tenant = TenantId::new("rescue_lane_scope").unwrap();
+    let (store, dir) = make_sparse_persistent_store();
+    let waiting = (0..300)
+        .map(|index| project_chunk(&tenant, "other", &format!("Waiting note {index}."), index))
+        .collect::<Vec<_>>();
+    let waiting_ids = store.add_batch(waiting).await.unwrap();
+    store
+        .metadata()
+        .mark_index_pending(&tenant, &waiting_ids, 1)
+        .unwrap();
+    let own = (0..500)
+        .map(|index| job_chunk(&tenant, &format!("Indexed note {index}."), 1_000 + index))
+        .collect::<Vec<_>>();
+    store.add_batch(own).await.unwrap();
+
+    let lane = store
+        .unindexed_chunks(&tenant, Some("p"), EXACT_RESCUE_UNINDEXED_LIMIT)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&lane, UnindexedChunks::Chunks(chunks) if chunks.is_empty()),
+        "the 300 waiting rows of another project must not reach project p: {lane:?}"
+    );
+
+    // Work done by the query itself: the 300 waiting rows are the only rows it
+    // may visit, and it never scans the table or sorts.
+    let connection = rusqlite::Connection::open(dir.path().join("metadata.db")).unwrap();
+    let mut statement = connection
+        .prepare(crate::store::metadata::sqlite::LIST_UNINDEXED_SQL)
+        .unwrap();
+    let rows = statement
+        .query_map(rusqlite::params![tenant.as_str(), "p", 201_i64], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap()
+        .count();
+    let fullscan = statement.get_status(rusqlite::StatementStatus::FullscanStep);
+    let sorts = statement.get_status(rusqlite::StatementStatus::Sort);
+    let vm_steps = statement.get_status(rusqlite::StatementStatus::VmStep);
+    println!("unindexed rows query for project p: rows={rows} fullscan_steps={fullscan} sorts={sorts} vm_steps={vm_steps}");
+    assert_eq!(rows, 0);
+    assert_eq!(fullscan, 0);
+    assert_eq!(sorts, 0);
+}
+
+#[tokio::test]
+async fn exact_rescue_is_unknown_when_a_waiting_row_cannot_be_read() {
+    let tenant = TenantId::new("rescue_pending_unreadable").unwrap();
+    let (store, dir) = make_sparse_persistent_store();
+    for index in 0..EXACT_RESCUE_MAX_MATCHES {
+        store
+            .add(job_chunk(
+                &tenant,
+                &format!("Indexed {index} on job_2807."),
+                index as i64,
+            ))
+            .await
+            .unwrap();
+    }
+    let waiting = store
+        .add(job_chunk(&tenant, "Pending on job_2807.", 100))
+        .await
+        .unwrap();
+    index_pending(&store, &tenant, &waiting);
+    let connection = rusqlite::Connection::open(dir.path().join("metadata.db")).unwrap();
+    connection
+        .execute(
+            "UPDATE chunks SET segment_id = 99999 WHERE chunk_id = ?1",
+            [waiting.to_string()],
+        )
+        .unwrap();
+
+    assert!(
+        matches!(
+            store
+                .unindexed_chunks(&tenant, Some("p"), EXACT_RESCUE_UNINDEXED_LIMIT)
+                .await
+                .unwrap(),
+            UnindexedChunks::Unknown
+        ),
+        "a waiting row with no readable payload leaves its content unknown"
+    );
+    assert!(
+        rescued_texts(&store, &tenant, "p", "job_2807")
+            .await
+            .is_empty(),
+        "eight indexed matches plus an unreadable waiting row are not rare"
+    );
+}
+
+#[tokio::test]
 async fn exact_rescue_counts_a_pending_chunk_with_the_indexed_ones() {
     let tenant = TenantId::new("rescue_pending_count").unwrap();
     let (store, _dir) = make_sparse_persistent_store();

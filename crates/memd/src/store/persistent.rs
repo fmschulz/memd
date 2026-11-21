@@ -2305,13 +2305,15 @@ impl Store for PersistentStore {
         }
         let mut chunks = Vec::with_capacity(ids.len());
         for id in &ids {
-            // The retrieval read skips an unreadable row.
-            if let Some(chunk) = self
+            // The retrieval read skips an unreadable row. Its text is then
+            // unknown, and it might hold the term, so the whole lane is unknown.
+            let Some(chunk) = self
                 .get_chunk_for_retrieval(tenant_id, id, "exact_rescue_unindexed")
                 .await?
-            {
-                chunks.push(chunk);
-            }
+            else {
+                return Ok(UnindexedChunks::Unknown);
+            };
+            chunks.push(chunk);
         }
         Ok(UnindexedChunks::Chunks(chunks))
     }
