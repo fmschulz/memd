@@ -8,19 +8,30 @@
 //! marker reads `<revision> rebuilding` until that pass has finished, so an
 //! interrupted rebuild resumes instead of starting over.
 //! `embedding_model` separately records the model identity; dimensions alone
-//! cannot distinguish MiniLM from BGE-small.
+//! cannot distinguish MiniLM from BGE-small. A command that names no model
+//! uses the one this marker records ([`recorded_embedding_model`]), so an
+//! existing store keeps its model and only an explicit switch changes it.
 
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::embeddings::{CandleModel, EMBEDDING_REVISION};
+use crate::embeddings::{
+    CandleEmbedder, CandleModel, Embedder, EmbeddingConfig, EMBEDDING_REVISION,
+};
 use crate::error::{MemdError, Result};
 use crate::index::EmbeddingCache;
 
 const MARKER_FILE: &str = "embedding_revision";
 const REBUILDING_SUFFIX: &str = " rebuilding";
 const MODEL_MARKER_FILE: &str = "embedding_model";
+
+/// Every model a marker can name.
+const KNOWN_MODELS: [CandleModel; 3] = [
+    CandleModel::MiniLm,
+    CandleModel::BgeBase,
+    CandleModel::BgeSmall,
+];
 
 fn marker_path(data_dir: &Path) -> PathBuf {
     data_dir.join(MARKER_FILE)
@@ -43,28 +54,111 @@ fn write_named_marker(data_dir: &Path, name: &str, content: &str) -> Result<()> 
     Ok(())
 }
 
+/// The model marker, if the store has one.
+fn read_model_marker(data_dir: &Path) -> Result<Option<String>> {
+    match fs::read_to_string(data_dir.join(MODEL_MARKER_FILE)) {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Split a marker into the model identity and its state (`rebuilding`,
+/// `resetting`, or empty).
+fn split_model_marker(recorded: &str) -> (&str, &str) {
+    let recorded = recorded.trim();
+    recorded.split_once(' ').unwrap_or((recorded, ""))
+}
+
+/// The model of an unmarked dense index, from its vector width. Before model
+/// markers existed, these were the only two live models.
+fn legacy_model(index: &Path) -> Result<Option<CandleModel>> {
+    let cache_path = index.join("embeddings.bin");
+    if !cache_path.exists() {
+        return Ok(None);
+    }
+    match EmbeddingCache::load_from(&cache_path)?.dimension() {
+        384 => Ok(Some(CandleModel::MiniLm)),
+        768 => Ok(Some(CandleModel::BgeBase)),
+        dimension => Err(MemdError::ValidationError(format!(
+            "unmarked dense index at {} has unknown embedding dimension {dimension}",
+            index.display()
+        ))),
+    }
+}
+
+/// The model a store records, for a command that names none.
+///
+/// This is the `embedding_model` marker or, for an unmarked store with dense
+/// vectors, the legacy width rule that [`prepare_model`] applies. `None`
+/// means the store has neither: a new store, free to take the default. It only
+/// reads. A marker that names a model this build does not know is an error,
+/// not a reason to pick another model.
+pub fn recorded_embedding_model(data_dir: &Path) -> Result<Option<CandleModel>> {
+    if let Some(recorded) = read_model_marker(data_dir)? {
+        let (identity, _) = split_model_marker(&recorded);
+        return KNOWN_MODELS
+            .into_iter()
+            .find(|model| model.hf_id() == identity)
+            .map(Some)
+            .ok_or_else(|| {
+                MemdError::ValidationError(format!(
+                    "{} names the embedding model {identity:?}, which this memd does not know",
+                    data_dir.join(MODEL_MARKER_FILE).display()
+                ))
+            });
+    }
+    for index in dense_index_dirs(data_dir)? {
+        if let Some(model) = legacy_model(&index)? {
+            return Ok(Some(model));
+        }
+    }
+    Ok(None)
+}
+
+/// Load `model` for real: read or download its files, build it, and embed one
+/// text. A switch calls this before it deletes the old dense index.
+///
+/// It runs on a thread of its own because a store can be opened from inside a
+/// Tokio runtime, where a second `block_on` would panic.
+pub(crate) fn model_loads(model: CandleModel) -> Result<()> {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                let embedder =
+                    CandleEmbedder::with_config_and_model(EmbeddingConfig::default(), model);
+                runtime
+                    .block_on(embedder.embed_texts(&["memd model check"]))
+                    .map(|_| ())
+            })
+            .join()
+            .unwrap_or_else(|_| Err(MemdError::EmbeddingError("the model check panicked".into())))
+    })
+}
+
 /// Check model identity before loading any dense vectors or migrating revisions.
 /// Returns whether the writer must finish a segment-backed rebuild.
+///
+/// A switch to another model deletes the old dense indexes. `verify_model`
+/// runs first and must prove that the new model loads, so a machine that
+/// cannot fetch or read its files keeps its index and its marker.
 pub(crate) fn prepare_model(
     data_dir: &Path,
     model: CandleModel,
     read_only: bool,
     backfill: bool,
+    verify_model: impl FnOnce() -> Result<()>,
 ) -> Result<bool> {
     let path = data_dir.join(MODEL_MARKER_FILE);
-    let recorded = match fs::read_to_string(&path) {
-        Ok(value) => Some(value),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
-    };
+    let recorded = read_model_marker(data_dir)?;
     let current = model.hf_id();
     let mut stored_model = current.to_string();
     let mut resetting = false;
     if let Some(recorded) = &recorded {
-        let (identity, state) = recorded
-            .trim()
-            .split_once(' ')
-            .unwrap_or((recorded.trim(), ""));
+        let (identity, state) = split_model_marker(recorded);
         stored_model = identity.to_string();
         resetting = state == "resetting";
         if identity == current && !resetting {
@@ -76,22 +170,10 @@ pub(crate) fn prepare_model(
         // Before model markers existed, these were the only two live models.
         // Inspect every tenant so even a legacy mixed store cannot pass.
         for index in &indexes {
-            let cache_path = index.join("embeddings.bin");
-            if !cache_path.exists() {
+            let Some(legacy) = legacy_model(index)? else {
                 continue;
-            }
-            let cache = EmbeddingCache::load_from(&cache_path)?;
-            let legacy_model = match cache.dimension() {
-                384 => CandleModel::MiniLm,
-                768 => CandleModel::BgeBase,
-                dimension => {
-                    return Err(MemdError::ValidationError(format!(
-                        "unmarked dense index at {} has unknown embedding dimension {dimension}",
-                        index.display()
-                    )))
-                }
             };
-            stored_model = legacy_model.hf_id().to_string();
+            stored_model = legacy.hf_id().to_string();
             if stored_model != current {
                 break;
             }
@@ -109,6 +191,12 @@ pub(crate) fn prepare_model(
                 active_model: current.to_string(),
             });
         }
+        verify_model().map_err(|error| {
+            MemdError::EmbeddingError(format!(
+                "not switching the dense index to {current}: the model failed to load ({error}); \
+                 the existing index and model marker are unchanged"
+            ))
+        })?;
         // Persist reset intent first. A crash during deletion repeats the whole
         // reset; only after every old tenant cache is gone can new vectors load.
         write_named_marker(data_dir, MODEL_MARKER_FILE, &format!("{current} resetting"))?;
@@ -208,6 +296,16 @@ pub(crate) fn mark_current(data_dir: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// `prepare_model` for a model whose files load.
+    fn prepare_loadable(
+        data_dir: &Path,
+        model: CandleModel,
+        read_only: bool,
+        backfill: bool,
+    ) -> Result<bool> {
+        prepare_model(data_dir, model, read_only, backfill, || Ok(()))
+    }
+
     fn seed_model_vectors(data_dir: &Path, dimension: usize) -> PathBuf {
         let index = data_dir.join("tenants/test/warm_index");
         fs::create_dir_all(&index).unwrap();
@@ -222,7 +320,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let index = seed_model_vectors(dir.path(), 384);
         let before = fs::read(index.join("embeddings.bin")).unwrap();
-        let error = prepare_model(dir.path(), CandleModel::BgeSmall, false, false).unwrap_err();
+        let error = prepare_loadable(dir.path(), CandleModel::BgeSmall, false, false).unwrap_err();
         assert!(error.to_string().contains("all-MiniLM-L6-v2"));
         assert!(error.to_string().contains("bge-small-en-v1.5"));
         assert!(error
@@ -231,7 +329,7 @@ mod tests {
         assert_eq!(fs::read(index.join("embeddings.bin")).unwrap(), before);
         assert!(!dir.path().join("embedding_model").exists());
         // Read-only opens refuse the switch even with the opt-in.
-        assert!(prepare_model(dir.path(), CandleModel::BgeSmall, true, true).is_err());
+        assert!(prepare_loadable(dir.path(), CandleModel::BgeSmall, true, true).is_err());
         assert_eq!(fs::read(index.join("embeddings.bin")).unwrap(), before);
     }
 
@@ -242,7 +340,7 @@ mod tests {
         let second = dir.path().join("tenants/second/warm_index");
         fs::create_dir_all(&second).unwrap();
         fs::copy(index.join("embeddings.bin"), second.join("embeddings.bin")).unwrap();
-        assert!(prepare_model(dir.path(), CandleModel::BgeSmall, false, true).unwrap());
+        assert!(prepare_loadable(dir.path(), CandleModel::BgeSmall, false, true).unwrap());
         assert!(!index.exists());
         assert!(!second.exists());
         assert!(fs::read_to_string(dir.path().join("embedding_model"))
@@ -250,12 +348,12 @@ mod tests {
             .contains("bge-small-en-v1.5 rebuilding"));
         let rebuilt = seed_model_vectors(dir.path(), 384);
         // A restart continues the new model's partial cache, without another opt-in.
-        assert!(prepare_model(dir.path(), CandleModel::BgeSmall, false, false).unwrap());
+        assert!(prepare_loadable(dir.path(), CandleModel::BgeSmall, false, false).unwrap());
         assert!(rebuilt.join("embeddings.bin").exists());
         mark_model_current(dir.path(), CandleModel::BgeSmall).unwrap();
-        assert!(!prepare_model(dir.path(), CandleModel::BgeSmall, false, false).unwrap());
+        assert!(!prepare_loadable(dir.path(), CandleModel::BgeSmall, false, false).unwrap());
         // Cached vectors must never be reused in the reverse direction either.
-        assert!(prepare_model(dir.path(), CandleModel::MiniLm, false, false).is_err());
+        assert!(prepare_loadable(dir.path(), CandleModel::MiniLm, false, false).is_err());
     }
 
     #[test]
@@ -263,9 +361,9 @@ mod tests {
         for (dimension, model) in [(384, CandleModel::MiniLm), (768, CandleModel::BgeBase)] {
             let dir = tempfile::tempdir().unwrap();
             let index = seed_model_vectors(dir.path(), dimension);
-            assert!(!prepare_model(dir.path(), model, true, false).unwrap());
+            assert!(!prepare_loadable(dir.path(), model, true, false).unwrap());
             assert!(!dir.path().join("embedding_model").exists());
-            assert!(!prepare_model(dir.path(), model, false, false).unwrap());
+            assert!(!prepare_loadable(dir.path(), model, false, false).unwrap());
             assert_eq!(
                 fs::read_to_string(dir.path().join("embedding_model"))
                     .unwrap()
@@ -286,9 +384,9 @@ mod tests {
             &format!("{} resetting", CandleModel::BgeSmall.hf_id()),
         )
         .unwrap();
-        assert!(prepare_model(dir.path(), CandleModel::BgeSmall, true, false).is_err());
+        assert!(prepare_loadable(dir.path(), CandleModel::BgeSmall, true, false).is_err());
         assert!(old.exists());
-        assert!(prepare_model(dir.path(), CandleModel::BgeSmall, false, false).unwrap());
+        assert!(prepare_loadable(dir.path(), CandleModel::BgeSmall, false, false).unwrap());
         assert!(!old.exists());
     }
 
@@ -296,8 +394,198 @@ mod tests {
     fn bge_small_cannot_mark_a_store_when_tenant_scan_fails() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("tenants"), b"not a tenant directory").unwrap();
-        assert!(prepare_model(dir.path(), CandleModel::BgeSmall, false, true).is_err());
+        assert!(prepare_loadable(dir.path(), CandleModel::BgeSmall, false, true).is_err());
         assert!(!dir.path().join(MODEL_MARKER_FILE).exists());
+    }
+
+    /// A store that records `model` and holds one dense index of `dimension`.
+    fn seed_marked_store(data_dir: &Path, model: CandleModel, dimension: usize) -> PathBuf {
+        write_named_marker(data_dir, MODEL_MARKER_FILE, model.hf_id()).unwrap();
+        seed_model_vectors(data_dir, dimension)
+    }
+
+    fn model_marker(data_dir: &Path) -> String {
+        fs::read_to_string(data_dir.join(MODEL_MARKER_FILE)).unwrap()
+    }
+
+    fn never_loaded() -> Result<()> {
+        panic!("the model must not load on this path")
+    }
+
+    #[test]
+    fn new_store_records_no_model_and_the_lookup_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(recorded_embedding_model(dir.path()).unwrap(), None);
+        // A tenant without dense vectors does not count as a recorded model.
+        fs::create_dir_all(dir.path().join("tenants/test/segments")).unwrap();
+        assert_eq!(recorded_embedding_model(dir.path()).unwrap(), None);
+        assert!(!dir.path().join(MODEL_MARKER_FILE).exists());
+    }
+
+    #[test]
+    fn marked_store_resolves_its_model_and_opens_untouched() {
+        for model in [CandleModel::MiniLm, CandleModel::BgeSmall] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = seed_marked_store(dir.path(), model, 384);
+            let vectors = fs::read(index.join("embeddings.bin")).unwrap();
+            let marker = model_marker(dir.path());
+
+            let resolved = recorded_embedding_model(dir.path()).unwrap().unwrap();
+            assert_eq!(resolved, model);
+            // Same open a flagless command makes: writable, no opt-in, no load.
+            assert!(!prepare_model(dir.path(), resolved, false, false, never_loaded).unwrap());
+
+            assert_eq!(model_marker(dir.path()), marker);
+            assert_eq!(fs::read(index.join("embeddings.bin")).unwrap(), vectors);
+        }
+    }
+
+    #[test]
+    fn marker_state_suffix_does_not_change_the_resolved_model() {
+        for state in ["rebuilding", "resetting"] {
+            let dir = tempfile::tempdir().unwrap();
+            write_named_marker(
+                dir.path(),
+                MODEL_MARKER_FILE,
+                &format!("{} {state}", CandleModel::BgeSmall.hf_id()),
+            )
+            .unwrap();
+            assert_eq!(
+                recorded_embedding_model(dir.path()).unwrap(),
+                Some(CandleModel::BgeSmall)
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_marker_identity_is_an_error_not_a_default() {
+        let dir = tempfile::tempdir().unwrap();
+        write_named_marker(dir.path(), MODEL_MARKER_FILE, "acme/future-embedder-v9").unwrap();
+        let error = recorded_embedding_model(dir.path()).unwrap_err();
+        assert!(error.to_string().contains("acme/future-embedder-v9"));
+    }
+
+    #[test]
+    fn unmarked_store_resolves_its_model_from_the_vector_width() {
+        for (dimension, model) in [(384, CandleModel::MiniLm), (768, CandleModel::BgeBase)] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = seed_model_vectors(dir.path(), dimension);
+            let vectors = fs::read(index.join("embeddings.bin")).unwrap();
+
+            assert_eq!(recorded_embedding_model(dir.path()).unwrap(), Some(model));
+
+            // A lookup is a read: it records nothing and leaves the vectors alone.
+            assert!(!dir.path().join(MODEL_MARKER_FILE).exists());
+            assert_eq!(fs::read(index.join("embeddings.bin")).unwrap(), vectors);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        seed_model_vectors(dir.path(), 100);
+        assert!(recorded_embedding_model(dir.path()).is_err());
+    }
+
+    #[test]
+    fn explicit_model_that_differs_from_the_marker_fails_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = seed_marked_store(dir.path(), CandleModel::MiniLm, 384);
+        let vectors = fs::read(index.join("embeddings.bin")).unwrap();
+        let marker = model_marker(dir.path());
+
+        let error = prepare_model(
+            dir.path(),
+            CandleModel::BgeSmall,
+            false,
+            false,
+            never_loaded,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("all-MiniLM-L6-v2"));
+        assert!(error.to_string().contains("bge-small-en-v1.5"));
+        // A read-only open refuses the switch even with the opt-in.
+        assert!(
+            prepare_model(dir.path(), CandleModel::BgeSmall, true, true, never_loaded).is_err()
+        );
+
+        assert_eq!(model_marker(dir.path()), marker);
+        assert_eq!(fs::read(index.join("embeddings.bin")).unwrap(), vectors);
+    }
+
+    #[test]
+    fn switch_loads_the_new_model_before_it_deletes_the_old_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = seed_marked_store(dir.path(), CandleModel::MiniLm, 384);
+        let vectors = fs::read(index.join("embeddings.bin")).unwrap();
+        let marker = model_marker(dir.path());
+
+        // The new model's files are missing: the switch stops with a clear
+        // error and the store keeps its model, marker and index.
+        let error = prepare_model(dir.path(), CandleModel::BgeSmall, false, true, || {
+            Err(MemdError::EmbeddingError("no network".to_string()))
+        })
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("no network"), "{message}");
+        assert!(message.contains("bge-small-en-v1.5"), "{message}");
+        assert_eq!(model_marker(dir.path()), marker);
+        assert_eq!(fs::read(index.join("embeddings.bin")).unwrap(), vectors);
+        assert_eq!(
+            recorded_embedding_model(dir.path()).unwrap(),
+            Some(CandleModel::MiniLm)
+        );
+
+        // The files load: the switch deletes the old index and starts the rebuild.
+        let loaded = std::cell::Cell::new(false);
+        let rebuild = prepare_model(dir.path(), CandleModel::BgeSmall, false, true, || {
+            assert!(
+                index.exists(),
+                "the old index must still exist at load time"
+            );
+            loaded.set(true);
+            Ok(())
+        })
+        .unwrap();
+        assert!(rebuild);
+        assert!(loaded.get());
+        assert!(!index.exists());
+        assert!(model_marker(dir.path()).contains("bge-small-en-v1.5 rebuilding"));
+    }
+
+    #[test]
+    fn after_a_switch_a_flagless_open_resolves_the_new_model() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_marked_store(dir.path(), CandleModel::MiniLm, 384);
+        assert!(prepare_model(dir.path(), CandleModel::BgeSmall, false, true, || Ok(())).unwrap());
+        // Mid-rebuild a restart continues with the new model, no opt-in.
+        let resolved = recorded_embedding_model(dir.path()).unwrap().unwrap();
+        assert_eq!(resolved, CandleModel::BgeSmall);
+        assert!(prepare_model(dir.path(), resolved, false, false, never_loaded).unwrap());
+
+        let rebuilt = seed_model_vectors(dir.path(), 384);
+        mark_model_current(dir.path(), CandleModel::BgeSmall).unwrap();
+        let resolved = recorded_embedding_model(dir.path()).unwrap().unwrap();
+        assert_eq!(resolved, CandleModel::BgeSmall);
+        assert!(!prepare_model(dir.path(), resolved, false, false, never_loaded).unwrap());
+        assert!(rebuilt.join("embeddings.bin").exists());
+        assert_eq!(
+            model_marker(dir.path()).trim(),
+            CandleModel::BgeSmall.hf_id()
+        );
+    }
+
+    #[test]
+    fn resuming_an_interrupted_reset_loads_the_model_before_deleting_more() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = seed_model_vectors(dir.path(), 384);
+        write_named_marker(
+            dir.path(),
+            MODEL_MARKER_FILE,
+            &format!("{} resetting", CandleModel::BgeSmall.hf_id()),
+        )
+        .unwrap();
+        let outcome = prepare_model(dir.path(), CandleModel::BgeSmall, false, false, || {
+            Err(MemdError::EmbeddingError("no network".to_string()))
+        });
+        assert!(outcome.is_err());
+        assert!(old.exists());
     }
 
     fn seed_dense_index(data_dir: &Path, tenant: &str) -> PathBuf {

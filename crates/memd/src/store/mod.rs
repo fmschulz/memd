@@ -756,6 +756,7 @@ pub(crate) fn chunk_status_is_searchable(status: crate::types::ChunkStatus) -> b
 }
 
 pub use dense::{DenseSearchConfig, DenseSearchResult, DenseSearcher};
+pub use embedding_revision::recorded_embedding_model;
 pub use hybrid::{HybridConfig, HybridSearchResult, HybridSearcher, HybridTiming, SearchContext};
 pub use memory::MemoryStore;
 pub use persistent::{PersistentStore, PersistentStoreConfig};

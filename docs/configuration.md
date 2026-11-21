@@ -91,11 +91,27 @@ order after lexical retrieval.
 
 ## Embedding models
 
-Select the model with `--embedding-model`: `all-minilm` (default, 384 dimensions),
-`bge-small` (BAAI/bge-small-en-v1.5, 384 dimensions), or `bge-base`
-(BAAI/bge-base-en-v1.5, 768 dimensions). BGE uses CLS pooling, unit normalisation,
-and the query-only prefix `Represent this sentence for searching relevant passages: `.
-`bge-small` keeps the `hybrid-feature` search default.
+`--embedding-model` is optional. The model of a run is, in this order:
+
+1. the `--embedding-model` flag, when given: `all-minilm` (384 dimensions),
+   `bge-small` (BAAI/bge-small-en-v1.5, 384 dimensions), or `bge-base`
+   (BAAI/bge-base-en-v1.5, 768 dimensions);
+2. otherwise the model the store records in its `embedding_model` marker. An
+   unmarked store with dense vectors is read by vector width: 384-d is
+   `all-minilm`, 768-d is `bge-base`;
+3. otherwise `bge-small`, for a new store that has neither.
+
+A new store therefore uses `bge-small` and records it. An existing store keeps
+its model after an upgrade: no flag, no error, no rebuild, and no download of
+another model. A flag that differs from the store's model is an error.
+BGE uses CLS pooling, unit normalisation, and the query-only prefix
+`Represent this sentence for searching relevant passages: `. `bge-small` keeps
+the `hybrid-feature` search default. The first embedding of a `bge-small`
+store downloads 133 MB of model files; `all-minilm` needs 91 MB.
+
+A flagless warm client and a flagless warm worker resolve the model from the
+same store, so they agree. A client that names a different model than the
+running worker serves is an error, as before.
 
 The model loads on the first call that embeds text, not when a store opens.
 Commands that never embed, such as `get`, `stats` and `doctor`, do not load it,
@@ -108,10 +124,40 @@ pass runs on one thread and a call that embeds many texts runs one pass per
 core, up to 32, with at most 8 texts per pass; `MEMD_EMBED_BATCH_SIZE` can
 lower that limit.
 
-Switching models on an existing store requires a writable open with
-`MEMD_BACKFILL_HNSW_ON_STARTUP=1`. This rebuilds dense indexes from segments;
-equal vector dimensions do not make models interchangeable. Unmarked existing
-384-d stores are read as `all-minilm`, and 768-d stores as `bge-base`.
+### Switch the model of an existing store
+
+Switching is always an explicit act. It rebuilds the dense indexes from the
+stored segments; equal vector dimensions do not make models interchangeable.
+Two steps switch a store to `bge-small`:
+
+1. Stop the warm worker, then run any writer command with the opt-in variable
+   and the flag. The worker holds the writer lock, so `--warm off` makes the
+   command open the store itself:
+
+   ```bash
+   memd warm stop
+   MEMD_BACKFILL_HNSW_ON_STARTUP=1 memd --embedding-model bge-small --warm off \
+     add --tenant-id "$TENANT_ID" --project-id "$PROJECT_ID" --chunk-type doc \
+     --text "Switched this store to bge-small."
+   ```
+
+2. Drop the variable and the flag. Every later command resolves `bge-small`
+   from the store.
+
+Read-only commands such as `stats` or `search` refuse the switch. The
+switching command loads the new model before it deletes anything. A machine
+that cannot read or download the new files (for example offline) keeps its old
+dense index and marker and prints `not switching the dense index to ...`. Run
+the command again once the files are available.
+
+The rebuild runs in the background of the writer. A command that exits during
+it waits up to 10 seconds, saves what it indexed, and the next writer command
+continues. The marker `<data_dir>/embedding_model` reads
+`BAAI/bge-small-en-v1.5 rebuilding` until the rebuild finishes, then
+`BAAI/bge-small-en-v1.5`. Until then, chunks that are not yet re-embedded are
+found through the sparse index only. Do not leave
+`MEMD_BACKFILL_HNSW_ON_STARTUP=1` set: it also backfills cold tenants at every
+open. To go back, use the same two steps with `--embedding-model all-minilm`.
 
 ## Project alias compatibility
 

@@ -79,7 +79,7 @@ pub enum MemdError {
 
     /// Models with equal vector dimensions still have incompatible embeddings.
     #[error(
-        "dense index at {path} was built with embedding model {store_model}, but the active model is {active_model}. Re-open with the original model, or set MEMD_BACKFILL_HNSW_ON_STARTUP=1 on a writer to discard the dense indexes and re-embed from segments."
+        "dense index at {path} was built with embedding model {store_model}, but the active model is {active_model}. Re-open without --embedding-model to use the store's model, or set MEMD_BACKFILL_HNSW_ON_STARTUP=1 on a writer to discard the dense indexes and re-embed from segments."
     )]
     DenseIndexEmbeddingModelMismatch {
         path: std::path::PathBuf,

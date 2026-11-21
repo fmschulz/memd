@@ -11,6 +11,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use tempfile::tempdir;
 
+/// These tests check lock routing, not the model. MiniLM keeps eight
+/// concurrent debug-build embeds under the 30 s warm client timeout; the
+/// default model, bge-small, costs about twice as much.
+const MODEL_ARGS: [&str; 2] = ["--embedding-model", "all-minilm"];
+
 fn memd_bin() -> String {
     // Isolate the worker cap from concurrent memd activity (see warm module
     // unit tests for the cap logic itself).
@@ -131,6 +136,7 @@ fn start_worker(data_dir: &Path) -> (WorkerGuard, u32) {
     let output = Command::new(memd_bin())
         .arg("--data-dir")
         .arg(data_dir)
+        .args(MODEL_ARGS)
         .args(["warm", "start"])
         .output()
         .expect("run memd warm start");
@@ -192,6 +198,7 @@ fn run_storm(route_via_worker: bool) {
                 .arg("--data-dir")
                 .arg(&data_dir)
                 .env("MEMD_WRITER_LOCK_TIMEOUT_MS", lock_timeout)
+                .args(MODEL_ARGS)
                 .args([
                     "add",
                     "--warm",

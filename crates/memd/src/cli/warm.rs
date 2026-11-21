@@ -1786,7 +1786,7 @@ pub(super) async fn run_warm_worker<S: Store>(
 
     // Identity this worker advertises in its ping handshake. Falls back to the
     // documented defaults if the parent did not stamp them (test paths only).
-    let embedding_model = embedding_model.unwrap_or("all-minilm").to_string();
+    let embedding_model = embedding_model.unwrap_or("bge-small").to_string();
     let search_variant = search_variant.unwrap_or("hybrid-feature").to_string();
     use std::os::unix::fs::PermissionsExt;
     use tokio::net::UnixListener;

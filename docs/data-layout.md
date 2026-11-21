@@ -5,6 +5,7 @@ Persistent mode writes to:
 ```
 ~/.memd/data/
 ├── .writer.lock                      # Exclusive writer flock
+├── embedding_model                   # Embedding model of the dense vectors
 ├── embedding_revision                # Embedder revision of the dense vectors
 ├── metadata.db                       # SQLite metadata (WAL mode, pooled)
 ├── sparse_index/                     # tantivy BM25 index (open_or_create)
@@ -28,6 +29,11 @@ A writer saves a tenant's `warm_index` once, at shutdown, and only if that
 index changed since it was loaded or last saved. A failed save is reported to
 the caller. The chunks stay safe in the segments, and the cache-aware backfill
 re-indexes anything the files lack.
+
+`embedding_model` records the model that produced the vectors, as its Hugging
+Face id. A command with no `--embedding-model` flag uses this model, and a new
+store records `BAAI/bge-small-en-v1.5` at its first writable open. See
+[Embedding models](configuration.md#embedding-models).
 
 `embedding_revision` records which revision of the embedder produced the
 vectors under `warm_index/`. When a release changes how vectors are computed,

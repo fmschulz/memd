@@ -9,6 +9,11 @@ use tempfile::tempdir;
 
 const WRITERS: usize = 8;
 
+/// These tests check worker lifecycle, not the model. MiniLM keeps eight
+/// concurrent debug-build embeds under the 30 s warm client timeout; the
+/// default model, bge-small, costs about twice as much.
+const MODEL_ARGS: [&str; 2] = ["--embedding-model", "all-minilm"];
+
 fn memd_bin() -> String {
     // Isolate the worker cap from concurrent memd activity: the cap counts
     // live workers under the shared temp-fallback root, so a parallel test run
@@ -159,6 +164,7 @@ fn start_worker(data_dir: &Path) -> (WorkerGuard, u32) {
     let output = Command::new(memd_bin())
         .arg("--data-dir")
         .arg(data_dir)
+        .args(MODEL_ARGS)
         .args(["warm", "start"])
         .output()
         .expect("run memd warm start");
@@ -208,6 +214,7 @@ fn add_command(data_dir: &Path, warm: &str, tenant: &str, project: &str, text: &
     command
         .arg("--data-dir")
         .arg(data_dir)
+        .args(MODEL_ARGS)
         .args([
             "add",
             "--warm",

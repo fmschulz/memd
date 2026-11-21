@@ -17,7 +17,7 @@ use memd::{
 /// Embedding model choice
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ModelChoice {
-    /// all-MiniLM-L6-v2: 384-dim, fast, good quality (default)
+    /// all-MiniLM-L6-v2: 384-dim, fast, good quality
     AllMinilm,
     /// Qwen3-Embedding-0.6B: 1024-dim, slower, best quality (not yet supported in Candle)
     Qwen3,
@@ -50,6 +50,27 @@ impl From<ModelChoice> for CandleModel {
             ModelChoice::BgeSmall => CandleModel::BgeSmall,
         }
     }
+}
+
+impl From<CandleModel> for ModelChoice {
+    fn from(model: CandleModel) -> Self {
+        match model {
+            CandleModel::MiniLm => ModelChoice::AllMinilm,
+            CandleModel::BgeBase => ModelChoice::BgeBase,
+            CandleModel::BgeSmall => ModelChoice::BgeSmall,
+        }
+    }
+}
+
+/// The model of one run: the explicit flag, else the model the store records,
+/// else `bge-small` for a new store (no recorded model, no dense vectors).
+fn resolve_model_choice(
+    explicit: Option<ModelChoice>,
+    recorded: Option<CandleModel>,
+) -> ModelChoice {
+    explicit
+        .or(recorded.map(ModelChoice::from))
+        .unwrap_or(ModelChoice::BgeSmall)
 }
 
 impl ModelChoice {
@@ -126,8 +147,12 @@ struct Args {
     verbose: bool,
 
     /// Embedding model to use
-    #[arg(long, value_enum, default_value = "all-minilm")]
-    embedding_model: ModelChoice,
+    ///
+    /// Without this flag a store keeps the model it records, and a new store
+    /// uses bge-small. A model that differs from the store's is an error;
+    /// switching needs MEMD_BACKFILL_HNSW_ON_STARTUP=1 on a writer.
+    #[arg(long, value_enum)]
+    embedding_model: Option<ModelChoice>,
 
     /// Retrieval strategy variant for persistent mode
     ///
@@ -224,29 +249,43 @@ async fn main() {
         std::process::exit(1);
     }
 
+    // Resolve the model once, here: the flag, else what the store records, else
+    // bge-small for a new store. A flagless client and a flagless warm worker
+    // read the same store, so both get the same model. The store is read only
+    // when no flag names a model.
+    let recorded_model = match args.embedding_model {
+        Some(_) => None,
+        None if args.in_memory => None,
+        None => memd::store::recorded_embedding_model(&data_dir).unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }),
+    };
+    let embedding_model = resolve_model_choice(args.embedding_model, recorded_model);
+
     // Resolve the retrieval strategy once, here, so an unset --search-variant
     // takes the model-derived default (dense-only for bge-base) and warm
     // workers are spawned with the same concrete variant.
-    let search_variant = resolve_search_variant(args.search_variant, args.embedding_model);
+    let search_variant = resolve_search_variant(args.search_variant, embedding_model);
 
     // Stamp the worker's model/variant identity onto the (hidden) WarmWorker
     // command so it reports them in the ping handshake; a client requesting a
     // different model/variant then respawns it instead of being answered by
     // the wrong embedder.
     if let CliCommand::WarmWorker {
-        embedding_model,
+        embedding_model: worker_model,
         search_variant: worker_variant,
         ..
     } = &mut cmd
     {
-        *embedding_model = Some(args.embedding_model.cli_value().to_string());
+        *worker_model = Some(embedding_model.cli_value().to_string());
         *worker_variant = Some(search_variant.cli_value().to_string());
     }
 
     let warm_config = WarmProcessConfig {
         data_dir: data_dir.clone(),
         config_path: args.config.clone(),
-        embedding_model: args.embedding_model.cli_value().to_string(),
+        embedding_model: embedding_model.cli_value().to_string(),
         search_variant: search_variant.cli_value().to_string(),
     };
 
@@ -306,12 +345,12 @@ async fn main() {
             std::process::exit(1);
         }
     } else {
-        info!(data_dir = %data_dir.display(), embedding_model = ?args.embedding_model, "using persistent store");
+        info!(data_dir = %data_dir.display(), embedding_model = ?embedding_model, "using persistent store");
         let mut store_config = PersistentStoreConfig {
             data_dir: data_dir.clone(),
             read_only: cmd.store_access() == StoreAccess::ReadOnly,
-            embedding_model: args.embedding_model.into(),
-            candle_model: args.embedding_model.into(),
+            embedding_model: embedding_model.into(),
+            candle_model: embedding_model.into(),
             ..Default::default()
         };
         apply_search_variant(search_variant, &mut store_config);
@@ -409,23 +448,50 @@ mod tests {
             "test",
         ])
         .unwrap();
-        assert_eq!(args.embedding_model.cli_value(), "bge-small");
-        assert_eq!(
-            CandleModel::from(args.embedding_model).hf_id(),
-            "BAAI/bge-small-en-v1.5"
-        );
+        let model = args.embedding_model.unwrap();
+        assert_eq!(model.cli_value(), "bge-small");
+        assert_eq!(CandleModel::from(model).hf_id(), "BAAI/bge-small-en-v1.5");
         assert!(matches!(
-            resolve_search_variant(None, args.embedding_model),
+            resolve_search_variant(None, model),
             SearchVariant::HybridFeature
         ));
         assert!(matches!(
-            resolve_search_variant(Some(SearchVariant::DenseOnly), args.embedding_model),
+            resolve_search_variant(Some(SearchVariant::DenseOnly), model),
             SearchVariant::DenseOnly
         ));
+        // No flag means no choice yet: the store decides.
         assert_eq!(
             Args::try_parse_from(["memd", "stats", "--tenant-id", "test"])
                 .unwrap()
                 .embedding_model,
+            None
+        );
+    }
+
+    #[test]
+    fn model_resolves_from_flag_then_store_then_bge_small() {
+        // A new store records nothing and takes bge-small, with its variant.
+        let new_store = resolve_model_choice(None, None);
+        assert_eq!(new_store, ModelChoice::BgeSmall);
+        assert!(matches!(
+            resolve_search_variant(None, new_store),
+            SearchVariant::HybridFeature
+        ));
+        // An existing store keeps the model it records.
+        for (recorded, expected) in [
+            (CandleModel::MiniLm, ModelChoice::AllMinilm),
+            (CandleModel::BgeSmall, ModelChoice::BgeSmall),
+            (CandleModel::BgeBase, ModelChoice::BgeBase),
+        ] {
+            assert_eq!(resolve_model_choice(None, Some(recorded)), expected);
+        }
+        // The flag wins, so a mismatch with the store still reaches the check.
+        assert_eq!(
+            resolve_model_choice(Some(ModelChoice::BgeSmall), Some(CandleModel::MiniLm)),
+            ModelChoice::BgeSmall
+        );
+        assert_eq!(
+            resolve_model_choice(Some(ModelChoice::AllMinilm), None),
             ModelChoice::AllMinilm
         );
     }

@@ -90,8 +90,10 @@ pub struct PersistentStoreConfig {
     /// Vestigial ONNX-era selector (retained for config compatibility); the
     /// live dense embedder is the Candle backend selected via `candle_model`.
     pub embedding_model: EmbeddingModel,
-    /// Candle embedder model actually loaded for dense search. Set from the
-    /// `--embedding-model` CLI choice.
+    /// Candle embedder model actually loaded for dense search. The CLI
+    /// resolves it: the `--embedding-model` flag, else the model the store
+    /// records (`recorded_embedding_model`), else `bge-small` for a new store.
+    /// A library caller names it here; the default is the legacy MiniLM.
     pub candle_model: CandleModel,
     /// Enable async/background indexing of newly added chunks
     pub enable_async_indexing: bool,
@@ -752,6 +754,7 @@ impl PersistentStore {
                 config.candle_model,
                 config.read_only,
                 config.backfill_hnsw_on_startup,
+                || embedding_revision::model_loads(config.candle_model),
             )?;
 
             let mut dense_config = DenseSearchConfig {
