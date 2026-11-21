@@ -1,6 +1,6 @@
 # memd
 
-[![Version](https://img.shields.io/badge/version-1.9.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.10.0-blue)](CHANGELOG.md)
 [![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust&logoColor=white)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-fmschulz.github.io%2Fmemd-blue)](https://fmschulz.github.io/memd/)
@@ -142,6 +142,25 @@ latency. On code retrieval the ordering is different: dense, adaptive, and
 hybrid lanes tie on answer accuracy (73.0%, 72.8%, 72.5%) and each beats BM25
 (65.0%). Pick the lane against your own corpus rather than assuming the
 default.
+
+Default model and speed in 1.10.0. New stores embed with `bge-small`. In the
+2026-11-18 retrieval benchmark (hybrid lane, single runs, turn Recall@10 /
+nDCG@10), `bge-small` scored 64.1 / 49.4 on LoCoMo against 56.8 / 41.8 for
+`all-minilm`, at about twice the ingest cost. On a 19,025-chunk store,
+1.10.0 against 1.9.0 on the same machine and workload, both with `all-minilm`
+(median of 5 runs):
+
+| Measure | 1.9.0 | 1.10.0 |
+|---|---:|---:|
+| Ingest per chunk | 134.6 ms | 12.9 ms |
+| `session-start`, project with 9,500 facts | 5,297 ms | 1,946 ms |
+| Cold `get` | 229 ms | 21 ms |
+| Warm search, code-like token, 9,500-chunk project | 1,884 ms | 198 ms |
+| Cold search, peak memory | 537 MB | 264 MB |
+
+On a store shaped like a real one (10,625 rows, most of them generated
+experience rows), `memory.md` showed 9 of 9 curated project facts instead of
+0 of 10, and took about 0.5 s instead of 1.4 s.
 
 Cross-system answer-accuracy comparisons against other memory tools are not
 published here. They live in the benchmark repository behind immutable phase
