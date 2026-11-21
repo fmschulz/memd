@@ -8,8 +8,10 @@
 //! When the project has no `.memd/project_scope.json`, the command
 //! auto-creates one using sensible defaults (USER as tenant, repo
 //! basename as project) so automatic startup does not require a per-repo
-//! `memd init`. Opt out by setting `MEMD_AUTO_SCOPE=0` or
-//! dropping a `.memd-skip` file in the repo root.
+//! `memd init`. Inside a repository, a subdirectory uses the nearest scope up
+//! to the repository root, and a missing scope is created at that root. Opt
+//! out by setting `MEMD_AUTO_SCOPE=0` or dropping a `.memd-skip` file in the
+//! repo root.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -227,18 +229,35 @@ pub(super) async fn run_session_start_inner<S: Store>(
         return Ok(json!({ "skipped": "memd_skip_present" }));
     }
 
-    let scope_path = project_dir.join(".memd").join("project_scope.json");
-    let mut resolved_scope = match validated_project_scope(&project_dir) {
-        Ok(scope) => scope.map(|scope| (scope.tenant_id, scope.project_id)),
-        Err(error) => return Ok(invalid_scope_response(&scope_path, &error)),
+    // Auto-scope only applies when neither project_scope.json nor the legacy
+    // `.memd/config.json` resolves.
+    let mut resolved_scope = match read_scope_at(&project_dir) {
+        Ok(scope) => scope,
+        Err(invalid) => return Ok(invalid_scope_response(&invalid.0, &invalid.1)),
     };
-    // Preserve the legacy `.memd/config.json` fallback when there is no
-    // project_scope.json. Auto-scope only applies when neither source resolves.
+
+    // Inside a repository, its scope covers this directory, as it does for
+    // every other command. A repository without a scope gets one at its root,
+    // never one per subdirectory.
+    let mut scope_dir = project_dir.clone();
     if resolved_scope.is_none() {
-        let legacy_path = project_dir.join(".memd/config.json");
-        match read_legacy_scope(&legacy_path) {
-            Ok(scope) => resolved_scope = scope,
-            Err(error) => return Ok(invalid_scope_response(&legacy_path, &error)),
+        match find_repository_scope(&project_dir, canonical_home().as_deref()) {
+            RepositoryScope::OptedOut => {
+                return Ok(json!({ "skipped": "memd_skip_present" }));
+            }
+            RepositoryScope::Found {
+                dir,
+                tenant_id,
+                project_id,
+            } => {
+                resolved_scope = Some((tenant_id, project_id));
+                scope_dir = dir;
+            }
+            RepositoryScope::Invalid { path, error } => {
+                return Ok(invalid_scope_response(&path, &error));
+            }
+            RepositoryScope::Missing { root } => scope_dir = root,
+            RepositoryScope::Outside => {}
         }
     }
 
@@ -247,7 +266,7 @@ pub(super) async fn run_session_start_inner<S: Store>(
     // the winner before proceeding.
     let mut auto_scoped = false;
     if resolved_scope.is_none() {
-        match maybe_auto_create_scope(&project_dir, &auto_inputs)? {
+        match maybe_auto_create_scope(&scope_dir, &auto_inputs)? {
             AutoScopeOutcome::Created => {
                 auto_scoped = true;
             }
@@ -262,9 +281,9 @@ pub(super) async fn run_session_start_inner<S: Store>(
                 return Ok(json!({ "skipped": "memd_skip_present" }));
             }
         }
-        resolved_scope = match validated_project_scope(&project_dir) {
-            Ok(scope) => scope.map(|scope| (scope.tenant_id, scope.project_id)),
-            Err(error) => return Ok(invalid_scope_response(&scope_path, &error)),
+        resolved_scope = match read_scope_at(&scope_dir) {
+            Ok(scope) => scope,
+            Err(invalid) => return Ok(invalid_scope_response(&invalid.0, &invalid.1)),
         };
     }
 
@@ -411,14 +430,35 @@ pub(super) async fn run_session_start_inner<S: Store>(
         }
     }
 
-    Ok(json!({
+    let mut result = json!({
         "memory_md": memory_md,
         "dirty_count": dirty,
         "consolidation_spawned": consolidation_spawned,
         "consolidation_skipped": skip_reason,
         "auto_scoped": auto_scoped,
         "consolidation_recovery": consolidation_recovery,
-    }))
+    });
+    if scope_dir != project_dir {
+        result["scope_dir"] = json!(scope_dir);
+    }
+    Ok(result)
+}
+
+/// Tenant and project of a scope.
+type ScopeIds = (String, Option<String>);
+
+/// Read the scope that `dir` holds: `.memd/project_scope.json` first, then a
+/// valid legacy `.memd/config.json`. An invalid or unreadable file is an error
+/// that carries its path (boxed to keep the `Result` small).
+fn read_scope_at(dir: &Path) -> std::result::Result<Option<ScopeIds>, Box<(PathBuf, MemdError)>> {
+    let scope_path = dir.join(".memd/project_scope.json");
+    if let Some(scope) =
+        validated_project_scope(dir).map_err(|error| Box::new((scope_path, error)))?
+    {
+        return Ok(Some((scope.tenant_id, scope.project_id)));
+    }
+    let legacy_path = dir.join(".memd/config.json");
+    read_legacy_scope(&legacy_path).map_err(|error| Box::new((legacy_path, error)))
 }
 
 fn validated_project_scope(project_dir: &Path) -> Result<Option<ProjectScopeConfig>> {
@@ -523,8 +563,7 @@ pub(super) fn maybe_auto_create_scope(
     // Compare canonical paths so aliases such as ~/repo/.. and symlinks
     // cannot create an implicit scope for every descendant of home or /.
     let canonical = project_dir.canonicalize()?;
-    let home = dirs::home_dir().and_then(|home| home.canonicalize().ok());
-    if canonical.parent().is_none() || home.as_deref() == Some(canonical.as_path()) {
+    if is_unsafe_scope_root(&canonical, canonical_home().as_deref()) {
         return Ok(AutoScopeOutcome::SkippedUnsafeRoot);
     }
 
@@ -559,6 +598,100 @@ pub(super) fn maybe_auto_create_scope(
         return Err(error.into());
     }
     Ok(AutoScopeOutcome::Created)
+}
+
+/// The canonical home directory, when it resolves.
+fn canonical_home() -> Option<PathBuf> {
+    dirs::home_dir().and_then(|home| home.canonicalize().ok())
+}
+
+/// True for the filesystem root and the home directory. A scope there would
+/// cover every descendant. Both arguments must be canonical.
+fn is_unsafe_scope_root(canonical: &Path, home: Option<&Path>) -> bool {
+    canonical.parent().is_none() || home == Some(canonical)
+}
+
+/// What the enclosing git repository says about the scope of a directory.
+#[derive(Debug)]
+enum RepositoryScope {
+    /// No usable repository covers the directory.
+    Outside,
+    /// The repository root holds a `.memd-skip` marker.
+    OptedOut,
+    /// The nearest scope between the directory and the repository root.
+    Found {
+        dir: PathBuf,
+        tenant_id: String,
+        project_id: Option<String>,
+    },
+    /// A scope file exists but is invalid or unreadable.
+    Invalid { path: PathBuf, error: MemdError },
+    /// A repository root with no scope file below or at it.
+    Missing { root: PathBuf },
+}
+
+/// Look for the scope of the git repository that covers `project_dir`, which
+/// holds no scope itself. A `.git` file or directory marks a repository root,
+/// and the nearest root at or above `project_dir` is the repository.
+///
+/// - A `project_dir` that is itself a root is covered only by its main
+///   checkout, when it is a linked worktree. A nested clone or a submodule
+///   keeps its own scope (`Outside`).
+/// - The walk starts at the parent and stops at the root, then also checks the
+///   main checkout of a linked worktree. Each directory is read like
+///   `project_dir` is: project scope first, then legacy scope. The nearest
+///   valid scope wins; an invalid one stops the walk.
+/// - A repository whose root, or main checkout, is unsafe (home or `/`) is
+///   ignored. A `.memd-skip` marker there opts the whole repository out.
+///
+/// Reads files only and never runs `git`.
+fn find_repository_scope(project_dir: &Path, home: Option<&Path>) -> RepositoryScope {
+    let Some(repo_root) = project_dir
+        .ancestors()
+        .find(|dir| dir.join(".git").symlink_metadata().is_ok())
+    else {
+        return RepositoryScope::Outside;
+    };
+    let main_checkout = main_checkout_of_linked_worktree(repo_root);
+    if repo_root == project_dir && main_checkout.is_none() {
+        return RepositoryScope::Outside;
+    }
+    let root = main_checkout.as_deref().unwrap_or(repo_root);
+    if root
+        .canonicalize()
+        .map_or(true, |canonical| is_unsafe_scope_root(&canonical, home))
+    {
+        return RepositoryScope::Outside;
+    }
+    if [repo_root, root]
+        .iter()
+        .any(|dir| dir.join(".memd-skip").exists())
+    {
+        return RepositoryScope::OptedOut;
+    }
+    let below_root = project_dir
+        .ancestors()
+        .skip(1)
+        .take_while(|dir| dir.starts_with(repo_root));
+    for dir in below_root.chain(main_checkout.as_deref()) {
+        match read_scope_at(dir) {
+            Ok(Some((tenant_id, project_id))) => {
+                return RepositoryScope::Found {
+                    dir: dir.to_path_buf(),
+                    tenant_id,
+                    project_id,
+                }
+            }
+            Ok(None) => {}
+            Err(invalid) => {
+                let (path, error) = *invalid;
+                return RepositoryScope::Invalid { path, error };
+            }
+        }
+    }
+    RepositoryScope::Missing {
+        root: root.to_path_buf(),
+    }
 }
 
 /// Derive a `project_id` from the repo basename via `sanitize_id`.
@@ -1144,6 +1277,400 @@ mod tests {
 
         assert_eq!(outcome, AutoScopeOutcome::AlreadyExists);
         assert_eq!(std::fs::read(scope_path).unwrap(), original);
+    }
+
+    fn write_scope(dir: &Path, tenant: &str, project: &str) {
+        std::fs::create_dir_all(dir.join(".memd")).unwrap();
+        let scope = ProjectScopeConfig {
+            tenant_id: tenant.to_string(),
+            project_id: Some(project.to_string()),
+            interface: "cli".to_string(),
+            cli_command: "memd".to_string(),
+            agent_context_output: ".memd/context.md".to_string(),
+            project_dir: dir.display().to_string(),
+        };
+        std::fs::write(
+            dir.join(".memd/project_scope.json"),
+            format!("{}\n", serde_json::to_string_pretty(&scope).unwrap()),
+        )
+        .unwrap();
+    }
+
+    /// Run session-start against a persistent store. An in-memory store makes
+    /// memory.md fall back to a hit-stats cache under the project's `.memd`,
+    /// which would hide whether session-start itself created that directory.
+    async fn start(project_dir: &Path) -> Value {
+        let data = tempdir().unwrap();
+        let store = PersistentStore::open(PersistentStoreConfig {
+            data_dir: data.path().to_path_buf(),
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            backfill_hnsw_on_startup: false,
+            backfill_canonical_text_on_startup: false,
+            ..Default::default()
+        })
+        .unwrap();
+        run_session_start_inner(
+            &store,
+            SessionStartOptions {
+                project_dir: project_dir.to_path_buf(),
+            },
+            enabled_inputs("alice"),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn subdirectory_inherits_the_repository_scope() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("repo-root");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        write_scope(&root, "alice", "repo");
+        let review = root.join("review");
+        std::fs::create_dir_all(&review).unwrap();
+
+        let result = start(&review).await;
+
+        assert_eq!(result["auto_scoped"], false);
+        assert_eq!(result["scope_dir"], root.display().to_string());
+        assert_eq!(result["memory_md"]["tenant_id"], "alice");
+        assert_eq!(result["memory_md"]["project_id"], "repo");
+        assert!(!review.join(".memd").exists());
+        assert!(review.join("memory.md").exists());
+    }
+
+    #[tokio::test]
+    async fn nearest_ancestor_scope_wins_over_the_repository_root() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("repo-root");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        write_scope(&root, "alice", "repo");
+        let sub = root.join("sub");
+        write_scope(&sub, "alice", "sub_project");
+        let deep = sub.join("deep");
+        std::fs::create_dir_all(&deep).unwrap();
+
+        let result = start(&deep).await;
+
+        assert_eq!(result["scope_dir"], sub.display().to_string());
+        assert_eq!(result["memory_md"]["project_id"], "sub_project");
+        assert!(!deep.join(".memd").exists());
+    }
+
+    #[tokio::test]
+    async fn subdirectory_of_unscoped_repository_creates_the_scope_at_the_root() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("Fresh-Repo");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let deep = root.join("review/deep");
+        std::fs::create_dir_all(&deep).unwrap();
+
+        let result = start(&deep).await;
+
+        assert_eq!(result["auto_scoped"], true);
+        assert_eq!(result["scope_dir"], root.display().to_string());
+        let scope: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join(".memd/project_scope.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(scope["tenant_id"], "alice");
+        assert_eq!(scope["project_id"], "fresh_repo");
+        assert!(!root.join("review/.memd").exists());
+        assert!(!deep.join(".memd").exists());
+        assert!(deep.join("memory.md").exists());
+    }
+
+    #[tokio::test]
+    async fn invalid_repository_scope_stops_the_subdirectory_start() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("repo-root");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join(".memd")).unwrap();
+        let scope_path = root.join(".memd/project_scope.json");
+        std::fs::write(&scope_path, b"{not json").unwrap();
+        let review = root.join("review");
+        std::fs::create_dir_all(&review).unwrap();
+
+        let result = start(&review).await;
+
+        assert_eq!(result["skipped"], "invalid_project_scope");
+        assert_eq!(result["project_scope"], scope_path.display().to_string());
+        assert_eq!(std::fs::read(&scope_path).unwrap(), b"{not json");
+        assert!(!review.join(".memd").exists());
+        assert!(!review.join("memory.md").exists());
+    }
+
+    #[tokio::test]
+    async fn skip_marker_at_the_repository_root_suppresses_scope_creation() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("repo-root");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".memd-skip"), "").unwrap();
+        let review = root.join("review");
+        std::fs::create_dir_all(&review).unwrap();
+
+        let result = start(&review).await;
+
+        assert_eq!(result["skipped"], "memd_skip_present");
+        assert!(!root.join(".memd").exists());
+        assert!(!review.join(".memd").exists());
+    }
+
+    #[test]
+    fn unsafe_scope_root_is_the_filesystem_root_or_home() {
+        let home = Path::new("/home/someone");
+        assert!(is_unsafe_scope_root(Path::new("/"), Some(home)));
+        assert!(is_unsafe_scope_root(home, Some(home)));
+        assert!(!is_unsafe_scope_root(
+            Path::new("/home/someone/repo"),
+            Some(home)
+        ));
+        assert!(!is_unsafe_scope_root(Path::new("/srv/repo"), None));
+    }
+
+    #[test]
+    fn a_repository_at_home_is_ignored_for_subdirectories() {
+        let tmp = tempdir().unwrap();
+        let home = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(home.join(".git")).unwrap();
+        write_scope(&home, "alice", "home");
+        let sub = home.join("notes");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        assert!(matches!(
+            find_repository_scope(&sub, Some(&home)),
+            RepositoryScope::Outside
+        ));
+        assert!(matches!(
+            find_repository_scope(&sub, None),
+            RepositoryScope::Found { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn directory_outside_any_repository_gets_its_own_scope() {
+        let tmp = tempdir().unwrap();
+        let project_dir = tmp.path().join("plain-dir/inner");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let result = start(&project_dir).await;
+
+        assert_eq!(result["auto_scoped"], true);
+        assert!(result.get("scope_dir").is_none());
+        assert!(project_dir.join(".memd/project_scope.json").exists());
+        assert!(!tmp.path().join("plain-dir/.memd").exists());
+    }
+
+    #[tokio::test]
+    async fn subdirectory_of_a_linked_worktree_inherits_the_worktree_scope() {
+        let tmp = tempdir().unwrap();
+        let (main, worktree) = linked_worktree_layout(tmp.path(), false);
+        write_scope(&main, "alice", "main_project");
+        write_scope(&worktree, "alice", "worktree_project");
+        let sub = worktree.join("review");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let result = start(&sub).await;
+
+        assert_eq!(result["scope_dir"], worktree.display().to_string());
+        assert_eq!(result["memory_md"]["project_id"], "worktree_project");
+        assert!(!sub.join(".memd").exists());
+    }
+
+    /// A linked worktree of `Main-Repo`, either inside the main checkout (the
+    /// `cc` layout) or next to it. Returns (main checkout, worktree).
+    fn linked_worktree_at(root: &Path, inside_main: bool) -> (PathBuf, PathBuf) {
+        if inside_main {
+            return linked_worktree_layout(root, false);
+        }
+        let main = root.join("Main-Repo");
+        let admin = main.join(".git/worktrees/sibling-wt");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(admin.join("commondir"), "../..\n").unwrap();
+        let worktree = root.join("sibling-wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", admin.display()),
+        )
+        .unwrap();
+        (main, worktree)
+    }
+
+    fn read_scope_json(dir: &Path) -> Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(dir.join(".memd/project_scope.json")).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn nested_independent_repository_keeps_its_own_scope() {
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(parent.join(".git")).unwrap();
+        write_scope(&parent, "alice", "parent_project");
+        let child = parent.join("vendor/child");
+        std::fs::create_dir_all(child.join(".git")).unwrap();
+
+        let result = start(&child).await;
+
+        assert_eq!(result["auto_scoped"], true);
+        assert!(result.get("scope_dir").is_none());
+        assert_eq!(read_scope_json(&child)["project_id"], "child");
+        assert_eq!(read_scope_json(&parent)["project_id"], "parent_project");
+    }
+
+    #[tokio::test]
+    async fn submodule_keeps_its_own_scope() {
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path().join("parent");
+        let module_git = parent.join(".git/modules/sub");
+        std::fs::create_dir_all(&module_git).unwrap();
+        write_scope(&parent, "alice", "parent_project");
+        let submodule = parent.join("Sub-Module");
+        std::fs::create_dir_all(&submodule).unwrap();
+        std::fs::write(
+            submodule.join(".git"),
+            format!("gitdir: {}\n", module_git.display()),
+        )
+        .unwrap();
+
+        let result = start(&submodule).await;
+
+        assert_eq!(result["auto_scoped"], true);
+        assert!(result.get("scope_dir").is_none());
+        assert_eq!(read_scope_json(&submodule)["project_id"], "sub_module");
+    }
+
+    #[tokio::test]
+    async fn linked_worktree_root_inherits_the_main_checkout_scope() {
+        for inside_main in [true, false] {
+            let tmp = tempdir().unwrap();
+            let (main, worktree) = linked_worktree_at(tmp.path(), inside_main);
+            write_scope(&main, "custom_tenant", "custom_project");
+
+            let result = start(&worktree).await;
+
+            assert_eq!(result["auto_scoped"], false, "inside_main={inside_main}");
+            assert_eq!(result["scope_dir"], main.display().to_string());
+            assert_eq!(result["memory_md"]["tenant_id"], "custom_tenant");
+            assert_eq!(result["memory_md"]["project_id"], "custom_project");
+            assert!(!worktree.join(".memd").exists());
+            assert!(worktree.join("memory.md").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn linked_worktree_with_unscoped_main_creates_the_scope_at_the_main_checkout() {
+        for inside_main in [true, false] {
+            let tmp = tempdir().unwrap();
+            let (main, worktree) = linked_worktree_at(tmp.path(), inside_main);
+            let sub = worktree.join("review");
+            std::fs::create_dir_all(&sub).unwrap();
+
+            let expected_project = if inside_main { "my_repo" } else { "main_repo" };
+            for dir in [&worktree, &sub] {
+                let result = start(dir).await;
+                assert_eq!(result["scope_dir"], main.display().to_string());
+                assert_eq!(read_scope_json(&main)["project_id"], expected_project);
+                assert!(
+                    !worktree.join(".memd").exists(),
+                    "inside_main={inside_main}"
+                );
+                assert!(!sub.join(".memd").exists());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn subdirectory_of_an_unscoped_worktree_inherits_the_main_checkout_scope() {
+        let tmp = tempdir().unwrap();
+        let (main, worktree) = linked_worktree_at(tmp.path(), false);
+        write_scope(&main, "custom_tenant", "custom_project");
+        let sub = worktree.join("review");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let result = start(&sub).await;
+
+        assert_eq!(result["scope_dir"], main.display().to_string());
+        assert_eq!(result["memory_md"]["project_id"], "custom_project");
+        assert!(!sub.join(".memd").exists());
+        assert!(!worktree.join(".memd").exists());
+    }
+
+    #[tokio::test]
+    async fn legacy_scope_on_the_walk_is_inherited_without_a_shadowing_scope() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("repo-root");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join(".memd")).unwrap();
+        std::fs::write(
+            root.join(".memd/config.json"),
+            b"{\"tenant_id\":\"legacy_tenant\",\"project_id\":\"legacy_project\"}\n",
+        )
+        .unwrap();
+        let review = root.join("review");
+        std::fs::create_dir_all(&review).unwrap();
+
+        let result = start(&review).await;
+
+        assert_eq!(result["auto_scoped"], false);
+        assert_eq!(result["scope_dir"], root.display().to_string());
+        assert_eq!(result["memory_md"]["tenant_id"], "legacy_tenant");
+        assert_eq!(result["memory_md"]["project_id"], "legacy_project");
+        assert!(!root.join(".memd/project_scope.json").exists());
+        assert!(!review.join(".memd").exists());
+    }
+
+    #[tokio::test]
+    async fn invalid_legacy_scope_on_the_walk_stops_the_start() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("repo-root");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join(".memd")).unwrap();
+        let legacy_path = root.join(".memd/config.json");
+        std::fs::write(&legacy_path, b"{not legacy json").unwrap();
+        let review = root.join("review");
+        std::fs::create_dir_all(&review).unwrap();
+
+        let result = start(&review).await;
+
+        assert_eq!(result["skipped"], "invalid_project_scope");
+        assert_eq!(result["project_scope"], legacy_path.display().to_string());
+        assert!(!root.join(".memd/project_scope.json").exists());
+        assert!(!review.join(".memd").exists());
+    }
+
+    #[tokio::test]
+    async fn skip_marker_opts_out_the_whole_repository_even_with_a_scope() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("repo-root");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        write_scope(&root, "alice", "repo");
+        std::fs::write(root.join(".memd-skip"), "").unwrap();
+        let review = root.join("review");
+        std::fs::create_dir_all(&review).unwrap();
+
+        let result = start(&review).await;
+
+        assert_eq!(result["skipped"], "memd_skip_present");
+        assert!(!review.join("memory.md").exists());
+    }
+
+    #[tokio::test]
+    async fn skip_marker_in_the_main_checkout_opts_out_its_linked_worktrees() {
+        let tmp = tempdir().unwrap();
+        let (main, worktree) = linked_worktree_at(tmp.path(), false);
+        write_scope(&main, "alice", "repo");
+        std::fs::write(main.join(".memd-skip"), "").unwrap();
+
+        let result = start(&worktree).await;
+
+        assert_eq!(result["skipped"], "memd_skip_present");
+        assert!(!worktree.join("memory.md").exists());
+        assert!(!worktree.join(".memd").exists());
     }
 
     #[tokio::test]

@@ -69,10 +69,19 @@ file, or attach that context to later commands. Missing identity and model
 fields remain absent.
 
 `session-start` reads `.memd/project_scope.json` first, then a valid legacy
-`.memd/config.json` scope when the project scope is absent. If neither provides
-a scope, it creates `.memd/project_scope.json` using `$MEMD_DEFAULT_TENANT`
-(then `$USER`, then `"default"`) as `tenant_id` and the repo basename as
-`project_id`. Derived IDs use lowercase ASCII letters, digits, and underscores;
+`.memd/config.json` scope when the project scope is absent. Inside a git
+repository, a directory with neither uses the nearest scope in its ancestors, up
+to the repository root, and creates no file. Each ancestor counts if it holds a
+project scope or a valid legacy scope. A linked worktree also uses the scope of
+its main checkout. If no scope exists, session-start creates one at the
+repository root (the main checkout for a linked worktree), named after the
+repository. A `.memd-skip` file at that root skips startup for the whole
+repository. A nested clone or submodule is its own repository and keeps its own
+scope. The home directory and `/` never count as a repository root. Outside a
+repository, or at its root, a missing scope is created in the directory itself
+using `$MEMD_DEFAULT_TENANT` (then `$USER`, then `"default"`) as `tenant_id` and
+the directory basename as `project_id`. The JSON result adds `scope_dir` when
+the scope came from another directory. Derived IDs use lowercase ASCII letters, digits, and underscores;
 separator runs collapse, leading and trailing separators are removed, and IDs
 are capped at 64 characters. Empty IDs fall back to `default` for the tenant
 and `project` for the project.
