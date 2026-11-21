@@ -2530,14 +2530,19 @@ fn make_store_with_unloadable_model() -> (
     Arc<std::sync::atomic::AtomicUsize>,
 ) {
     let (mut store, dir) = make_test_store();
+    // A store whose vectors were current when the model stopped loading.
+    embedding_revision::mark_current(dir.path()).unwrap();
     let (embedder, loads) = unloadable_embedder();
-    let dense = Arc::new(DenseSearcher::with_embedder(
-        embedder,
-        DenseSearchConfig {
-            persist: false,
-            ..Default::default()
-        },
-    ));
+    let dense = Arc::new(
+        DenseSearcher::with_embedder(
+            embedder,
+            DenseSearchConfig {
+                persist: false,
+                ..Default::default()
+            },
+        )
+        .with_base_path(dir.path().to_path_buf()),
+    );
     let sparse = Arc::new(Bm25Index::with_path(Some(dir.path().join("sparse_index"))).unwrap());
     let hybrid = HybridSearcher::new(
         dense.clone(),
@@ -2561,14 +2566,15 @@ fn make_store_with_unloadable_model() -> (
 /// is tried once.
 #[tokio::test]
 async fn unloadable_model_falls_back_to_the_keyword_index() {
-    let (store, _dir, loads) = make_store_with_unloadable_model();
+    let (store, dir, loads) = make_store_with_unloadable_model();
     let tenant = make_tenant();
-    let mut ids = Vec::new();
-    for text in [
+    let texts = [
         "zanzibar expedition left in june",
         "unrelated note about compilers",
         "harbor logistics memo",
-    ] {
+    ];
+    let mut ids = Vec::new();
+    for text in texts {
         ids.push(Store::add(&store, make_chunk(&tenant, text)).await.unwrap());
     }
 
@@ -2618,6 +2624,13 @@ async fn unloadable_model_falls_back_to_the_keyword_index() {
         1,
         "the model load is tried once, not once per call"
     );
+
+    // The chunks are marked indexed but hold no vector. After a clean shutdown
+    // a later writer whose model loads must still find them and embed them.
+    store.shutdown().unwrap();
+    drop(store);
+    let chunks: Vec<(ChunkId, &str)> = ids.into_iter().zip(texts).collect();
+    rebuild_with_working_embedder(&dir, &tenant, &chunks).await;
 }
 
 /// Without a hybrid searcher the old open-time fallback was substring
@@ -2625,22 +2638,22 @@ async fn unloadable_model_falls_back_to_the_keyword_index() {
 /// recorded as indexed as it was when no dense searcher existed.
 #[tokio::test]
 async fn unloadable_model_in_a_dense_only_store_falls_back_to_text_search() {
-    let (mut store, _dir) = make_test_store();
+    let (mut store, dir) = make_test_store();
+    embedding_revision::mark_current(dir.path()).unwrap();
     let (embedder, loads) = unloadable_embedder();
-    store.dense_searcher = Some(Arc::new(DenseSearcher::with_embedder(
-        embedder,
-        DenseSearchConfig {
-            persist: false,
-            ..Default::default()
-        },
-    )));
+    store.dense_searcher = Some(Arc::new(
+        DenseSearcher::with_embedder(
+            embedder,
+            DenseSearchConfig {
+                persist: false,
+                ..Default::default()
+            },
+        )
+        .with_base_path(dir.path().to_path_buf()),
+    ));
     let tenant = make_tenant();
-    let id = Store::add(
-        &store,
-        make_chunk(&tenant, "zanzibar expedition left in june"),
-    )
-    .await
-    .unwrap();
+    let text = "zanzibar expedition left in june";
+    let id = Store::add(&store, make_chunk(&tenant, text)).await.unwrap();
     assert_eq!(
         store.metadata.count_by_index_state(&tenant).unwrap(),
         (0, 1, 0)
@@ -2654,6 +2667,237 @@ async fn unloadable_model_in_a_dense_only_store_falls_back_to_text_search() {
     assert_eq!(hits[0].0.chunk_id, id);
     assert_eq!(store.retrieval_mode(), "text_fallback");
     assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // A dense-only store has no keyword index to fall back on at the next
+    // writer, so the rebuild is the only way the chunk gets a vector.
+    store.shutdown().unwrap();
+    drop(store);
+    rebuild_with_working_embedder(&dir, &tenant, &[(id, text)]).await;
+}
+
+/// What the next writer does once the model loads. The marker asks for a
+/// rebuild, the rebuild embeds the chunks that have no vector, a dense search
+/// finds them, and the marker ends current.
+async fn rebuild_with_working_embedder(
+    dir: &tempfile::TempDir,
+    tenant: &TenantId,
+    chunks: &[(ChunkId, &str)],
+) {
+    let revision = crate::embeddings::EMBEDDING_REVISION;
+    assert_eq!(
+        embedding_revision_marker(dir.path()),
+        format!("{revision} rebuilding"),
+        "the skipped writes must leave a durable rebuild request"
+    );
+    let pending = embedding_revision::prepare(dir.path()).unwrap();
+    assert!(pending, "the next writer must see a pending rebuild");
+
+    let mut store = PersistentStore::open(PersistentStoreConfig {
+        data_dir: dir.path().to_path_buf(),
+        segment_max_chunks: 100,
+        wal_checkpoint_interval: 10,
+        enable_dense_search: false,
+        enable_hybrid_search: false,
+        backfill_hnsw_on_startup: false,
+        ..Default::default()
+    })
+    .unwrap();
+    let dense = Arc::new(
+        DenseSearcher::with_embedder(Arc::new(MockEmbedder::new()), DenseSearchConfig::default())
+            .with_base_path(dir.path().to_path_buf()),
+    );
+    store.dense_searcher = Some(Arc::clone(&dense));
+    store
+        .embedding_rebuild_pending
+        .store(pending, Ordering::Release);
+
+    let RepairSchedule::Scheduled(done) = store.schedule_hnsw_repair(RepairKind::Startup) else {
+        panic!("the repair must be scheduled");
+    };
+    assert!(done.await.unwrap(), "the repair pass must succeed");
+
+    assert!(!store.embedding_rebuild_pending.load(Ordering::Acquire));
+    assert_eq!(embedding_revision_marker(dir.path()), revision.to_string());
+    assert_eq!(dense.index_len(tenant), chunks.len());
+    for (chunk_id, text) in chunks {
+        let hits = dense.search(tenant, text, 1).await.unwrap();
+        assert_eq!(
+            hits.first().map(|hit| &hit.chunk_id),
+            Some(chunk_id),
+            "a dense search must find {text:?}"
+        );
+    }
+}
+
+/// Mock embedder that counts the texts it embeds.
+struct TextCountingEmbedder {
+    inner: MockEmbedder,
+    texts: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl crate::embeddings::Embedder for TextCountingEmbedder {
+    async fn embed_texts(&self, texts: &[&str]) -> Result<Vec<crate::embeddings::EmbeddingResult>> {
+        self.texts
+            .fetch_add(texts.len(), std::sync::atomic::Ordering::SeqCst);
+        self.inner.embed_texts(texts).await
+    }
+
+    async fn embed_query(&self, query: &str) -> Result<crate::embeddings::EmbeddingResult> {
+        self.inner.embed_query(query).await
+    }
+
+    fn dimension(&self) -> usize {
+        self.inner.dimension()
+    }
+
+    fn config(&self) -> &crate::embeddings::EmbeddingConfig {
+        self.inner.config()
+    }
+}
+
+/// The rebuild a skipped write asks for embeds only the chunks that have no
+/// vector. Chunks the dense index already holds are not embedded again.
+#[tokio::test]
+async fn rebuild_after_skipped_writes_embeds_only_the_chunks_without_vectors() {
+    let dir = tempdir().unwrap();
+    let tenant = make_tenant();
+    let open = || {
+        PersistentStore::open(PersistentStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+            segment_max_chunks: 100,
+            wal_checkpoint_interval: 10,
+            enable_dense_search: false,
+            enable_hybrid_search: false,
+            backfill_hnsw_on_startup: false,
+            ..Default::default()
+        })
+        .unwrap()
+    };
+    let dense_with = |embedder: Arc<dyn crate::embeddings::Embedder>| {
+        Arc::new(
+            DenseSearcher::with_embedder(embedder, DenseSearchConfig::default())
+                .with_base_path(dir.path().to_path_buf()),
+        )
+    };
+    embedding_revision::mark_current(dir.path()).unwrap();
+
+    // A working writer indexes three chunks and saves the dense index.
+    {
+        let mut store = open();
+        store.dense_searcher = Some(dense_with(Arc::new(MockEmbedder::new())));
+        for text in ["alpha scheduler quota", "bravo wal replay", "charlie cache"] {
+            Store::add(&store, make_chunk(&tenant, text)).await.unwrap();
+        }
+        store.shutdown().unwrap();
+    }
+    assert_eq!(
+        embedding_revision_marker(dir.path()),
+        crate::embeddings::EMBEDDING_REVISION.to_string()
+    );
+
+    // A writer whose model cannot load adds two more.
+    {
+        let mut store = open();
+        let (embedder, _loads) = unloadable_embedder();
+        store.dense_searcher = Some(dense_with(embedder));
+        for text in ["delta eviction policy", "echo segment merge"] {
+            Store::add(&store, make_chunk(&tenant, text)).await.unwrap();
+        }
+        store.shutdown().unwrap();
+    }
+
+    // The next writer's model loads: only the two skipped chunks are embedded.
+    let embedded = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let pending = embedding_revision::prepare(dir.path()).unwrap();
+    assert!(pending);
+    let mut store = open();
+    let dense = dense_with(Arc::new(TextCountingEmbedder {
+        inner: MockEmbedder::new(),
+        texts: Arc::clone(&embedded),
+    }));
+    store.dense_searcher = Some(Arc::clone(&dense));
+    store
+        .embedding_rebuild_pending
+        .store(pending, Ordering::Release);
+    let RepairSchedule::Scheduled(done) = store.schedule_hnsw_repair(RepairKind::Startup) else {
+        panic!("the repair must be scheduled");
+    };
+    assert!(done.await.unwrap());
+
+    assert_eq!(dense.index_len(&tenant), 5);
+    assert_eq!(
+        embedded.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the rebuild must embed only the chunks that have no vector"
+    );
+    assert_eq!(
+        embedding_revision_marker(dir.path()),
+        crate::embeddings::EMBEDDING_REVISION.to_string()
+    );
+}
+
+/// A process whose model works never touches the marker: it is removed here,
+/// so any write to it would show.
+#[tokio::test]
+async fn a_write_with_a_working_model_leaves_the_rebuild_marker_alone() {
+    let (mut store, dir) = make_test_store();
+    embedding_revision::mark_current(dir.path()).unwrap();
+    fs::remove_file(dir.path().join("embedding_revision")).unwrap();
+    store.dense_searcher = Some(Arc::new(
+        DenseSearcher::with_embedder(Arc::new(MockEmbedder::new()), DenseSearchConfig::default())
+            .with_base_path(dir.path().to_path_buf()),
+    ));
+    let tenant = make_tenant();
+    Store::add(&store, make_chunk(&tenant, "alpha scheduler quota"))
+        .await
+        .unwrap();
+    store.shutdown().unwrap();
+    assert!(!dir.path().join("embedding_revision").exists());
+}
+
+/// The first skipped write records the rebuild; later skipped writes in the
+/// same process do not write the marker again.
+#[tokio::test]
+async fn the_first_skipped_write_records_the_rebuild_once_per_process() {
+    let (store, dir, _loads) = make_store_with_unloadable_model();
+    let tenant = make_tenant();
+    let revision = crate::embeddings::EMBEDDING_REVISION;
+    assert_eq!(embedding_revision_marker(dir.path()), revision.to_string());
+
+    Store::add(&store, make_chunk(&tenant, "alpha scheduler quota"))
+        .await
+        .unwrap();
+    assert_eq!(
+        embedding_revision_marker(dir.path()),
+        format!("{revision} rebuilding"),
+        "the marker must be durable before the write returns"
+    );
+
+    // Put the marker back as if a rebuild had finished meanwhile.
+    embedding_revision::mark_current(dir.path()).unwrap();
+    Store::add(&store, make_chunk(&tenant, "bravo wal replay"))
+        .await
+        .unwrap();
+    assert_eq!(embedding_revision_marker(dir.path()), revision.to_string());
+}
+
+/// If the repair request cannot be made durable, the write must not claim the
+/// chunk is indexed: it is left as an index failure, which a later pass retries.
+#[tokio::test]
+async fn a_failed_marker_write_leaves_the_chunk_as_an_index_failure() {
+    let (store, dir, _loads) = make_store_with_unloadable_model();
+    let tenant = make_tenant();
+    // A directory where the marker's temporary file goes makes the write fail.
+    fs::create_dir(dir.path().join("embedding_revision.tmp")).unwrap();
+
+    Store::add(&store, make_chunk(&tenant, "alpha scheduler quota"))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.metadata.count_by_index_state(&tenant).unwrap(),
+        (0, 0, 1)
+    );
 }
 
 /// A rebuild that embedded nothing is not a finished rebuild. The marker

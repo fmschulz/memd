@@ -294,6 +294,26 @@ pub(crate) fn mark_current(data_dir: &Path) -> Result<()> {
     write_marker(data_dir, &EMBEDDING_REVISION.to_string())
 }
 
+/// Record that some chunks have no vector because the embedding model could
+/// not load. The marker then reads `<revision> rebuilding`, so the next writer
+/// whose model loads resumes the segment-backed rebuild. That pass embeds only
+/// the chunks that lack a vector and marks the store current when it is done.
+///
+/// A current or unmarked store moves to `rebuilding`; an already rebuilding
+/// store stays. A marker of another revision is left alone: the next writer
+/// open discards those vectors and re-embeds every chunk from the segments,
+/// which covers these chunks as well.
+pub(crate) fn mark_rebuilding(data_dir: &Path) -> Result<()> {
+    let current = EMBEDDING_REVISION.to_string();
+    let rebuilding = format!("{current}{REBUILDING_SUFFIX}");
+    let recorded = fs::read_to_string(marker_path(data_dir)).ok();
+    match recorded.as_deref().map(str::trim) {
+        Some(value) if value == rebuilding => Ok(()),
+        Some(value) if value != current => Ok(()),
+        _ => write_marker(data_dir, &rebuilding),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,6 +326,31 @@ mod tests {
         backfill: bool,
     ) -> Result<bool> {
         prepare_model(data_dir, model, read_only, backfill, || Ok(()))
+    }
+
+    #[test]
+    fn mark_rebuilding_moves_only_a_current_or_unmarked_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let revision = EMBEDDING_REVISION;
+        let marker = || fs::read_to_string(marker_path(dir.path())).unwrap();
+
+        mark_rebuilding(dir.path()).unwrap();
+        assert_eq!(marker().trim(), format!("{revision} rebuilding"));
+        // Already rebuilding: the writer that finds it has nothing to add.
+        mark_rebuilding(dir.path()).unwrap();
+        assert_eq!(marker().trim(), format!("{revision} rebuilding"));
+        // The next writer open resumes it; a finished rebuild is current again.
+        assert!(prepare(dir.path()).unwrap());
+        mark_current(dir.path()).unwrap();
+        mark_rebuilding(dir.path()).unwrap();
+        assert_eq!(marker().trim(), format!("{revision} rebuilding"));
+
+        // A marker of another revision is left to the next writer open: it
+        // discards the old vectors and re-embeds every chunk, which covers
+        // the chunks this call would have recorded.
+        write_marker(dir.path(), "0").unwrap();
+        mark_rebuilding(dir.path()).unwrap();
+        assert_eq!(marker().trim(), "0");
     }
 
     fn seed_model_vectors(data_dir: &Path, dimension: usize) -> PathBuf {

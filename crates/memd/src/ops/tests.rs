@@ -7730,11 +7730,13 @@ fn lifecycle_batch(tenant: &TenantId) -> AddBatchParams {
 }
 
 /// What a finished batch left behind, without ids or clock values.
-async fn lifecycle_batch_snapshot(store: &PersistentStore, tenant: &TenantId) -> Vec<String> {
+async fn batch_snapshot(
+    store: &PersistentStore,
+    tenant: &TenantId,
+    params: AddBatchParams,
+) -> Vec<String> {
     use crate::store::metadata::MetadataStore;
-    let result = handle_memory_add_batch(store, None, lifecycle_batch(tenant))
-        .await
-        .unwrap();
+    let result = handle_memory_add_batch(store, None, params).await.unwrap();
     let text = result["content"][0]["text"].as_str().unwrap();
     let response: AddBatchResult = serde_json::from_str(text).unwrap();
     let mut rows = store.metadata().list(tenant, usize::MAX, 0).unwrap();
@@ -7790,7 +7792,7 @@ async fn lifecycle_batch_snapshot(store: &PersistentStore, tenant: &TenantId) ->
 async fn memory_add_batch_with_lifecycle_keeps_rows_statuses_and_overlays() {
     let (store, _dir) = make_persistent_store();
     let tenant = TenantId::new("lifecycle_batch_rows").unwrap();
-    let snapshot = lifecycle_batch_snapshot(&store, &tenant).await;
+    let snapshot = batch_snapshot(&store, &tenant, lifecycle_batch(&tenant)).await;
     // Recorded from the per-chunk path that stored these chunks one by one:
     // chunk 3 reuses chunk 2, the repeated long text is stored again (its
     // rows are split, so no hash matches), the long text with a review time
@@ -7814,6 +7816,68 @@ async fn memory_add_batch_with_lifecycle_keeps_rows_statuses_and_overlays() {
         "doc|final|LongTerm|-|exp=None|rev=None|mode=Document|stamped=false",
         "doc|final|LongTerm|-|exp=Some(true)|rev=None|mode=Document|stamped=true",
         "trace|final|LongTerm|-|exp=Some(false)|rev=Some(false)|mode=Document|stamped=true",
+    ];
+    assert_eq!(snapshot, expected);
+}
+
+/// A long document with a review time, then chunks whose text equals one of
+/// the physical rows the document is split into.
+fn split_fragment_batch(tenant: &TenantId) -> AddBatchParams {
+    let long = long_note();
+    let rows = crate::store::split_for_add(MemoryChunk::new(
+        tenant.clone(),
+        long.clone(),
+        ChunkType::Doc,
+    ));
+    assert!(rows.len() >= 3, "the fixture must split into several rows");
+    let plain = |text: &str| BatchChunkParams {
+        text: text.to_string(),
+        chunk_type: "doc".to_string(),
+        ..Default::default()
+    };
+    AddBatchParams {
+        tenant_id: tenant.to_string(),
+        chunks: vec![
+            // 0: the document; it is split and carries a review time
+            BatchChunkParams {
+                review_after_ms: Some(FAR_REVIEW_MS),
+                ..plain(&long)
+            },
+            // 1: text equal to one row of the document
+            plain(&rows[1].text),
+            // 2: another row's text, but with its own expiry, so it is stored
+            BatchChunkParams {
+                expires_at_ms: Some(FAR_EXPIRY_MS),
+                ..plain(&rows[2].text)
+            },
+            // 3: the first fragment again
+            plain(&rows[1].text),
+        ],
+        supersede_near_duplicates: None,
+    }
+}
+
+/// Chunks stored one by one could reuse a row the splitting of an earlier
+/// document created. The batch must give the same rows and the same ids.
+#[tokio::test]
+async fn memory_add_batch_with_lifecycle_dedups_a_split_fragment_like_the_per_chunk_path() {
+    let (store, _dir) = make_persistent_store();
+    let tenant = TenantId::new("lifecycle_batch_split").unwrap();
+    let snapshot = batch_snapshot(&store, &tenant, split_fragment_batch(&tenant)).await;
+    // Recorded from the per-chunk path: chunks 1 and 3 reuse the document's
+    // second row (row 1), and chunk 2, which asked for its own expiry, is
+    // stored as a fourth row.
+    let expected = [
+        "ids=4",
+        "distinct=3",
+        "decisions=Some([\"inserted\", \"reused_existing_exact_content\", \"inserted\", \"reused_existing_exact_content\"])",
+        "reused_rows=[\"none\", \"1\", \"none\", \"1\"]",
+        "admission=Some([\"durable\", \"durable\", \"durable\", \"durable\"])",
+        "primary_rows=[\"0\", \"1\", \"3\", \"1\"]",
+        "doc|final|LongTerm|-|exp=None|rev=Some(true)|mode=Document|stamped=true",
+        "doc|final|LongTerm|-|exp=None|rev=Some(true)|mode=Document|stamped=true",
+        "doc|final|LongTerm|-|exp=None|rev=Some(true)|mode=Document|stamped=true",
+        "doc|final|LongTerm|-|exp=Some(true)|rev=None|mode=Document|stamped=true",
     ];
     assert_eq!(snapshot, expected);
 }

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 use crate::compaction::hnsw_rebuild::{HnswRebuilder, RebuildResult};
 use crate::embeddings::{CandleEmbedder, CandleModel, Embedder, EmbeddingConfig};
@@ -68,6 +68,10 @@ pub struct DenseSearcher {
     /// out. From then on this searcher does not call the embedder again:
     /// indexing skips the dense side and search reports the failure.
     unavailable: OnceLock<String>,
+    /// Whether this process has already recorded in the rebuild marker that
+    /// some chunks lack vectors. The lock also keeps two skipping writes
+    /// from writing the marker at once.
+    rebuild_recorded: Mutex<bool>,
     /// Configuration
     config: DenseSearchConfig,
 }
@@ -105,6 +109,7 @@ impl DenseSearcher {
             base_path: None,
             read_only: false,
             unavailable: OnceLock::new(),
+            rebuild_recorded: Mutex::new(false),
             config,
         }
     }
@@ -113,6 +118,25 @@ impl DenseSearcher {
     /// out. `None` means the model works or has not been needed yet.
     pub fn unavailable_reason(&self) -> Option<&str> {
         self.unavailable.get().map(String::as_str)
+    }
+
+    /// Indexing skipped because the model cannot load. The rows are marked
+    /// indexed by the caller but hold no vector, so the first skip in this
+    /// process makes that durable before the write returns: the embedding
+    /// revision marker moves to `rebuilding`, and the next writer whose model
+    /// loads re-embeds the chunks that lack a vector. If the marker cannot be
+    /// written, the error reaches the caller and the rows stay index failures,
+    /// which a later pass retries.
+    fn skip_without_model(&self) -> Result<()> {
+        let Some(data_dir) = &self.base_path else {
+            return Ok(());
+        };
+        let mut recorded = self.rebuild_recorded.lock();
+        if !*recorded {
+            super::embedding_revision::mark_rebuilding(data_dir)?;
+            *recorded = true;
+        }
+        Ok(())
     }
 
     /// The embedding result, remembering a model that cannot load.
@@ -192,7 +216,7 @@ impl DenseSearcher {
             });
         }
         if self.unavailable.get().is_some() {
-            return Ok(());
+            return self.skip_without_model();
         }
         // Documents are embedded verbatim via embed_texts; embed_query would
         // apply a retrieval query prefix (BGE), corrupting stored vectors.
@@ -202,7 +226,7 @@ impl DenseSearcher {
                 MemdError::EmbeddingError("embed_texts returned no embedding".to_string())
             })?,
             // The model cannot load: the dense side waits for a repair pass.
-            Err(MemdError::ModelUnavailable(_)) => return Ok(()),
+            Err(MemdError::ModelUnavailable(_)) => return self.skip_without_model(),
             Err(error) => return Err(error),
         };
         let index = self.get_or_create_index(tenant_id)?;
@@ -234,16 +258,17 @@ impl DenseSearcher {
 
         // A model that cannot load leaves the dense side unindexed, as when a
         // store has no dense searcher. The rows wait for a repair pass that
-        // has the model; the caller can tell from `unavailable_reason`.
+        // has the model; the caller can tell from `unavailable_reason`, and
+        // the rebuild marker tells the next writer.
         if self.unavailable.get().is_some() {
-            return Ok(());
+            return self.skip_without_model();
         }
 
         // Batch embed all texts
         let texts: Vec<&str> = chunks.iter().map(|(_, text)| text.as_str()).collect();
         let embeddings = match self.note_model_failure(self.embedder.embed_texts(&texts).await) {
             Ok(embeddings) => embeddings,
-            Err(MemdError::ModelUnavailable(_)) => return Ok(()),
+            Err(MemdError::ModelUnavailable(_)) => return self.skip_without_model(),
             Err(error) => return Err(error),
         };
 

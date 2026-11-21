@@ -47,6 +47,13 @@ async fn store_queued_with_lifecycle(
     Ok(())
 }
 
+/// Whether storing this chunk splits it into several rows. The stored rows
+/// then hold pieces of the text, not the text itself.
+fn chunk_will_split(chunk: &MemoryChunk) -> bool {
+    chunk.text.len() > crate::store::ADD_CHUNK_THRESHOLD
+        && crate::store::split_for_add(chunk.clone()).len() > 1
+}
+
 /// The batch's chunk ids in input order; every position must have one.
 fn ordered_chunk_ids(ids_by_position: Vec<Option<ChunkId>>) -> Result<Vec<ChunkId>, McpError> {
     ids_by_position
@@ -620,6 +627,18 @@ pub async fn handle_memory_add_batch<S: Store>(
                     any_default_deduped = true;
                     continue;
                 }
+            }
+            if chunk_will_split(&chunk) {
+                // A split document leaves rows that a later chunk can match by
+                // text, and the queue's content keys do not cover those rows.
+                // Store the queue first, to keep the storing order, then the
+                // document in a call of its own, so what follows finds its
+                // rows in the store.
+                store_queued_with_lifecycle(ps, &mut queue, &mut ids_by_position).await?;
+                queued_keys.clear();
+                queue.push((position, chunk, delta));
+                store_queued_with_lifecycle(ps, &mut queue, &mut ids_by_position).await?;
+                continue;
             }
             queued_keys.insert(key);
             queue.push((position, chunk, delta));

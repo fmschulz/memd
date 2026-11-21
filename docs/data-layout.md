@@ -42,7 +42,10 @@ from its segments in the background; the file reads `<revision> rebuilding`
 until that pass has finished and the rebuilt indexes are saved. A command that
 exits during the rebuild waits up to 10 seconds for it, saves what has been
 indexed, and the next writer continues from there. Until then, chunks that are
-not yet re-embedded are found through the sparse index only.
+not yet re-embedded are found through the sparse index only. The marker also
+moves to `rebuilding` when a writer's embedding model cannot load and it writes
+chunks without vectors; the next writer whose model loads embeds only those
+chunks.
 
 Retrieval/list scans are tolerant of stale metadata rows with unreadable segment
 payloads: unreadable chunks are logged and skipped. Direct
