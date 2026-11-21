@@ -82,22 +82,42 @@ What `make install` does:
 `memd session-start` reads `.memd/project_scope.json` first. When that file is
 absent, it uses a valid legacy `.memd/config.json` scope. When neither exists in
 a directory inside a git repository, it uses the nearest scope in the ancestors
-up to the repository root and creates no scope file. A linked worktree also
-uses the scope of its main checkout, which its main repository must confirm. A
-nested clone or a submodule is its own repository. When the repository has no
-scope, session-start creates a minimal one at the repository root (the main
-checkout for a linked worktree), not in the subdirectory. The scope comes from
-`$MEMD_DEFAULT_TENANT` (then `$USER`, then `"default"`) and the repository
-basename. If the root is not writable, the scope goes to the session directory
-and keeps the repository's name. Outside a repository, the directory itself
-gets the scope. `memory.md` is always written to the session directory. The
-result reports `scope_dir` when the scope came from another directory. The
-consolidation watermark lives in the scope directory, so one repository has one
-watermark. Derived IDs are lowercased,
+up to the repository root and creates no scope file. A scope above the
+repository, such as one in the home directory, never applies to a repository;
+every scope lookup stops at the repository root (for a linked worktree, after
+its main checkout). Outside a repository the lookup is unchanged. A linked
+worktree uses the scope of its main checkout, which its main repository must
+confirm. A nested clone or a submodule is its own repository.
+
+A project gets files only once it has content: at least one visible fact or one
+experience case. When no scope exists, session-start derives the scope it would
+create, writes nothing, and checks the store. With content, it creates the scope
+at the repository root (the main checkout for a linked worktree), not in the
+subdirectory, and writes `memory.md`. Without content it returns
+`{"skipped": "no_stored_facts", "tenant_id": ..., "project_id": ...}` and
+writes no `.memd` directory, no scope file and no `memory.md`. An existing scope
+whose project has no content gets no new `memory.md` either; an existing
+`memory.md` stays. Because such a project has no `memory.md`, it also shows no
+machine-wide facts.
+
+The first write creates the scope. A flagless `memd add` or `memd experience
+note` in a directory with no scope creates it by the same rule, then stores the
+fact. Read commands (`search`, `agent-context`, `get` without ids) never create
+a scope; their "no scope" error says so and names `--tenant-id`.
+
+The scope comes from `$MEMD_DEFAULT_TENANT` (then `$USER`, then `"default"`) and
+the repository basename. If the root is not writable, the scope goes to the
+session directory and keeps the repository's name. Outside a repository, the
+directory itself gets the scope. `memory.md` is always written to the session
+directory. The result reports `scope_dir` when the scope came from another
+directory. The consolidation watermark lives in the scope directory, so one
+repository has one watermark. Derived IDs are lowercased,
 separator runs become underscores, and IDs are capped at 64 characters.
 Automatic scope creation skips the home directory itself and `/`, including
 symlink aliases, and a repository rooted there is ignored. Explicit
-`memd init` can still create a scope there.
+`memd init` can still create a scope there. A project directory that exists is
+resolved to its canonical path first, so `..` after a symlink names the real
+directory.
 Set `MEMD_AUTO_SCOPE=0` to disable scope creation. Add `.memd-skip` in the repo
 root (or main checkout) to skip startup for the whole repository, even for a
 subdirectory with its own scope. Invalid or unreadable scopes

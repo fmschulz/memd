@@ -25,8 +25,11 @@ This writes `.memd/memory_guardrails.md`, `.memd/tenant_scope.json`, and
 `AGENTS.md` and `CLAUDE.md`.
 
 Automatic session startup does not require `memd init`. It reuses a valid
-project or legacy scope, or creates `.memd/project_scope.json` when neither
-provides one. Let memd write this file; partial JSON fails to parse. See
+project or legacy scope. When neither exists, the first flagless `memd add` (or
+`memd experience note`) creates `.memd/project_scope.json`; `memd session-start`
+creates it only for a project that already has stored facts or an experience
+case. Read commands never create a scope. A scope above a git repository never
+applies to it. Let memd write this file; partial JSON fails to parse. See
 [Automatic session-start](session-start.md#automatic-session-start).
 Run `memd init` only when you want the full guardrail suite for a repo.
 

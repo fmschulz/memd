@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use super::args::{CliCommand, ProjectScopeConfig};
-use super::paths::normalize_absolute;
+use super::paths::absolutize_project_dir;
 use crate::error::{MemdError, Result};
 
 #[derive(Default)]
@@ -29,28 +29,93 @@ impl OperationScopeCache {
 /// that is a linked worktree also offers the scope of its main checkout,
 /// before the walk continues upward, so a worktree outside the main checkout
 /// shares the repository's scope.
+///
+/// The walk stops at the root of the git repository that encloses `start`
+/// (after the main checkout of a linked worktree): a scope above a
+/// repository, such as one in the home directory, never becomes the project
+/// of a repository. Outside any repository the walk runs to `$HOME`.
 pub(super) fn find_project_scope(start: &Path) -> Result<Option<ProjectScopeConfig>> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let mut current = normalize_absolute(start);
+    find_project_scope_with_home(start, canonical_home().as_deref())
+}
 
-    for _ in 0..64 {
-        if let Some(scope) = read_scope_file_at(&current)? {
+fn find_project_scope_with_home(
+    start: &Path,
+    home: Option<&Path>,
+) -> Result<Option<ProjectScopeConfig>> {
+    let start = absolutize_project_dir(start)?;
+    let repository = enclosing_repository(&start, home);
+
+    for dir in start.ancestors() {
+        if let Some(scope) = read_scope_file_at(dir)? {
             return Ok(Some(scope));
         }
-        if let Some(main_checkout) = main_checkout_of_linked_worktree(&current) {
+        if let Some(main_checkout) = main_checkout_of_linked_worktree(dir) {
             if let Some(scope) = read_scope_file_at(&main_checkout)? {
                 return Ok(Some(scope));
             }
         }
-        if home.as_deref().is_some_and(|home| current == home) {
-            break;
-        }
-        if !current.pop() {
+        if home == Some(dir) || repository.as_ref().is_some_and(|r| r.repo_root == dir) {
             break;
         }
     }
 
     Ok(None)
+}
+
+/// The canonical home directory, when it resolves.
+pub(super) fn canonical_home() -> Option<PathBuf> {
+    dirs::home_dir().and_then(|home| home.canonicalize().ok())
+}
+
+/// True for the filesystem root and the home directory. A scope there would
+/// cover every descendant. Both arguments must be canonical.
+pub(super) fn is_unsafe_scope_root(canonical: &Path, home: Option<&Path>) -> bool {
+    canonical.parent().is_none() || home == Some(canonical)
+}
+
+/// The git repository that encloses a directory.
+#[derive(Debug)]
+pub(super) struct Repository {
+    /// The nearest directory at or above the directory with a `.git`.
+    pub(super) repo_root: PathBuf,
+    /// For a linked worktree, the main checkout that its main repository
+    /// confirms.
+    pub(super) main_checkout: Option<PathBuf>,
+}
+
+impl Repository {
+    /// The directory that owns the repository's scope: the main checkout of a
+    /// linked worktree, else the repository root.
+    pub(super) fn root(&self) -> &Path {
+        self.main_checkout.as_deref().unwrap_or(&self.repo_root)
+    }
+
+    /// True when a `.memd-skip` marker at the root or main checkout opts the
+    /// whole repository out.
+    pub(super) fn opted_out(&self) -> bool {
+        [self.repo_root.as_path(), self.root()]
+            .iter()
+            .any(|dir| dir.join(".memd-skip").exists())
+    }
+}
+
+/// The repository that encloses `dir`, if any: the nearest `.git` file or
+/// directory at or above `dir` marks its root. A repository whose root, or
+/// main checkout, is unsafe (home or `/`) is ignored. `home` must be
+/// canonical. Reads files only and never runs `git`.
+pub(super) fn enclosing_repository(dir: &Path, home: Option<&Path>) -> Option<Repository> {
+    let repo_root = dir
+        .ancestors()
+        .find(|dir| dir.join(".git").symlink_metadata().is_ok())?;
+    let repository = Repository {
+        repo_root: repo_root.to_path_buf(),
+        main_checkout: main_checkout_of_linked_worktree(repo_root),
+    };
+    let unsafe_root = repository
+        .root()
+        .canonicalize()
+        .map_or(true, |canonical| is_unsafe_scope_root(&canonical, home));
+    (!unsafe_root).then_some(repository)
 }
 
 /// Read `dir/.memd/project_scope.json`. A missing file is `None`. A file that
@@ -87,12 +152,14 @@ fn read_scope_file_at(dir: &Path) -> Result<Option<ProjectScopeConfig>> {
 /// parent is the main checkout. The admin dir also records the worktree's
 /// `.git` file in its `gitdir` file. That back-pointer must resolve to this
 /// directory's `.git`, so a crafted `.git` file cannot claim another
-/// repository. This reads files only and never runs `git`. Plain repos,
-/// submodules (no `commondir`), bare-repo worktrees (common dir not named
-/// `.git`), forged pointers, and unreadable files all return `None`.
+/// repository. The admin dir itself must be `<common dir>/worktrees/<name>`,
+/// so an admin dir outside the repository it names is refused too. A `.git`
+/// that is a symlink is refused. This reads files only and never runs `git`.
+/// Plain repos, submodules (no `commondir`), bare-repo worktrees (common dir
+/// not named `.git`), forged pointers, and unreadable files all return `None`.
 pub(super) fn main_checkout_of_linked_worktree(project_dir: &Path) -> Option<PathBuf> {
     let dot_git = project_dir.join(".git");
-    if !dot_git.is_file() {
+    if !dot_git.symlink_metadata().ok()?.file_type().is_file() {
         return None;
     }
     let pointer = std::fs::read_to_string(&dot_git).ok()?;
@@ -110,12 +177,17 @@ pub(super) fn main_checkout_of_linked_worktree(project_dir: &Path) -> Option<Pat
     if common_dir.file_name()? != ".git" {
         return None;
     }
+    // The admin dir must live in the worktrees directory of the repository it
+    // names; otherwise the claim is not the repository's own record.
+    if admin_dir.canonicalize().ok()?.parent()? != common_dir.join("worktrees") {
+        return None;
+    }
     common_dir.parent().map(Path::to_path_buf)
 }
 
 fn scope_missing_error(cwd: &Path) -> MemdError {
     MemdError::ValidationError(format!(
-        "no --tenant-id given and no .memd/project_scope.json found upward from {}; run: memd session-start --project-dir . (or pass --tenant-id)",
+        "no --tenant-id given and no .memd/project_scope.json found upward from {}; the first `memd add` creates the scope, or pass --tenant-id",
         cwd.display()
     ))
 }
@@ -139,6 +211,27 @@ pub(super) fn resolve_required(
         .ok_or_else(|| scope_missing_error(start))?;
     let project_id = project.or_else(|| scope.and_then(|scope| scope.project_id));
     Ok((tenant_id, project_id))
+}
+
+/// [`resolve_required`] for a command that writes. When no tenant is given and
+/// no scope exists, the first write creates the scope the way `session-start`
+/// would (at the repository root, else in the directory; unsafe roots,
+/// `.memd-skip` and `MEMD_AUTO_SCOPE=0` honoured) and uses it. When creation
+/// is refused, the usual "no scope" error follows.
+fn resolve_for_write(
+    start: &Path,
+    tenant: Option<String>,
+    project: Option<String>,
+    inputs: &super::session_start::AutoScopeInputs,
+) -> Result<(String, Option<String>)> {
+    if tenant.is_none() && find_project_scope(start)?.is_none() {
+        if let Some((tenant_id, scope_project)) =
+            super::session_start::create_scope_for_first_write(start, inputs)?
+        {
+            return Ok((tenant_id, project.or(scope_project)));
+        }
+    }
+    resolve_required(start, tenant, project)
 }
 
 pub(super) fn resolve_optional(
@@ -229,19 +322,47 @@ pub(super) fn apply_operation_scope_at(
 }
 
 pub fn resolve_command_scope(cmd: &mut CliCommand) -> Result<()> {
-    let cwd = current_dir();
+    resolve_command_scope_at(
+        &current_dir(),
+        cmd,
+        &super::session_start::AutoScopeInputs::from_env(),
+    )
+}
+
+fn resolve_command_scope_at(
+    cwd: &Path,
+    cmd: &mut CliCommand,
+    inputs: &super::session_start::AutoScopeInputs,
+) -> Result<()> {
+    let cwd = cwd.to_path_buf();
     match cmd {
+        // The first write creates the scope; reads never do.
+        CliCommand::Add {
+            tenant_id,
+            project_id,
+            ..
+        } => {
+            let (resolved_tenant, resolved_project) =
+                resolve_for_write(&cwd, tenant_id.take(), project_id.take(), inputs)?;
+            *tenant_id = Some(resolved_tenant);
+            *project_id = resolved_project;
+        }
         CliCommand::Experience {
             tenant_id,
             project_id,
+            command,
             ..
+        } => {
+            let (tenant, project) = (tenant_id.take(), project_id.take());
+            let (resolved_tenant, resolved_project) = if command.first_write() {
+                resolve_for_write(&cwd, tenant, project, inputs)?
+            } else {
+                resolve_required(&cwd, tenant, project)?
+            };
+            *tenant_id = Some(resolved_tenant);
+            *project_id = resolved_project;
         }
-        | CliCommand::Add {
-            tenant_id,
-            project_id,
-            ..
-        }
-        | CliCommand::Search {
+        CliCommand::Search {
             tenant_id,
             project_id,
             ..
@@ -304,6 +425,7 @@ pub fn resolve_command_scope(cmd: &mut CliCommand) -> Result<()> {
 mod tests {
     use super::*;
     use crate::cli::{CliQueryMode, ExportFormat, SearchReranker, WarmMode};
+    use crate::types::TenantId;
 
     #[test]
     fn resolve_required_fills_search_scope_from_file() {
@@ -427,7 +549,7 @@ mod tests {
         assert_eq!(
             message,
             format!(
-                "no --tenant-id given and no .memd/project_scope.json found upward from {}; run: memd session-start --project-dir . (or pass --tenant-id)",
+                "no --tenant-id given and no .memd/project_scope.json found upward from {}; the first `memd add` creates the scope, or pass --tenant-id",
                 dir.path().display()
             )
         );
@@ -652,5 +774,263 @@ mod tests {
         .unwrap();
         assert_eq!(main_checkout_of_linked_worktree(&forged), None);
         assert!(resolve_required(&forged, None, None).is_err());
+    }
+
+    #[test]
+    fn forged_admin_directory_outside_the_victim_repository_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (victim, _worktree) = sibling_worktree(dir.path());
+        // The attacker owns the admin directory: commondir names the victim's
+        // `.git`, and the back-pointer names the attacker's own `.git` file.
+        let attacker = dir.path().join("attacker");
+        let admin = dir.path().join("attacker-admin");
+        std::fs::create_dir_all(&attacker).unwrap();
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(
+            admin.join("commondir"),
+            format!("{}\n", victim.join(".git").display()),
+        )
+        .unwrap();
+        std::fs::write(
+            admin.join("gitdir"),
+            format!("{}/.git\n", attacker.display()),
+        )
+        .unwrap();
+        std::fs::write(
+            attacker.join(".git"),
+            format!("gitdir: {}\n", admin.display()),
+        )
+        .unwrap();
+
+        assert_eq!(main_checkout_of_linked_worktree(&attacker), None);
+        assert!(resolve_required(&attacker, None, None).is_err());
+    }
+
+    #[test]
+    fn symlinked_dot_git_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_main, worktree) = sibling_worktree(dir.path());
+        assert!(main_checkout_of_linked_worktree(&worktree).is_some());
+        let link_dir = dir.path().join("link-wt");
+        std::fs::create_dir_all(&link_dir).unwrap();
+        std::os::unix::fs::symlink(worktree.join(".git"), link_dir.join(".git")).unwrap();
+
+        assert_eq!(main_checkout_of_linked_worktree(&link_dir), None);
+    }
+
+    fn write_scope_file(dir: &Path, tenant: &str, project: &str) {
+        std::fs::create_dir_all(dir.join(".memd")).unwrap();
+        std::fs::write(
+            dir.join(".memd/project_scope.json"),
+            format!(
+                r#"{{"tenant_id":"{tenant}","project_id":"{project}","interface":"cli","cli_command":"memd","agent_context_output":".memd/context.md","project_dir":"."}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn repository_below_a_home_like_directory_does_not_inherit_its_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        write_scope_file(&home, "home_tenant", "home_project");
+        let repo = home.join("repo");
+        let sub = repo.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let plain = home.join("notes/deep");
+        std::fs::create_dir_all(&plain).unwrap();
+
+        // Inside the repository the home scope is out of reach.
+        assert!(find_project_scope_with_home(&sub, Some(&home))
+            .unwrap()
+            .is_none());
+        assert!(find_project_scope_with_home(&repo, Some(&home))
+            .unwrap()
+            .is_none());
+        // Outside any repository the walk still reaches home.
+        let scope = find_project_scope_with_home(&plain, Some(&home)).unwrap();
+        assert_eq!(scope.unwrap().tenant_id, "home_tenant");
+        // The repository's own scope is still found.
+        write_scope_file(&repo, "repo_tenant", "repo_project");
+        let scope = find_project_scope_with_home(&sub, Some(&home)).unwrap();
+        assert_eq!(scope.unwrap().tenant_id, "repo_tenant");
+    }
+
+    #[test]
+    fn nested_clone_and_linked_worktree_stop_the_walk_at_their_own_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        // A scope above everything.
+        write_scope_file(&root, "outer_tenant", "outer");
+        let clone = root.join("outer-dir/clone");
+        std::fs::create_dir_all(clone.join(".git")).unwrap();
+        std::fs::create_dir_all(clone.join("sub")).unwrap();
+        assert!(find_project_scope_with_home(&clone.join("sub"), None)
+            .unwrap()
+            .is_none());
+        assert!(find_project_scope_with_home(&clone, None)
+            .unwrap()
+            .is_none());
+
+        let (main, worktree) = sibling_worktree(&root.join("wt-parent"));
+        std::fs::remove_file(main.join(".memd/project_scope.json")).unwrap();
+        std::fs::create_dir_all(worktree.join("sub")).unwrap();
+        assert!(find_project_scope_with_home(&worktree.join("sub"), None)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn symlink_in_the_path_is_resolved_before_the_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let repo = root.join("b/repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        write_scope_file(&repo, "repo_tenant", "repo_project");
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::os::unix::fs::symlink(repo.join("sub"), root.join("a/link")).unwrap();
+
+        // `/a/link/../src` is `/b/repo/src`, not `/a/src`.
+        let scope = find_project_scope_with_home(&root.join("a/link/../src"), None).unwrap();
+        assert_eq!(scope.unwrap().tenant_id, "repo_tenant");
+    }
+
+    fn add_command() -> CliCommand {
+        CliCommand::Add {
+            tenant_id: None,
+            text: "Decision: the first write creates the scope. Agent action: none.".to_string(),
+            chunk_type: crate::types::ChunkType::Decision,
+            project_id: None,
+            tags: None,
+            source_uri: None,
+            source_path: None,
+            warm: WarmMode::Off,
+        }
+    }
+
+    fn inputs(enabled: bool) -> super::super::session_start::AutoScopeInputs {
+        super::super::session_start::AutoScopeInputs {
+            default_tenant: "writer".to_string(),
+            enabled,
+            consolidate: false,
+        }
+    }
+
+    fn unscoped_repository(root: &Path) -> (PathBuf, PathBuf) {
+        let repo = root.join("My-Repo");
+        let sub = repo.join("review/deep");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        (repo, sub)
+    }
+
+    #[tokio::test]
+    async fn flagless_add_in_an_unscoped_repository_creates_the_scope_and_stores_the_chunk() {
+        use crate::cli::write_commands::{cli_add_rendered, CliAddRenderOptions};
+        use crate::store::{MemoryStore, Store};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (repo, sub) = unscoped_repository(dir.path());
+        let mut command = add_command();
+
+        resolve_command_scope_at(&sub, &mut command, &inputs(true)).unwrap();
+
+        let CliCommand::Add {
+            tenant_id,
+            project_id,
+            text,
+            chunk_type,
+            ..
+        } = command
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(tenant_id.as_deref(), Some("writer"));
+        assert_eq!(project_id.as_deref(), Some("my_repo"));
+        assert!(repo.join(".memd/project_scope.json").exists());
+        assert!(!sub.join(".memd").exists());
+        assert!(!repo.join("review/.memd").exists());
+
+        let store = MemoryStore::new();
+        cli_add_rendered(
+            &store,
+            None,
+            CliAddRenderOptions {
+                tenant_id: tenant_id.unwrap(),
+                text,
+                chunk_type,
+                project_id: project_id.clone(),
+                tags: None,
+                source_uri: None,
+                source_path: None,
+            },
+        )
+        .await
+        .unwrap();
+        let stored = store
+            .list_chunks_for_project(
+                &TenantId::new("writer").unwrap(),
+                project_id.as_deref(),
+                5,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        // A second flagless command now finds the scope and creates nothing.
+        let mut again = add_command();
+        resolve_command_scope_at(&sub, &mut again, &inputs(true)).unwrap();
+    }
+
+    #[test]
+    fn flagless_search_in_an_unscoped_repository_fails_and_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (repo, sub) = unscoped_repository(dir.path());
+        let mut command = CliCommand::Stats { tenant_id: None };
+
+        let error = resolve_command_scope_at(&sub, &mut command, &inputs(true)).unwrap_err();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("the first `memd add` creates the scope"),
+            "{message}"
+        );
+        assert!(message.contains("--tenant-id"), "{message}");
+        assert!(!message.contains("session-start"), "{message}");
+        assert!(!repo.join(".memd").exists());
+        assert!(!sub.join(".memd").exists());
+    }
+
+    #[test]
+    fn skip_marker_and_disabled_auto_scope_stop_the_creation_by_add() {
+        let dir = tempfile::tempdir().unwrap();
+        let (repo, sub) = unscoped_repository(dir.path());
+
+        let mut disabled = add_command();
+        assert!(resolve_command_scope_at(&sub, &mut disabled, &inputs(false)).is_err());
+        assert!(!repo.join(".memd").exists());
+
+        std::fs::write(repo.join(".memd-skip"), "").unwrap();
+        let mut skipped = add_command();
+        assert!(resolve_command_scope_at(&sub, &mut skipped, &inputs(true)).is_err());
+        assert!(!repo.join(".memd/project_scope.json").exists());
+        assert!(!sub.join(".memd").exists());
+    }
+
+    #[test]
+    fn explicit_tenant_add_creates_no_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let (repo, sub) = unscoped_repository(dir.path());
+        let mut command = add_command();
+        if let CliCommand::Add { tenant_id, .. } = &mut command {
+            *tenant_id = Some("explicit".to_string());
+        }
+
+        resolve_command_scope_at(&sub, &mut command, &inputs(true)).unwrap();
+
+        assert!(!repo.join(".memd").exists());
     }
 }

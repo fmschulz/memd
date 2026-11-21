@@ -138,15 +138,20 @@ pub(super) fn reject_if_any_symlink_inside_outdir(
     Ok(())
 }
 
-/// Absolute project directory with `.` and `..` resolved textually, so every
-/// walk from it follows the path it names.
+/// Absolute project directory that every walk from it can trust.
+///
+/// A directory that exists is canonicalised, so `..` after a symlink names the
+/// directory the kernel names (`/a/link/../src` is a sibling of the link's
+/// target, not of `/a`). A path that does not exist yet has `.` and `..`
+/// resolved textually. Callers see the canonical path of a symlinked
+/// directory in results and in the `project_dir` they write.
 pub(super) fn absolutize_project_dir(path: &Path) -> Result<PathBuf> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()?.join(path)
     };
-    Ok(normalize_absolute(&absolute))
+    Ok(std::fs::canonicalize(&absolute).unwrap_or_else(|_| normalize_absolute(&absolute)))
 }
 
 pub(super) fn resolve_data_dir(explicit: Option<&Path>) -> Result<PathBuf> {

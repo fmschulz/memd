@@ -88,6 +88,13 @@ pub enum ExperienceCommand {
 
 impl ExperienceCommand {
     /// True for commands that only read the store.
+    /// True for the commands that store the first fact of a project: a flagless
+    /// run of one creates the project scope (`memd experience note --emit`
+    /// only prints and stores nothing).
+    pub(super) fn first_write(&self) -> bool {
+        matches!(self, Self::Record { .. } | Self::Note { emit: false, .. })
+    }
+
     pub(super) fn reads_only(&self) -> bool {
         matches!(
             self,

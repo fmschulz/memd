@@ -88,9 +88,17 @@ fields remain absent.
 repository, a directory with neither uses the nearest scope in its ancestors, up
 to the repository root, and creates no scope file. Each ancestor counts if it
 holds a project scope or a valid legacy scope. A linked worktree also uses the
-scope of its main checkout, which its main repository must confirm. If no scope
-exists, session-start creates one at the repository root (the main checkout for
-a linked worktree), named after the repository. If that root is not writable,
+scope of its main checkout, which its main repository must confirm. A scope
+above the repository (for example in the home directory) never applies to it.
+If no scope exists and the project has stored content (a visible fact or an
+experience case), session-start creates one at the repository root (the main
+checkout for a linked worktree), named after the repository, and writes
+`memory.md`. Without content it writes nothing and returns
+`{"skipped": "no_stored_facts", "tenant_id", "project_id"}`: no `.memd`
+directory, no scope, no `memory.md`. A scope whose project has no content gets
+no new `memory.md` either, and an existing one stays. The first flagless
+`memd add` or `memd experience note` creates the scope by the same rule;
+read commands never do. If the root is not writable,
 the scope goes to the session directory instead. A `.memd-skip` file at that
 root skips startup for the whole repository, even for a subdirectory with its
 own scope. A nested clone or submodule is its own repository and keeps its own

@@ -21,6 +21,7 @@ fn command(home: &Path, data_dir: &Path, cwd: &Path) -> Command {
     command
         .env("HOME", home)
         .env("MEMD_WRITER_LOCK_TIMEOUT_MS", "10000")
+        .env("MEMD_DEFAULT_TENANT", "scope_tenant")
         .arg("--data-dir")
         .arg(data_dir)
         .current_dir(cwd);
@@ -46,14 +47,18 @@ fn assert_failure(output: Output, label: &str) -> Output {
     output
 }
 
-fn run_session_start(home: &Path, data_dir: &Path, project_dir: &Path, tenant: &str) {
-    let output = command(home, data_dir, project_dir)
-        .env("MEMD_DEFAULT_TENANT", tenant)
-        .args(["session-start", "--project-dir", "."])
-        .output()
-        .expect("run memd session-start");
-    assert_success(output, "session-start");
-    assert!(project_dir.join(".memd/project_scope.json").is_file());
+/// The first flagless `add` creates the project scope: tenant from
+/// `MEMD_DEFAULT_TENANT`, project from the directory name.
+fn assert_scope_created_by_first_add(project_dir: &Path) {
+    let scope = project_dir.join(".memd/project_scope.json");
+    assert!(
+        scope.is_file(),
+        "the first add must create {}",
+        scope.display()
+    );
+    let parsed: Value = serde_json::from_slice(&std::fs::read(&scope).unwrap()).unwrap();
+    assert_eq!(parsed["tenant_id"], "scope_tenant");
+    assert_eq!(parsed["project_id"], "scoped_project");
 }
 
 fn add_text(home: &Path, data_dir: &Path, cwd: &Path, text: &str, extra: &[&str]) -> Output {
@@ -130,11 +135,10 @@ fn scoped_project_commands_fall_back_to_project_scope() {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&project_dir).unwrap();
 
-    run_session_start(&home, &data_dir, &project_dir, "scope_tenant");
-
     let token = format!("scope_fallback_root_{}", nonce());
     let text = format!("Validated scope fallback root retrieval token {token}.");
     assert_success(add_text(&home, &data_dir, &project_dir, &text, &[]), "add");
+    assert_scope_created_by_first_add(&project_dir);
 
     let search_output = assert_success(search(&home, &data_dir, &project_dir, &token), "search");
     let search_stdout = String::from_utf8_lossy(&search_output.stdout);
@@ -153,11 +157,10 @@ fn nested_cwd_walks_up_to_project_scope() {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&nested).unwrap();
 
-    run_session_start(&home, &data_dir, &project_dir, "scope_tenant");
-
     let token = format!("scope_fallback_nested_{}", nonce());
     let text = format!("Validated nested scope fallback retrieval token {token}.");
     assert_success(add_text(&home, &data_dir, &project_dir, &text, &[]), "add");
+    assert_scope_created_by_first_add(&project_dir);
 
     let search_output = assert_success(search(&home, &data_dir, &nested, &token), "search");
     let search_stdout = String::from_utf8_lossy(&search_output.stdout);
@@ -186,6 +189,60 @@ fn missing_scope_fails_with_actionable_error() {
         stderr.contains("no --tenant-id given and no .memd/project_scope.json found upward from"),
         "{stderr}"
     );
+}
+
+#[test]
+fn search_without_scope_fails_and_creates_nothing() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let data_dir = tmp.path().join("data");
+    let project_dir = tmp.path().join("scoped_project");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let output = assert_failure(
+        search(&home, &data_dir, &project_dir, "anything"),
+        "search without scope",
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("the first `memd add` creates the scope"),
+        "{stderr}"
+    );
+    assert!(!project_dir.join(".memd").exists());
+}
+
+#[test]
+fn session_start_in_an_empty_project_writes_nothing_until_the_first_add() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let data_dir = tmp.path().join("data");
+    let project_dir = tmp.path().join("scoped_project");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let start = |label| {
+        let output = command(&home, &data_dir, &project_dir)
+            .args(["session-start", "--project-dir", "."])
+            .output()
+            .expect("run memd session-start");
+        let output = assert_success(output, label);
+        serde_json::from_slice::<Value>(&output.stdout).expect("session-start JSON")
+    };
+
+    let before = start("session-start before the first add");
+    assert_eq!(before["skipped"], "no_stored_facts");
+    assert_eq!(before["project_id"], "scoped_project");
+    assert!(!project_dir.join(".memd").exists());
+    assert!(!project_dir.join("memory.md").exists());
+
+    let text = "Validated that the first add creates the scope and memory.md.";
+    assert_success(add_text(&home, &data_dir, &project_dir, text, &[]), "add");
+    assert_scope_created_by_first_add(&project_dir);
+
+    let after = start("session-start after the first add");
+    assert!(after.get("skipped").is_none(), "{after}");
+    assert!(project_dir.join("memory.md").exists());
 }
 
 #[test]
