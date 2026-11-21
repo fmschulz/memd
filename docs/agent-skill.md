@@ -92,10 +92,16 @@ confirm. A nested clone or a submodule is its own repository.
 memd trusts a directory, its `.git` entry, a `.memd` directory and a scope file
 only when the current user owns them, as git does. Another user's `/tmp/.git`
 does not make `/tmp` a repository: the search goes on upward, and a project
-below `/tmp` is a project outside a repository. A scope file or `.memd`
-directory that another user owns is ignored by every command, and `memd doctor`
-names the ignored path. No scope is planned in a directory that another user
-owns.
+below `/tmp` is a project outside a repository. A scope also needs a directory
+that the user owns, because the owner of that directory can rename `.memd`. A
+symlinked `.memd` or scope file never counts. A linked worktree names a main
+checkout only when the user owns it, and a rejected pointer neither supplies a
+scope nor chooses the project id. A scope that fails these tests is ignored by
+every command, and `memd doctor` names the ignored path when it finds no other
+scope. No scope is planned in a directory that another user owns, and none is
+published there: a first write whose target turns out to be such a directory
+stores its fact and prints a warning. The rule works on unix only; on other
+platforms every entry counts as owned. Explicit `memd init` does not check it.
 
 A project gets files only once it has content: at least one visible fact or one
 experience case. When no scope exists, session-start derives the scope it would

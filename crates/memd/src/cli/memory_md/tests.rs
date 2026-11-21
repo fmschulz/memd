@@ -1297,11 +1297,16 @@ fn lesson_fields_are_capped_per_field() {
 
 /// `memd memory-md` with no flags: the tenant and project come from the scope.
 async fn memory_md_without_flags(project_dir: &Path) -> Result<Value> {
+    memory_md_for_tenant(project_dir, None).await
+}
+
+/// `memd memory-md`, with `--tenant-id` when a tenant is given.
+async fn memory_md_for_tenant(project_dir: &Path, tenant_id: Option<&str>) -> Result<Value> {
     refresh_memory_md_with_health(
         &crate::store::MemoryStore::new(),
         None,
         MemoryMdOptions {
-            tenant_id: None,
+            tenant_id: tenant_id.map(str::to_string),
             project_id: None,
             project_dir: project_dir.to_path_buf(),
             output: PathBuf::from("memory.md"),
@@ -1347,6 +1352,32 @@ async fn memory_md_without_a_tenant_uses_the_scope_of_the_main_checkout_in_a_lin
         assert_eq!(result["tenant_id"], "main_tenant");
         assert_eq!(result["project_id"], "main_project");
     }
+}
+
+#[tokio::test]
+async fn memory_md_with_an_explicit_tenant_looks_up_no_scope() {
+    use crate::cli::scope::tests::write_scope_file;
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().canonicalize().unwrap().join("repo");
+    let sub = repo.join("src");
+    fs::create_dir_all(&sub).unwrap();
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    write_scope_file(&repo, "scoped_tenant", "scoped_project");
+
+    // An explicit tenant never borrows the project of a scope.
+    let result = memory_md_for_tenant(&sub, Some("explicit_tenant"))
+        .await
+        .unwrap();
+    assert_eq!(result["tenant_id"], "explicit_tenant");
+    assert!(result["project_id"].is_null(), "{}", result["project_id"]);
+
+    // A malformed scope above does not stop a run with an explicit tenant.
+    fs::write(repo.join(".memd/project_scope.json"), "{not json").unwrap();
+    let result = memory_md_for_tenant(&sub, Some("explicit_tenant"))
+        .await
+        .unwrap();
+    assert_eq!(result["tenant_id"], "explicit_tenant");
 }
 
 #[tokio::test]

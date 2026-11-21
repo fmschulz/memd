@@ -93,7 +93,7 @@ fn locate_project_scope_with_home(
     for dir in start.ancestors() {
         let own = read_scope_file_at(dir, owns, &mut not_owned);
         let main_checkout = match &own {
-            Ok(None) => main_checkout_of_linked_worktree(dir),
+            Ok(None) => trusted_main_checkout(dir, owns),
             _ => None,
         };
         let found = match own {
@@ -192,16 +192,23 @@ fn owns_checkout(dir: &Path, owns: &Owns) -> bool {
 }
 
 /// The `.memd` directory of `dir`, or its file `name`, when it exists and the
-/// current user does not own it. A reader treats that entry as missing and
-/// never opens it. Every reader of a scope file calls this before it reads. The
-/// directory comes first, because a foreign `.memd` with mode 700 would fail the
-/// read of the file inside it.
+/// current user cannot trust it: the user does not own `dir`, `.memd` or the
+/// file, or `.memd` or the file is a symlink. The owner of `dir` can rename
+/// `.memd`, and the owner of a symlink's target can change what it holds, so
+/// neither counts. A reader treats that entry as missing and never opens it.
+/// Every reader of a scope file calls this before it reads, and a publish calls
+/// it before it writes. The directory comes first, because a foreign `.memd`
+/// with mode 700 would fail the read of the file inside it. An entry that does
+/// not exist is not reported, so a foreign `dir` without `.memd` yields `None`.
 pub(super) fn foreign_scope_entry(dir: &Path, name: &str, owns: &Owns) -> Option<PathBuf> {
     let memd_dir = dir.join(".memd");
     let file = memd_dir.join(name);
-    [memd_dir, file]
-        .into_iter()
-        .find(|entry| entry.symlink_metadata().is_ok() && !owns(entry))
+    let dir_trusted = owns(dir);
+    [memd_dir, file].into_iter().find(|entry| {
+        entry
+            .symlink_metadata()
+            .is_ok_and(|metadata| !dir_trusted || metadata.file_type().is_symlink() || !owns(entry))
+    })
 }
 
 /// Read `dir/.memd/project_scope.json`. A missing file is `None`. So is a file,
@@ -314,6 +321,14 @@ pub(super) fn main_checkout_of_linked_worktree(project_dir: &Path) -> Option<Pat
         return None;
     }
     common_dir.parent().map(Path::to_path_buf)
+}
+
+/// [`main_checkout_of_linked_worktree`] for the current user: the pointers of a
+/// worktree name a main checkout only when the user owns that directory and
+/// its `.git`. A pointer to another user's checkout is rejected, so it can
+/// neither supply a scope nor choose the project id.
+pub(super) fn trusted_main_checkout(project_dir: &Path, owns: &Owns) -> Option<PathBuf> {
+    main_checkout_of_linked_worktree(project_dir).filter(|main| owns_checkout(main, owns))
 }
 
 fn scope_missing_error(cwd: &Path) -> MemdError {
@@ -1641,5 +1656,106 @@ pub(super) mod tests {
             assert!(message.contains("--tenant-id"), "{message}");
         }
         assert!(!project.join(".memd").exists());
+    }
+
+    #[test]
+    fn the_production_owner_rule_rejects_an_entry_that_another_user_owns() {
+        // `/` belongs to root. A test run by root owns it, so skip it there.
+        // SAFETY: `geteuid` has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(!owned_by_current_user(Path::new("/")));
+        }
+    }
+
+    #[test]
+    fn a_symlinked_memd_directory_or_scope_file_is_not_a_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        // Another user can change what an owned symlink points at, so the
+        // current user's own symlink does not count.
+        write_scope_file(&root.join("elsewhere"), "linked", "linked_project");
+        let with_file_link = root.join("with-file-link");
+        std::fs::create_dir_all(with_file_link.join(".memd")).unwrap();
+        let file_link = with_file_link.join(".memd/project_scope.json");
+        std::os::unix::fs::symlink(root.join("elsewhere/.memd/project_scope.json"), &file_link)
+            .unwrap();
+        let with_dir_link = root.join("with-dir-link");
+        std::fs::create_dir_all(&with_dir_link).unwrap();
+        let dir_link = with_dir_link.join(".memd");
+        std::os::unix::fs::symlink(root.join("elsewhere/.memd"), &dir_link).unwrap();
+
+        for (project, ignored) in [(with_file_link, file_link), (with_dir_link, dir_link)] {
+            let located =
+                locate_project_scope_with_home(&project, Some(&root), &owned_by_current_user);
+            let Ok(LocatedScope::Missing { not_owned }) = located else {
+                panic!("{} is a symlink: {located:?}", ignored.display());
+            };
+            assert_eq!(not_owned, [ignored]);
+        }
+    }
+
+    #[test]
+    fn a_scope_in_a_directory_that_another_user_owns_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let shared = root.join("shared");
+        let project = shared.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        write_scope_file(&shared, "shared_tenant", "shared_project");
+
+        // The current user owns `.memd` and the file, but not the directory
+        // that holds them: its owner can rename `.memd` and choose the scope.
+        let owns = owned_below(&root, &[&shared]);
+        let located = locate_project_scope_with_home(&project, Some(&root), &owns);
+        let Ok(LocatedScope::Missing { not_owned }) = located else {
+            panic!("the directory belongs to another user: {located:?}");
+        };
+        assert_eq!(not_owned, [shared.join(".memd")]);
+        // A foreign directory without a `.memd` has nothing to report.
+        assert!(foreign_scope_entry(&project, "project_scope.json", &owns).is_none());
+    }
+
+    #[test]
+    fn a_worktree_pointer_to_a_main_checkout_the_user_does_not_own_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (main, worktree) = sibling_worktree(&root);
+        // The user owns the worktree and the main checkout directory, but
+        // another user owns the main checkout's `.git`.
+        let owns = owned_below(&root, &[&main.join(".git")]);
+
+        assert_eq!(
+            trusted_main_checkout(&worktree, &owned_by_current_user),
+            Some(main.clone())
+        );
+        assert_eq!(trusted_main_checkout(&worktree, &owns), None);
+        // The walk reads no scope through the rejected pointer.
+        let scope = find_project_scope_with_home(&worktree, Some(&root), &owned_by_current_user);
+        assert_eq!(scope.unwrap().unwrap().tenant_id, "main_tenant");
+        assert!(find_project_scope_with_home(&worktree, Some(&root), &owns)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn a_rejected_worktree_pointer_does_not_choose_the_project_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (main, worktree) = sibling_worktree(&root);
+        std::fs::remove_dir_all(main.join(".memd")).unwrap();
+
+        let mut command = add_command();
+        let owner = inputs_with_owner(owned_below(&root, &[&main.join(".git")]));
+        let pending = resolve_command_scope_at(&worktree, &mut command, &owner)
+            .unwrap()
+            .expect("a flagless first write plans a scope");
+
+        // The pointer names `main-repo`, which would give the project
+        // `main_repo`. The directory itself names the project instead.
+        let CliCommand::Add { project_id, .. } = command else {
+            panic!("unexpected command");
+        };
+        assert_eq!(project_id.as_deref(), Some("wt"));
+        assert_eq!(pending.scope_dir(), worktree);
     }
 }

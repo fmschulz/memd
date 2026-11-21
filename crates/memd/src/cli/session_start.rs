@@ -30,7 +30,7 @@ use crate::store::metadata::{DigestScope, MetadataStore};
 
 use super::scope::{
     canonical_home, enclosing_repository, foreign_scope_entry, is_unsafe_scope_root,
-    main_checkout_of_linked_worktree, owned_by_current_user, Owns, Repository,
+    owned_by_current_user, trusted_main_checkout, Owns, Repository,
 };
 use crate::error::{MemdError, Result};
 use crate::store::{Store, TenantManager};
@@ -369,8 +369,15 @@ pub(super) async fn run_session_start_inner<S: Store>(
     let (tenant_id, project_id) = match new_scope {
         None => (tenant_id, project_id),
         Some(plan) => {
-            let (outcome, written_dir) =
-                write_scope_with_fallback(&plan, &scope_dir, &project_dir)?;
+            let (outcome, written_dir) = write_scope_with_fallback(
+                &plan,
+                &scope_dir,
+                &project_dir,
+                auto_inputs.owns.as_ref(),
+            )?;
+            if outcome == AutoScopeOutcome::SkippedNotOwner {
+                return Ok(skipped_response(&outcome));
+            }
             scope_dir = written_dir;
             auto_scoped = outcome == AutoScopeOutcome::Created;
             match read_scope_at(&scope_dir, auto_inputs.owns.as_ref()) {
@@ -613,7 +620,7 @@ fn maybe_auto_create_scope(
     inputs: &AutoScopeInputs,
 ) -> Result<AutoScopeOutcome> {
     match plan_new_scope(scope_dir, id_source, inputs)? {
-        Ok(plan) => plan.write(scope_dir),
+        Ok(plan) => plan.write(scope_dir, inputs.owns.as_ref()),
         Err(skipped) => Ok(skipped),
     }
 }
@@ -627,8 +634,14 @@ struct NewScope {
 }
 
 impl NewScope {
-    /// Publish the scope file in `dir/.memd`, whole or not at all.
-    fn write(&self, dir: &Path) -> Result<AutoScopeOutcome> {
+    /// Publish the scope file in `dir/.memd`, whole or not at all. Nothing is
+    /// written, and the outcome is `SkippedNotOwner`, when the current user
+    /// does not own `dir`, or an existing `.memd` there is another user's or a
+    /// symlink: a write would go into a place the user does not control.
+    fn write(&self, dir: &Path, owns: &Owns) -> Result<AutoScopeOutcome> {
+        if !owns(dir) || foreign_scope_entry(dir, "project_scope.json", owns).is_some() {
+            return Ok(AutoScopeOutcome::SkippedNotOwner);
+        }
         let scope = ProjectScopeConfig {
             tenant_id: self.tenant_id.clone(),
             project_id: Some(self.project_id.clone()),
@@ -674,7 +687,7 @@ fn plan_new_scope(
 
     Ok(Ok(NewScope {
         tenant_id: inputs.default_tenant.clone(),
-        project_id: derive_project_id(id_source),
+        project_id: derive_project_id(id_source, inputs.owns.as_ref()),
     }))
 }
 
@@ -728,11 +741,23 @@ async fn project_has_content<S: Store>(
 /// is on disk while it is pending, so a command that fails (bad input, a
 /// rejected write, a store that will not open) leaves no scope behind, and a
 /// project without a stored fact has no `.memd` directory.
-#[derive(Debug)]
 pub struct PendingScope {
     plan: NewScope,
     scope_dir: PathBuf,
     project_dir: PathBuf,
+    /// The owner rule of the plan; the publish checks its target with it.
+    owns: Arc<Owns>,
+}
+
+impl std::fmt::Debug for PendingScope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingScope")
+            .field("plan", &self.plan)
+            .field("scope_dir", &self.scope_dir)
+            .field("project_dir", &self.project_dir)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PendingScope {
@@ -743,24 +768,38 @@ impl PendingScope {
 
     /// Publish the scope file. Returns true when this call created it, false
     /// when a concurrent first write published one first (that file stays).
+    /// Nothing is published, and the result is an error, when the target
+    /// directory does not belong to the current user.
     pub fn publish(self) -> Result<bool> {
-        let (outcome, _dir) =
-            write_scope_with_fallback(&self.plan, &self.scope_dir, &self.project_dir)?;
+        let (outcome, _dir) = write_scope_with_fallback(
+            &self.plan,
+            &self.scope_dir,
+            &self.project_dir,
+            self.owns.as_ref(),
+        )?;
+        if outcome == AutoScopeOutcome::SkippedNotOwner {
+            return Err(MemdError::ValidationError(format!(
+                "no project scope published: {}",
+                refusal_reason(&outcome)
+            )));
+        }
         Ok(outcome == AutoScopeOutcome::Created)
     }
 }
 
 /// Publish `plan` in `scope_dir`. A directory that cannot be written must not
 /// fail the session: the scope then goes to `project_dir`, still named after
-/// the repository. Returns the outcome and the directory that holds the scope.
+/// the repository. Both directories are checked for their owner right before
+/// the write. Returns the outcome and the directory that holds the scope.
 fn write_scope_with_fallback(
     plan: &NewScope,
     scope_dir: &Path,
     project_dir: &Path,
+    owns: &Owns,
 ) -> Result<(AutoScopeOutcome, PathBuf)> {
-    match plan.write(scope_dir) {
+    match plan.write(scope_dir, owns) {
         Err(MemdError::IoError(error)) if scope_dir != project_dir && is_unwritable(&error) => {
-            Ok((plan.write(project_dir)?, project_dir.to_path_buf()))
+            Ok((plan.write(project_dir, owns)?, project_dir.to_path_buf()))
         }
         other => Ok((other?, scope_dir.to_path_buf())),
     }
@@ -820,6 +859,7 @@ pub(super) fn plan_scope_for_first_write(
         plan,
         scope_dir,
         project_dir,
+        owns: Arc::clone(&inputs.owns),
     };
     Ok(Ok((ids, Some(pending))))
 }
@@ -1026,10 +1066,11 @@ fn look_up_scope(project_dir: &Path, repository: Option<&Repository>, owns: &Own
 
 /// Derive a `project_id` from the repo basename via `sanitize_id`.
 /// A linked git worktree uses the basename of its main checkout, so every
-/// worktree of one repo shares one project. Pathological inputs (`/`, `.`,
-/// missing basename) fall back to `"project"`.
-fn derive_project_id(project_dir: &Path) -> String {
-    let main_checkout = main_checkout_of_linked_worktree(project_dir);
+/// worktree of one repo shares one project, when the current user owns that
+/// main checkout. Pathological inputs (`/`, `.`, missing basename) fall back to
+/// `"project"`.
+fn derive_project_id(project_dir: &Path, owns: &Owns) -> String {
+    let main_checkout = trusted_main_checkout(project_dir, owns);
     let raw = main_checkout
         .as_deref()
         .unwrap_or(project_dir)
@@ -1074,6 +1115,7 @@ fn sanitize_id(raw: &str, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::scope::main_checkout_of_linked_worktree;
     use crate::hit_stats::{record_hits_to_data_dir, HitRecord};
     use crate::store::{MemoryStore, PersistentStore, PersistentStoreConfig};
     use crate::types::{ChunkType, MemoryChunk};
@@ -1312,15 +1354,27 @@ mod tests {
     #[test]
     fn derive_project_id_handles_punctuation_and_edge_cases() {
         assert_eq!(
-            derive_project_id(Path::new("/tmp/Foo-Bar.v2")),
+            derive_project_id(Path::new("/tmp/Foo-Bar.v2"), &owned_by_current_user),
             "foo_bar_v2"
         );
-        assert_eq!(derive_project_id(Path::new("/tmp/__weird__")), "weird");
-        assert_eq!(derive_project_id(Path::new("/")), "project");
+        assert_eq!(
+            derive_project_id(Path::new("/tmp/__weird__"), &owned_by_current_user),
+            "weird"
+        );
+        assert_eq!(
+            derive_project_id(Path::new("/"), &owned_by_current_user),
+            "project"
+        );
         // `.` resolves to file_name() == None — must fall back, not panic.
-        assert_eq!(derive_project_id(Path::new(".")), "project");
+        assert_eq!(
+            derive_project_id(Path::new("."), &owned_by_current_user),
+            "project"
+        );
         // Non-ASCII chars are dropped (lossy by design, documented).
-        assert_eq!(derive_project_id(Path::new("/tmp/café")), "caf");
+        assert_eq!(
+            derive_project_id(Path::new("/tmp/café"), &owned_by_current_user),
+            "caf"
+        );
     }
 
     /// Lay out a main checkout and one linked worktree the way `git worktree
@@ -1352,9 +1406,9 @@ mod tests {
         for relative in [false, true] {
             let tmp = tempdir().unwrap();
             let (main, worktree) = linked_worktree_layout(tmp.path(), relative);
-            assert_eq!(derive_project_id(&main), "my_repo");
+            assert_eq!(derive_project_id(&main, &owned_by_current_user), "my_repo");
             assert_eq!(
-                derive_project_id(&worktree),
+                derive_project_id(&worktree, &owned_by_current_user),
                 "my_repo",
                 "relative={relative}"
             );
@@ -1366,11 +1420,17 @@ mod tests {
         let tmp = tempdir().unwrap();
         let plain = tmp.path().join("Plain-Repo");
         std::fs::create_dir_all(plain.join(".git")).unwrap();
-        assert_eq!(derive_project_id(&plain), "plain_repo");
+        assert_eq!(
+            derive_project_id(&plain, &owned_by_current_user),
+            "plain_repo"
+        );
 
         let non_git = tmp.path().join("scratch");
         std::fs::create_dir_all(&non_git).unwrap();
-        assert_eq!(derive_project_id(&non_git), "scratch");
+        assert_eq!(
+            derive_project_id(&non_git, &owned_by_current_user),
+            "scratch"
+        );
 
         // A submodule has a `.git` file but no `commondir`: it is its own project.
         let super_repo = tmp.path().join("super");
@@ -1383,13 +1443,19 @@ mod tests {
             format!("gitdir: {}\n", module_git.display()),
         )
         .unwrap();
-        assert_eq!(derive_project_id(&submodule), "sub_module");
+        assert_eq!(
+            derive_project_id(&submodule, &owned_by_current_user),
+            "sub_module"
+        );
 
         // A dangling or malformed `.git` file falls back to the basename.
         let broken = tmp.path().join("Broken-Tree");
         std::fs::create_dir_all(&broken).unwrap();
         std::fs::write(broken.join(".git"), "gitdir: /does/not/exist\n").unwrap();
-        assert_eq!(derive_project_id(&broken), "broken_tree");
+        assert_eq!(
+            derive_project_id(&broken, &owned_by_current_user),
+            "broken_tree"
+        );
     }
 
     #[test]
@@ -1683,6 +1749,97 @@ mod tests {
         assert_eq!(pending.unwrap().scope_dir(), project);
     }
 
+    /// A repository with a `.git` directory and a directory elsewhere, joined
+    /// by a `.memd` symlink in the repository.
+    fn repository_with_a_symlinked_memd(root: &Path) -> (PathBuf, PathBuf) {
+        let repo = root.join("repo");
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, repo.join(".memd")).unwrap();
+        (repo, elsewhere)
+    }
+
+    #[test]
+    fn a_publish_does_not_write_through_a_symlinked_memd_directory() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (repo, elsewhere) = repository_with_a_symlinked_memd(&root);
+
+        // The symlink is not a scope, so the first write plans a new one.
+        let (_, pending) = plan_scope_for_first_write(&repo, &enabled_inputs("alice"))
+            .unwrap()
+            .unwrap();
+        let error = pending.unwrap().publish().unwrap_err();
+
+        assert!(
+            error.to_string().contains("belongs to another user"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn session_start_does_not_write_through_a_symlinked_memd_directory() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (repo, elsewhere) = repository_with_a_symlinked_memd(&root);
+
+        let result = start(&repo).await;
+
+        assert_eq!(result["skipped"], "scope_dir_not_owned");
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+        assert!(!repo.join("memory.md").exists());
+    }
+
+    #[test]
+    fn a_publish_into_a_directory_that_another_user_owns_writes_nothing() {
+        let dir = tempdir().unwrap();
+        let plan = NewScope {
+            tenant_id: "alice".to_string(),
+            project_id: "project".to_string(),
+        };
+
+        let outcome = plan.write(dir.path(), &|_: &Path| false).unwrap();
+
+        assert_eq!(outcome, AutoScopeOutcome::SkippedNotOwner);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn the_fallback_directory_of_a_publish_must_belong_to_the_user_too() {
+        use crate::cli::scope::tests::owned_below;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let repo = root.join("repo");
+        let sub = repo.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        // The repository root is the user's, but the session directory below
+        // it belongs to another user.
+        let inputs = AutoScopeInputs {
+            owns: Arc::new(owned_below(&root, &[&sub])),
+            ..enabled_inputs("alice")
+        };
+        let (_, pending) = plan_scope_for_first_write(&sub, &inputs).unwrap().unwrap();
+        let pending = pending.unwrap();
+        assert_eq!(pending.scope_dir(), repo);
+
+        // The root cannot be written, so the publish falls back to `sub`.
+        std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let published = pending.publish();
+        std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(!sub.join(".memd").exists());
+        // A test run by root can write the root, so the fallback is not used.
+        // SAFETY: `geteuid` has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(published.is_err());
+        }
+    }
+
     #[test]
     fn the_refusal_of_a_foreign_directory_has_a_json_value_and_a_reason() {
         assert_eq!(
@@ -1758,9 +1915,10 @@ mod tests {
             locate_repository(&dir, canonical_home().as_deref(), &owned_by_current_user);
         match look_up_scope(&dir, repository.as_ref(), &owned_by_current_user) {
             ScopeLookup::Found { ids, .. } => Some(ids),
-            ScopeLookup::Missing { id_source, .. } => {
-                Some(("alice".to_string(), Some(derive_project_id(&id_source))))
-            }
+            ScopeLookup::Missing { id_source, .. } => Some((
+                "alice".to_string(),
+                Some(derive_project_id(&id_source, &owned_by_current_user)),
+            )),
             ScopeLookup::Invalid { .. } => None,
         }
     }

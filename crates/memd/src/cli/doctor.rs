@@ -507,7 +507,9 @@ fn check_project_scope_with(
                     .map(|path| path.display().to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
-                let ignored = format!("ignored, because another user owns it: {ignored}");
+                let ignored = format!(
+                    "ignored, because it is a symlink or another user owns it or its directory: {ignored}"
+                );
                 report["note"] = match report["note"].as_str() {
                     Some(note) => json!(format!("{note}; {ignored}")),
                     None => json!(ignored),

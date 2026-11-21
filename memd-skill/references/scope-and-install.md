@@ -32,8 +32,10 @@ case. Read commands never create a scope: with none in reach they use the planne
 scope (the ids the first write would publish) and return an empty result for a
 project without content. Where no scope may be planned (home or `/`, a directory
 of another user, `.memd-skip`, `MEMD_AUTO_SCOPE=0`) they fail and say why. A scope
-above a git repository never applies to it. A repository, a scope file and a
-`.memd` directory count only when the current user owns them. Let memd write this file; partial JSON fails to parse. See
+above a git repository never applies to it. A repository, a scope file, a
+`.memd` directory and the directory that holds it count only when the current
+user owns them, and a symlink never counts (unix only; `memd init` does not
+check it). Let memd write this file; partial JSON fails to parse. See
 [Automatic session-start](session-start.md#automatic-session-start).
 Run `memd init` only when you want the full guardrail suite for a repo.
 

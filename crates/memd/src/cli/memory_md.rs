@@ -111,10 +111,11 @@ pub(super) async fn refresh_memory_md_with_health<S: Store>(
     options: MemoryMdOptions,
 ) -> Result<Value> {
     let project_dir = absolutize_project_dir(&options.project_dir)?;
-    // The scope fills what the caller left out. The lookup is the one every
-    // other command uses, so a subdirectory of a repository and a linked
-    // worktree find the repository's scope.
-    let scope = if options.tenant_id.is_some() && options.project_id.is_some() {
+    // Without a tenant, the scope gives the tenant and the project. The lookup
+    // is the one every other command uses, so a subdirectory of a repository
+    // and a linked worktree find the repository's scope. An explicit tenant
+    // never borrows the project of a scope, as in `resolve_required`.
+    let scope = if options.tenant_id.is_some() {
         None
     } else {
         find_project_scope(&project_dir)?

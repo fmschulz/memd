@@ -91,9 +91,12 @@ holds a project scope or a valid legacy scope. A linked worktree also uses the
 scope of its main checkout, which its main repository must confirm. A scope
 above the repository (for example in the home directory) never applies to it.
 A directory counts as a repository, and a scope file or `.memd` directory
-counts as a scope, only when the current user owns it, as in git. A `/tmp/.git`
-of another user does not make `/tmp` a repository, and no scope is planned in a
-directory that another user owns (`{"skipped": "scope_dir_not_owned"}`).
+counts as a scope, only when the current user owns it, as in git. A scope also
+needs a directory that the user owns, and a symlinked `.memd` or scope file
+never counts. A `/tmp/.git` of another user does not make `/tmp` a repository,
+and no scope is planned or published in a directory that another user owns
+(`{"skipped": "scope_dir_not_owned"}`). The rule works on unix only. Explicit
+`memd init` does not check it.
 If no scope exists and the project has stored content (a visible fact or an
 experience case), session-start creates one at the repository root (the main
 checkout for a linked worktree), named after the repository, and writes
