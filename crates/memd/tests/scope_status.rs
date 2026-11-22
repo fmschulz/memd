@@ -92,9 +92,15 @@ async fn project_scoped_miss_reports_wider_scope_hits() {
     let wider = status["wider_scope_hits"].as_u64().unwrap();
     assert!(wider >= 1, "expected wider_scope_hits >= 1, got {wider}");
     let hint = status["widen_hint"].as_str().unwrap();
+    // The project may come from the scope file, so the hint must not tell the
+    // caller to drop a flag that was never passed.
     assert!(
-        hint.contains("--project-id"),
-        "widen_hint must name the flag to drop: {hint}"
+        !hint.contains("--project-id"),
+        "widen_hint names a flag the caller may not have passed: {hint}"
+    );
+    assert!(
+        hint.contains("tenant 't1' outside project 'beta'"),
+        "widen_hint must name the tenant and the project: {hint}"
     );
 }
 

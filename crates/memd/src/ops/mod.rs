@@ -2244,8 +2244,8 @@ async fn scope_status_for_search<S: Store>(
             if let Ok(scored) = widened {
                 // Count only rows the real widened search would surface: apply
                 // the caller's non-project filters (chunk_type, time, episode)
-                // and the visibility policy, exactly as rerunning without
-                // --project-id would. Otherwise the hint counts superseded,
+                // and the visibility policy, exactly as a search without the
+                // project filter would. Otherwise the hint counts superseded,
                 // expired, or filtered rows the agent would never see.
                 let scored_len = scored.len();
                 let filtered = apply_search_filters(scored, None, parsed_filters, scored_len);
@@ -2258,9 +2258,11 @@ async fn scope_status_for_search<S: Store>(
                     .count();
                 if outside > 0 {
                     wider_scope_hits = Some(outside);
+                    // The project may come from the scope file, not from a flag,
+                    // so the hint names no flag.
                     widen_hint = Some(format!(
                         "{outside} hit(s) for this query exist in tenant '{tenant_id}' outside \
-                         project '{project}'; rerun without --project-id to search tenant-wide"
+                         project '{project}'; search without a project filter to include them"
                     ));
                 }
             }

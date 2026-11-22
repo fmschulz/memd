@@ -110,7 +110,13 @@ scope by the same rule after the write succeeded (a failed command leaves no
 the scope goes to the session directory instead. A `.memd-skip` file at that
 root skips startup for the whole repository, even for a subdirectory with its
 own scope. A nested clone or submodule is its own repository and keeps its own
-scope. The home directory and `/` never count as a repository root. Outside a
+scope. The home directory and `/` never count as a repository root. The scope
+file in the home directory serves the home folder itself. A folder below it,
+outside a repository and without a scope of its own, does not borrow it for
+session start or for a first write: it gets a scope of its own, and session
+start writes no `memory.md` there until a fact is stored for that folder. Reads
+keep using the home scope, and so does a scope file between the folder and
+home. Outside a
 repository, or at its root, a missing scope is created in the directory itself
 using `$MEMD_DEFAULT_TENANT` (then `$USER`, then `"default"`) as `tenant_id` and
 the directory basename as `project_id`. `memory.md` is still written to the

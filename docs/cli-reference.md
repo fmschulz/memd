@@ -26,7 +26,7 @@ For write-quality expectations and cleanup safety, see the
 | --- | --- |
 | `memd agent-context` | Prefetch bounded context to a file with audit logs. With no scope and no `--tenant-id`, it uses the planned scope (the ids a first `memd add` would publish) and creates no file. |
 | `memd search` | Direct compact search. With no scope and no `--tenant-id`, it uses the planned scope and creates no file: an empty result with exit 0 for a project without content. It fails, saying why, only where no scope may be planned (home or `/`, `.memd-skip`, `MEMD_AUTO_SCOPE=0`). |
-| `memd add` | Store summaries, traces, evidence, decisions. Without `--tenant-id` and with no scope in reach, the add uses the scope it would create and, once it succeeded, publishes `.memd/project_scope.json` (at the repository root, else in the directory). |
+| `memd add` | Store summaries, traces, evidence, decisions. Without `--tenant-id` and with no scope in reach, the add uses the scope it would create and, once it succeeded, publishes `.memd/project_scope.json` (at the repository root, else in the directory). The scope in the home folder serves only the home folder itself, so a loose folder below home gets its own scope. |
 | `memd warm start \| status \| stop` | Manage the private local warm worker used by `--warm auto\|required`. |
 | `memd batch --jsonl` | Run structured operation calls from JSONL in one loaded process; `--stream` keeps stdin/stdout open for benchmark clients. |
 | `memd get`, `memd delete`, `memd stats` | Inspect and maintain chunks. `get` and `stats` use the planned scope when none exists; `delete` needs an existing scope or `--tenant-id`. |

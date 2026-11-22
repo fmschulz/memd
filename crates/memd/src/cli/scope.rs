@@ -58,7 +58,9 @@ impl OperationScopeCache {
 /// The walk stops at the root of the git repository that encloses `start`
 /// (after the main checkout of a linked worktree): a scope above a
 /// repository, such as one in the home directory, never becomes the project
-/// of a repository. Outside any repository the walk runs to `$HOME`.
+/// of a repository. Outside any repository the walk runs to `$HOME`, so the
+/// scope in the home folder serves a read in every folder below it. A first
+/// write does not borrow it (see [`find_scope_for_first_write`]).
 pub(super) fn find_project_scope(start: &Path) -> Result<Option<ProjectScopeConfig>> {
     find_project_scope_with_home(start, canonical_home().as_deref(), &owned_by_current_user)
 }
@@ -68,7 +70,25 @@ fn find_project_scope_with_home(
     home: Option<&Path>,
     owns: &Owns,
 ) -> Result<Option<ProjectScopeConfig>> {
-    match locate_project_scope_with_home(start, home, owns)? {
+    scope_of(locate_project_scope_with_home(start, home, owns)?)
+}
+
+/// The scope that a first write in `start` finds. The walk is the one of
+/// [`find_project_scope`], except that the scope in the home folder serves
+/// only the home folder itself. A folder below home that has no scope of its
+/// own, outside a repository, is a project of its own: its first write plans
+/// and publishes the scope of that folder instead of storing under the home
+/// project.
+fn find_scope_for_first_write(
+    start: &Path,
+    home: Option<&Path>,
+    owns: &Owns,
+) -> Result<Option<ProjectScopeConfig>> {
+    scope_of(locate_project_scope_for(start, home, owns, false)?)
+}
+
+fn scope_of(located: LocatedScope) -> Result<Option<ProjectScopeConfig>> {
+    match located {
         LocatedScope::Found { scope, .. } => Ok(Some(scope)),
         LocatedScope::Missing { .. } => Ok(None),
         LocatedScope::Invalid(invalid) => Err(invalid.error),
@@ -77,20 +97,31 @@ fn find_project_scope_with_home(
 
 /// [`find_project_scope`] that also says which scope file it found, or which
 /// invalid one stopped the walk.
-pub(super) fn locate_project_scope(start: &Path, owns: &Owns) -> Result<LocatedScope> {
-    locate_project_scope_with_home(start, canonical_home().as_deref(), owns)
-}
-
-fn locate_project_scope_with_home(
+pub(super) fn locate_project_scope_with_home(
     start: &Path,
     home: Option<&Path>,
     owns: &Owns,
+) -> Result<LocatedScope> {
+    locate_project_scope_for(start, home, owns, true)
+}
+
+/// The walk of [`find_project_scope`]. With `home_serves_below` false, the
+/// scope in the home folder counts only when `start` is the home folder.
+fn locate_project_scope_for(
+    start: &Path,
+    home: Option<&Path>,
+    owns: &Owns,
+    home_serves_below: bool,
 ) -> Result<LocatedScope> {
     let start = absolutize_project_dir(start)?;
     let repository = enclosing_repository(&start, home, owns);
     let mut not_owned = Vec::new();
 
     for dir in start.ancestors() {
+        if !home_serves_below && home == Some(dir) && dir != start {
+            // The walk reached home from below, and home is its last stop.
+            break;
+        }
         let own = read_scope_file_at(dir, owns, &mut not_owned);
         let main_checkout = match &own {
             Ok(None) => trusted_main_checkout(dir, owns),
@@ -385,24 +416,31 @@ fn plan_scope(
 }
 
 /// [`resolve_required`] for a command that writes. When no tenant is given and
-/// no scope exists, the first write plans the scope the way `session-start`
-/// would (at the repository root, else in the directory; unsafe roots,
-/// directories of another user, `.memd-skip` and `MEMD_AUTO_SCOPE=0` honoured)
-/// and writes under it. Nothing
-/// is created here: the caller publishes the returned [`PendingScope`] once
-/// the command succeeded. When planning is refused, the error says why.
+/// no scope serves the folder, the first write plans the scope the way
+/// `session-start` would (at the repository root, else in the directory; unsafe
+/// roots, directories of another user, `.memd-skip` and `MEMD_AUTO_SCOPE=0`
+/// honoured) and writes under it. The scope in the home folder serves only the
+/// home folder itself, so a folder below home, outside a repository and
+/// without a scope of its own, gets its own. Nothing is created here: the
+/// caller publishes the returned [`PendingScope`] once the command succeeded.
+/// When planning is refused, the error says why.
 fn resolve_for_write(
     start: &Path,
     tenant: Option<String>,
     project: Option<String>,
     inputs: &super::session_start::AutoScopeInputs,
 ) -> Result<(String, Option<String>, Option<PendingScope>)> {
-    if tenant.is_none() && find_project_scope(start)?.is_none() {
-        let (tenant_id, scope_project, pending) = plan_scope(start, inputs)?;
-        return Ok((tenant_id, project.or(scope_project), pending));
+    if let Some(tenant_id) = tenant {
+        return Ok((tenant_id, project, None));
     }
-    let (tenant_id, project_id) = resolve_required(start, tenant, project)?;
-    Ok((tenant_id, project_id, None))
+    let scope = find_scope_for_first_write(start, inputs.home.as_deref(), inputs.owns.as_ref())?;
+    match scope {
+        Some(scope) => Ok((scope.tenant_id, project.or(scope.project_id), None)),
+        None => {
+            let (tenant_id, scope_project, pending) = plan_scope(start, inputs)?;
+            Ok((tenant_id, project.or(scope_project), pending))
+        }
+    }
 }
 
 /// [`resolve_required`] for a command that only reads. With no scope in reach
@@ -416,11 +454,17 @@ fn resolve_for_read(
     project: Option<String>,
     inputs: &super::session_start::AutoScopeInputs,
 ) -> Result<(String, Option<String>)> {
-    if tenant.is_none() && find_project_scope(start)?.is_none() {
-        let (tenant_id, scope_project, _unpublished) = plan_scope(start, inputs)?;
-        return Ok((tenant_id, project.or(scope_project)));
+    if let Some(tenant_id) = tenant {
+        return Ok((tenant_id, project));
     }
-    resolve_required(start, tenant, project)
+    let scope = find_project_scope_with_home(start, inputs.home.as_deref(), inputs.owns.as_ref())?;
+    match scope {
+        Some(scope) => Ok((scope.tenant_id, project.or(scope.project_id))),
+        None => {
+            let (tenant_id, scope_project, _unpublished) = plan_scope(start, inputs)?;
+            Ok((tenant_id, project.or(scope_project)))
+        }
+    }
 }
 
 pub(super) fn resolve_optional(
@@ -629,7 +673,7 @@ pub(super) mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
-    use crate::cli::{CliQueryMode, ExportFormat, SearchReranker, WarmMode};
+    use crate::cli::{CliQueryMode, ExperienceCommand, ExportFormat, SearchReranker, WarmMode};
     use crate::types::TenantId;
 
     #[test]
@@ -1136,6 +1180,7 @@ pub(super) mod tests {
             enabled,
             consolidate: false,
             owns: std::sync::Arc::new(owned_by_current_user),
+            home: canonical_home(),
         }
     }
 
@@ -1242,6 +1287,7 @@ pub(super) mod tests {
             enabled: true,
             consolidate: false,
             owns: std::sync::Arc::new(owned_by_current_user),
+            home: canonical_home(),
         };
         let first_plan = resolve_command_scope_at(&sub, &mut first, &inputs(true))
             .unwrap()
@@ -1795,5 +1841,182 @@ pub(super) mod tests {
         };
         assert_eq!(project_id.as_deref(), Some("wt"));
         assert_eq!(pending.scope_dir(), worktree);
+    }
+
+    /// A home that holds a scope file, and a folder below it that is no
+    /// repository and has no scope file of its own.
+    fn home_with_a_scope_and_a_loose_folder(root: &Path) -> (PathBuf, PathBuf) {
+        let home = root.join("home");
+        let folder = home.join("Downloads/My-Folder");
+        std::fs::create_dir_all(&folder).unwrap();
+        write_scope_file(&home, "home_tenant", "home_project");
+        (home, folder)
+    }
+
+    fn inputs_at(home: &Path) -> super::super::session_start::AutoScopeInputs {
+        super::super::session_start::AutoScopeInputs {
+            home: Some(home.to_path_buf()),
+            ..inputs(true)
+        }
+    }
+
+    /// The tenant and project that a flagless command in `folder` resolves.
+    fn resolved(
+        folder: &Path,
+        mut command: CliCommand,
+        inputs: &super::super::session_start::AutoScopeInputs,
+    ) -> ((Option<String>, Option<String>), Option<PendingScope>) {
+        let pending = resolve_command_scope_at(folder, &mut command, inputs).unwrap();
+        let ids = match command {
+            CliCommand::Add {
+                tenant_id,
+                project_id,
+                ..
+            }
+            | CliCommand::Experience {
+                tenant_id,
+                project_id,
+                ..
+            } => (tenant_id, project_id),
+            other => resolved_ids(other),
+        };
+        (ids, pending)
+    }
+
+    fn ids(tenant: &str, project: &str) -> (Option<String>, Option<String>) {
+        (Some(tenant.to_string()), Some(project.to_string()))
+    }
+
+    fn experience_command(command: ExperienceCommand) -> CliCommand {
+        CliCommand::Experience {
+            tenant_id: None,
+            project_id: None,
+            output: None,
+            warm: WarmMode::Off,
+            command,
+        }
+    }
+
+    #[test]
+    fn a_flagless_first_write_in_a_loose_folder_below_home_plans_its_own_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let (home, folder) =
+            home_with_a_scope_and_a_loose_folder(&dir.path().canonicalize().unwrap());
+        let home_scope = std::fs::read(home.join(".memd/project_scope.json")).unwrap();
+
+        // `add`, `experience record` and `experience note` start a project.
+        let record = ExperienceCommand::Record {
+            json: Some("{}".to_string()),
+            input: None,
+        };
+        let note = ExperienceCommand::Note {
+            file: PathBuf::from("case.json"),
+            emit: false,
+            shared_id: None,
+            compact: false,
+        };
+        for command in [
+            add_command(),
+            experience_command(record),
+            experience_command(note),
+        ] {
+            let (got, pending) = resolved(&folder, command, &inputs_at(&home));
+
+            // The project is named after the folder, not the home project.
+            assert_eq!(got, ids("writer", "my_folder"));
+            let pending = pending.expect("a first write plans the scope of the folder");
+            assert_eq!(pending.scope_dir(), folder);
+        }
+
+        // The first add publishes the folder's scope and leaves home alone.
+        let (_, pending) = resolved(&folder, add_command(), &inputs_at(&home));
+        assert!(pending.unwrap().publish().unwrap());
+        let published = std::fs::read_to_string(folder.join(".memd/project_scope.json")).unwrap();
+        assert!(published.contains("\"my_folder\""), "{published}");
+        assert_eq!(
+            std::fs::read(home.join(".memd/project_scope.json")).unwrap(),
+            home_scope
+        );
+        // The next write finds the folder's own scope and plans nothing.
+        let (got, pending) = resolved(&folder, add_command(), &inputs_at(&home));
+        assert_eq!(got, ids("writer", "my_folder"));
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn flagless_reads_in_a_loose_folder_below_home_use_the_home_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let (home, folder) =
+            home_with_a_scope_and_a_loose_folder(&dir.path().canonicalize().unwrap());
+        let find = ExperienceCommand::Find {
+            query: "lesson".to_string(),
+            machine: None,
+            tool: None,
+            version: None,
+            project_only: false,
+            limit: 5,
+        };
+        let get = ExperienceCommand::Get {
+            problem_id: "problem".to_string(),
+        };
+
+        for command in [
+            search_command(),
+            experience_command(find),
+            experience_command(get),
+        ] {
+            let (got, pending) = resolved(&folder, command, &inputs_at(&home));
+            assert_eq!(got, ids("home_tenant", "home_project"));
+            assert!(pending.is_none());
+        }
+        let (got, _) = resolved(
+            &folder,
+            CliCommand::Stats { tenant_id: None },
+            &inputs_at(&home),
+        );
+        assert_eq!(got, (Some("home_tenant".to_string()), None));
+        // A read creates nothing.
+        assert!(!folder.join(".memd").exists());
+    }
+
+    #[test]
+    fn the_home_folder_itself_uses_its_scope_for_every_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let (home, _folder) =
+            home_with_a_scope_and_a_loose_folder(&dir.path().canonicalize().unwrap());
+
+        for command in [add_command(), search_command()] {
+            let (got, pending) = resolved(&home, command, &inputs_at(&home));
+            assert_eq!(got, ids("home_tenant", "home_project"));
+            assert!(pending.is_none());
+        }
+    }
+
+    #[test]
+    fn a_scope_between_a_loose_folder_and_home_applies_to_every_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (home, folder) = home_with_a_scope_and_a_loose_folder(&root);
+        write_scope_file(&home.join("Downloads"), "mid_tenant", "mid_project");
+
+        for command in [add_command(), search_command()] {
+            let (got, pending) = resolved(&folder, command, &inputs_at(&home));
+            assert_eq!(got, ids("mid_tenant", "mid_project"));
+            assert!(pending.is_none());
+        }
+    }
+
+    #[test]
+    fn a_repository_below_home_plans_its_own_scope_whatever_the_home_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (home, _folder) = home_with_a_scope_and_a_loose_folder(&root);
+        let (repo, sub) = unscoped_repository(&home);
+
+        for command in [add_command(), search_command()] {
+            let (got, _) = resolved(&sub, command, &inputs_at(&home));
+            assert_eq!(got, ids("writer", "my_repo"));
+        }
+        assert!(!repo.join(".memd").exists());
     }
 }

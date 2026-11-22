@@ -82,6 +82,10 @@ pub(super) struct AutoScopeInputs {
     /// directory that another user owns are not trusted. Tests pass their own
     /// rule, because a test cannot change the owner of a file.
     pub(super) owns: Arc<Owns>,
+    /// The canonical home directory, when it resolves. It is never a scope
+    /// root, and its scope serves a folder below it only for reads. Tests pass
+    /// a home of their own, because a test must not change the environment.
+    pub(super) home: Option<PathBuf>,
 }
 
 impl AutoScopeInputs {
@@ -122,6 +126,7 @@ impl AutoScopeInputs {
             enabled,
             consolidate: true,
             owns: Arc::new(owned_by_current_user),
+            home: canonical_home(),
         }
     }
 }
@@ -250,7 +255,7 @@ pub(super) async fn run_session_start_inner<S: Store>(
     // repository, whatever scope files its subdirectories hold.
     let repository = locate_repository(
         &project_dir,
-        canonical_home().as_deref(),
+        auto_inputs.home.as_deref(),
         auto_inputs.owns.as_ref(),
     );
     if repository.as_ref().is_some_and(Repository::opted_out) {
@@ -676,7 +681,7 @@ fn plan_new_scope(
     // Compare canonical paths so aliases such as ~/repo/.. and symlinks
     // cannot create an implicit scope for every descendant of home or /.
     let canonical = scope_dir.canonicalize()?;
-    if is_unsafe_scope_root(&canonical, canonical_home().as_deref()) {
+    if is_unsafe_scope_root(&canonical, inputs.home.as_deref()) {
         return Ok(Err(AutoScopeOutcome::SkippedUnsafeRoot));
     }
     // A directory that another user owns (such as /tmp) must not get a scope
@@ -828,11 +833,7 @@ pub(super) fn plan_scope_for_first_write(
     if project_dir.join(".memd-skip").exists() {
         return Ok(Err(AutoScopeOutcome::SkippedMarker));
     }
-    let repository = locate_repository(
-        &project_dir,
-        canonical_home().as_deref(),
-        inputs.owns.as_ref(),
-    );
+    let repository = locate_repository(&project_dir, inputs.home.as_deref(), inputs.owns.as_ref());
     if repository.as_ref().is_some_and(Repository::opted_out) {
         return Ok(Err(AutoScopeOutcome::SkippedMarker));
     }
@@ -1127,6 +1128,7 @@ mod tests {
             enabled: false,
             consolidate: false,
             owns: Arc::new(owned_by_current_user),
+            home: canonical_home(),
         }
     }
 
@@ -1136,6 +1138,7 @@ mod tests {
             enabled: true,
             consolidate: false,
             owns: Arc::new(owned_by_current_user),
+            home: canonical_home(),
         }
     }
 
@@ -1962,6 +1965,118 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    /// A home that holds a scope file, and a folder below it that is no
+    /// repository and has no scope file of its own.
+    fn home_with_a_scope_and_a_loose_folder(root: &Path) -> (PathBuf, PathBuf) {
+        let home = root.join("home");
+        let folder = home.join("Downloads/My-Folder");
+        std::fs::create_dir_all(&folder).unwrap();
+        write_scope(&home, "home_tenant", "home_project");
+        (home, folder)
+    }
+
+    async fn seed_fact(store: &PersistentStore, tenant: &str, project: &str) {
+        let chunk = MemoryChunk::new(
+            TenantId::new(tenant).unwrap(),
+            "Seeded fact: this project has stored content.",
+            ChunkType::Summary,
+        )
+        .with_project(ProjectId::from(project));
+        store.add(chunk).await.unwrap();
+    }
+
+    /// Start a session in `project_dir` under a test `home`.
+    async fn start_below(store: &PersistentStore, project_dir: &Path, home: &Path) -> Value {
+        run_session_start_inner(
+            store,
+            SessionStartOptions {
+                project_dir: project_dir.to_path_buf(),
+            },
+            AutoScopeInputs {
+                home: Some(home.to_path_buf()),
+                ..enabled_inputs("alice")
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn session_start_in_a_loose_folder_below_home_does_not_use_the_home_scope() {
+        let dir = tempdir().unwrap();
+        let (home, folder) =
+            home_with_a_scope_and_a_loose_folder(&dir.path().canonicalize().unwrap());
+        let data = tempdir().unwrap();
+        let store = open_test_store(data.path());
+        // The home project has facts. The folder has none.
+        seed_fact(&store, "home_tenant", "home_project").await;
+
+        let result = start_below(&store, &folder, &home).await;
+
+        assert_eq!(result["skipped"], "no_stored_facts");
+        assert_eq!(result["tenant_id"], "alice");
+        assert_eq!(result["project_id"], "my_folder");
+        assert!(result.get("scope_dir").is_none(), "{result}");
+        assert!(!folder.join(".memd").exists());
+        assert!(!folder.join("memory.md").exists());
+    }
+
+    #[tokio::test]
+    async fn session_start_in_a_loose_folder_with_content_writes_its_own_scope_and_memory_md() {
+        let dir = tempdir().unwrap();
+        let (home, folder) =
+            home_with_a_scope_and_a_loose_folder(&dir.path().canonicalize().unwrap());
+        let data = tempdir().unwrap();
+        let store = open_test_store(data.path());
+        seed_fact(&store, "alice", "my_folder").await;
+
+        let result = start_below(&store, &folder, &home).await;
+
+        assert_eq!(result["auto_scoped"], true);
+        let scope: Value = serde_json::from_str(
+            &std::fs::read_to_string(folder.join(".memd/project_scope.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(scope["tenant_id"], "alice");
+        assert_eq!(scope["project_id"], "my_folder");
+        assert!(folder.join("memory.md").exists());
+        assert!(!home.join("memory.md").exists());
+    }
+
+    #[tokio::test]
+    async fn session_start_in_the_home_folder_uses_the_home_scope() {
+        let dir = tempdir().unwrap();
+        let (home, _folder) =
+            home_with_a_scope_and_a_loose_folder(&dir.path().canonicalize().unwrap());
+        let data = tempdir().unwrap();
+        let store = open_test_store(data.path());
+        seed_fact(&store, "home_tenant", "home_project").await;
+
+        let result = start_below(&store, &home, &home).await;
+
+        assert!(result.get("skipped").is_none(), "{result}");
+        assert_eq!(result["auto_scoped"], false);
+        assert!(home.join("memory.md").exists());
+    }
+
+    #[tokio::test]
+    async fn session_start_outside_a_repository_looks_only_in_its_own_directory() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (home, folder) = home_with_a_scope_and_a_loose_folder(&root);
+        write_scope(&home.join("Downloads"), "mid_tenant", "mid_project");
+        let data = tempdir().unwrap();
+        let store = open_test_store(data.path());
+        seed_fact(&store, "mid_tenant", "mid_project").await;
+
+        // Other commands walk up to the scope between the folder and home.
+        // Session-start plans the scope of the folder itself instead.
+        let result = start_below(&store, &folder, &home).await;
+
+        assert_eq!(result["skipped"], "no_stored_facts");
+        assert_eq!(result["project_id"], "my_folder");
     }
 
     async fn add_unconsolidated_chunks(store: &PersistentStore, project: &str, count: usize) {

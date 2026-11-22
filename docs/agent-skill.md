@@ -134,6 +134,17 @@ project, so they still need an existing scope or `--tenant-id`. `audit`,
 `report` and `consolidate-review` are unchanged: with no scope they run
 store-wide.
 
+The scope file in the home directory (made by `memd init`, never automatically)
+serves the home folder itself. A folder below home, outside a repository and
+without a scope of its own, does not borrow it for a session or a write. Session
+start there plans the scope of that folder and writes no `memory.md` until a
+fact is stored for it. The first flagless `memd add`, `memd experience note` or
+`memd experience record` there creates the scope of the folder, named after it,
+instead of storing under the home project. Reads (`search`, `get`,
+`agent-context`, `experience find`, `memory-md` and the others) keep using the
+home scope, and `memd doctor` says so. A scope file in a folder between the
+start folder and home, and a repository, apply as before.
+
 The scope comes from `$MEMD_DEFAULT_TENANT` (then `$USER`, then `"default"`) and
 the repository basename. If the root is not writable, the scope goes to the
 session directory and keeps the repository's name. Outside a repository, the

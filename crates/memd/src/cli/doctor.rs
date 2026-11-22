@@ -466,9 +466,13 @@ fn check_project_scope_with(
     project_dir: &Path,
     inputs: &super::session_start::AutoScopeInputs,
 ) -> Value {
-    use super::scope::{locate_project_scope, LocatedScope};
+    use super::scope::{locate_project_scope_with_home, LocatedScope};
 
-    let located = match locate_project_scope(project_dir, inputs.owns.as_ref()) {
+    let located = match locate_project_scope_with_home(
+        project_dir,
+        inputs.home.as_deref(),
+        inputs.owns.as_ref(),
+    ) {
         Ok(located) => located,
         Err(error) => {
             return json!({
@@ -480,13 +484,20 @@ fn check_project_scope_with(
         }
     };
     match located {
-        LocatedScope::Found { path, scope } => json!({
-            "ok": true,
-            "path": path.display().to_string(),
-            "tenant_id": scope.tenant_id,
-            "project_id": scope.project_id,
-            "fix": "",
-        }),
+        LocatedScope::Found { path, scope } => {
+            let note = home_scope_note(&path, &scope, project_dir, inputs.home.as_deref());
+            let mut report = json!({
+                "ok": true,
+                "path": path.display().to_string(),
+                "tenant_id": scope.tenant_id,
+                "project_id": scope.project_id,
+                "fix": "",
+            });
+            if let Some(note) = note {
+                report["note"] = json!(note);
+            }
+            report
+        }
         LocatedScope::Invalid(invalid) if invalid.malformed => json!({
             "ok": false,
             "path": invalid.path.display().to_string(),
@@ -518,6 +529,27 @@ fn check_project_scope_with(
             report
         }
     }
+}
+
+/// The scope in the home folder serves a read in a folder below it, but the
+/// first write there creates the scope of that folder. The note says so when
+/// the scope found is the home scope and `project_dir` is not the home folder.
+/// It keeps the ids, because the text report prints the note instead of them.
+fn home_scope_note(
+    found: &Path,
+    scope: &super::args::ProjectScopeConfig,
+    project_dir: &Path,
+    home: Option<&Path>,
+) -> Option<String> {
+    let home = home?;
+    let start = super::paths::absolutize_project_dir(project_dir).ok()?;
+    (start != home && found == home.join(".memd").join("project_scope.json")).then(|| {
+        format!(
+            "tenant={} project={}; home scope: the first memd add here creates the scope of this folder",
+            scope.tenant_id,
+            scope.project_id.as_deref().unwrap_or("?")
+        )
+    })
 }
 
 /// The scope report for a directory with no scope file.
@@ -1029,6 +1061,7 @@ mod tests {
             enabled,
             consolidate: false,
             owns: std::sync::Arc::new(super::super::scope::owned_by_current_user),
+            home: super::super::scope::canonical_home(),
         }
     }
 
@@ -1109,6 +1142,76 @@ mod tests {
         );
         assert!(note.contains("another user owns"), "note was: {note}");
         assert!(v.get("tenant_id").is_some_and(|tenant| tenant != "alice"));
+    }
+
+    /// A home that holds a scope file, and a folder below it that is no
+    /// repository and has no scope file of its own.
+    fn home_with_a_scope_and_a_loose_folder(root: &Path) -> (PathBuf, PathBuf) {
+        let home = root.canonicalize().unwrap().join("home");
+        let folder = home.join("Downloads/My-Folder");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(home.join(".memd")).unwrap();
+        std::fs::write(
+            home.join(".memd/project_scope.json"),
+            scope_json("home_tenant", "home_project"),
+        )
+        .unwrap();
+        (home, folder)
+    }
+
+    fn doctor_inputs_at(home: &Path) -> super::super::session_start::AutoScopeInputs {
+        super::super::session_start::AutoScopeInputs {
+            home: Some(home.to_path_buf()),
+            ..doctor_inputs(true)
+        }
+    }
+
+    #[test]
+    fn project_scope_in_a_loose_folder_below_home_reports_the_home_scope_and_the_first_write() {
+        let dir = tempdir().unwrap();
+        let (home, folder) = home_with_a_scope_and_a_loose_folder(dir.path());
+
+        let v = check_project_scope_with(&folder, &doctor_inputs_at(&home));
+
+        // A read uses the home scope, and the report says so.
+        assert_eq!(v["ok"], true);
+        assert_eq!(
+            v["path"],
+            home.join(".memd/project_scope.json").display().to_string()
+        );
+        assert_eq!(v["tenant_id"], "home_tenant");
+        assert_eq!(v["project_id"], "home_project");
+        // The note keeps the ids, because the text report prints the note
+        // instead of them, and adds what a first write does.
+        let note = v["note"].as_str().unwrap_or("");
+        assert_eq!(
+            note,
+            "tenant=home_tenant project=home_project; home scope: the first memd add here \
+             creates the scope of this folder"
+        );
+    }
+
+    #[test]
+    fn project_scope_in_the_home_folder_and_below_a_folder_scope_has_no_home_note() {
+        let dir = tempdir().unwrap();
+        let (home, folder) = home_with_a_scope_and_a_loose_folder(dir.path());
+
+        // The home folder itself: the home scope is its own scope.
+        let v = check_project_scope_with(&home, &doctor_inputs_at(&home));
+        assert_eq!(v["tenant_id"], "home_tenant");
+        assert!(v.get("note").is_none(), "{v}");
+
+        // A scope between the folder and home applies to the folder.
+        let between = home.join("Downloads");
+        std::fs::create_dir_all(between.join(".memd")).unwrap();
+        std::fs::write(
+            between.join(".memd/project_scope.json"),
+            scope_json("mid_tenant", "mid_project"),
+        )
+        .unwrap();
+        let v = check_project_scope_with(&folder, &doctor_inputs_at(&home));
+        assert_eq!(v["tenant_id"], "mid_tenant");
+        assert!(v.get("note").is_none(), "{v}");
     }
 
     #[test]
