@@ -485,7 +485,7 @@ fn check_project_scope_with(
     };
     match located {
         LocatedScope::Found { path, scope } => {
-            let note = home_scope_note(&path, &scope, project_dir, inputs.home.as_deref());
+            let note = home_scope_note(&path, &scope, project_dir, inputs);
             let mut report = json!({
                 "ok": true,
                 "path": path.display().to_string(),
@@ -535,21 +535,30 @@ fn check_project_scope_with(
 /// first write there creates the scope of that folder. The note says so when
 /// the scope found is the home scope and `project_dir` is not the home folder.
 /// It keeps the ids, because the text report prints the note instead of them.
+/// Where no scope may be created (automatic scopes off, or a `.memd-skip`
+/// marker), it says that a flagless add fails instead.
 fn home_scope_note(
     found: &Path,
     scope: &super::args::ProjectScopeConfig,
     project_dir: &Path,
-    home: Option<&Path>,
+    inputs: &super::session_start::AutoScopeInputs,
 ) -> Option<String> {
-    let home = home?;
+    let home = inputs.home.as_deref()?;
     let start = super::paths::absolutize_project_dir(project_dir).ok()?;
-    (start != home && found == home.join(".memd").join("project_scope.json")).then(|| {
-        format!(
-            "tenant={} project={}; home scope: the first memd add here creates the scope of this folder",
-            scope.tenant_id,
-            scope.project_id.as_deref().unwrap_or("?")
-        )
-    })
+    if start == home || found != home.join(".memd").join("project_scope.json") {
+        return None;
+    }
+    let first_write = if inputs.enabled && !start.join(".memd-skip").exists() {
+        "the first memd add here creates the scope of this folder"
+    } else {
+        "no scope can be created here (automatic scopes are off or .memd-skip is present), \
+         so a flagless memd add fails; pass --tenant-id"
+    };
+    Some(format!(
+        "tenant={} project={}; home scope: {first_write}",
+        scope.tenant_id,
+        scope.project_id.as_deref().unwrap_or("?")
+    ))
 }
 
 /// The scope report for a directory with no scope file.
@@ -1189,6 +1198,26 @@ mod tests {
             "tenant=home_tenant project=home_project; home scope: the first memd add here \
              creates the scope of this folder"
         );
+    }
+
+    #[test]
+    fn home_scope_note_says_a_flagless_add_fails_where_no_scope_can_be_created() {
+        let dir = tempdir().unwrap();
+        let (home, folder) = home_with_a_scope_and_a_loose_folder(dir.path());
+        let expected = "tenant=home_tenant project=home_project; home scope: no scope can be \
+             created here (automatic scopes are off or .memd-skip is present), so a flagless \
+             memd add fails; pass --tenant-id";
+
+        let disabled = super::super::session_start::AutoScopeInputs {
+            enabled: false,
+            ..doctor_inputs_at(&home)
+        };
+        let v = check_project_scope_with(&folder, &disabled);
+        assert_eq!(v["note"].as_str().unwrap_or(""), expected);
+
+        std::fs::write(folder.join(".memd-skip"), "").unwrap();
+        let v = check_project_scope_with(&folder, &doctor_inputs_at(&home));
+        assert_eq!(v["note"].as_str().unwrap_or(""), expected);
     }
 
     #[test]
