@@ -1073,7 +1073,7 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use crate::consolidate::MockEnvConsolidator;
-    use crate::mcp::handlers::{handle_memory_search, SearchParams};
+    use crate::ops::{handle_memory_search, SearchParams};
     use crate::store::metadata::MetadataStore;
     use crate::store::persistent::{PersistentStore, PersistentStoreConfig};
     use crate::store::Store;

@@ -483,7 +483,6 @@ async fn run_treatment(
         enable_dense_search: false,
         enable_hybrid_search: false,
         backfill_hnsw_on_startup: false,
-        backfill_canonical_text_on_startup: false,
         ..Default::default()
     })
     .map_err(|error| error.to_string())?;

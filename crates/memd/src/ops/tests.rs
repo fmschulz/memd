@@ -2599,61 +2599,6 @@ async fn context_get_files_for_subsystem_returns_tag_and_source_paths() {
 }
 
 #[tokio::test]
-async fn context_search_documents_filters_by_tier_and_subsystem() {
-    let store = make_store();
-
-    for (text, tier_tag) in [
-        ("hot retrieval context", "ctx:tier:hot"),
-        ("cold retrieval context", "ctx:tier:cold"),
-    ] {
-        handle_memory_add(
-            &store,
-            None,
-            AddParams {
-                tenant_id: "test".to_string(),
-                text: text.to_string(),
-                chunk_type: "doc".to_string(),
-                project_id: None,
-                episode_id: None,
-                source: None,
-                tags: vec![
-                    "ctx:doc".to_string(),
-                    "ctx:subsystem:retrieval".to_string(),
-                    tier_tag.to_string(),
-                ],
-
-                expires_at_ms: None,
-                review_after_ms: None,
-
-                mode: None,
-                supersede_near_duplicates: None,
-                event_time_ms: None,
-            },
-        )
-        .await
-        .unwrap();
-    }
-
-    let result = handle_context_search_documents(
-        &store,
-        ContextSearchDocumentsParams {
-            tenant_id: "test".to_string(),
-            query: "retrieval".to_string(),
-            k: 10,
-            subsystem_key: Some("retrieval".to_string()),
-            tier: Some("hot".to_string()),
-        },
-    )
-    .await
-    .unwrap();
-
-    let payload: ContextSearchDocumentsResult = parse_tool_payload(&result);
-    assert_eq!(payload.results.len(), 1);
-    assert_eq!(payload.results[0].text, "hot retrieval context");
-    assert_eq!(payload.results[0].source_tier.as_deref(), Some("hot"));
-}
-
-#[tokio::test]
 async fn context_find_relevant_context_can_prepend_hot_chunks() {
     let store = make_store();
     let tenant = TenantId::new("test").unwrap();

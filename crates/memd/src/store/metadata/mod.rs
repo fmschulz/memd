@@ -245,15 +245,6 @@ pub trait MetadataStore: Send + Sync {
         now_ms: i64,
     ) -> Result<()>;
 
-    /// Set the optional canonical text used by writer-driven digest /
-    /// supersession-by-content-identity flows.
-    fn set_canonical_text(
-        &self,
-        tenant_id: &TenantId,
-        chunk_id: &ChunkId,
-        canonical: &str,
-    ) -> Result<()>;
-
     /// List chunk IDs whose retention window has elapsed before `now_ms`.
     ///
     /// Skips rows already in terminal lifecycle states (`deleted`,

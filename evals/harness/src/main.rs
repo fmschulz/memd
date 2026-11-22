@@ -85,7 +85,7 @@ struct Args {
     #[arg(long)]
     skip_build: bool,
 
-    /// Embedding model to use (all-minilm, qwen3)
+    /// Embedding model to use (all-minilm, bge-small, bge-base)
     #[arg(long, default_value = "all-minilm")]
     embedding_model: String,
 

@@ -1949,7 +1949,6 @@ mod tests {
             enable_dense_search: false,
             enable_hybrid_search: false,
             backfill_hnsw_on_startup: false,
-            backfill_canonical_text_on_startup: false,
             ..Default::default()
         })
         .unwrap()
@@ -2934,7 +2933,6 @@ mod tests {
             enable_dense_search: false,
             enable_hybrid_search: false,
             backfill_hnsw_on_startup: false,
-            backfill_canonical_text_on_startup: false,
             ..Default::default()
         };
         let store = PersistentStore::open(config.clone()).unwrap();

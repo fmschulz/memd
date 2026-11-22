@@ -1,5 +1,4 @@
 use memd::cli;
-use memd::mcp;
 use memd::MemoryStore;
 
 #[test]
@@ -19,21 +18,15 @@ fn cli_public_paths_resolve() {
 }
 
 #[test]
-fn mcp_compatibility_exports_resolve() {
-    let _ = mcp::configure_operation_routing;
-    let _ = mcp::handle_memory_search::<MemoryStore>;
-
-    let _ = std::any::type_name::<mcp::McpError>();
-    let _ = std::any::type_name::<mcp::QueryMode>();
-    let _ = std::any::type_name::<mcp::SearchParams>();
-    let _ = std::any::type_name::<mcp::ArtifactCreateParams>();
-    let _ = std::any::type_name::<mcp::TaskStartParams>();
-    let _ = std::any::type_name::<mcp::dedup::ResolvedDedup>();
-    let _ = std::any::type_name::<mcp::markdown_export::RenderedFile>();
-}
-
-#[test]
 fn protocol_neutral_operation_paths_resolve() {
+    let _ = memd::ops::configure_operation_routing;
+    let _ = memd::ops::handle_memory_search::<MemoryStore>;
+
+    let _ = std::any::type_name::<memd::ops::error::McpError>();
+    let _ = std::any::type_name::<memd::ops::QueryMode>();
+    let _ = std::any::type_name::<memd::ops::SearchParams>();
+    let _ = std::any::type_name::<memd::ops::ArtifactCreateParams>();
+    let _ = std::any::type_name::<memd::ops::TaskStartParams>();
     let _ = std::any::type_name::<memd::ops::OperationError>();
     let _ = std::any::type_name::<memd::dedup::ResolvedDedup>();
     let _ = std::any::type_name::<memd::markdown_export::RenderedFile>();

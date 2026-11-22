@@ -8,9 +8,8 @@ operations** (`memd call <operation>` and `memd batch --jsonl`).
 ## Agent-facing commands
 
 The global `--embedding-model` flag is optional. It accepts `all-minilm` (384-d),
-`bge-small` (384-d CLS), `bge-base` (768-d CLS), and `qwen3` (unsupported by
-the Candle backend; uses MiniLM). Without the flag, a store uses the model it
-records, and a new store uses `bge-small`. A flag that differs from the store's
+`bge-small` (384-d CLS), and `bge-base` (768-d CLS). Without the flag, a store
+uses the model it records, and a new store uses `bge-small`. A flag that differs from the store's
 model is an error. Both BGE models normalise vectors and add the
 retrieval instruction to queries only. The default search variant is
 `hybrid-feature` for `bge-small` and `all-minilm`, and `dense-only` for `bge-base`.

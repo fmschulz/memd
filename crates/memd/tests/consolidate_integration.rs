@@ -10,7 +10,7 @@
 //! environment variables.
 
 use memd::cli::{run_cli, CliCommand};
-use memd::mcp::{handle_memory_search, SearchParams};
+use memd::ops::{handle_memory_search, SearchParams};
 use memd::store::persistent::{PersistentStore, PersistentStoreConfig};
 use memd::store::Store;
 use memd::types::ChunkStatus;
@@ -24,7 +24,6 @@ fn open_store(dir: &std::path::Path) -> PersistentStore {
         enable_dense_search: false,
         enable_hybrid_search: false,
         backfill_hnsw_on_startup: false,
-        backfill_canonical_text_on_startup: false,
         ..Default::default()
     };
     PersistentStore::open(cfg).expect("open persistent store")

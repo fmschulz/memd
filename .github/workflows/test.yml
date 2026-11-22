@@ -60,12 +60,6 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
-      # Three canonical-text backfill tests need the `test-support` feature
-      # (it exposes store helpers that release builds must not carry), so
-      # the plain workspace run above skips them.
-      - name: Run feature-gated tests
-        run: cargo test -p memd --features test-support --test fuzzy_dedup backfill_canonical_text
-
       - name: Reject close_range glibc imports
         run: |
           cargo build -p memd

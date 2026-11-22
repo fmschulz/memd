@@ -25,7 +25,6 @@ fn growth_config(path: &Path) -> PersistentStoreConfig {
             ..Default::default()
         }),
         backfill_hnsw_on_startup: false,
-        backfill_canonical_text_on_startup: false,
         ..Default::default()
     }
 }
@@ -312,7 +311,6 @@ async fn shutdown_finalizes_tiny_segment_without_replay_rewrite() {
         enable_dense_search: false,
         enable_hybrid_search: false,
         backfill_hnsw_on_startup: false,
-        backfill_canonical_text_on_startup: false,
         segment_max_chunks: 10_000,
         ..Default::default()
     };
@@ -354,7 +352,6 @@ async fn repeated_shutdown_does_not_create_extra_segments() {
         enable_dense_search: false,
         enable_hybrid_search: false,
         backfill_hnsw_on_startup: false,
-        backfill_canonical_text_on_startup: false,
         segment_max_chunks: 10_000,
         ..Default::default()
     };
@@ -392,7 +389,6 @@ async fn unfinalized_chunks_survive_restart_via_wal_recovery() {
         enable_dense_search: false,
         enable_hybrid_search: false,
         backfill_hnsw_on_startup: false,
-        backfill_canonical_text_on_startup: false,
         segment_max_chunks: 10_000,
         ..Default::default()
     };
@@ -430,7 +426,6 @@ async fn checkpoint_enabled_shutdown_leaves_finalized_segments() {
         enable_dense_search: false,
         enable_hybrid_search: false,
         backfill_hnsw_on_startup: false,
-        backfill_canonical_text_on_startup: false,
         segment_max_chunks: 10_000,
         // Non-zero interval activates the checkpoint path.
         wal_checkpoint_interval: 1,
@@ -477,7 +472,6 @@ async fn checkpoint_finalizes_active_segment_immediately() {
         enable_dense_search: false,
         enable_hybrid_search: false,
         backfill_hnsw_on_startup: false,
-        backfill_canonical_text_on_startup: false,
         segment_max_chunks: 10_000,
         wal_checkpoint_interval: 1,
         ..Default::default()

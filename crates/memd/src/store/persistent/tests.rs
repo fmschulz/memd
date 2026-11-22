@@ -2650,9 +2650,9 @@ async fn unloadable_model_falls_back_to_the_keyword_index() {
     assert_eq!(store.retrieval_mode(), "keyword_fallback");
 
     // The search payload says so, with the cause.
-    let response = crate::mcp::handle_memory_search(
+    let response = crate::ops::handle_memory_search(
         &store,
-        crate::mcp::SearchParams {
+        crate::ops::SearchParams {
             tenant_id: tenant.to_string(),
             query: "zanzibar".to_string(),
             k: 3,

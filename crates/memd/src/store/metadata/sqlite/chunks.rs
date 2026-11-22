@@ -149,36 +149,14 @@ impl SqliteMetadataStore {
 
     /// Back-date a chunk's `timestamp_created` via direct SQL.
     ///
-    /// TEST-ONLY: used by integration tests that need a deterministic
-    /// clock when exercising history promotion / age-based behavior.
-    /// Gated behind `cfg(any(test, feature = "test-support"))` so it
-    /// never ships in release builds. Allowed-dead until Track C tests
-    /// wire it up through the `common` test-helpers module.
-    ///
-    /// Visibility note: spec called for `pub(crate)`, but the integration
-    /// tests under `crates/memd/tests/` live in a separate crate and
-    /// cannot see crate-private items. Exposing this as `pub` behind the
-    /// `test-support` feature keeps it off release builds while letting
-    /// integration tests reach it.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn force_timestamp_created(&self, chunk_id: &ChunkId, ts_ms: i64) -> Result<()> {
+    /// TEST-ONLY: gives unit tests a deterministic clock when they exercise
+    /// age-based behavior.
+    #[cfg(test)]
+    pub(crate) fn force_timestamp_created(&self, chunk_id: &ChunkId, ts_ms: i64) -> Result<()> {
         let conn = self.pool.get();
         conn.execute(
             "UPDATE chunks SET timestamp_created = ?1 WHERE chunk_id = ?2",
             rusqlite::params![ts_ms, chunk_id.to_string()],
-        )?;
-        Ok(())
-    }
-
-    /// Test-only: NULL out `canonical_text` for a chunk so the D2 startup
-    /// backfill path can be exercised against legacy-shaped rows. Same
-    /// `pub` + feature-gate rationale as `force_timestamp_created`.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn force_clear_canonical_text(&self, chunk_id: &ChunkId) -> Result<()> {
-        let conn = self.pool.get();
-        conn.execute(
-            "UPDATE chunks SET canonical_text = NULL WHERE chunk_id = ?1",
-            rusqlite::params![chunk_id.to_string()],
         )?;
         Ok(())
     }
@@ -1217,20 +1195,6 @@ impl MetadataStore for SqliteMetadataStore {
         now_ms: i64,
     ) -> Result<()> {
         self.atomic_supersede_lifecycle(tenant_id, old_id, new_id, now_ms)
-    }
-
-    fn set_canonical_text(
-        &self,
-        tenant_id: &TenantId,
-        chunk_id: &ChunkId,
-        canonical: &str,
-    ) -> Result<()> {
-        let conn = self.pool.get();
-        conn.execute(
-            "UPDATE chunks SET canonical_text = ?1 WHERE tenant_id = ?2 AND chunk_id = ?3",
-            rusqlite::params![canonical, tenant_id.as_str(), chunk_id.to_string()],
-        )?;
-        Ok(())
     }
 
     fn list_expired_before(&self, tenant_id: &TenantId, now_ms: i64) -> Result<Vec<ChunkId>> {

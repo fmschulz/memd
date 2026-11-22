@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{ArgAction, Subcommand};
 use serde::{Deserialize, Serialize};
 
-use crate::mcp::handlers::QueryMode;
+use crate::ops::QueryMode;
 use crate::types::ChunkType;
 
 /// Export output format.

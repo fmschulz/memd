@@ -19,8 +19,6 @@ use memd::{
 enum ModelChoice {
     /// all-MiniLM-L6-v2: 384-dim, fast, good quality
     AllMinilm,
-    /// Qwen3-Embedding-0.6B: 1024-dim, slower, best quality (not yet supported in Candle)
-    Qwen3,
     /// bge-base-en-v1.5: 768-dim Candle BERT, stronger retrieval (CLS pooling,
     /// dense-only by default)
     BgeBase,
@@ -31,9 +29,7 @@ enum ModelChoice {
 impl From<ModelChoice> for CandleModel {
     fn from(choice: ModelChoice) -> Self {
         match choice {
-            // Qwen3 is not supported by the Candle BERT backend; it has always
-            // run MiniLM there, so preserve that behavior.
-            ModelChoice::AllMinilm | ModelChoice::Qwen3 => CandleModel::MiniLm,
+            ModelChoice::AllMinilm => CandleModel::MiniLm,
             ModelChoice::BgeBase => CandleModel::BgeBase,
             ModelChoice::BgeSmall => CandleModel::BgeSmall,
         }
@@ -65,7 +61,6 @@ impl ModelChoice {
     fn cli_value(self) -> &'static str {
         match self {
             ModelChoice::AllMinilm => "all-minilm",
-            ModelChoice::Qwen3 => "qwen3",
             ModelChoice::BgeBase => "bge-base",
             ModelChoice::BgeSmall => "bge-small",
         }
@@ -517,8 +512,10 @@ mod tests {
             CandleModel::from(ModelChoice::BgeBase),
             CandleModel::BgeBase
         );
-        // Qwen3 has no Candle backend and has always run MiniLM there.
-        assert_eq!(CandleModel::from(ModelChoice::Qwen3), CandleModel::MiniLm);
+        assert_eq!(
+            CandleModel::from(ModelChoice::BgeSmall),
+            CandleModel::BgeSmall
+        );
     }
 
     #[test]
@@ -537,7 +534,7 @@ mod tests {
             SearchVariant::HybridFeature
         ));
         assert!(matches!(
-            default_search_variant(ModelChoice::Qwen3),
+            default_search_variant(ModelChoice::BgeSmall),
             SearchVariant::HybridFeature
         ));
     }

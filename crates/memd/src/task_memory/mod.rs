@@ -564,7 +564,7 @@ impl TaskArtifact {
     /// `summary`, `artifact_role`, `related_artifact_ids` (used as
     /// grounding refs at the MCP boundary) before the page is handed to
     /// `artifact.create`. The handler validates those fields before
-    /// storing the row — see `crates/memd/src/mcp/handlers.rs`.
+    /// storing the row — see `crates/memd/src/ops/`.
     pub fn new_wiki_page(tenant_id: TenantId, task_id: impl Into<String>) -> Self {
         let mut artifact = Self::new(ArtifactKind::WikiPage, tenant_id, task_id);
         artifact.status = Some("authored".to_string());
@@ -759,7 +759,7 @@ fn base_projection_tags(artifact: &TaskArtifact) -> Vec<String> {
 pub fn derive_artifact_trust_tier(artifact: &TaskArtifact) -> TrustTier {
     // `VerifiedRecord` is reserved for artifacts the server has
     // explicitly promoted via `promote_if_countersigned` (see
-    // `mcp::handlers`). Agent-supplied `verification_status` /
+    // `ops`). Agent-supplied `verification_status` /
     // `approval_state` / `ArtifactKind::Verification` previously unlocked
     // the tier directly — that was a self-labelling laundering channel
     // because any caller could write an artifact that stamped itself
@@ -786,7 +786,7 @@ pub fn derive_chunk_trust_tier(artifact: Option<&TaskArtifact>) -> TrustTier {
 ///
 /// This function intentionally NEVER returns `PromotionState::Verified`.
 /// Verification is a server-side decision made by
-/// `mcp::handlers::promote_if_countersigned` after looking up the
+/// `ops::promote_if_countersigned` after looking up the
 /// reply-to parent and checking distinct-writer countersignature; it is
 /// the only path that should produce a `Verified` promotion in v0.3.1+.
 ///
@@ -1294,7 +1294,7 @@ mod tests {
         // Simulate the state after a distinct-writer Verification
         // child has been recorded against this page. The child would
         // be promoted via promote_if_countersigned (covered separately
-        // in mcp::handlers tests); the PAGE itself never changes
+        // in the ops tests); the PAGE itself never changes
         // promotion_state. Assert directly that an externally-
         // unmodified WikiPage remains at CanonicalRecord.
         assert_eq!(
@@ -1381,7 +1381,7 @@ mod tests {
     /// Regression test: `derive_artifact_promotion_state` is a PURE
     /// function and must never return `Verified`. Verification is a
     /// store-side decision made by
-    /// `mcp::handlers::promote_if_countersigned` that cannot be reached
+    /// `ops::promote_if_countersigned` that cannot be reached
     /// by only reading an artifact's fields. Previously this function
     /// honoured agent-supplied `verification_status`, `approval_state`,
     /// `ArtifactKind::Verification`, and non-empty `validation` — each

@@ -97,7 +97,7 @@ jobs:
 
       - name: Restore embedding model cache
         # Cache key includes the embedding-model env var so a model swap
-        # (e.g. BEIR_EMBEDDING_MODEL=qwen3) gets a fresh cache entry instead
+        # (e.g. BEIR_EMBEDDING_MODEL=bge-small) gets a fresh cache entry instead
         # of silently reusing stale weights. Split restore/save (paired with
         # the explicit save below) replaces a single cache step so a freshly
         # downloaded model is persisted even when a later benchmark/gate step

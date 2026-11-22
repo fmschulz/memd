@@ -56,8 +56,8 @@ mod retrieval;
 mod write;
 
 use indexing::{
-    await_index_ack, run_async_index_job, run_canonical_text_backfill, run_hnsw_backfill,
-    sparse_self_heal_enabled, sweep_pending_index_jobs,
+    await_index_ack, run_async_index_job, run_hnsw_backfill, sparse_self_heal_enabled,
+    sweep_pending_index_jobs,
 };
 
 /// Configuration for persistent store
@@ -112,15 +112,6 @@ pub struct PersistentStoreConfig {
     /// segment files); only semantic search is degraded until the task
     /// completes.
     pub backfill_hnsw_on_startup: bool,
-    /// On startup, populate `canonical_text` for any chunk row whose
-    /// value is NULL — pre-D2 production rows were inserted with
-    /// `canonical_text: None`, so Track D's `idx_chunks_canonical`
-    /// partial index never sees them and `memory.find_near_duplicates`
-    /// / exact-mode `supersede_near_duplicates` would silently miss
-    /// them. The backfill reads each row's text from its segment,
-    /// canonicalises it via `canonicalize_for_type(text, chunk_type)`,
-    /// and writes the result back. Best-effort, single-pass.
-    pub backfill_canonical_text_on_startup: bool,
 }
 
 impl Default for PersistentStoreConfig {
@@ -149,14 +140,6 @@ impl Default for PersistentStoreConfig {
                 matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
             })
             .unwrap_or(false);
-        let backfill_canonical_text_on_startup =
-            std::env::var("MEMD_BACKFILL_CANONICAL_TEXT_ON_STARTUP")
-                .ok()
-                .map(|v| {
-                    let normalized = v.trim().to_ascii_lowercase();
-                    matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
-                })
-                .unwrap_or(false);
 
         Self {
             data_dir: PathBuf::from("data"),
@@ -183,7 +166,6 @@ impl Default for PersistentStoreConfig {
             async_index_poll_ms,
             bounded_search_locks: false,
             backfill_hnsw_on_startup,
-            backfill_canonical_text_on_startup,
         }
     }
 }
@@ -310,16 +292,6 @@ pub struct BackfillStats {
     /// Batches whose embedding or index write failed. Their chunks are
     /// retried by the next pass.
     pub batches_failed: usize,
-}
-
-/// Result of a canonical_text backfill pass over legacy NULL rows.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct CanonicalBackfillStats {
-    /// Rows whose canonical_text was populated by this pass.
-    pub rows_backfilled: usize,
-    /// Rows visited but not updated (missing text, load error, write
-    /// error). The next pass will retry.
-    pub rows_skipped: usize,
 }
 
 /// Result of physically rewriting finalized segment files for a tenant.
@@ -680,7 +652,6 @@ impl PersistentStore {
         config.enable_hybrid_search = false;
         config.enable_async_indexing = false;
         config.backfill_hnsw_on_startup = false;
-        config.backfill_canonical_text_on_startup = false;
         Self::open(config)
     }
 
@@ -920,9 +891,6 @@ impl PersistentStore {
                 || store.embedding_rebuild_pending.load(Ordering::Acquire))
         {
             store.spawn_startup_hnsw_backfill();
-        }
-        if !store.config.read_only && store.config.backfill_canonical_text_on_startup {
-            store.spawn_startup_canonical_backfill();
         }
         // Sparse self-heal trigger. Unlike the opt-in HNSW startup
         // backfill, this check is cheap (one doc-count query per tenant)
@@ -1180,46 +1148,6 @@ impl PersistentStore {
             }
         }
         false
-    }
-
-    /// Populate `canonical_text` for any chunk row whose value is NULL.
-    ///
-    /// Pre-D2 production rows were inserted with `canonical_text: None`
-    /// and the `idx_chunks_canonical` partial index never sees them.
-    /// This pass restores Track D's exact-mode dedup contract for those
-    /// rows without requiring a destructive migration. Best-effort: a
-    /// single-row failure (deserialization, missing segment) is logged
-    /// and counted, not fatal — subsequent runs reattempt the same row.
-    pub fn backfill_canonical_text_for_legacy_chunks(&self) -> Result<CanonicalBackfillStats> {
-        self.ensure_writable("backfill_canonical_text_for_legacy_chunks")?;
-        Ok(run_canonical_text_backfill(
-            self.metadata.as_ref(),
-            self.tenants.as_ref(),
-        ))
-    }
-
-    /// Schedule a one-shot background task that populates canonical_text
-    /// for legacy NULL rows. Mirrors the HNSW backfill structure: no-op
-    /// when no Tokio runtime is available (sync test contexts) — call
-    /// `backfill_canonical_text_for_legacy_chunks` directly in that
-    /// case.
-    fn spawn_startup_canonical_backfill(&self) {
-        let handle = match tokio::runtime::Handle::try_current() {
-            Ok(h) => h,
-            Err(_) => return,
-        };
-        let metadata = Arc::clone(&self.metadata);
-        let tenants = Arc::clone(&self.tenants);
-        handle.spawn(async move {
-            let stats = run_canonical_text_backfill(metadata.as_ref(), tenants.as_ref());
-            if stats.rows_backfilled > 0 || stats.rows_skipped > 0 {
-                info!(
-                    backfilled = stats.rows_backfilled,
-                    skipped = stats.rows_skipped,
-                    "startup canonical_text backfill completed"
-                );
-            }
-        });
     }
 
     /// Re-baseline the external-mutation probe after this process finished a

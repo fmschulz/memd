@@ -971,21 +971,6 @@ pub struct ContextGetFilesForSubsystemParams {
     pub limit: usize,
 }
 
-/// Parameters for context.search_context_documents
-#[derive(Debug, Deserialize)]
-pub struct ContextSearchDocumentsParams {
-    #[serde(default)]
-    pub tenant_id: String,
-    pub query: String,
-    #[serde(default = "default_context_limit")]
-    pub k: usize,
-    #[serde(default)]
-    pub subsystem_key: Option<String>,
-    /// Optional tier filter: "hot" | "cold"
-    #[serde(default)]
-    pub tier: Option<String>,
-}
-
 /// Parameters for context.find_relevant_context
 #[derive(Debug, Deserialize)]
 pub struct ContextFindRelevantContextParams {
@@ -1520,12 +1505,6 @@ pub struct SubsystemSummary {
 pub struct ContextGetFilesForSubsystemResult {
     pub subsystem_key: String,
     pub files: Vec<String>,
-}
-
-/// Result of context.search_context_documents
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ContextSearchDocumentsResult {
-    pub results: Vec<ChunkResult>,
 }
 
 /// Result of context.find_relevant_context

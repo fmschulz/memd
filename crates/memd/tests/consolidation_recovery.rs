@@ -21,7 +21,6 @@ fn open_store(path: &std::path::Path) -> PersistentStore {
         enable_dense_search: false,
         enable_hybrid_search: false,
         backfill_hnsw_on_startup: false,
-        backfill_canonical_text_on_startup: false,
         ..Default::default()
     })
     .unwrap()
@@ -33,7 +32,6 @@ fn open_sparse_store(path: &std::path::Path) -> PersistentStore {
         enable_dense_search: false,
         enable_hybrid_search: true,
         backfill_hnsw_on_startup: false,
-        backfill_canonical_text_on_startup: false,
         ..Default::default()
     })
     .unwrap()

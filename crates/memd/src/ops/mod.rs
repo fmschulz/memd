@@ -772,15 +772,6 @@ fn chunk_matches_any_subsystem(chunk: &MemoryChunk, subsystem_keys: &[String]) -
         .any(|key| chunk_matches_subsystem(chunk, key))
 }
 
-fn chunk_matches_tier(chunk: &MemoryChunk, tier: Option<&str>) -> bool {
-    match tier {
-        Some("hot") => has_exact_tag(&chunk.tags, TAG_CTX_TIER_HOT),
-        Some("cold") => has_exact_tag(&chunk.tags, TAG_CTX_TIER_COLD),
-        Some(_) => false,
-        None => true,
-    }
-}
-
 fn is_context_chunk(chunk: &MemoryChunk) -> bool {
     if has_exact_tag(&chunk.tags, TAG_CTX_DOC)
         || has_exact_tag(&chunk.tags, TAG_CTX_TIER_HOT)

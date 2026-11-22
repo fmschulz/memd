@@ -158,6 +158,50 @@ fn mode_mcp_is_rejected_by_current_cli() {
 }
 
 #[test]
+fn embedding_model_qwen3_is_rejected_by_current_cli() {
+    let output = Command::new(memd_bin())
+        .args(["--embedding-model", "qwen3", "--in-memory", "stats"])
+        .output()
+        .expect("run memd --embedding-model qwen3");
+
+    assert!(
+        !output.status.success(),
+        "--embedding-model qwen3 unexpectedly succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invalid value 'qwen3'"),
+        "unexpected rejection message: {stderr}"
+    );
+}
+
+#[test]
+fn removed_context_search_operation_is_an_unknown_tool() {
+    let output = Command::new(memd_bin())
+        .args([
+            "--in-memory",
+            "call",
+            "context.search_context_documents",
+            "--json",
+            r#"{"query":"x"}"#,
+            "--warm",
+            "off",
+        ])
+        .output()
+        .expect("run memd call context.search_context_documents");
+
+    assert!(
+        !output.status.success(),
+        "removed operation unexpectedly succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown tool 'context.search_context_documents'"),
+        "unexpected rejection message: {stderr}"
+    );
+}
+
+#[test]
 fn batch_cli_preserves_operation_response_shapes() {
     let jsonl = r#"{"tool":"memory.add","arguments":{"tenant_id":"cli_contract","project_id":"p","text":"contract alpha memory","type":"doc","tags":["contract"]}}
 {"tool":"memory.search","arguments":{"tenant_id":"cli_contract","project_id":"p","query":"contract alpha","k":1,"compact":true,"include_text":true}}

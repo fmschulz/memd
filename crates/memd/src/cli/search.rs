@@ -6,7 +6,7 @@ use tracing::info;
 
 use crate::error::{MemdError, Result};
 use crate::hit_stats::{query_mode_label, record_hits, record_hits_to_data_dir, HitRecord};
-use crate::mcp::handlers::{handle_memory_search, SearchParams};
+use crate::ops::{handle_memory_search, SearchParams};
 use crate::store::usage::{UsageEvent, UsageOp};
 use crate::store::{
     stable_query_hash, RankingPolicyMode, RetrievalEpisode, RetrievalEpisodeId,

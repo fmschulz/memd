@@ -143,9 +143,8 @@ A `tracing` subscriber writes human-readable logs to stderr. Without
 `RUST_LOG`, memd logs at `warn`, or at `info` with `--verbose` and in the warm
 worker. `RUST_LOG` sets the filter.
 
-Deprecation warnings for `artifact.create` (mega-schema),
-`context.search_context_documents`, and the `artifact.verify` alias log at
-`warn!` so migration can be tracked.
+Deprecation warnings for `artifact.create` (mega-schema) and the
+`artifact.verify` alias log at `warn!` so migration can be tracked.
 
 ## Hit counters
 

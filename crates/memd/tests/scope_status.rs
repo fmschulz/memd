@@ -3,7 +3,7 @@
 //! memory.search payload, and a write that creates a brand-new tenant
 //! must say so.
 
-use memd::mcp::{handle_memory_add, handle_memory_search, AddParams, SearchParams};
+use memd::ops::{handle_memory_add, handle_memory_search, AddParams, SearchParams};
 use memd::store::persistent::{PersistentStore, PersistentStoreConfig};
 use memd::store::Store;
 use memd::{ChunkType, MemoryChunk, ProjectId, TenantId};
@@ -16,7 +16,6 @@ fn open_store(dir: &std::path::Path) -> PersistentStore {
         enable_dense_search: false,
         enable_hybrid_search: false,
         backfill_hnsw_on_startup: false,
-        backfill_canonical_text_on_startup: false,
         ..Default::default()
     };
     PersistentStore::open(cfg).expect("open persistent store")

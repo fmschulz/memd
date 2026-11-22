@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use super::paths::absolutize_project_dir;
 use super::unwrap_content_payload;
 use crate::error::{MemdError, Result};
-use crate::mcp::handlers::{handle_memory_search, SearchParams};
+use crate::ops::{handle_memory_search, SearchParams};
 use crate::store::{RankingPolicyMode, RetrievalEpisodeId, RetrievalEpisodeItem, Store};
 use crate::types::TenantId;
 

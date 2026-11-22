@@ -18,7 +18,6 @@ pub mod index;
 pub mod logging;
 pub mod maintenance;
 pub mod markdown_export;
-pub mod mcp;
 pub mod omf;
 pub mod ops;
 pub mod retrieval;

@@ -19,7 +19,7 @@ usage() {
 Usage: run_offline_retrieval_benchmark.sh [options]
 
 Options:
-  --model <all-minilm|qwen3>       Embedding model (default: all-minilm)
+  --model <all-minilm|bge-small|bge-base>  Embedding model (default: all-minilm)
   --system-variant <name>          Retrieval variant (default: hybrid-feature)
   --output-dir <path>              Output directory (default: evals/bench/results/offline-<timestamp>)
   --max-queries <n>                Optional query cap per dataset

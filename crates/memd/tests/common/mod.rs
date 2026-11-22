@@ -17,7 +17,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use memd::config::Config;
-use memd::mcp::*;
+use memd::ops::error::McpError;
+use memd::ops::*;
 use memd::store::persistent::{PersistentStore, PersistentStoreConfig};
 use memd::types::{ChunkId, TenantId};
 
@@ -63,7 +64,6 @@ pub async fn persistent_store(data_dir: &Path) -> Arc<PersistentStore> {
         // state stays deterministic — otherwise the background passes
         // race with the test's own writes / metadata mutations.
         backfill_hnsw_on_startup: false,
-        backfill_canonical_text_on_startup: false,
         ..Default::default()
     };
     Arc::new(PersistentStore::open(config).expect("persistent store"))
