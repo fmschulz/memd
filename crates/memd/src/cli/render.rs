@@ -201,7 +201,7 @@ pub(super) fn render_guardrail_block(
     scope_config: &TenantScopeConfig,
     memd_command: &str,
 ) -> String {
-    let policy = include_str!("../../../../memd-skill/memory-policy.md");
+    let policy = include_str!("../../memory-policy.md");
     format!(
         "<!-- memd-guardrails:start -->\n## memd CLI Memory Guardrails\n\n\
          - Write tenant: `{}`\n\

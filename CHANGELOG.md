@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Fixed
+
+- The crate package now carries its own copy of the memory policy text (`crates/memd/memory-policy.md`), so the published crate compiles. 1.10.0 could not be published to crates.io because the policy was read from `memd-skill/`, outside the crate. A test keeps the copy equal to the skill's.
+
 ## [1.10.0] - 2026-11-21
 
 ### Added
