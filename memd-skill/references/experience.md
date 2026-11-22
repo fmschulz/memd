@@ -6,7 +6,7 @@ source, progress, exact commands, and complete logs in the repository. The case
 stores the causal summary and links to that evidence.
 
 This workflow requires memd 1.8.0 or later; `experience note` needs memd 1.9.0
-or later, and `experience note --compact` needs 1.10.0.
+or later, and `experience note --compact` needs 1.10.1.
 
 Run the commands from a scoped repository, or pass the same explicit
 `--tenant-id` and `--project-id` to every command.

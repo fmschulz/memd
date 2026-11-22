@@ -6,8 +6,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [1.10.1] - 2026-11-21
+
+1.10.0 was tagged but not released: no binaries and no crates.io package. 1.10.1 is the same code with the two release fixes below.
+
 ### Fixed
 
+- The macOS arm64 binary builds on the `macos-15` runner. GitHub no longer supports the `macos-14` image that cargo-dist 0.32 picks, so the 1.10.0 release build was cancelled.
 - The crate package now carries its own copy of the memory policy text (`crates/memd/memory-policy.md`), so the published crate compiles. 1.10.0 could not be published to crates.io because the policy was read from `memd-skill/`, outside the crate. A test keeps the copy equal to the skill's.
 
 ## [1.10.0] - 2026-11-21
