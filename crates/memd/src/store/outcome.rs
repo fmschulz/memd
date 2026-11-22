@@ -160,12 +160,6 @@ impl OutcomeKind {
     pub const fn credits_harmful(self) -> bool {
         matches!(self, Self::Corrected | Self::Failed)
     }
-
-    /// True when the event records that verification did not happen, rather
-    /// than a verified result. Never eligible for ranking in either direction.
-    pub const fn is_verifier_error(self) -> bool {
-        matches!(self, Self::VerifierError)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -754,7 +748,6 @@ mod tests {
     fn verifier_error_credits_nothing_in_either_direction() {
         assert!(!OutcomeKind::VerifierError.credits_used());
         assert!(!OutcomeKind::VerifierError.credits_harmful());
-        assert!(OutcomeKind::VerifierError.is_verifier_error());
         assert_eq!(
             OutcomeKind::parse("verifier_error").unwrap(),
             OutcomeKind::VerifierError

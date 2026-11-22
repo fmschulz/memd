@@ -72,7 +72,7 @@ impl Default for HnswConfig {
             ef_construction: 200,  // Higher = better quality, slower build
             ef_search: 50,         // Higher = better recall, slower search
             max_elements: 100_000, // 100K chunks per tenant
-            dimension: 384,        // all-MiniLM-L6-v2 (TODO: 1024 for Qwen3 upgrade)
+            dimension: 384,        // all-MiniLM-L6-v2
             persist_graph_dump: true,
             search_lock_budget_ms: None,
             backfill_hnsw_on_startup: false,

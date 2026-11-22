@@ -4,7 +4,7 @@
 //! - Header: Magic(4B) | Type(1B) | Length(4B) | CRC32(4B) = 13 bytes
 //! - Payload: Variable length serialized data
 
-use std::io::{self, Read, Write};
+use std::io;
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use serde::{Deserialize, Serialize};
@@ -237,41 +237,6 @@ impl WalRecord {
 
         Ok((record, total_size))
     }
-
-    /// Write the record to a writer
-    pub fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
-        let bytes = self.encode_to_bytes();
-        writer.write_all(&bytes)
-    }
-
-    /// Read a record from a reader
-    pub fn read_from<R: Read>(reader: &mut R) -> io::Result<Self> {
-        // Read header first
-        let mut header = [0u8; WAL_HEADER_SIZE];
-        reader.read_exact(&mut header)?;
-
-        // Validate magic
-        if &header[0..4] != WAL_MAGIC {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid WAL magic",
-            ));
-        }
-
-        // Read length
-        let mut cursor = &header[5..9];
-        let length = cursor.read_u32::<LittleEndian>()? as usize;
-
-        // Read full record (header + payload)
-        let mut full_bytes = Vec::with_capacity(WAL_HEADER_SIZE + length);
-        full_bytes.extend_from_slice(&header);
-        full_bytes.resize(WAL_HEADER_SIZE + length, 0);
-        reader.read_exact(&mut full_bytes[WAL_HEADER_SIZE..])?;
-
-        // Decode
-        let (record, _) = Self::decode_from_bytes(&full_bytes)?;
-        Ok(record)
-    }
 }
 
 #[cfg(test)]
@@ -451,23 +416,6 @@ mod tests {
     }
 
     #[test]
-    fn write_and_read_from_stream() {
-        let record = WalRecord::add(
-            "tenant_1".to_string(),
-            "chunk_abc".to_string(),
-            1700000000000,
-            b"stream payload".to_vec(),
-        );
-
-        let mut buffer = Vec::new();
-        record.write_to(&mut buffer).unwrap();
-
-        let mut cursor = buffer.as_slice();
-        let decoded = WalRecord::read_from(&mut cursor).unwrap();
-        assert_eq!(decoded, record);
-    }
-
-    #[test]
     fn header_size_constant() {
         assert_eq!(WAL_HEADER_SIZE, 13);
     }
@@ -499,7 +447,7 @@ mod tests {
         // Encode all records into a single buffer
         let mut buffer = Vec::new();
         for record in &records {
-            record.write_to(&mut buffer).unwrap();
+            buffer.extend(record.encode_to_bytes());
         }
 
         // Decode all records back

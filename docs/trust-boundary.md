@@ -41,7 +41,7 @@ for source coverage, command cleanup, and transfer limits.
 - The warm worker creates its Unix socket in a `0700` runtime directory and
   chmods the socket file to `0600` before accepting connections.
 - Embedding model and tokenizer downloads for all-MiniLM-L6-v2,
-  BAAI/bge-small-en-v1.5, BAAI/bge-base-en-v1.5, and Qwen3-Embedding-0.6B
+  BAAI/bge-small-en-v1.5, and BAAI/bge-base-en-v1.5
   are pinned to immutable Hugging Face commit revisions
   and verified against compiled-in SHA-256 digests.
 - Dense indexes record their embedding model. A different model is rejected,

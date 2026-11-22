@@ -203,6 +203,15 @@ pub(super) fn sparse_self_heal_enabled() -> bool {
         .unwrap_or(true)
 }
 
+/// Re-index the active chunks that the dense index lacks.
+///
+/// `DenseSearcher` keeps its HNSW indexes in memory and saves them only on a
+/// graceful shutdown. After a crash, a tenant's index can start empty while its
+/// segments and metadata load, so reads work but semantic search finds nothing.
+/// This pass snapshots each tenant's active metadata once, finds the chunks
+/// without a cached embedding, and re-indexes them in batches. A non-zero
+/// `chunks_skipped` in the returned `BackfillStats` means coverage may be
+/// partial.
 pub(super) async fn run_hnsw_backfill(
     dense_searcher: Option<&Arc<DenseSearcher>>,
     hybrid_searcher: Option<&Arc<HybridSearcher>>,
@@ -244,7 +253,7 @@ pub(super) async fn run_hnsw_backfill(
         // is the authoritative "active" set at this moment. Any new
         // writes arriving after this point will be indexed by their
         // write path; any chunks indexed between snapshot and the
-        // per-chunk membership check will be skipped by `contains_chunk`.
+        // per-chunk membership check will be skipped there.
         let metas = metadata.list(&tenant_id, usize::MAX, 0)?;
         if metas.is_empty() {
             continue;

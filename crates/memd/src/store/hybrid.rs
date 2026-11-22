@@ -164,17 +164,6 @@ impl HybridSearcher {
         self.config.enable_rerank
     }
 
-    /// Index a chunk in both dense and sparse indexes
-    pub async fn index_chunk(
-        &self,
-        tenant_id: &TenantId,
-        chunk_id: &ChunkId,
-        text: &str,
-    ) -> Result<()> {
-        self.index_batch(tenant_id, &[(chunk_id.clone(), text.to_string())])
-            .await
-    }
-
     /// Index multiple chunks in dense+sparse indexes with batched operations.
     pub async fn index_batch(
         &self,
@@ -395,16 +384,6 @@ impl HybridSearcher {
         );
 
         Ok((results, timing))
-    }
-
-    /// Rerank results with full metadata (called by PersistentStore)
-    pub fn rerank_with_metadata(
-        &self,
-        results: Vec<HybridSearchResult>,
-        chunks_meta: Vec<ChunkMetaForRerank>,
-        context: Option<SearchContext>,
-    ) -> Vec<HybridSearchResult> {
-        self.rerank_with_metadata_for_query("", results, chunks_meta, context)
     }
 
     /// Rerank results with full metadata and query context.
@@ -635,10 +614,12 @@ mod tests {
 
         // Index a chunk
         searcher
-            .index_chunk(
+            .index_batch(
                 &tenant,
-                &chunk_id,
-                "The getUserById function returns user data",
+                &[(
+                    chunk_id.clone(),
+                    "The getUserById function returns user data".to_string(),
+                )],
             )
             .await
             .unwrap();
@@ -696,10 +677,12 @@ mod tests {
 
         // Add chunk with unique identifier
         searcher
-            .index_chunk(
+            .index_batch(
                 &tenant,
-                &chunk_id,
-                "The XyzSpecialFunctionName handles edge cases in processing",
+                &[(
+                    chunk_id.clone(),
+                    "The XyzSpecialFunctionName handles edge cases in processing".to_string(),
+                )],
             )
             .await
             .unwrap();
@@ -726,7 +709,10 @@ mod tests {
 
         // Index a chunk
         searcher
-            .index_chunk(&tenant, &chunk_id, "deletable content here")
+            .index_batch(
+                &tenant,
+                &[(chunk_id.clone(), "deletable content here".to_string())],
+            )
             .await
             .unwrap();
 
@@ -775,7 +761,7 @@ mod tests {
 
         // Index
         searcher
-            .index_chunk(&tenant, &chunk_id, "some content")
+            .index_batch(&tenant, &[(chunk_id.clone(), "some content".to_string())])
             .await
             .unwrap();
 
@@ -842,7 +828,7 @@ mod tests {
             ranking_time_ms: None,
         });
 
-        let reranked = searcher.rerank_with_metadata(results, chunks_meta, context);
+        let reranked = searcher.rerank_with_metadata_for_query("", results, chunks_meta, context);
 
         // chunk2 should be boosted due to recency, project match, and type preference
         assert_eq!(reranked.len(), 2);
@@ -933,26 +919,32 @@ mod tests {
         let chunk_id3 = ChunkId::new();
 
         searcher
-            .index_chunk(
+            .index_batch(
                 &tenant,
-                &chunk_id1,
-                "The parseConfig function reads configuration files",
+                &[(
+                    chunk_id1.clone(),
+                    "The parseConfig function reads configuration files".to_string(),
+                )],
             )
             .await
             .unwrap();
         searcher
-            .index_chunk(
+            .index_batch(
                 &tenant,
-                &chunk_id2,
-                "Configuration parsing is handled by parseConfig",
+                &[(
+                    chunk_id2.clone(),
+                    "Configuration parsing is handled by parseConfig".to_string(),
+                )],
             )
             .await
             .unwrap();
         searcher
-            .index_chunk(
+            .index_batch(
                 &tenant,
-                &chunk_id3,
-                "This module handles user authentication",
+                &[(
+                    chunk_id3.clone(),
+                    "This module handles user authentication".to_string(),
+                )],
             )
             .await
             .unwrap();
@@ -986,7 +978,13 @@ mod tests {
 
         // Index chunk for tenant_a
         searcher
-            .index_chunk(&tenant_a, &chunk_id, "secret data for tenant A only")
+            .index_batch(
+                &tenant_a,
+                &[(
+                    chunk_id.clone(),
+                    "secret data for tenant A only".to_string(),
+                )],
+            )
             .await
             .unwrap();
 
@@ -1017,7 +1015,10 @@ mod tests {
         let chunk_id = ChunkId::new();
 
         searcher
-            .index_chunk(&tenant, &chunk_id, "some content here")
+            .index_batch(
+                &tenant,
+                &[(chunk_id.clone(), "some content here".to_string())],
+            )
             .await
             .unwrap();
 

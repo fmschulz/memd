@@ -202,44 +202,6 @@ impl DenseSearcher {
         Ok(index)
     }
 
-    /// Index a chunk embedding
-    pub async fn index_chunk(
-        &self,
-        tenant_id: &TenantId,
-        chunk_id: &ChunkId,
-        text: &str,
-    ) -> Result<()> {
-        if self.read_only {
-            return Err(MemdError::ReadOnlyStore {
-                op: "dense_index_chunk".to_string(),
-            });
-        }
-        if self.unavailable.get().is_some() {
-            return self.skip_without_model();
-        }
-        // Documents are embedded verbatim via embed_texts; embed_query would
-        // apply a retrieval query prefix (BGE), corrupting stored vectors.
-        let embedded = self.note_model_failure(self.embedder.embed_texts(&[text]).await);
-        let embedding = match embedded {
-            Ok(vectors) => vectors.into_iter().next().ok_or_else(|| {
-                MemdError::EmbeddingError("embed_texts returned no embedding".to_string())
-            })?,
-            // The model cannot load: the dense side waits for a repair pass.
-            Err(MemdError::ModelUnavailable(_)) => return self.skip_without_model(),
-            Err(error) => return Err(error),
-        };
-        let index = self.get_or_create_index(tenant_id)?;
-        index.insert(chunk_id, &embedding)?;
-
-        tracing::debug!(
-            tenant_id = %tenant_id,
-            chunk_id = %chunk_id,
-            "indexed chunk in HNSW"
-        );
-
-        Ok(())
-    }
-
     /// Index multiple chunks in batch
     pub async fn index_batch(
         &self,
@@ -372,11 +334,13 @@ impl DenseSearcher {
 
     /// Whether the embedding model is in memory. A command that never embeds
     /// leaves it unloaded.
+    #[cfg(test)]
     pub fn embedder_loaded(&self) -> bool {
         self.embedder.is_loaded()
     }
 
     /// Get the number of indexed chunks for a tenant
+    #[cfg(test)]
     pub fn index_len(&self, tenant_id: &TenantId) -> usize {
         let indices = self.indices.read();
         let tenant_str = tenant_id.to_string();
@@ -391,6 +355,7 @@ impl DenseSearcher {
     /// decrements on delete, so a tenant with deletes + re-adds + a crash
     /// can satisfy `index_len >= active_count` while still missing live
     /// chunks. Per-chunk membership is the authoritative signal.
+    #[cfg(test)]
     pub fn contains_chunk(&self, tenant_id: &TenantId, chunk_id: &ChunkId) -> bool {
         let indices = self.indices.read();
         let tenant_str = tenant_id.to_string();

@@ -22,7 +22,7 @@ pub mod traits;
 pub const EMBEDDING_REVISION: u32 = 2;
 
 pub use candle_embedder::CandleEmbedder;
-pub use download::{CandleModel, EmbeddingModel};
+pub use download::CandleModel;
 pub use mock::MockEmbedder;
 // pub use onnx::OnnxEmbedder;
 // pub use python_embedder::PythonEmbedder;

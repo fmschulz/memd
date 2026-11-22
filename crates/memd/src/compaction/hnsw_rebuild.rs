@@ -28,7 +28,7 @@ pub struct RebuildResult {
 ///
 /// This is a stateless utility that creates a new HNSW graph from the
 /// embeddings in the source index's cache, excluding specified deleted IDs.
-/// The caller (CompactionManager) is responsible for atomically swapping
+/// The caller (the dense searcher) is responsible for atomically swapping
 /// the old index with a new HnswIndex containing the rebuilt graph.
 pub struct HnswRebuilder;
 

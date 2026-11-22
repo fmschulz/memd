@@ -221,7 +221,8 @@ impl SqliteConnectionPool {
         }
     }
 
-    /// Current idle count. Primarily for diagnostics + tests.
+    /// Current idle count, for tests.
+    #[cfg(test)]
     pub fn idle_count(&self) -> usize {
         self.inner
             .state

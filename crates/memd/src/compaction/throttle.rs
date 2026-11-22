@@ -1,7 +1,7 @@
 //! Throttle module for rate-limiting compaction operations
 //!
 //! Provides configurable throttling to ensure compaction doesn't cause
-//! query latency spikes. Supports both sync and async delays.
+//! query latency spikes.
 
 use std::time::Duration;
 
@@ -28,8 +28,7 @@ impl Default for ThrottleConfig {
 
 /// Throttle for rate-limiting compaction work
 ///
-/// Provides delay methods and batched processing helpers to prevent
-/// compaction from monopolizing I/O.
+/// Provides a delay method to prevent compaction from monopolizing I/O.
 #[derive(Debug, Clone, Default)]
 pub struct Throttle {
     config: ThrottleConfig,
@@ -51,72 +50,9 @@ impl Throttle {
         std::thread::sleep(Duration::from_millis(self.config.batch_delay_ms));
     }
 
-    /// Asynchronous delay between operations
-    ///
-    /// If throttling is disabled, returns immediately.
-    pub async fn delay_async(&self) {
-        if !self.config.enabled {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(self.config.batch_delay_ms)).await;
-    }
-
-    /// Process items in batches with delays between each batch
-    ///
-    /// Processes items in chunks of `batch_size`, inserting a delay
-    /// between each chunk (not before the first).
-    pub fn process_batched<T, F, R>(&self, items: Vec<T>, f: F) -> Vec<R>
-    where
-        F: Fn(&[T]) -> Vec<R>,
-    {
-        let mut results = Vec::new();
-        let mut first = true;
-
-        for chunk in items.chunks(self.config.batch_size) {
-            if first {
-                first = false;
-            } else {
-                self.delay_sync();
-            }
-            results.extend(f(chunk));
-        }
-
-        results
-    }
-
-    /// Process items in batches with async delays between each batch
-    ///
-    /// Same as `process_batched` but uses async delays. Takes ownership
-    /// of sub-vecs to avoid lifetime issues with async closures.
-    pub async fn process_batched_async<T, F, Fut, R>(&self, items: Vec<T>, f: F) -> Vec<R>
-    where
-        T: Clone,
-        F: Fn(Vec<T>) -> Fut,
-        Fut: std::future::Future<Output = Vec<R>>,
-    {
-        let mut results = Vec::new();
-        let mut first = true;
-
-        for chunk in items.chunks(self.config.batch_size) {
-            if first {
-                first = false;
-            } else {
-                self.delay_async().await;
-            }
-            results.extend(f(chunk.to_vec()).await);
-        }
-
-        results
-    }
-
     /// Get the configured batch size
     pub fn batch_size(&self) -> usize {
         self.config.batch_size
-    }
-
-    /// Check if throttling is enabled
-    pub fn is_enabled(&self) -> bool {
-        self.config.enabled
     }
 }
 
@@ -164,32 +100,6 @@ mod tests {
     }
 
     #[test]
-    fn test_process_batched() {
-        let config = ThrottleConfig {
-            enabled: true,
-            batch_delay_ms: 1, // Minimal delay for test speed
-            batch_size: 3,
-        };
-        let throttle = Throttle::new(config);
-
-        let items: Vec<i32> = (0..10).collect();
-        let results =
-            throttle.process_batched(items, |batch| batch.iter().map(|x| x * 2).collect());
-
-        assert_eq!(results, vec![0, 2, 4, 6, 8, 10, 12, 14, 16, 18]);
-    }
-
-    #[test]
-    fn test_process_batched_empty() {
-        let throttle = Throttle::default();
-        let items: Vec<i32> = vec![];
-        let results =
-            throttle.process_batched(items, |batch| batch.iter().map(|x| x * 2).collect());
-
-        assert!(results.is_empty());
-    }
-
-    #[test]
     fn test_getters() {
         let config = ThrottleConfig {
             enabled: true,
@@ -199,7 +109,6 @@ mod tests {
         let throttle = Throttle::new(config);
 
         assert_eq!(throttle.batch_size(), 50);
-        assert!(throttle.is_enabled());
     }
 
     #[test]
@@ -214,6 +123,5 @@ mod tests {
     fn test_default_throttle() {
         let throttle = Throttle::default();
         assert_eq!(throttle.batch_size(), 100);
-        assert!(throttle.is_enabled());
     }
 }

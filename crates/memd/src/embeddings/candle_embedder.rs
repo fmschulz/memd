@@ -492,28 +492,6 @@ impl CandleEmbedder {
                         // Take CLS token (first token) - select all batches, first sequence position
                         outputs.narrow(1, 0, 1)?.squeeze(1)?
                     }
-                    PoolingStrategy::LastToken => {
-                        // Take last non-padding token for each sequence
-                        let batch_size = outputs.dim(0)?;
-                        let mut last_outputs = Vec::with_capacity(batch_size);
-
-                        for i in 0..batch_size {
-                            // Get attention mask for this batch item
-                            let mask = attention_mask_tensor.narrow(0, i, 1)?.squeeze(0)?;
-                            let mask_vec = mask.to_vec1::<u32>()?;
-
-                            // Find last non-zero position in attention mask
-                            let last_pos = mask_vec.iter().rposition(|&x| x != 0).unwrap_or(0);
-
-                            // Extract the token at last_pos for batch item i
-                            let batch_item = outputs.narrow(0, i, 1)?;
-                            let last_token =
-                                batch_item.narrow(1, last_pos, 1)?.squeeze(1)?.squeeze(0)?;
-                            last_outputs.push(last_token);
-                        }
-
-                        Tensor::stack(&last_outputs, 0)?
-                    }
                 };
 
                 // Normalize embeddings only if configured to do so
@@ -605,6 +583,7 @@ impl Embedder for CandleEmbedder {
         &self.config
     }
 
+    #[cfg(test)]
     fn is_loaded(&self) -> bool {
         self.model.loaded.get().is_some()
     }

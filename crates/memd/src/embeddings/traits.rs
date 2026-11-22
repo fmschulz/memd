@@ -8,15 +8,12 @@ use crate::error::Result;
 ///
 /// Different embedding models require different pooling approaches:
 /// - Mean: Average all token embeddings (BERT-style, all-MiniLM-L6-v2)
-/// - LastToken: Use final token embedding (decoder-style, Qwen3, E5-Mistral)
 /// - Cls: Use CLS token embedding (first token)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PoolingStrategy {
     /// Mean pooling: average all token embeddings weighted by attention mask
     #[default]
     Mean,
-    /// Last-token pooling: extract embedding at final attended position
-    LastToken,
     /// CLS token pooling: use first token embedding
     Cls,
 }
@@ -24,7 +21,7 @@ pub enum PoolingStrategy {
 /// Configuration for embedding generation
 #[derive(Debug, Clone)]
 pub struct EmbeddingConfig {
-    /// Embedding dimension (384 for all-MiniLM-L6-v2, 1024 for Qwen3)
+    /// Embedding dimension (384 for all-MiniLM-L6-v2, 768 for bge-base)
     pub dimension: usize,
     /// Normalize embeddings to unit length
     pub normalize: bool,
@@ -73,6 +70,7 @@ pub trait Embedder: Send + Sync {
     /// Whether the model is in memory. An embedder that loads its model on
     /// first use reports `false` until then; the default is for embedders
     /// that have nothing to load.
+    #[cfg(test)]
     fn is_loaded(&self) -> bool {
         true
     }

@@ -67,7 +67,10 @@ async fn stage_run(
         ChunkType::Doc,
     )
     .with_project(ProjectId::from(project_id))
-    .with_source(Source::from_path(format!("notes/{label}.md")))
+    .with_source(Source {
+        path: Some(format!("notes/{label}.md")),
+        ..Source::default()
+    })
     .with_tags(vec![format!("source:{label}")]);
     let source_id = store.add(source).await.unwrap();
     let candidate_text = format!("candidate inspection token {label}");

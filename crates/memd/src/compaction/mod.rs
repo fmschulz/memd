@@ -1,8 +1,8 @@
 //! Compaction module for memd
 //!
 //! Provides infrastructure for monitoring compaction health and managing
-//! the compaction lifecycle. Includes metrics gathering, tombstone auditing,
-//! HNSW rebuild, segment merge, throttling, and compaction runner.
+//! the compaction lifecycle. Includes metrics gathering, HNSW rebuild, segment
+//! merge, throttling, and compaction runner.
 
 pub mod expiry_sweep;
 pub mod history_promotion;
@@ -11,7 +11,6 @@ pub mod metrics;
 pub mod runner;
 pub mod segment_merge;
 pub mod throttle;
-pub mod tombstone_audit;
 
 pub use expiry_sweep::{ExpirySweep, SweepResult};
 pub use history_promotion::{HistoryPromotion, PromotionResult};
@@ -20,7 +19,6 @@ pub use metrics::CompactionMetrics;
 pub use runner::{CompactionResult, CompactionRunner};
 pub use segment_merge::{MergeResult, SegmentMerger};
 pub use throttle::{Throttle, ThrottleConfig};
-pub use tombstone_audit::{AuditResult, TombstoneAudit};
 
 /// Thresholds that trigger compaction
 ///
@@ -83,38 +81,6 @@ impl Default for CompactionConfig {
     }
 }
 
-/// Manager for compaction operations
-///
-/// Coordinates compaction decisions based on metrics and thresholds.
-/// Currently a skeleton - full implementation in later plans.
-pub struct CompactionManager {
-    config: CompactionConfig,
-}
-
-impl CompactionManager {
-    /// Create a new CompactionManager with the given configuration
-    pub fn new(config: CompactionConfig) -> Self {
-        Self { config }
-    }
-
-    /// Check if any threshold is exceeded
-    ///
-    /// Returns true if ANY of the following conditions are met:
-    /// - Tombstone ratio exceeds configured threshold
-    /// - Segment count exceeds configured maximum
-    /// - HNSW staleness exceeds configured threshold
-    pub fn check_thresholds(&self, metrics: &CompactionMetrics) -> bool {
-        metrics.exceeds_tombstone_threshold(self.config.thresholds.tombstone_ratio_pct)
-            || metrics.exceeds_segment_threshold(self.config.thresholds.max_segment_count)
-            || metrics.exceeds_hnsw_staleness_threshold(self.config.thresholds.hnsw_staleness_pct)
-    }
-
-    /// Get the current configuration
-    pub fn config(&self) -> &CompactionConfig {
-        &self.config
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,60 +99,5 @@ mod tests {
         assert_eq!(config.batch_delay_ms, 10);
         assert_eq!(config.batch_size, 100);
         assert!(config.enabled);
-    }
-
-    #[test]
-    fn manager_creation() {
-        let config = CompactionConfig::default();
-        let manager = CompactionManager::new(config);
-        assert!(manager.config().enabled);
-    }
-
-    #[test]
-    fn check_thresholds_below() {
-        let manager = CompactionManager::new(CompactionConfig::default());
-        let metrics = CompactionMetrics {
-            tombstone_ratio: 0.10, // Below 0.20 threshold
-            segment_count: 5,      // Below 10 threshold
-            hnsw_staleness: 0.05,  // Below 0.15 threshold
-            ..Default::default()
-        };
-        assert!(!manager.check_thresholds(&metrics));
-    }
-
-    #[test]
-    fn check_thresholds_tombstone_exceeded() {
-        let manager = CompactionManager::new(CompactionConfig::default());
-        let metrics = CompactionMetrics {
-            tombstone_ratio: 0.25, // Above 0.20 threshold
-            segment_count: 5,
-            hnsw_staleness: 0.05,
-            ..Default::default()
-        };
-        assert!(manager.check_thresholds(&metrics));
-    }
-
-    #[test]
-    fn check_thresholds_segment_exceeded() {
-        let manager = CompactionManager::new(CompactionConfig::default());
-        let metrics = CompactionMetrics {
-            tombstone_ratio: 0.10,
-            segment_count: 15, // Above 10 threshold
-            hnsw_staleness: 0.05,
-            ..Default::default()
-        };
-        assert!(manager.check_thresholds(&metrics));
-    }
-
-    #[test]
-    fn check_thresholds_hnsw_exceeded() {
-        let manager = CompactionManager::new(CompactionConfig::default());
-        let metrics = CompactionMetrics {
-            tombstone_ratio: 0.10,
-            segment_count: 5,
-            hnsw_staleness: 0.20, // Above 0.15 threshold
-            ..Default::default()
-        };
-        assert!(manager.check_thresholds(&metrics));
     }
 }

@@ -139,7 +139,9 @@ warning means candidate rows exist whose segment payloads could not be read.
 
 ## Tracing logs
 
-A `tracing` subscriber emits structured JSON logs when `RUST_LOG` is set.
+A `tracing` subscriber writes human-readable logs to stderr. Without
+`RUST_LOG`, memd logs at `warn`, or at `info` with `--verbose` and in the warm
+worker. `RUST_LOG` sets the filter.
 
 Deprecation warnings for `artifact.create` (mega-schema),
 `context.search_context_documents`, and the `artifact.verify` alias log at

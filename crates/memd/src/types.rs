@@ -188,11 +188,6 @@ impl ChunkId {
         Self(Uuid::now_v7())
     }
 
-    /// Create a ChunkId from an existing UUID
-    pub fn from_uuid(uuid: Uuid) -> Self {
-        Self(uuid)
-    }
-
     /// Parse a ChunkId from a string
     pub fn parse(s: &str) -> Result<Self> {
         Uuid::parse_str(s)
@@ -447,14 +442,6 @@ impl Source {
     /// Create an empty source
     pub fn empty() -> Self {
         Self::default()
-    }
-
-    /// Create a source from a file path
-    pub fn from_path(path: impl Into<String>) -> Self {
-        Self {
-            path: Some(path.into()),
-            ..Default::default()
-        }
     }
 }
 

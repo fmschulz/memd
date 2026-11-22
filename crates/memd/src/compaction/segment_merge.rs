@@ -28,24 +28,12 @@ pub struct MergeResult {
 ///
 /// Forces all currently searchable Tantivy segments into one segment and
 /// reports before/after statistics.
-pub struct SegmentMerger {
-    /// Minimum segment count before merge is needed (default 4)
-    min_segments_for_merge: usize,
-}
+pub struct SegmentMerger;
 
 impl SegmentMerger {
-    /// Create a new SegmentMerger with default settings
+    /// Create a new SegmentMerger
     pub fn new() -> Self {
-        Self {
-            min_segments_for_merge: 4,
-        }
-    }
-
-    /// Create a new SegmentMerger with a custom segment-count threshold.
-    pub fn with_min_segments(min_segments: usize) -> Self {
-        Self {
-            min_segments_for_merge: min_segments,
-        }
+        Self
     }
 
     /// Force all searchable segments into one merged segment.
@@ -93,16 +81,6 @@ impl SegmentMerger {
         }
 
         Ok(result)
-    }
-
-    /// Check if merge is needed based on current segment count
-    pub fn needs_merge(&self, current_segment_count: usize) -> bool {
-        current_segment_count > self.min_segments_for_merge
-    }
-
-    /// Get the minimum segment threshold
-    pub fn min_segments_threshold(&self) -> usize {
-        self.min_segments_for_merge
     }
 }
 
@@ -158,39 +136,5 @@ mod tests {
             result.segments_before.saturating_sub(result.segments_after)
         );
         let _duration = result.duration;
-    }
-
-    #[test]
-    fn test_needs_merge_below_threshold() {
-        let merger = SegmentMerger::new();
-
-        assert!(!merger.needs_merge(1));
-        assert!(!merger.needs_merge(2));
-        assert!(!merger.needs_merge(4)); // At threshold
-    }
-
-    #[test]
-    fn test_needs_merge_above_threshold() {
-        let merger = SegmentMerger::new();
-
-        assert!(merger.needs_merge(5));
-        assert!(merger.needs_merge(10));
-        assert!(merger.needs_merge(100));
-    }
-
-    #[test]
-    fn test_custom_threshold() {
-        let merger = SegmentMerger::with_min_segments(10);
-
-        assert_eq!(merger.min_segments_threshold(), 10);
-        assert!(!merger.needs_merge(5));
-        assert!(!merger.needs_merge(10));
-        assert!(merger.needs_merge(11));
-    }
-
-    #[test]
-    fn test_default() {
-        let merger = SegmentMerger::default();
-        assert_eq!(merger.min_segments_threshold(), 4);
     }
 }

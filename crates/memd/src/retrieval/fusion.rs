@@ -84,11 +84,6 @@ impl RrfFusion {
         Self { config }
     }
 
-    /// Create with default configuration (k=60, equal weights).
-    pub fn default_config() -> Self {
-        Self::new(RrfConfig::default())
-    }
-
     /// Fuse candidates from multiple sources using RRF.
     ///
     /// # Algorithm
@@ -156,12 +151,12 @@ mod tests {
 
     fn make_chunk_id(seed: u8) -> ChunkId {
         let bytes = [seed; 16];
-        ChunkId::from_uuid(Uuid::from_bytes(bytes))
+        ChunkId::parse(&Uuid::from_bytes(bytes).to_string()).unwrap()
     }
 
     #[test]
     fn test_rrf_single_source() {
-        let fusion = RrfFusion::default_config();
+        let fusion = RrfFusion::new(RrfConfig::default());
 
         let candidates = vec![
             FusionCandidate {
@@ -197,7 +192,7 @@ mod tests {
 
     #[test]
     fn test_rrf_both_sources() {
-        let fusion = RrfFusion::default_config();
+        let fusion = RrfFusion::new(RrfConfig::default());
 
         // Chunk A: dense rank 1, sparse rank 3
         // Chunk B: dense rank 2, sparse rank 1
@@ -267,7 +262,7 @@ mod tests {
 
     #[test]
     fn test_rrf_deduplication() {
-        let fusion = RrfFusion::default_config();
+        let fusion = RrfFusion::new(RrfConfig::default());
 
         // Same chunk from both sources
         let candidates = vec![
@@ -299,7 +294,7 @@ mod tests {
 
     #[test]
     fn test_rrf_equal_score_tie_break_is_deterministic() {
-        let fusion = RrfFusion::default_config();
+        let fusion = RrfFusion::new(RrfConfig::default());
 
         // Two chunks seen by exactly one source each at the same rank score
         // identically (weight/(k+rank)); order must not depend on input

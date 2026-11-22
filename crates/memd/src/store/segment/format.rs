@@ -4,7 +4,7 @@
 //! - PayloadIndexRecord: 16-byte index entry (offset, length, crc32)
 //! - SegmentMeta: Segment-level metadata
 
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use serde::{Deserialize, Serialize};
@@ -74,13 +74,6 @@ impl PayloadIndexRecord {
     /// Write the record to a writer
     pub fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         writer.write_all(&self.to_bytes())
-    }
-
-    /// Read a record from a reader
-    pub fn read_from<R: Read>(reader: &mut R) -> io::Result<Self> {
-        let mut buf = [0u8; Self::SIZE];
-        reader.read_exact(&mut buf)?;
-        Self::from_bytes(&buf)
     }
 
     /// Parse all index records from bytes
@@ -200,7 +193,7 @@ mod tests {
         record.write_to(&mut buf).unwrap();
         assert_eq!(buf.len(), PayloadIndexRecord::SIZE);
 
-        let restored = PayloadIndexRecord::read_from(&mut buf.as_slice()).unwrap();
+        let restored = PayloadIndexRecord::from_bytes(&buf).unwrap();
         assert_eq!(record, restored);
     }
 

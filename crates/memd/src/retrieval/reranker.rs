@@ -166,10 +166,6 @@ impl FeatureReranker {
         Self { config }
     }
 
-    pub fn default_config() -> Self {
-        Self::new(RerankerConfig::default())
-    }
-
     pub fn rerank(
         &self,
         chunks: Vec<ChunkWithMeta>,
@@ -631,7 +627,7 @@ mod tests {
     use uuid::Uuid;
 
     fn make_chunk_id(seed: u8) -> ChunkId {
-        ChunkId::from_uuid(Uuid::from_bytes([seed; 16]))
+        ChunkId::parse(&Uuid::from_bytes([seed; 16]).to_string()).unwrap()
     }
 
     const MS_PER_DAY: i64 = 1000 * 60 * 60 * 24;
@@ -655,7 +651,7 @@ mod tests {
         // (~0.015) differ by less than any single bonus weight. With
         // relevance normalized to the candidate-set max, a fresh-but-less-
         // relevant chunk must NOT outrank a clearly more relevant old one.
-        let reranker = FeatureReranker::default_config();
+        let reranker = FeatureReranker::new(RerankerConfig::default());
         let now_ms = 1_000_000_000_000i64;
 
         let chunks = vec![
@@ -694,7 +690,7 @@ mod tests {
 
     #[test]
     fn feature_reranker_prefers_recent_when_rrf_is_tied() {
-        let reranker = FeatureReranker::default_config();
+        let reranker = FeatureReranker::new(RerankerConfig::default());
         let now_ms = 1_000_000_000_000i64;
 
         let chunks = vec![
@@ -730,7 +726,7 @@ mod tests {
 
     #[test]
     fn fixed_ranking_time_reproduces_scores_and_order() {
-        let reranker = FeatureReranker::default_config();
+        let reranker = FeatureReranker::new(RerankerConfig::default());
         let now_ms = 1_700_000_000_000i64;
         let chunks = vec![
             ChunkWithMeta {
@@ -834,7 +830,7 @@ mod tests {
 
     #[test]
     fn query_text_bonus_counts_numeric_matches() {
-        let reranker = FeatureReranker::default_config();
+        let reranker = FeatureReranker::new(RerankerConfig::default());
 
         let with_number = reranker.compute_query_text_bonus(
             "What happened in 2021?",
@@ -849,7 +845,7 @@ mod tests {
 
     #[test]
     fn query_text_bonus_is_zero_without_chunk_text() {
-        let reranker = FeatureReranker::default_config();
+        let reranker = FeatureReranker::new(RerankerConfig::default());
 
         assert_eq!(
             reranker.compute_query_text_bonus("Where did Maria move?", None),

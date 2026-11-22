@@ -5,7 +5,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::format::WalRecord;
 #[cfg(test)]
@@ -18,10 +18,6 @@ use super::format::WalRecordType;
 pub struct WalWriter {
     /// The WAL file handle
     file: File,
-    /// Path to the WAL file
-    path: PathBuf,
-    /// Count of records written
-    records_written: u64,
 }
 
 impl WalWriter {
@@ -40,11 +36,7 @@ impl WalWriter {
             .append(true)
             .open(path)?;
 
-        Ok(Self {
-            file,
-            path: path.to_path_buf(),
-            records_written: 0,
-        })
+        Ok(Self { file })
     }
 
     /// Open an existing WAL file for append
@@ -53,11 +45,7 @@ impl WalWriter {
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = OpenOptions::new().append(true).open(path)?;
 
-        Ok(Self {
-            file,
-            path: path.to_path_buf(),
-            records_written: 0, // Note: doesn't count existing records
-        })
+        Ok(Self { file })
     }
 
     /// Open existing WAL or create new one
@@ -88,7 +76,6 @@ impl WalWriter {
         // CRITICAL: Ensure data reaches disk before returning
         self.file.sync_all()?;
 
-        self.records_written += 1;
         Ok(())
     }
 
@@ -106,25 +93,7 @@ impl WalWriter {
             self.file.write_all(&bytes)?;
         }
         self.file.sync_all()?;
-        self.records_written += records.len() as u64;
         Ok(())
-    }
-
-    /// Append an Add record (convenience method)
-    pub fn append_add(
-        &mut self,
-        tenant_id: &str,
-        chunk_id: &str,
-        timestamp: i64,
-        payload: Vec<u8>,
-    ) -> io::Result<()> {
-        let record = WalRecord::add(
-            tenant_id.to_string(),
-            chunk_id.to_string(),
-            timestamp,
-            payload,
-        );
-        self.append(&record)
     }
 
     /// Append multiple Add records with one fsync at the end.
@@ -167,46 +136,12 @@ impl WalWriter {
         self.append(&record)
     }
 
-    /// Append a TaskArtifact record (convenience method).
-    pub fn append_task_artifact(
-        &mut self,
-        tenant_id: &str,
-        artifact_id: &str,
-        timestamp: i64,
-        payload: Vec<u8>,
-    ) -> io::Result<()> {
-        let record = WalRecord::task_artifact(
-            tenant_id.to_string(),
-            artifact_id.to_string(),
-            timestamp,
-            payload,
-        );
-        self.append(&record)
-    }
-
-    /// Explicit sync (already done per-record, but useful for batches)
-    pub fn sync(&self) -> io::Result<()> {
-        self.file.sync_all()
-    }
-
-    /// Get the number of records written in this session
-    pub fn records_written(&self) -> u64 {
-        self.records_written
-    }
-
-    /// Get the path to the WAL file
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     /// Truncate the WAL file to zero
     ///
     /// Called after successful checkpoint/recovery to start fresh.
-    /// After truncation, records_written is reset to 0.
     pub fn truncate(&mut self) -> io::Result<()> {
         self.file.set_len(0)?;
         self.file.sync_all()?;
-        self.records_written = 0;
         Ok(())
     }
 }
@@ -223,12 +158,16 @@ mod tests {
 
         let mut writer = WalWriter::create(&wal_path).unwrap();
         writer
-            .append_add("tenant_1", "chunk_1", 1000, b"hello".to_vec())
+            .append(&WalRecord::add(
+                "tenant_1".into(),
+                "chunk_1".into(),
+                1000,
+                b"hello".to_vec(),
+            ))
             .unwrap();
 
         assert!(wal_path.exists());
         assert!(std::fs::metadata(&wal_path).unwrap().len() > 0);
-        assert_eq!(writer.records_written(), 1);
     }
 
     #[test]
@@ -242,7 +181,12 @@ mod tests {
         let initial_size = 0;
 
         writer
-            .append_add("t1", "c1", 1000, b"data1".to_vec())
+            .append(&WalRecord::add(
+                "t1".into(),
+                "c1".into(),
+                1000,
+                b"data1".to_vec(),
+            ))
             .unwrap();
         let size_after_add = std::fs::metadata(&wal_path).unwrap().len();
         assert!(size_after_add > initial_size);
@@ -254,8 +198,6 @@ mod tests {
         writer.append_checkpoint("t1", 3000).unwrap();
         let size_after_checkpoint = std::fs::metadata(&wal_path).unwrap().len();
         assert!(size_after_checkpoint > size_after_delete);
-
-        assert_eq!(writer.records_written(), 3);
     }
 
     #[test]
@@ -267,12 +209,15 @@ mod tests {
 
         // Test each convenience method
         writer
-            .append_add("tenant", "chunk_add", 1000, b"payload".to_vec())
+            .append(&WalRecord::add(
+                "tenant".into(),
+                "chunk_add".into(),
+                1000,
+                b"payload".to_vec(),
+            ))
             .unwrap();
         writer.append_delete("tenant", "chunk_del", 2000).unwrap();
         writer.append_checkpoint("tenant", 3000).unwrap();
-
-        assert_eq!(writer.records_written(), 3);
 
         // Read back and verify
         let contents = std::fs::read(&wal_path).unwrap();
@@ -301,7 +246,6 @@ mod tests {
             WalRecord::checkpoint("tenant".into(), 1002),
         ];
         writer.append_batch(&batch).unwrap();
-        assert_eq!(writer.records_written(), 3);
 
         let (records, _) = super::super::reader::WalReader::open(&wal_path)
             .unwrap()
@@ -328,7 +272,6 @@ mod tests {
                 ],
             )
             .unwrap();
-        assert_eq!(writer.records_written(), 2);
 
         let (records, _) = super::super::reader::WalReader::open(&wal_path)
             .unwrap()
@@ -342,15 +285,19 @@ mod tests {
     }
 
     #[test]
-    fn append_task_artifact_writes_record() {
+    fn task_artifact_record_round_trips() {
         let temp_dir = TempDir::new().unwrap();
         let wal_path = temp_dir.path().join("task_artifact.wal");
         let mut writer = WalWriter::create(&wal_path).unwrap();
 
         writer
-            .append_task_artifact("tenant", "artifact-1", 1002, b"payload".to_vec())
+            .append(&WalRecord::task_artifact(
+                "tenant".into(),
+                "artifact-1".into(),
+                1002,
+                b"payload".to_vec(),
+            ))
             .unwrap();
-        assert_eq!(writer.records_written(), 1);
 
         let (records, _) = super::super::reader::WalReader::open(&wal_path)
             .unwrap()
@@ -370,11 +317,15 @@ mod tests {
 
         let mut writer = WalWriter::open_or_create(&wal_path).unwrap();
         writer
-            .append_add("t1", "c1", 1000, b"test".to_vec())
+            .append(&WalRecord::add(
+                "t1".into(),
+                "c1".into(),
+                1000,
+                b"test".to_vec(),
+            ))
             .unwrap();
 
         assert!(wal_path.exists());
-        assert_eq!(writer.records_written(), 1);
     }
 
     #[test]
@@ -386,7 +337,12 @@ mod tests {
         {
             let mut writer = WalWriter::create(&wal_path).unwrap();
             writer
-                .append_add("t1", "c1", 1000, b"first".to_vec())
+                .append(&WalRecord::add(
+                    "t1".into(),
+                    "c1".into(),
+                    1000,
+                    b"first".to_vec(),
+                ))
                 .unwrap();
         }
 
@@ -396,7 +352,12 @@ mod tests {
         {
             let mut writer = WalWriter::open_or_create(&wal_path).unwrap();
             writer
-                .append_add("t1", "c2", 2000, b"second".to_vec())
+                .append(&WalRecord::add(
+                    "t1".into(),
+                    "c2".into(),
+                    2000,
+                    b"second".to_vec(),
+                ))
                 .unwrap();
         }
 
@@ -441,21 +402,29 @@ mod tests {
 
         let mut writer = WalWriter::create(&wal_path).unwrap();
         writer
-            .append_add("t1", "c1", 1000, b"data".to_vec())
+            .append(&WalRecord::add(
+                "t1".into(),
+                "c1".into(),
+                1000,
+                b"data".to_vec(),
+            ))
             .unwrap();
         writer
-            .append_add("t1", "c2", 2000, b"more data".to_vec())
+            .append(&WalRecord::add(
+                "t1".into(),
+                "c2".into(),
+                2000,
+                b"more data".to_vec(),
+            ))
             .unwrap();
 
         let size_before = std::fs::metadata(&wal_path).unwrap().len();
         assert!(size_before > 0);
-        assert_eq!(writer.records_written(), 2);
 
         writer.truncate().unwrap();
 
         let size_after = std::fs::metadata(&wal_path).unwrap().len();
         assert_eq!(size_after, 0);
-        assert_eq!(writer.records_written(), 0);
     }
 
     #[test]
@@ -463,9 +432,23 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("truncate-append.wal");
         let mut writer = WalWriter::create(&path).unwrap();
-        writer.append_add("t1", "old", 1, b"old".to_vec()).unwrap();
+        writer
+            .append(&WalRecord::add(
+                "t1".into(),
+                "old".into(),
+                1,
+                b"old".to_vec(),
+            ))
+            .unwrap();
         writer.truncate().unwrap();
-        writer.append_add("t1", "new", 2, b"new".to_vec()).unwrap();
+        writer
+            .append(&WalRecord::add(
+                "t1".into(),
+                "new".into(),
+                2,
+                b"new".to_vec(),
+            ))
+            .unwrap();
         let reader = crate::store::wal::WalReader::open(&path).unwrap();
         let (records, valid_bytes) = reader.read_all_records().unwrap();
         assert_eq!(
@@ -506,15 +489,6 @@ mod tests {
     }
 
     #[test]
-    fn path_accessor() {
-        let temp_dir = TempDir::new().unwrap();
-        let wal_path = temp_dir.path().join("test.wal");
-
-        let writer = WalWriter::create(&wal_path).unwrap();
-        assert_eq!(writer.path(), wal_path);
-    }
-
-    #[test]
     fn sync_all_is_called() {
         // This test verifies the file is synced by checking we can read
         // the data immediately after write without explicit flush
@@ -523,7 +497,12 @@ mod tests {
 
         let mut writer = WalWriter::create(&wal_path).unwrap();
         writer
-            .append_add("t1", "c1", 1000, b"important".to_vec())
+            .append(&WalRecord::add(
+                "t1".into(),
+                "c1".into(),
+                1000,
+                b"important".to_vec(),
+            ))
             .unwrap();
 
         // Read from a different handle immediately - should see the data

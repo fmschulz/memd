@@ -11,179 +11,6 @@ use sha2::{Digest, Sha256};
 use super::traits::PoolingStrategy;
 use crate::error::{MemdError, Result};
 
-/// Supported embedding models
-///
-/// Each model has specific configuration for URLs, dimensions, and pooling.
-/// Pooling strategy is tied to model architecture, not user-configurable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum EmbeddingModel {
-    /// all-MiniLM-L6-v2: 384-dim, mean pooling, 23MB quantized
-    /// MTEB score: 56.3
-    #[default]
-    AllMiniLmL6V2,
-    /// Qwen3-Embedding-0.6B: 1024-dim, last-token pooling, ~614MB quantized
-    /// MTEB score: 64.33 (+15% improvement)
-    Qwen3Embedding0_6B,
-}
-
-impl EmbeddingModel {
-    /// Get embedding dimension for this model
-    pub fn dimension(&self) -> usize {
-        match self {
-            Self::AllMiniLmL6V2 => 384,
-            Self::Qwen3Embedding0_6B => 1024,
-        }
-    }
-
-    /// Get pooling strategy for this model
-    pub fn pooling_strategy(&self) -> PoolingStrategy {
-        match self {
-            Self::AllMiniLmL6V2 => PoolingStrategy::Mean,
-            Self::Qwen3Embedding0_6B => PoolingStrategy::LastToken,
-        }
-    }
-
-    /// Get model ONNX file URL
-    pub fn model_url(&self) -> &'static str {
-        match self {
-            Self::AllMiniLmL6V2 => ALL_MINILM_MODEL_URL,
-            Self::Qwen3Embedding0_6B => QWEN3_MODEL_URL,
-        }
-    }
-
-    /// Get tokenizer URL
-    pub fn tokenizer_url(&self) -> &'static str {
-        match self {
-            Self::AllMiniLmL6V2 => ALL_MINILM_TOKENIZER_URL,
-            Self::Qwen3Embedding0_6B => QWEN3_TOKENIZER_URL,
-        }
-    }
-
-    /// Get expected model ONNX sha256 for fresh downloads
-    pub fn model_sha256(&self) -> &'static str {
-        match self {
-            Self::AllMiniLmL6V2 => ALL_MINILM_MODEL_SHA256,
-            Self::Qwen3Embedding0_6B => QWEN3_MODEL_SHA256,
-        }
-    }
-
-    /// Get expected tokenizer sha256 for fresh downloads
-    pub fn tokenizer_sha256(&self) -> &'static str {
-        match self {
-            Self::AllMiniLmL6V2 => ALL_MINILM_TOKENIZER_SHA256,
-            Self::Qwen3Embedding0_6B => QWEN3_TOKENIZER_SHA256,
-        }
-    }
-
-    /// Get model filename for cache
-    pub fn model_filename(&self) -> &'static str {
-        match self {
-            Self::AllMiniLmL6V2 => "all-MiniLM-L6-v2-quantized.onnx",
-            Self::Qwen3Embedding0_6B => "qwen3-embedding-0.6b-q8.onnx",
-        }
-    }
-
-    /// Get tokenizer filename for cache
-    pub fn tokenizer_filename(&self) -> &'static str {
-        match self {
-            Self::AllMiniLmL6V2 => "all-minilm-l6-v2-tokenizer.json",
-            Self::Qwen3Embedding0_6B => "qwen3-embedding-0.6b-tokenizer.json",
-        }
-    }
-
-    /// Get minimum expected model file size (bytes)
-    pub fn min_model_size(&self) -> u64 {
-        match self {
-            Self::AllMiniLmL6V2 => 20_000_000,       // ~23MB
-            Self::Qwen3Embedding0_6B => 500_000_000, // ~614MB
-        }
-    }
-
-    /// Get minimum expected tokenizer file size (bytes)
-    pub fn min_tokenizer_size(&self) -> u64 {
-        match self {
-            Self::AllMiniLmL6V2 => 500_000,     // ~700KB
-            Self::Qwen3Embedding0_6B => 10_000, // ~varies
-        }
-    }
-
-    /// Whether this model uses instruction-formatted queries
-    pub fn uses_instruction_format(&self) -> bool {
-        match self {
-            Self::AllMiniLmL6V2 => false,
-            Self::Qwen3Embedding0_6B => true,
-        }
-    }
-
-    /// Whether this model requires position_ids as an input
-    ///
-    /// Decoder-style models (Qwen3) require explicit position IDs,
-    /// while encoder models (BERT, all-MiniLM) compute them internally.
-    pub fn requires_position_ids(&self) -> bool {
-        match self {
-            Self::AllMiniLmL6V2 => false,
-            Self::Qwen3Embedding0_6B => true,
-        }
-    }
-
-    /// Get KV-cache configuration for decoder models
-    ///
-    /// Returns None for encoder models (BERT-style) that don't use KV-cache.
-    /// Returns configuration for decoder models that require empty KV-cache tensors.
-    pub fn kv_cache_config(&self) -> Option<KvCacheConfig> {
-        match self {
-            Self::AllMiniLmL6V2 => None,
-            Self::Qwen3Embedding0_6B => Some(KvCacheConfig {
-                num_layers: 28,
-                num_kv_heads: 8,
-                head_dim: 128,
-            }),
-        }
-    }
-}
-
-/// KV-cache configuration for decoder models
-///
-/// Decoder models (like Qwen3) use key-value caching for efficient autoregressive
-/// generation. For embedding generation (single forward pass), we pass empty
-/// KV-cache tensors with sequence length 0.
-#[derive(Debug, Clone, Copy)]
-pub struct KvCacheConfig {
-    /// Number of transformer layers
-    pub num_layers: usize,
-    /// Number of key-value attention heads
-    pub num_kv_heads: usize,
-    /// Dimension of each attention head
-    pub head_dim: usize,
-}
-
-const ALL_MINILM_MODEL_URL: &str =
-    "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/751bff37182d3f1213fa05d7196b954e230abad9/onnx/model_quantized.onnx";
-const ALL_MINILM_MODEL_SHA256: &str =
-    "afdb6f1a0e45b715d0bb9b11772f032c399babd23bfc31fed1c170afc848bdb1";
-const ALL_MINILM_TOKENIZER_URL: &str =
-    "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/751bff37182d3f1213fa05d7196b954e230abad9/tokenizer.json";
-const ALL_MINILM_TOKENIZER_SHA256: &str =
-    "da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0";
-
-const QWEN3_MODEL_URL: &str =
-    "https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/resolve/c25a394dd583836952667c12f008335071b3f43d/onnx/model_int8.onnx";
-const QWEN3_MODEL_SHA256: &str = "6d0ea863f78b4a84afa3c7fcba1ec341572b5e28121aef77b7092b1dfdf679c7";
-const QWEN3_TOKENIZER_URL: &str =
-    "https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/resolve/c25a394dd583836952667c12f008335071b3f43d/tokenizer.json";
-const QWEN3_TOKENIZER_SHA256: &str =
-    "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a";
-
-// Legacy constants for backward compatibility (used by existing get_model_path/get_tokenizer_path)
-const MODEL_URL: &str = ALL_MINILM_MODEL_URL;
-const MODEL_SHA256: &str = ALL_MINILM_MODEL_SHA256;
-const MODEL_FILENAME: &str = "all-MiniLM-L6-v2-quantized.onnx";
-const TOKENIZER_URL: &str = ALL_MINILM_TOKENIZER_URL;
-const TOKENIZER_SHA256: &str = ALL_MINILM_TOKENIZER_SHA256;
-const TOKENIZER_FILENAME: &str = "tokenizer.json";
-const MIN_MODEL_SIZE: u64 = 20_000_000;
-const MIN_TOKENIZER_SIZE: u64 = 500_000;
-
 // Candle BERT (safetensors) files for sentence-transformers/all-MiniLM-L6-v2.
 // These URLs are fetched with plain ureq, which follows huggingface.co's
 // relative 307 Location headers correctly. Prior versions used hf-hub 0.3.2,
@@ -252,8 +79,7 @@ const MIN_CANDLE_BGE_SMALL_WEIGHTS_SIZE: u64 = 100_000_000;
 /// Selected through the normal config surface (`--embedding-model bge-base`,
 /// which threads down to the store as `PersistentStoreConfig::candle_model`).
 /// Pooling and the retrieval query prefix are properties of the model, not
-/// user-configurable — mirroring how `EmbeddingModel` ties pooling to
-/// architecture.
+/// user-configurable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CandleModel {
     /// sentence-transformers/all-MiniLM-L6-v2: 384-d, mean pooling
@@ -313,144 +139,6 @@ pub fn get_cache_dir() -> Result<PathBuf> {
     Ok(cache_dir)
 }
 
-/// Get path to model file, downloading if needed
-pub fn get_model_path() -> Result<PathBuf> {
-    let cache_dir = get_cache_dir()?;
-    let model_path = cache_dir.join(MODEL_FILENAME);
-
-    if !model_path.exists() {
-        download_model(&cache_dir)?;
-    }
-
-    // Verify model exists and has expected size
-    verify_model_exists(&model_path)?;
-
-    Ok(model_path)
-}
-
-/// Get path to tokenizer file, downloading if needed
-pub fn get_tokenizer_path() -> Result<PathBuf> {
-    let cache_dir = get_cache_dir()?;
-    let tokenizer_path = cache_dir.join(TOKENIZER_FILENAME);
-
-    if !tokenizer_path.exists() {
-        download_tokenizer(&cache_dir)?;
-    }
-
-    // Verify tokenizer exists and has expected size
-    verify_tokenizer_exists(&tokenizer_path)?;
-
-    Ok(tokenizer_path)
-}
-
-/// Verify model file exists and has reasonable size
-pub fn verify_model_exists(path: &PathBuf) -> Result<()> {
-    if !path.exists() {
-        return Err(MemdError::StorageError(format!(
-            "model file not found at {:?}",
-            path
-        )));
-    }
-
-    let metadata = std::fs::metadata(path)?;
-    if metadata.len() < MIN_MODEL_SIZE {
-        return Err(MemdError::StorageError(format!(
-            "model file too small ({} bytes), expected >= {} bytes. File may be corrupted, delete and retry.",
-            metadata.len(),
-            MIN_MODEL_SIZE
-        )));
-    }
-
-    Ok(())
-}
-
-/// Verify tokenizer file exists and has reasonable size
-fn verify_tokenizer_exists(path: &PathBuf) -> Result<()> {
-    if !path.exists() {
-        return Err(MemdError::StorageError(format!(
-            "tokenizer file not found at {:?}",
-            path
-        )));
-    }
-
-    let metadata = std::fs::metadata(path)?;
-    if metadata.len() < MIN_TOKENIZER_SIZE {
-        return Err(MemdError::StorageError(format!(
-            "tokenizer file too small ({} bytes), expected >= {} bytes. File may be corrupted, delete and retry.",
-            metadata.len(),
-            MIN_TOKENIZER_SIZE
-        )));
-    }
-
-    Ok(())
-}
-
-/// Download the embedding model
-pub fn download_model(cache_dir: &Path) -> Result<()> {
-    let model_path = cache_dir.join(MODEL_FILENAME);
-    download_file(
-        MODEL_URL,
-        &model_path,
-        "embedding model",
-        Some(MODEL_SHA256),
-    )
-}
-
-/// Download the tokenizer (legacy, uses default model)
-fn download_tokenizer(cache_dir: &Path) -> Result<()> {
-    let tokenizer_path = cache_dir.join(TOKENIZER_FILENAME);
-    download_file(
-        TOKENIZER_URL,
-        &tokenizer_path,
-        "tokenizer",
-        Some(TOKENIZER_SHA256),
-    )
-}
-
-// =============================================================================
-// Model-aware download functions (new API)
-// =============================================================================
-
-/// Get path to model file for specific model, downloading if needed
-pub fn get_model_path_for(model: EmbeddingModel) -> Result<PathBuf> {
-    let cache_dir = get_cache_dir()?;
-    let model_path = cache_dir.join(model.model_filename());
-
-    if !model_path.exists() {
-        download_file(
-            model.model_url(),
-            &model_path,
-            model.model_filename(),
-            Some(model.model_sha256()),
-        )?;
-    }
-
-    // Verify model exists and has expected size
-    verify_file_size(&model_path, model.min_model_size(), "model")?;
-
-    Ok(model_path)
-}
-
-/// Get path to tokenizer file for specific model, downloading if needed
-pub fn get_tokenizer_path_for(model: EmbeddingModel) -> Result<PathBuf> {
-    let cache_dir = get_cache_dir()?;
-    let tokenizer_path = cache_dir.join(model.tokenizer_filename());
-
-    if !tokenizer_path.exists() {
-        download_file(
-            model.tokenizer_url(),
-            &tokenizer_path,
-            model.tokenizer_filename(),
-            Some(model.tokenizer_sha256()),
-        )?;
-    }
-
-    // Verify tokenizer exists and has expected size
-    verify_file_size(&tokenizer_path, model.min_tokenizer_size(), "tokenizer")?;
-
-    Ok(tokenizer_path)
-}
-
 /// Generic file download helper.
 ///
 /// Streams into a per-invocation sibling temp file
@@ -481,7 +169,7 @@ fn download_file(
 
     // Advisory single-writer lock (Candle follow-up from v0.8.0 handoff).
     // Optimizes the N-process race: without this, all racers stream the
-    // full payload (up to ~614MB for Qwen3) and only one wins the
+    // full payload (up to ~438MB for BGE-base) and only one wins the
     // hard_link publish. With this, the writer streams; late-arrivers
     // wait for the target to appear and return without downloading.
     //
@@ -671,7 +359,7 @@ const ADVISORY_LOCK_WAIT: Duration = Duration::from_secs(900);
 
 /// A lock file is considered stale after this duration and reclaimed on
 /// the next acquire attempt. Set generously to cover the largest
-/// supported model (~614MB Qwen3) on a slow residential link (~2 Mbps):
+/// supported model (~438MB BGE-base) on a slow residential link (~2 Mbps):
 /// 60 minutes. Must be >= ADVISORY_LOCK_WAIT so a waiter timing out
 /// doesn't falsely invalidate a still-live writer's lock when it
 /// retries acquire. False negatives (treating a live writer as stale)
@@ -1013,45 +701,6 @@ mod tests {
         assert!(dir.to_string_lossy().contains("models"));
     }
 
-    #[test]
-    fn test_embedding_model_defaults() {
-        let model = EmbeddingModel::default();
-        assert_eq!(model, EmbeddingModel::AllMiniLmL6V2);
-        assert_eq!(model.dimension(), 384);
-        assert_eq!(model.pooling_strategy(), PoolingStrategy::Mean);
-        assert!(!model.uses_instruction_format());
-    }
-
-    #[test]
-    fn test_qwen3_model_config() {
-        let model = EmbeddingModel::Qwen3Embedding0_6B;
-        assert_eq!(model.dimension(), 1024);
-        assert_eq!(model.pooling_strategy(), PoolingStrategy::LastToken);
-        assert!(model.uses_instruction_format());
-    }
-
-    #[test]
-    fn test_model_filenames() {
-        assert_eq!(
-            EmbeddingModel::AllMiniLmL6V2.model_filename(),
-            "all-MiniLM-L6-v2-quantized.onnx"
-        );
-        assert_eq!(
-            EmbeddingModel::Qwen3Embedding0_6B.model_filename(),
-            "qwen3-embedding-0.6b-q8.onnx"
-        );
-    }
-
-    #[test]
-    fn test_model_urls() {
-        assert!(EmbeddingModel::AllMiniLmL6V2
-            .model_url()
-            .contains("all-MiniLM-L6-v2"));
-        assert!(EmbeddingModel::Qwen3Embedding0_6B
-            .model_url()
-            .contains("Qwen3-Embedding"));
-    }
-
     fn assert_pinned_hf_url(url: &str) {
         let marker = "/resolve/";
         let start = url
@@ -1094,12 +743,6 @@ mod tests {
     #[test]
     fn test_all_download_urls_are_revision_pinned() {
         let urls = [
-            ALL_MINILM_MODEL_URL,
-            ALL_MINILM_TOKENIZER_URL,
-            QWEN3_MODEL_URL,
-            QWEN3_TOKENIZER_URL,
-            MODEL_URL,
-            TOKENIZER_URL,
             CANDLE_BERT_CONFIG_URL,
             CANDLE_BERT_TOKENIZER_URL,
             CANDLE_BERT_WEIGHTS_URL,
@@ -1109,10 +752,6 @@ mod tests {
             CANDLE_BGE_SMALL_CONFIG_URL,
             CANDLE_BGE_SMALL_TOKENIZER_URL,
             CANDLE_BGE_SMALL_WEIGHTS_URL,
-            EmbeddingModel::AllMiniLmL6V2.model_url(),
-            EmbeddingModel::AllMiniLmL6V2.tokenizer_url(),
-            EmbeddingModel::Qwen3Embedding0_6B.model_url(),
-            EmbeddingModel::Qwen3Embedding0_6B.tokenizer_url(),
         ];
         for url in urls {
             assert_pinned_hf_url(url);
@@ -1122,12 +761,6 @@ mod tests {
     #[test]
     fn test_sha256_constants_are_lowercase_hex() {
         let hashes = [
-            ALL_MINILM_MODEL_SHA256,
-            ALL_MINILM_TOKENIZER_SHA256,
-            QWEN3_MODEL_SHA256,
-            QWEN3_TOKENIZER_SHA256,
-            MODEL_SHA256,
-            TOKENIZER_SHA256,
             CANDLE_BERT_CONFIG_SHA256,
             CANDLE_BERT_TOKENIZER_SHA256,
             CANDLE_BERT_WEIGHTS_SHA256,
@@ -1294,10 +927,10 @@ mod tests {
 
     #[test]
     fn test_candle_bert_cache_filenames_are_distinct() {
-        // Repo-qualified filenames avoid collisions with the Xenova ONNX
-        // tokenizer cached under the same directory.
+        // Repo-qualified filenames avoid collisions with the ONNX-era
+        // `tokenizer.json` that older versions cached under the same directory.
         assert_ne!(CANDLE_BERT_CONFIG_FILENAME, CANDLE_BERT_TOKENIZER_FILENAME);
-        assert_ne!(CANDLE_BERT_TOKENIZER_FILENAME, TOKENIZER_FILENAME);
+        assert_ne!(CANDLE_BERT_TOKENIZER_FILENAME, "tokenizer.json");
         assert!(CANDLE_BERT_TOKENIZER_FILENAME.contains("sentence-transformers"));
         assert!(CANDLE_BERT_WEIGHTS_FILENAME.ends_with(".safetensors"));
         let filenames = [

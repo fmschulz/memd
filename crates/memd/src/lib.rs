@@ -31,8 +31,7 @@ pub mod write_service;
 
 pub use chunking::{chunk_text, Chunk, ChunkingConfig};
 pub use compaction::{
-    AuditResult, CompactionConfig, CompactionManager, CompactionMetrics, CompactionThresholds,
-    Throttle, ThrottleConfig, TombstoneAudit,
+    CompactionConfig, CompactionMetrics, CompactionThresholds, Throttle, ThrottleConfig,
 };
 pub use config::{load_config, Config, ServerConfig};
 pub use embeddings::{CandleEmbedder, Embedder, EmbeddingConfig, EmbeddingResult, MockEmbedder};

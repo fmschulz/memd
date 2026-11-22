@@ -7,7 +7,7 @@ use tracing::info;
 use memd::cli::{
     run_cli, run_warm_admin, try_run_warm_client, CliCommand, StoreAccess, WarmProcessConfig,
 };
-use memd::embeddings::{CandleModel, EmbeddingModel};
+use memd::embeddings::CandleModel;
 use memd::store::HybridConfig;
 use memd::{
     configure_operation_routing, init_logging, load_config, MemoryStore, PersistentStore,
@@ -26,18 +26,6 @@ enum ModelChoice {
     BgeBase,
     /// bge-small-en-v1.5: 384-dim Candle BERT, CLS pooling
     BgeSmall,
-}
-
-impl From<ModelChoice> for EmbeddingModel {
-    fn from(choice: ModelChoice) -> Self {
-        match choice {
-            ModelChoice::AllMinilm => EmbeddingModel::AllMiniLmL6V2,
-            ModelChoice::Qwen3 => EmbeddingModel::Qwen3Embedding0_6B,
-            // EmbeddingModel is the vestigial ONNX-era selector and has no bge
-            // variant; the live Candle model is chosen via CandleModel below.
-            ModelChoice::BgeBase | ModelChoice::BgeSmall => EmbeddingModel::AllMiniLmL6V2,
-        }
-    }
 }
 
 impl From<ModelChoice> for CandleModel {
@@ -212,7 +200,7 @@ async fn main() {
     } else {
         "warn"
     };
-    init_logging("pretty", log_level);
+    init_logging(log_level);
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -534,14 +522,8 @@ mod tests {
     }
 
     #[test]
-    fn bge_choice_has_cli_value_and_vestigial_onnx_mapping() {
+    fn bge_choice_has_cli_value() {
         assert_eq!(ModelChoice::BgeBase.cli_value(), "bge-base");
-        // EmbeddingModel is the vestigial ONNX selector; bge maps onto the
-        // MiniLM id there because the live model flows via CandleModel.
-        assert_eq!(
-            EmbeddingModel::from(ModelChoice::BgeBase),
-            EmbeddingModel::AllMiniLmL6V2
-        );
     }
 
     #[test]

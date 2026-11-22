@@ -21,14 +21,6 @@ pub struct Config {
     #[serde(default = "default_consolidation_model")]
     pub consolidation_model: String,
 
-    /// Logging level: trace, debug, info, warn, error
-    #[serde(default = "default_log_level")]
-    pub log_level: String,
-
-    /// Log format: json (structured) or pretty (human-readable)
-    #[serde(default = "default_log_format")]
-    pub log_format: String,
-
     /// Compatibility routing configuration.
     #[serde(default)]
     pub server: ServerConfig,
@@ -40,14 +32,6 @@ fn default_data_dir() -> PathBuf {
 
 fn default_consolidation_model() -> String {
     crate::consolidate::claude_haiku::DEFAULT_MODEL.to_string()
-}
-
-fn default_log_level() -> String {
-    "info".to_string()
-}
-
-fn default_log_format() -> String {
-    "json".to_string()
 }
 
 /// Compatibility routing configuration.
@@ -100,8 +84,6 @@ impl Default for Config {
         Self {
             data_dir: default_data_dir(),
             consolidation_model: default_consolidation_model(),
-            log_level: default_log_level(),
-            log_format: default_log_format(),
             server: ServerConfig::default(),
         }
     }
@@ -119,26 +101,6 @@ impl Config {
             return Err(MemdError::ConfigError(
                 "consolidation_model must not be empty".into(),
             ));
-        }
-
-        // Validate log_level
-        let valid_levels = ["trace", "debug", "info", "warn", "error"];
-        if !valid_levels.contains(&self.log_level.to_lowercase().as_str()) {
-            return Err(MemdError::ConfigError(format!(
-                "invalid log_level '{}', must be one of: {}",
-                self.log_level,
-                valid_levels.join(", ")
-            )));
-        }
-
-        // Validate log_format
-        let valid_formats = ["json", "pretty"];
-        if !valid_formats.contains(&self.log_format.to_lowercase().as_str()) {
-            return Err(MemdError::ConfigError(format!(
-                "invalid log_format '{}', must be one of: {}",
-                self.log_format,
-                valid_formats.join(", ")
-            )));
         }
 
         for rule in &self.server.project_aliases {
@@ -246,8 +208,6 @@ mod tests {
     fn load_from_toml_string() {
         let toml = r#"
             data_dir = "/custom/path"
-            log_level = "debug"
-            log_format = "pretty"
 
             [server]
             allow_cross_tenant_project_fallback = true
@@ -255,29 +215,26 @@ mod tests {
 
         let config = load_from_str(toml).unwrap();
         assert_eq!(config.data_dir, PathBuf::from("/custom/path"));
-        assert_eq!(config.log_level, "debug");
-        assert_eq!(config.log_format, "pretty");
         assert!(config.server.allow_cross_tenant_project_fallback);
     }
 
     #[test]
     fn partial_toml_uses_defaults() {
         let toml = r#"
-            log_level = "warn"
+            data_dir = "/custom/path"
         "#;
 
         let config = load_from_str(toml).unwrap();
-        assert_eq!(config.log_level, "warn");
+        assert_eq!(config.data_dir, PathBuf::from("/custom/path"));
         // Other fields should use defaults
-        assert_eq!(config.log_format, "json");
+        assert_eq!(config.consolidation_model, default_consolidation_model());
         assert!(!config.server.allow_cross_tenant_project_fallback);
     }
 
     #[test]
     fn empty_toml_uses_all_defaults() {
         let config = load_from_str("").unwrap();
-        assert_eq!(config.log_level, "info");
-        assert_eq!(config.log_format, "json");
+        assert_eq!(config.consolidation_model, default_consolidation_model());
         assert_eq!(config.data_dir, PathBuf::from("~/.memd/data"));
     }
 
@@ -297,25 +254,14 @@ mod tests {
     }
 
     #[test]
-    fn invalid_log_level_rejected() {
-        let toml = r#"log_level = "invalid""#;
-        let result = load_from_str(toml);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("invalid log_level"));
-    }
+    fn removed_log_keys_are_ignored() {
+        let toml = r#"
+            log_level = "invalid"
+            log_format = "xml"
+        "#;
 
-    #[test]
-    fn invalid_log_format_rejected() {
-        let toml = r#"log_format = "xml""#;
-        let result = load_from_str(toml);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("invalid log_format"));
+        let config = load_from_str(toml).unwrap();
+        assert_eq!(config.data_dir, PathBuf::from("~/.memd/data"));
     }
 
     #[test]
@@ -323,14 +269,14 @@ mod tests {
         let config = Config::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
         assert!(toml_str.contains("data_dir"));
-        assert!(toml_str.contains("log_level"));
+        assert!(!toml_str.contains("log_level"));
     }
 
     #[test]
     fn load_config_returns_default_when_no_file() {
         // When no path provided and no XDG config exists, should return defaults
         let config = load_config(None).unwrap();
-        assert_eq!(config.log_level, "info");
+        assert_eq!(config.consolidation_model, default_consolidation_model());
     }
 
     #[test]

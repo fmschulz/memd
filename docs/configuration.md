@@ -56,12 +56,6 @@ data_dir = "~/.memd/data"
 # MEMD_CONSOLIDATION_MODEL takes precedence.
 consolidation_model = "sonnet"
 
-# Logging level: trace, debug, info, warn, error.
-log_level = "info"
-
-# Log format: json (recommended for production) or pretty (development).
-log_format = "json"
-
 [server]
 # Compatibility/scope routing. The table name remains [server] for existing
 # config files; this CLI-only binary exposes no network or stdio server mode.

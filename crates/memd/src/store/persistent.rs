@@ -941,8 +941,7 @@ impl PersistentStore {
 
     /// Schedule a one-shot background task that re-indexes any tenants
     /// whose HNSW state is colder than their metadata. No-op when no
-    /// Tokio runtime is available (e.g., sync test contexts) — callers
-    /// can invoke `backfill_hnsw_for_cold_tenants` explicitly in that case.
+    /// Tokio runtime is available (e.g., sync test contexts).
     fn spawn_startup_hnsw_backfill(&self) {
         // Routed through the shared single-flight scheduler so a startup
         // backfill and an on-probe repair can never double-index the same
@@ -960,8 +959,7 @@ impl PersistentStore {
     /// flag on every exit path of the task, including a panic.
     fn schedule_hnsw_repair(&self, kind: RepairKind) -> RepairSchedule {
         // Best-effort: with no Tokio runtime (sync test context) there is
-        // nothing to spawn onto. A caller that needs the backfill in that
-        // case calls `backfill_hnsw_for_cold_tenants` directly.
+        // nothing to spawn onto.
         let runtime = match tokio::runtime::Handle::try_current() {
             Ok(handle) => handle,
             Err(_) => return RepairSchedule::Skipped,
@@ -1064,30 +1062,10 @@ impl PersistentStore {
         self.async_indexer.is_some()
     }
 
-    /// Backfill the per-tenant HNSW index for tenants whose metadata has
-    /// chunks but whose in-memory HNSW is empty or significantly stale.
-    ///
-    /// Why this exists: `DenseSearcher` holds HNSW indices in memory and
-    /// only persists them on a graceful shutdown path (Drop / shutdown()).
-    /// If the daemon crashes, is killed, or restarts before `save_all()`
-    /// runs, on next boot every tenant's HNSW starts empty while
-    /// `load_segments()` happily rehydrates segment readers from disk.
-    /// Reads still work (via metadata + segment files) but semantic search
-    /// returns nothing — pre-crash data is invisible.
-    ///
-    /// This method snapshots the tenant's active metadata rows once
-    /// (avoiding the LIMIT/OFFSET race with concurrent writes), filters
-    /// via per-chunk HNSW membership (`DenseSearcher::contains_chunk`),
-    /// and re-indexes only the missing chunks in batches of 64. Count
-    /// comparisons are not used: HNSW's internal id counter never
-    /// decrements on delete, so count-based heuristics can silently
-    /// miss stale tenants after delete/re-add cycles.
-    ///
-    /// Intended to be called once at startup, either synchronously
-    /// before serving traffic or spawned as a background task. The
-    /// returned `BackfillStats` are informational; a non-zero
-    /// `chunks_skipped` indicates coverage may be partial (typically
-    /// from a corrupt segment or a transient index error).
+    /// Run the HNSW backfill once and wait for it: re-index the active chunks
+    /// that the per-tenant HNSW does not hold. Tests use it to run the repair
+    /// without the scheduler that production uses (`schedule_hnsw_repair`).
+    #[cfg(test)]
     pub async fn backfill_hnsw_for_cold_tenants(&self) -> Result<BackfillStats> {
         self.ensure_writable("backfill_hnsw_for_cold_tenants")?;
         run_hnsw_backfill(
