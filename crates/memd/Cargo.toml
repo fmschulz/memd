@@ -57,7 +57,6 @@ ort = { workspace = true, optional = true }
 ndarray = { workspace = true, optional = true }
 hnsw_rs.workspace = true
 anndists.workspace = true
-half.workspace = true
 ureq.workspace = true
 dirs.workspace = true
 tokenizers.workspace = true
@@ -66,10 +65,8 @@ tar = { workspace = true, optional = true }
 tantivy.workspace = true
 rust-stemmers.workspace = true
 unicode-segmentation.workspace = true
-regex.workspace = true
 
 [dev-dependencies]
-rusqlite.workspace = true
 proptest = "1.6"
 
 [target.'cfg(unix)'.dependencies]

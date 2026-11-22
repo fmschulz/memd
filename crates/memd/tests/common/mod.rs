@@ -10,8 +10,6 @@
 //! All helpers are async-aware where needed. The module deliberately stays
 //! small — anything specific to a single test suite should live next to that
 //! suite's assertions, not here.
-//!
-//! Some helpers (e.g. `backdate_timestamp_created`) require `--features test-support`.
 
 #![allow(dead_code)]
 
@@ -308,22 +306,4 @@ pub async fn add_with_expiry<S: memd::store::Store>(
         .expect("chunk_id")
         .to_string();
     ChunkId::parse(&id).expect("valid chunk id")
-}
-
-/// Back-date a chunk's `timestamp_created` to `ts_ms` via direct SQL.
-///
-/// Used by Track C history-promotion tests to make the clock
-/// deterministic. This is a TEST-ONLY helper — it wraps
-/// `SqliteMetadataStore::force_timestamp_created` which is itself gated
-/// behind the `test-support` feature on the `memd` crate. Consumers
-/// must therefore run their tests with `--features test-support`
-/// (e.g. `cargo test -p memd --features test-support`) to reach this
-/// helper; otherwise the wrapper compiles out entirely.
-#[cfg(feature = "test-support")]
-pub fn backdate_timestamp_created(
-    metadata: &memd::store::metadata::SqliteMetadataStore,
-    chunk_id: &ChunkId,
-    ts_ms: i64,
-) -> memd::error::Result<()> {
-    metadata.force_timestamp_created(chunk_id, ts_ms)
 }

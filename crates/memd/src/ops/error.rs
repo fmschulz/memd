@@ -50,19 +50,6 @@ impl OperationError {
             OperationError::ToolError(msg) => msg,
         }
     }
-
-    /// Short kebab-case label describing the variant — used as the
-    /// `reason` bucket in Phase 4.4 rejection metrics.
-    pub fn reason_label(&self) -> &'static str {
-        match self {
-            OperationError::ParseError(_) => "parse-error",
-            OperationError::InvalidRequest(_) => "invalid-request",
-            OperationError::MethodNotFound(_) => "method-not-found",
-            OperationError::InvalidParams(_) => "invalid-params",
-            OperationError::InternalError(_) => "internal-error",
-            OperationError::ToolError(_) => "tool-error",
-        }
-    }
 }
 
 impl std::fmt::Display for OperationError {

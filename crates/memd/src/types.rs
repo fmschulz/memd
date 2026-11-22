@@ -199,11 +199,6 @@ impl ChunkId {
             .map(Self)
             .map_err(|e| MemdError::ValidationError(format!("invalid chunk_id: {}", e)))
     }
-
-    /// Get the inner UUID
-    pub fn as_uuid(&self) -> &Uuid {
-        &self.0
-    }
 }
 
 impl Default for ChunkId {
@@ -458,15 +453,6 @@ impl Source {
     pub fn from_path(path: impl Into<String>) -> Self {
         Self {
             path: Some(path.into()),
-            ..Default::default()
-        }
-    }
-
-    /// Create a source from a tool call
-    pub fn from_tool(name: impl Into<String>, call_id: Option<impl Into<String>>) -> Self {
-        Self {
-            tool_name: Some(name.into()),
-            tool_call_id: call_id.map(|s| s.into()),
             ..Default::default()
         }
     }

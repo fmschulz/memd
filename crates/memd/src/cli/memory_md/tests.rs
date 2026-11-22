@@ -656,7 +656,6 @@ fn render_memory_md_caps_long_takeaway_text() {
         timestamp_created: 0,
         tags: vec!["kind:finish".to_string()],
         sources: BTreeSet::from(["scan".to_string()]),
-        occurrences: 1,
     };
     let state = make_project_state();
     let rendered = render_memory_md(&state, &[takeaway], &[], &[]);
@@ -678,7 +677,6 @@ fn render_memory_md_omits_empty_global_section() {
         timestamp_created: 0,
         tags: vec!["kind:finish".to_string()],
         sources: BTreeSet::from(["scan".to_string()]),
-        occurrences: 1,
     };
     let state = make_project_state();
     let rendered = render_memory_md(&state, &[takeaway], &[], &[]);
@@ -877,7 +875,6 @@ fn make_takeaway(chunk_id: &str, text: &str, tags: Vec<&str>, chunk_type: &str) 
         timestamp_created: 0,
         tags: tags.into_iter().map(str::to_string).collect(),
         sources: BTreeSet::new(),
-        occurrences: 1,
     }
 }
 

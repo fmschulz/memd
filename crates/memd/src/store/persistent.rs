@@ -41,10 +41,9 @@ use super::{
     ExternalMutationOutcome, RywProbeStats, Store, StoreHealthSnapshot, StoreStats,
     UnindexedChunks,
 };
-use crate::embeddings::{CandleModel, EmbeddingModel};
+use crate::embeddings::CandleModel;
 use crate::error::{MemdError, Result};
 use crate::index::{Bm25Index, SparseIndex};
-use crate::metrics::IndexStats;
 use crate::retrieval::RerankerMode;
 use crate::types::lifecycle::{LifecycleDelta, ResolvedChunk};
 use crate::types::{ChunkId, ChunkStatus, MemoryChunk, TenantId};
@@ -86,11 +85,6 @@ pub struct PersistentStoreConfig {
     pub enable_hybrid_search: bool,
     /// Hybrid search configuration
     pub hybrid_config: Option<HybridConfig>,
-    /// Embedding model to use for dense search
-    ///
-    /// Vestigial ONNX-era selector (retained for config compatibility); the
-    /// live dense embedder is the Candle backend selected via `candle_model`.
-    pub embedding_model: EmbeddingModel,
     /// Candle embedder model actually loaded for dense search. The CLI
     /// resolves it: the `--embedding-model` flag, else the model the store
     /// records (`recorded_embedding_model`), else `bge-small` for a new store.
@@ -183,7 +177,6 @@ impl Default for PersistentStoreConfig {
             enable_dense_search: true,
             enable_hybrid_search: true,
             hybrid_config: None,
-            embedding_model: EmbeddingModel::default(),
             candle_model: CandleModel::default(),
             enable_async_indexing,
             async_index_batch_size,
@@ -1401,24 +1394,6 @@ impl PersistentStore {
         })
     }
 
-    /// Get index statistics per tenant
-    pub fn get_index_stats(&self, tenant_id: Option<&TenantId>) -> HashMap<String, IndexStats> {
-        if let Some(ref searcher) = self.dense_searcher {
-            let all_stats = searcher.get_stats();
-            if let Some(tid) = tenant_id {
-                let tid_str = tid.to_string();
-                all_stats
-                    .into_iter()
-                    .filter(|(k, _)| k == &tid_str)
-                    .collect()
-            } else {
-                all_stats
-            }
-        } else {
-            HashMap::new()
-        }
-    }
-
     /// Run compaction for a tenant regardless of thresholds
     ///
     /// Forces compaction to run even if no thresholds are exceeded.
@@ -2234,10 +2209,6 @@ impl Store for PersistentStore {
             }
         }
         Ok(chunks)
-    }
-
-    fn get_index_stats(&self, tenant_id: Option<&TenantId>) -> HashMap<String, IndexStats> {
-        PersistentStore::get_index_stats(self, tenant_id)
     }
 
     fn run_compaction(&self, tenant_id: &TenantId) -> Result<CompactionResult> {

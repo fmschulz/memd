@@ -176,9 +176,6 @@ pub struct Bm25Index {
     reader: IndexReader,
     /// Index writer for insert/delete (mutex for thread safety)
     writer: Option<Mutex<IndexWriter>>,
-    /// Schema for document structure (kept for potential future use)
-    #[allow(dead_code)]
-    schema: Schema,
     /// Field for tenant ID
     tenant_field: Field,
     /// Field for chunk ID
@@ -297,7 +294,6 @@ impl Bm25Index {
             index,
             reader,
             writer: writer.map(Mutex::new),
-            schema: fields.schema,
             tenant_field: fields.tenant_field,
             chunk_field: fields.chunk_field,
             sentence_field: fields.sentence_field,

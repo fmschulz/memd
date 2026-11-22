@@ -69,10 +69,6 @@ pub(super) struct Takeaway {
     pub(super) timestamp_created: i64,
     pub(super) tags: Vec<String>,
     pub(super) sources: BTreeSet<String>,
-    /// Constant 1 since scan-first selection replaced the multi-query
-    /// fan-out; kept for struct stability.
-    #[allow(dead_code)]
-    pub(super) occurrences: usize,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -343,7 +339,6 @@ fn admit_scanned_chunk(
         timestamp_created: chunk.timestamp_created,
         tags: chunk.tags.clone(),
         sources: BTreeSet::from(["scan".to_string()]),
-        occurrences: 1,
     };
     let mut explanation = MemoryMdCandidateExplanation {
         section: section.to_string(),

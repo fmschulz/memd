@@ -40,14 +40,6 @@ fn default_max_actions() -> usize {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum RetentionProfile {
-    #[default]
-    Safe,
-    Aggressive,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
 pub enum DuplicateStrategy {
     None,
     #[default]
@@ -86,8 +78,6 @@ pub struct DreamParams {
     pub project_id: Option<String>,
     #[serde(default = "default_true")]
     pub dry_run: bool,
-    #[serde(default)]
-    pub retention_profile: RetentionProfile,
     #[serde(default = "default_older_than_days")]
     pub older_than_days: u64,
     #[serde(default = "default_history_after_days")]
@@ -116,7 +106,6 @@ pub struct DreamScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DreamPolicy {
     pub dry_run: bool,
-    pub retention_profile: RetentionProfile,
     pub duplicate_strategy: DuplicateStrategy,
     pub older_than_days: u64,
     pub history_after_days: u64,
@@ -131,7 +120,6 @@ impl DreamPolicy {
     pub fn from_params(params: &DreamParams) -> Self {
         Self {
             dry_run: params.dry_run,
-            retention_profile: params.retention_profile,
             duplicate_strategy: params.duplicate_strategy,
             older_than_days: params.older_than_days,
             history_after_days: params.history_after_days,
@@ -163,16 +151,7 @@ pub struct DreamStateSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DreamActionKind {
-    RefreshDigest,
-    CreateTakeawayDigest,
     RetireDuplicateProjection,
-    PromoteToHistory,
-    MarkExpired,
-    ArchiveToOmf,
-    PurgeMetadataRow,
-    PruneSparseIndex,
-    RebuildHnsw,
-    VacuumMetadata,
     RewriteSegmentsUnsupported,
 }
 

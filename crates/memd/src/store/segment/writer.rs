@@ -265,11 +265,6 @@ impl SegmentWriter {
         self.index_records.len()
     }
 
-    /// Get the current payload size in bytes
-    pub fn payload_size(&self) -> u64 {
-        self.payload_len
-    }
-
     /// Read a chunk by ordinal from the active segment
     ///
     /// This is used by PersistentStore to read chunks that haven't been

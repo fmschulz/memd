@@ -51,7 +51,6 @@ pub(crate) fn canonicalize_for_type(text: &str, kind: ChunkType) -> String {
 /// each input). Threshold range is the caller's responsibility; this fn
 /// does not validate. Used by Track D's `supersede_near_duplicates`
 /// flow.
-#[allow(dead_code)] // wired in D3
 pub(crate) fn is_near_duplicate(a: &str, b: &str, threshold: f32) -> bool {
     jaccard_trigram(a, b) >= threshold
 }
@@ -59,12 +58,10 @@ pub(crate) fn is_near_duplicate(a: &str, b: &str, threshold: f32) -> bool {
 /// Public wrapper exposing the underlying similarity score for callers
 /// that need to sort or report the value alongside a candidate (e.g.
 /// `memory.find_near_duplicates` in D5).
-#[allow(dead_code)] // wired in D5
 pub(crate) fn jaccard_trigram_score(a: &str, b: &str) -> f32 {
     jaccard_trigram(a, b)
 }
 
-#[allow(dead_code)] // wired in D3 / D5
 fn jaccard_trigram(a: &str, b: &str) -> f32 {
     let ta = trigram_set(a);
     let tb = trigram_set(b);
@@ -91,7 +88,6 @@ fn jaccard_trigram(a: &str, b: &str) -> f32 {
 /// still distinguishing it from non-whitespace inputs. Iterating over
 /// `chars()` keeps the result Unicode-semantic rather than
 /// byte-dependent.
-#[allow(dead_code)] // wired in D3 / D5
 fn trigram_set(s: &str) -> HashSet<[char; 3]> {
     let lower: Vec<char> = s.to_lowercase().chars().collect();
     if lower.is_empty() {

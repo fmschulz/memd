@@ -161,7 +161,6 @@ impl SqliteMetadataStore {
     /// `test-support` feature keeps it off release builds while letting
     /// integration tests reach it.
     #[cfg(any(test, feature = "test-support"))]
-    #[allow(dead_code)]
     pub fn force_timestamp_created(&self, chunk_id: &ChunkId, ts_ms: i64) -> Result<()> {
         let conn = self.pool.get();
         conn.execute(
@@ -175,7 +174,6 @@ impl SqliteMetadataStore {
     /// backfill path can be exercised against legacy-shaped rows. Same
     /// `pub` + feature-gate rationale as `force_timestamp_created`.
     #[cfg(any(test, feature = "test-support"))]
-    #[allow(dead_code)]
     pub fn force_clear_canonical_text(&self, chunk_id: &ChunkId) -> Result<()> {
         let conn = self.pool.get();
         conn.execute(

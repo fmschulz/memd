@@ -29,7 +29,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::compaction::{CompactionMetrics, CompactionResult};
 use crate::error::{MemdError, Result};
-use crate::metrics::IndexStats;
 use crate::task_memory::{
     TaskArtifact, TaskArtifactWriteResult, TaskProjection, TaskRecord, TaskSearchFilters,
 };
@@ -672,14 +671,6 @@ pub trait Store: Send + Sync {
         _duplicate_limit: usize,
     ) -> Result<Option<StoreHealthSnapshot>> {
         Ok(None)
-    }
-
-    /// Get dense index statistics
-    ///
-    /// Returns per-tenant index stats when available.
-    /// Default implementation returns empty stats.
-    fn get_index_stats(&self, _tenant_id: Option<&TenantId>) -> HashMap<String, IndexStats> {
-        HashMap::new()
     }
 
     /// Run compaction for a tenant regardless of thresholds

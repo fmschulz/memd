@@ -10,7 +10,7 @@ mod common;
 use common::*;
 
 use memd::store::Store;
-use memd::types::{ChunkId, ChunkStatus, ChunkType, MemoryChunk};
+use memd::types::{ChunkStatus, ChunkType, MemoryChunk};
 use serde_json::json;
 
 fn hit_ids(resp: &serde_json::Value) -> Vec<String> {
@@ -580,7 +580,3 @@ async fn list_lifecycle_hidden_returns_superseded_expired_and_history() {
         ids[4]
     );
 }
-
-// Suppress unused-import warnings for items only used in cross-test helpers.
-#[allow(dead_code)]
-fn _unused_marker(_: ChunkId, _: ChunkStatus) {}

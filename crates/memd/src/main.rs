@@ -359,7 +359,6 @@ async fn main() {
         let mut store_config = PersistentStoreConfig {
             data_dir: data_dir.clone(),
             read_only: cmd.store_access() == StoreAccess::ReadOnly,
-            embedding_model: embedding_model.into(),
             candle_model: embedding_model.into(),
             ..Default::default()
         };

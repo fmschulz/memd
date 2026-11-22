@@ -13,7 +13,6 @@ use crate::compaction::hnsw_rebuild::{HnswRebuilder, RebuildResult};
 use crate::embeddings::{CandleEmbedder, CandleModel, Embedder, EmbeddingConfig};
 use crate::error::{MemdError, Result};
 use crate::index::{HnswConfig, HnswIndex};
-use crate::metrics::IndexStats;
 use crate::types::{ChunkId, TenantId};
 
 /// Result of a dense search with chunk content
@@ -343,52 +342,6 @@ impl DenseSearcher {
         );
 
         Ok((dense_results, embed_time, search_time))
-    }
-
-    /// Get index statistics for all tenants
-    pub fn get_stats(&self) -> HashMap<String, IndexStats> {
-        let indices = self.indices.read();
-        let dimension = self.embedder.dimension();
-
-        indices
-            .iter()
-            .map(|(tenant_id, index)| {
-                let count = index.len() as u64;
-                // Estimate memory: each embedding is dim * 4 bytes, plus HNSW overhead (~2x)
-                let embedding_bytes = count * dimension as u64 * 4;
-                let estimated_memory = embedding_bytes * 2;
-
-                (
-                    tenant_id.clone(),
-                    IndexStats {
-                        chunks_indexed: count,
-                        embeddings_count: count,
-                        embedding_dimension: dimension,
-                        index_memory_bytes: estimated_memory,
-                    },
-                )
-            })
-            .collect()
-    }
-
-    /// Get index statistics for a specific tenant
-    pub fn get_tenant_stats(&self, tenant_id: &TenantId) -> Option<IndexStats> {
-        let indices = self.indices.read();
-        let tenant_str = tenant_id.to_string();
-        let dimension = self.embedder.dimension();
-
-        indices.get(&tenant_str).map(|index| {
-            let count = index.len() as u64;
-            let embedding_bytes = count * dimension as u64 * 4;
-            let estimated_memory = embedding_bytes * 2;
-
-            IndexStats {
-                chunks_indexed: count,
-                embeddings_count: count,
-                embedding_dimension: dimension,
-                index_memory_bytes: estimated_memory,
-            }
-        })
     }
 
     /// Save every index that changed since its last save.

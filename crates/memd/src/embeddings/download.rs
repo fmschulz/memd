@@ -852,20 +852,13 @@ impl Drop for LockGuard {
     }
 }
 
-/// Get paths to the Candle BERT model files (config, tokenizer, weights).
+/// Get paths to the Candle model files (config, tokenizer, weights) for the
+/// selected BERT-family model.
 ///
 /// Downloads any missing files from huggingface.co into the memd cache using
-/// plain `ureq`, which handles HF's relative 307 redirects correctly. Targets
-/// the `sentence-transformers/all-MiniLM-L6-v2` repo used by the Candle BERT
-/// embedder. Returns the local paths in (config, tokenizer, weights) order.
-pub fn get_candle_bert_paths() -> Result<(PathBuf, PathBuf, PathBuf)> {
-    get_candle_model_paths(CandleModel::MiniLm)
-}
-
-/// Get paths to the Candle model files for the selected BERT-family model.
-///
-/// Same download/verify contract as `get_candle_bert_paths`, parameterized
-/// over the model chosen via `--embedding-model`.
+/// plain `ureq`, which handles HF's relative 307 redirects correctly. The
+/// model is the one chosen via `--embedding-model`. Returns the local paths in
+/// (config, tokenizer, weights) order.
 pub fn get_candle_model_paths(model: CandleModel) -> Result<(PathBuf, PathBuf, PathBuf)> {
     struct Spec {
         config: (&'static str, &'static str, &'static str, u64),

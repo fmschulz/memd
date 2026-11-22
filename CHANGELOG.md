@@ -6,6 +6,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Removed
+
+- Rust API items that nothing called: `Config::expand_paths`, `hit_stats::aggregate_hits` (use `aggregate_hits_in`), `HnswIndex::needs_rebuild`, `HnswIndex::rebuild_clean_in_place`, `OperationError::reason_label`, `SegmentWriter::payload_size`, `ChunkId::as_uuid`, `Source::from_tool`, `embeddings::download::get_candle_bert_paths` (use `get_candle_model_paths`).
+- The `memd::metrics` module and the `IndexStats` type, with `Store::get_index_stats`, `PersistentStore::get_index_stats`, `DenseSearcher::get_stats` and `DenseSearcher::get_tenant_stats`. Nothing called them.
+- The `HybridConfig.packer` field and the `PersistentStoreConfig.embedding_model` field. Both were set and never read.
+- The `retention_profile` field of `memory.dream`. The key is ignored now, and the response `policy` no longer repeats it. It never changed what dream did. Nine `action.kind` values that dream never produced are gone from the `DreamActionKind` enum.
+- The unused `regex` and `half` dependencies of the `memd` crate, and the unused `tracing` and `tracing-subscriber` dependencies of the eval harness.
+
 ## [1.10.1] - 2026-11-21
 
 1.10.0 was tagged but not released: no binaries and no crates.io package. 1.10.1 is the same code with the two release fixes below.

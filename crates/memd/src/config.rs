@@ -108,12 +108,6 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Expand tilde (~) in paths to the user's home directory
-    pub fn expand_paths(&mut self) -> Result<()> {
-        self.data_dir = expand_tilde(&self.data_dir)?;
-        Ok(())
-    }
-
     /// Get the data directory with tilde expansion applied
     pub fn data_dir_expanded(&self) -> Result<PathBuf> {
         expand_tilde(&self.data_dir)

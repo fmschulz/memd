@@ -19,7 +19,6 @@ pub mod logging;
 pub mod maintenance;
 pub mod markdown_export;
 pub mod mcp;
-pub mod metrics;
 pub mod omf;
 pub mod ops;
 pub mod retrieval;
@@ -49,7 +48,6 @@ pub use experience::{
 };
 pub use index::{HnswConfig, HnswIndex, SearchResult};
 pub use logging::init_logging;
-pub use metrics::IndexStats;
 pub use ops::configure_operation_routing;
 pub use retrieval::{
     ChunkWithMeta, CrossEncoderReranker, FeatureReranker, FusedResult, FusionCandidate,

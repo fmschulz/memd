@@ -48,8 +48,7 @@ use crate::types::{
 
 use super::time::now_utc_ms;
 
-#[allow(unused_imports)]
-use super::{validate_omf, OmfDocument, OmfItem, MEMD_EXT_VERSION, MEMD_SOURCE_APP};
+use super::{validate_omf, OmfDocument, MEMD_EXT_VERSION, MEMD_SOURCE_APP};
 
 /// Tuning knobs for one `import_omf` / `preview_omf_import` call.
 ///
@@ -547,6 +546,7 @@ fn parse_retention_field(obj: &Value, key: &str) -> Result<Option<Option<i64>>> 
 
 #[cfg(test)]
 mod tests {
+    use super::super::OmfItem;
     use super::*;
     use serde_json::json;
 

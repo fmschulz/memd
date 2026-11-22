@@ -53,7 +53,6 @@ pub(crate) fn set_cross_tenant_project_fallback(enabled: bool) {
     ALLOW_CROSS_TENANT_PROJECT_FALLBACK.store(enabled, Ordering::Relaxed);
 }
 
-#[allow(dead_code)]
 pub(crate) fn set_project_aliases(aliases: Vec<ProjectAliasConfig>) {
     let lock = PROJECT_ALIASES.get_or_init(|| std::sync::RwLock::new(Vec::new()));
     if let Ok(mut guard) = lock.write() {
@@ -1682,14 +1681,6 @@ fn resolve_tenant_id(explicit: &str) -> Result<TenantId, McpError> {
     // Final fallback: a literal "default" tenant. Always valid per
     // `TenantId::validate` (ASCII alphanumeric).
     TenantId::new("default").map_err(|e| McpError::InvalidParams(e.to_string()))
-}
-
-/// Legacy alias. Kept so older call sites that want the strict "caller
-/// supplied a tenant_id" semantics do not accidentally pick up the
-/// file/env/default fallback. Prefer `resolve_tenant_id` for new code.
-#[allow(dead_code)]
-fn validate_tenant_id(tenant_id: &str) -> Result<TenantId, McpError> {
-    resolve_tenant_id(tenant_id)
 }
 
 /// Validate chunk_id and return ChunkId

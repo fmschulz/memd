@@ -1,7 +1,7 @@
 //! Retrieval exposure counting.
 //!
 //! Every CLI search appends one JSONL line per returned chunk to
-//! `.memd/data/retrieval_exposures.jsonl`. [`aggregate_hits`] folds that log
+//! `.memd/data/retrieval_exposures.jsonl`. [`aggregate_hits_in`] folds that log
 //! into per-chunk [`HitStats`] within a recency window, cached to
 //! `.memd/data/retrieval_exposures.summary.json` with a TTL so the read path
 //! stays cheap. `cli/memory_md.rs` feeds the aggregate into
@@ -168,20 +168,10 @@ struct SummaryCache {
 }
 
 /// Aggregate the hit log into per-chunk [`HitStats`] for retrievals
-/// within `window_days`. Reads `cwd`'s `.memd/data/`.
+/// within `window_days`, reading the project root's `.memd/data/`.
 ///
-/// A fresh exposure summary (same window, age under
-/// `DEFAULT_SUMMARY_TTL_MS`) is reused; otherwise the JSONL log is
-/// re-scanned and the cache rewritten.
-pub fn aggregate_hits(window_days: u32) -> HashMap<String, HitStats> {
-    let Ok(cwd) = std::env::current_dir() else {
-        return HashMap::new();
-    };
-    aggregate_hits_in(&cwd, window_days, DEFAULT_SUMMARY_TTL_MS)
-}
-
-/// `aggregate_hits` with an explicit project root and TTL — used by
-/// tests and by callers that need a non-default cache lifetime.
+/// A fresh exposure summary (same window, age under `ttl_ms`) is reused;
+/// otherwise the JSONL log is re-scanned and the cache rewritten.
 pub fn aggregate_hits_in(
     project_dir: &Path,
     window_days: u32,

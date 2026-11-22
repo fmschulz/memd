@@ -11,7 +11,6 @@ use tracing::debug;
 use super::dense::DenseSearcher;
 use crate::error::{MemdError, Result};
 use crate::index::{Bm25Index, SparseIndex};
-use crate::retrieval::packer::{ContextPacker, PackerConfig};
 use crate::retrieval::{
     ChunkWithMeta, FusionCandidate, FusionSource, RerankerConfig, RerankerContext, RerankerEngine,
     RerankerMode, RrfConfig, RrfFusion,
@@ -32,8 +31,6 @@ pub struct HybridConfig {
     pub reranker: RerankerConfig,
     /// Apply metadata/query feature reranking after dense/sparse fusion.
     pub enable_rerank: bool,
-    /// Packer configuration
-    pub packer: PackerConfig,
     /// Enable sparse search (can be disabled for dense-only fallback)
     pub enable_sparse: bool,
 }
@@ -46,7 +43,6 @@ impl Default for HybridConfig {
             rrf: RrfConfig::default(),
             reranker: RerankerConfig::default(),
             enable_rerank: true,
-            packer: PackerConfig::default(),
             enable_sparse: true,
         }
     }
@@ -110,8 +106,6 @@ pub struct HybridSearcher {
     text_processor: TextProcessor,
     fusion: RrfFusion,
     reranker: RerankerEngine,
-    #[allow(dead_code)]
-    packer: ContextPacker,
     config: HybridConfig,
 }
 
@@ -150,7 +144,6 @@ impl HybridSearcher {
     ) -> Self {
         let fusion = RrfFusion::new(config.rrf.clone());
         let reranker = RerankerEngine::new(config.reranker.clone());
-        let packer = ContextPacker::new(config.packer.clone());
 
         Self {
             dense,
@@ -158,7 +151,6 @@ impl HybridSearcher {
             text_processor: TextProcessor::new(),
             fusion,
             reranker,
-            packer,
             config,
         }
     }
